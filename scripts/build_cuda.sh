@@ -26,6 +26,8 @@ ${CMAKE_BIN} -S . -B build-cuda \
   -DCUDA_TOOLKIT_ROOT_DIR=${CUDA_ROOT} \
   -DCMAKE_CUDA_ARCHITECTURES=native
 
+env -u LD_LIBRARY_PATH -u LIBRARY_PATH -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH \
+PATH=${CUDA_ROOT}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
 ${CMAKE_BIN} --build build-cuda -j
 
-./build-cuda/smoke_ggml
+./build-cuda/bin/ld-cli --help

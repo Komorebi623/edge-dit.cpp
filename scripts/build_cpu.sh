@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 set -e
 
-cmake -S . -B build-cpu \
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+CMAKE_BIN=${CMAKE_BIN:-/usr/bin/cmake}
+CLEAN_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+env PATH=${CLEAN_PATH} ${CMAKE_BIN} -S . -B build-cpu \
   -DCMAKE_BUILD_TYPE=Release \
   -DLDIT_BUILD_EXAMPLES=ON
 
-cmake --build build-cpu -j
+env PATH=${CLEAN_PATH} ${CMAKE_BIN} --build build-cpu -j
 
-./build-cpu/smoke_ggml
+./build-cpu/bin/ld-cli --help
