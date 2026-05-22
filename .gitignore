@@ -1,0 +1,16 @@
+# build outputs
+/build-*/
+/cmake-build-*/
+
+# binaries and libraries
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# editor/cache
+.vscode/
+.idea/
+.DS_Store
