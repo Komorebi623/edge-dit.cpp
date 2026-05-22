@@ -3,13 +3,20 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <new>
+#include <sstream>
 #include <string>
+
+#include "core/runtime/model_loader.h"
+#include "utils/util.h"
 
 struct ld_context {
     ld_context_params_t params;
     std::string model_path;
     std::string last_error;
+    std::unique_ptr<ModelLoader> model_loader;
+    bool model_loaded = false;
 };
 
 static void ld_zero(void * ptr, size_t size) {
@@ -46,6 +53,19 @@ static uint32_t ld_mix_u32(uint32_t x) {
     x *= 0x846ca68bu;
     x ^= x >> 16;
     return x;
+}
+
+static std::string ld_format_wtype_stat(const std::map<ggml_type, uint32_t>& stat) {
+    std::ostringstream ss;
+    bool first = true;
+    for (const auto& item : stat) {
+        if (!first) {
+            ss << ", ";
+        }
+        first = false;
+        ss << ggml_type_name(item.first) << "=" << item.second;
+    }
+    return ss.str();
 }
 
 static bool ld_image_byte_size(int width, int height, uint32_t channels, size_t * size) {
@@ -193,6 +213,33 @@ ld_context_t * ld_create_context(const ld_context_params_t * params) {
         ctx->params.model_path = ctx->model_path.c_str();
     }
 
+    if (ctx->model_path.empty()) {
+        ctx->last_error = "model path is required";
+        delete ctx;
+        return nullptr;
+    }
+
+    ctx->model_loader.reset(new (std::nothrow) ModelLoader());
+    if (ctx->model_loader == nullptr) {
+        delete ctx;
+        return nullptr;
+    }
+
+    if (!ctx->model_loader->init_from_file_and_convert_name(ctx->model_path)) {
+        ctx->last_error = ctx->model_loader->get_last_error();
+        LOG_ERROR("failed to initialize model loader: %s", ctx->last_error.c_str());
+        delete ctx;
+        return nullptr;
+    }
+
+    ctx->model_loaded = true;
+    LOG_INFO("loaded model metadata: path=%s, version=%s, files=%zu, tensors=%zu",
+             ctx->model_path.c_str(),
+             ld_version_name(ctx->model_loader->get_ld_version()),
+             ctx->model_loader->get_file_paths().size(),
+             ctx->model_loader->get_tensor_storage_map().size());
+    LOG_INFO("weight types: %s", ld_format_wtype_stat(ctx->model_loader->get_wtype_stat()).c_str());
+
     ctx->last_error.clear();
     return ctx;
 }
@@ -213,6 +260,11 @@ ld_status_t ld_generate_image(
 
     if (ctx == nullptr || params == nullptr || out == nullptr) {
         return LD_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!ctx->model_loaded || ctx->model_loader == nullptr) {
+        ld_set_error(ctx, "model is not loaded");
+        return LD_STATUS_MODEL_LOAD_FAILED;
     }
 
     if (params->width <= 0 || params->height <= 0) {

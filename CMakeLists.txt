@@ -67,10 +67,28 @@ endif()
 
 add_subdirectory(third_party/ggml)
 
-file(GLOB_RECURSE LDIT_SOURCES CONFIGURE_DEPENDS
+file(GLOB_RECURSE LDIT_CORE_SOURCES CONFIGURE_DEPENDS
     "src/core/*.cpp"
     "src/core/*.h"
     "src/core/*.hpp"
+)
+
+file(GLOB LDIT_UTIL_SOURCES CONFIGURE_DEPENDS
+    "src/utils/*.cpp"
+    "src/utils/*.h"
+    "src/utils/*.hpp"
+)
+
+set(LDIT_SOURCES
+    ${LDIT_CORE_SOURCES}
+    ${LDIT_UTIL_SOURCES}
+    "src/utils/model_io/binary_io.h"
+    "src/utils/model_io/gguf_io.cpp"
+    "src/utils/model_io/gguf_io.h"
+    "src/utils/model_io/gguf_reader_ext.h"
+    "src/utils/model_io/safetensors_io.cpp"
+    "src/utils/model_io/safetensors_io.h"
+    "src/utils/model_io/tensor_storage.h"
 )
 
 if(LDIT_BUILD_SHARED_LIBS)
@@ -86,6 +104,7 @@ target_include_directories(lightdit
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
 
 target_link_libraries(lightdit
