@@ -1,13 +1,17 @@
 #include "utils/util.h"
 
 #include <algorithm>
+#include <codecvt>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <locale>
 #include <sstream>
 #include <thread>
+
+#include "core/tensor/tensor.hpp"
 
 bool ends_with(const std::string& str, const std::string& ending) {
     return str.size() >= ending.size() &&
@@ -37,6 +41,54 @@ std::string sd_format(const char* fmt, ...) {
     }
     va_end(args);
     return result;
+}
+
+std::u32string utf8_to_utf32(const std::string& utf8_str) {
+    std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t> converter;
+    return converter.from_bytes(utf8_str);
+}
+
+std::string utf32_to_utf8(const std::u32string& utf32_str) {
+    std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t> converter;
+    return converter.to_bytes(utf32_str);
+}
+
+std::u32string unicode_value_to_utf32(int unicode_value) {
+    return {static_cast<char32_t>(unicode_value)};
+}
+
+std::vector<std::pair<std::string, float>> parse_prompt_attention(const std::string& text) {
+    // Minimal parser for the first Flux path. Weight syntax can be expanded later;
+    // returning one segment keeps the tokenizer contract identical.
+    if (text.empty()) {
+        return {};
+    }
+    return {{text, 1.0f}};
+}
+
+sd::Tensor<float> clip_preprocess(const sd::Tensor<float>& image, int target_width, int target_height) {
+    if (image.empty() || target_width <= 0 || target_height <= 0 || image.dim() < 3) {
+        return {};
+    }
+
+    const int64_t src_w = image.shape()[0];
+    const int64_t src_h = image.shape()[1];
+    const int64_t src_c = image.shape()[2];
+    const int64_t frames = image.dim() >= 4 ? image.shape()[3] : 1;
+
+    sd::Tensor<float> output({target_width, target_height, src_c, frames});
+    for (int64_t f = 0; f < frames; ++f) {
+        for (int y = 0; y < target_height; ++y) {
+            const int64_t sy = std::min<int64_t>(src_h - 1, (static_cast<int64_t>(y) * src_h) / target_height);
+            for (int x = 0; x < target_width; ++x) {
+                const int64_t sx = std::min<int64_t>(src_w - 1, (static_cast<int64_t>(x) * src_w) / target_width);
+                for (int64_t c = 0; c < src_c; ++c) {
+                    output.index(x, y, c, f) = image.index(sx, sy, c, f);
+                }
+            }
+        }
+    }
+    return output;
 }
 
 void replace_all_chars(std::string& str, char target, char replacement) {
@@ -96,6 +148,22 @@ void pretty_bytes_progress(int step, int steps, uint64_t bytes_processed, float 
     }
 }
 
+void pretty_progress(int step, int steps, float time) {
+    if (steps <= 0 || step == 0) {
+        return;
+    }
+    const char* unit = "s/it";
+    float speed = time;
+    if (speed < 1.0f && speed > 0.0f) {
+        speed = 1.0f / speed;
+        unit = "it/s";
+    }
+    std::fprintf(stderr, "\rprogress %d/%d %.2f%s", step, steps, speed, unit);
+    if (step >= steps) {
+        std::fprintf(stderr, "\n");
+    }
+}
+
 void log_printf(ld_log_level_t level, const char* file, int line, const char* format, ...) {
     const char* level_name = "debug";
     switch (level) {
@@ -125,6 +193,8 @@ std::string trim(const std::string& s) {
 }
 
 std::unique_ptr<MmapWrapper> MmapWrapper::create(const std::string& filename) {
+    static constexpr size_t max_fallback_mmap_size = 256ull * 1024ull * 1024ull;
+
     std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) {
         return nullptr;
@@ -132,6 +202,9 @@ std::unique_ptr<MmapWrapper> MmapWrapper::create(const std::string& filename) {
     file.seekg(0, std::ios::end);
     const std::streamoff size = file.tellg();
     if (size < 0) {
+        return nullptr;
+    }
+    if (static_cast<uint64_t>(size) > max_fallback_mmap_size) {
         return nullptr;
     }
     file.seekg(0, std::ios::beg);

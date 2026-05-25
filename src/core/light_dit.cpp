@@ -2,21 +2,17 @@
 
 #include <cstdlib>
 #include <cstring>
-#include <limits>
 #include <memory>
 #include <new>
-#include <sstream>
 #include <string>
-
-#include "core/runtime/model_loader.h"
+#include "core/runtime/light_dit_engine.hpp"
 #include "utils/util.h"
 
 struct ld_context {
-    ld_context_params_t params;
-    std::string model_path;
+    ld_context_params_t params = {};
+    std::unique_ptr<lightdit::LightDitEngine> engine;
     std::string last_error;
-    std::unique_ptr<ModelLoader> model_loader;
-    bool model_loaded = false;
+    bool initialized = false;
 };
 
 static void ld_zero(void * ptr, size_t size) {
@@ -29,112 +25,6 @@ static void ld_set_error(ld_context_t * ctx, const char * message) {
     if (ctx != nullptr) {
         ctx->last_error = message != nullptr ? message : "";
     }
-}
-
-static uint32_t ld_hash_string(const char * text) {
-    uint32_t hash = 2166136261u;
-    if (text == nullptr) {
-        return hash;
-    }
-
-    while (*text != '\0') {
-        hash ^= static_cast<uint8_t>(*text);
-        hash *= 16777619u;
-        ++text;
-    }
-
-    return hash;
-}
-
-static uint32_t ld_mix_u32(uint32_t x) {
-    x ^= x >> 16;
-    x *= 0x7feb352du;
-    x ^= x >> 15;
-    x *= 0x846ca68bu;
-    x ^= x >> 16;
-    return x;
-}
-
-static std::string ld_format_wtype_stat(const std::map<ggml_type, uint32_t>& stat) {
-    std::ostringstream ss;
-    bool first = true;
-    for (const auto& item : stat) {
-        if (!first) {
-            ss << ", ";
-        }
-        first = false;
-        ss << ggml_type_name(item.first) << "=" << item.second;
-    }
-    return ss.str();
-}
-
-static bool ld_image_byte_size(int width, int height, uint32_t channels, size_t * size) {
-    if (size == nullptr || width <= 0 || height <= 0 || channels == 0) {
-        return false;
-    }
-
-    const size_t w = static_cast<size_t>(width);
-    const size_t h = static_cast<size_t>(height);
-    const size_t c = static_cast<size_t>(channels);
-
-    if (w > std::numeric_limits<size_t>::max() / h) {
-        return false;
-    }
-
-    const size_t pixels = w * h;
-    if (pixels > std::numeric_limits<size_t>::max() / c) {
-        return false;
-    }
-
-    *size = pixels * c;
-    return true;
-}
-
-static ld_status_t ld_make_naive_image(
-    const ld_image_generation_params_t * params,
-    int batch_index,
-    ld_image_t * image
-) {
-    if (params == nullptr || image == nullptr) {
-        return LD_STATUS_INVALID_ARGUMENT;
-    }
-
-    size_t byte_size = 0;
-    if (!ld_image_byte_size(params->width, params->height, 3, &byte_size)) {
-        return LD_STATUS_INVALID_ARGUMENT;
-    }
-
-    uint8_t * data = static_cast<uint8_t *>(std::malloc(byte_size));
-    if (data == nullptr) {
-        return LD_STATUS_OUT_OF_MEMORY;
-    }
-
-    const uint32_t prompt_hash = ld_hash_string(params->prompt);
-    const uint32_t neg_hash = ld_hash_string(params->negative_prompt);
-    const uint32_t seed = params->seed < 0
-        ? prompt_hash
-        : static_cast<uint32_t>(params->seed) ^ static_cast<uint32_t>(params->seed >> 32);
-    const uint32_t base = ld_mix_u32(seed ^ prompt_hash ^ (neg_hash << 1) ^ static_cast<uint32_t>(batch_index));
-
-    for (int y = 0; y < params->height; ++y) {
-        for (int x = 0; x < params->width; ++x) {
-            const size_t offset = (static_cast<size_t>(y) * params->width + x) * 3;
-            const uint32_t noise = ld_mix_u32(base ^ static_cast<uint32_t>(x * 73856093u) ^ static_cast<uint32_t>(y * 19349663u));
-
-            const uint32_t xf = static_cast<uint32_t>((255ull * static_cast<uint64_t>(x)) / static_cast<uint64_t>(params->width));
-            const uint32_t yf = static_cast<uint32_t>((255ull * static_cast<uint64_t>(y)) / static_cast<uint64_t>(params->height));
-
-            data[offset + 0] = static_cast<uint8_t>((xf + (noise & 0x3f) + (base & 0x7f)) & 0xff);
-            data[offset + 1] = static_cast<uint8_t>((yf + ((noise >> 8) & 0x3f) + ((base >> 8) & 0x7f)) & 0xff);
-            data[offset + 2] = static_cast<uint8_t>(((xf / 2) + (yf / 2) + ((noise >> 16) & 0x7f) + ((base >> 16) & 0x3f)) & 0xff);
-        }
-    }
-
-    image->width = static_cast<uint32_t>(params->width);
-    image->height = static_cast<uint32_t>(params->height);
-    image->channels = 3;
-    image->data = data;
-    return LD_STATUS_OK;
 }
 
 void ld_context_params_init(ld_context_params_t * params) {
@@ -197,51 +87,47 @@ void ld_video_generation_params_init(ld_video_generation_params_t * params) {
     ld_sample_params_init(&params->high_noise_sample);
 }
 
-ld_context_t * ld_create_context(const ld_context_params_t * params) {
+ld_context_t* ld_create_context(const ld_context_params_t* params) {
     if (params == nullptr) {
+        LOG_ERROR("ld_create_context failed: params is null");
         return nullptr;
     }
 
-    ld_context_t * ctx = new (std::nothrow) ld_context();
+    std::unique_ptr<ld_context_t> ctx(new (std::nothrow) ld_context_t());
     if (ctx == nullptr) {
+        LOG_ERROR("ld_create_context failed: allocate ld_context failed");
         return nullptr;
     }
 
     ctx->params = *params;
-    if (params->model_path != nullptr) {
-        ctx->model_path = params->model_path;
-        ctx->params.model_path = ctx->model_path.c_str();
-    }
 
-    if (ctx->model_path.empty()) {
-        ctx->last_error = "model path is required";
-        delete ctx;
+    try {
+        ctx->engine = std::make_unique<lightdit::LightDitEngine>();
+    } catch (const std::exception& e) {
+        ctx->last_error = std::string("failed to allocate LightDitEngine: ") + e.what();
+        LOG_ERROR("%s", ctx->last_error.c_str());
         return nullptr;
     }
 
-    ctx->model_loader.reset(new (std::nothrow) ModelLoader());
-    if (ctx->model_loader == nullptr) {
-        delete ctx;
+    if (ctx->engine == nullptr) {
+        ctx->last_error = "failed to allocate LightDitEngine";
+        LOG_ERROR("%s", ctx->last_error.c_str());
         return nullptr;
     }
 
-    if (!ctx->model_loader->init_from_file_and_convert_name(ctx->model_path)) {
-        ctx->last_error = ctx->model_loader->get_last_error();
-        LOG_ERROR("failed to initialize model loader: %s", ctx->last_error.c_str());
-        delete ctx;
+    if (!ctx->engine->init(params)) {
+        ctx->last_error = ctx->engine->last_error();
+        if (ctx->last_error.empty()) {
+            ctx->last_error = "failed to initialize LightDitEngine";
+        }
+
+        LOG_ERROR("failed to initialize engine: %s", ctx->last_error.c_str());
         return nullptr;
     }
 
-    ctx->model_loaded = true;
-    LOG_INFO("loaded model metadata: path=%s, version=%s, files=%zu, tensors=%zu",
-             ctx->model_path.c_str(),
-             ld_version_name(ctx->model_loader->get_ld_version()),
-             ctx->model_loader->get_file_paths().size(),
-             ctx->model_loader->get_tensor_storage_map().size());
-    LOG_INFO("weight types: %s", ld_format_wtype_stat(ctx->model_loader->get_wtype_stat()).c_str());
+    ctx->initialized = true;
 
-    ctx->last_error.clear();
-    return ctx;
+    return ctx.release();
 }
 
 void ld_free_context(ld_context_t * ctx) {
@@ -249,9 +135,9 @@ void ld_free_context(ld_context_t * ctx) {
 }
 
 ld_status_t ld_generate_image(
-    ld_context_t * ctx,
-    const ld_image_generation_params_t * params,
-    ld_image_batch_t * out
+    ld_context_t* ctx,
+    const ld_image_generation_params_t* params,
+    ld_image_batch_t* out
 ) {
     if (out != nullptr) {
         out->images = nullptr;
@@ -259,55 +145,46 @@ ld_status_t ld_generate_image(
     }
 
     if (ctx == nullptr || params == nullptr || out == nullptr) {
+        if (ctx != nullptr) {
+            ld_set_error(ctx, "invalid argument: ctx, params, or out is null");
+        }
         return LD_STATUS_INVALID_ARGUMENT;
     }
 
-    if (!ctx->model_loaded || ctx->model_loader == nullptr) {
-        ld_set_error(ctx, "model is not loaded");
+    if (!ctx->initialized || ctx->engine == nullptr) {
+        ld_set_error(ctx, "engine is not initialized");
         return LD_STATUS_MODEL_LOAD_FAILED;
     }
 
-    if (params->width <= 0 || params->height <= 0) {
-        ld_set_error(ctx, "image width and height must be positive");
-        return LD_STATUS_INVALID_ARGUMENT;
-    }
+    ld_image_batch_t tmp = {};
+    ld_status_t status = ctx->engine->generate_image(params, &tmp);
 
-    const int count = params->batch_count > 0 ? params->batch_count : 1;
-    if (count > 1024) {
-        ld_set_error(ctx, "batch count is too large");
-        return LD_STATUS_INVALID_ARGUMENT;
-    }
+    if (status != LD_STATUS_OK) {
+        ld_free_image_batch(&tmp);
 
-    ld_image_t * images = static_cast<ld_image_t *>(std::calloc(static_cast<size_t>(count), sizeof(ld_image_t)));
-    if (images == nullptr) {
-        ld_set_error(ctx, "failed to allocate image batch");
-        return LD_STATUS_OUT_OF_MEMORY;
-    }
-
-    for (int i = 0; i < count; ++i) {
-        const ld_status_t status = ld_make_naive_image(params, i, &images[i]);
-        if (status != LD_STATUS_OK) {
-            ld_image_batch_t partial;
-            partial.images = images;
-            partial.count = count;
-            ld_free_image_batch(&partial);
-            ld_set_error(ctx, status == LD_STATUS_OUT_OF_MEMORY
-                ? "failed to allocate image data"
-                : "invalid image generation parameters");
-            return status;
+        std::string err = ctx->engine->last_error();
+        if (err.empty()) {
+            err = "image generation failed";
         }
+
+        ld_set_error(ctx, err.c_str());
+        return status;
     }
 
-    out->images = images;
-    out->count = count;
+    if (tmp.images == nullptr || tmp.count <= 0) {
+        ld_free_image_batch(&tmp);
+        ld_set_error(ctx, "engine returned empty image batch");
+        return LD_STATUS_GENERATION_FAILED;
+    }
+    *out = tmp;
     ld_set_error(ctx, "");
     return LD_STATUS_OK;
 }
 
 ld_status_t ld_generate_video(
-    ld_context_t * ctx,
-    const ld_video_generation_params_t * params,
-    ld_video_t * out
+    ld_context_t* ctx,
+    const ld_video_generation_params_t* params,
+    ld_video_t* out
 ) {
     if (out != nullptr) {
         out->frames = nullptr;
@@ -315,11 +192,41 @@ ld_status_t ld_generate_video(
     }
 
     if (ctx == nullptr || params == nullptr || out == nullptr) {
+        if (ctx != nullptr) {
+            ld_set_error(ctx, "invalid argument: ctx, params, or out is null");
+        }
         return LD_STATUS_INVALID_ARGUMENT;
     }
 
-    ld_set_error(ctx, "Flux video generation is not implemented yet");
-    return LD_STATUS_UNSUPPORTED;
+    if (!ctx->initialized || ctx->engine == nullptr) {
+        ld_set_error(ctx, "engine is not initialized");
+        return LD_STATUS_MODEL_LOAD_FAILED;
+    }
+
+    ld_video_t tmp = {};
+    ld_status_t status = ctx->engine->generate_video(params, &tmp);
+
+    if (status != LD_STATUS_OK) {
+        ld_free_video(&tmp);
+
+        std::string err = ctx->engine->last_error();
+        if (err.empty()) {
+            err = "video generation failed";
+        }
+
+        ld_set_error(ctx, err.c_str());
+        return status;
+    }
+
+    if (tmp.frames == nullptr || tmp.frame_count <= 0) {
+        ld_free_video(&tmp);
+        ld_set_error(ctx, "engine returned empty video");
+        return LD_STATUS_GENERATION_FAILED;
+    }
+
+    *out = tmp;
+    ld_set_error(ctx, "");
+    return LD_STATUS_OK;
 }
 
 void ld_free_image(ld_image_t * image) {
@@ -334,13 +241,15 @@ void ld_free_image(ld_image_t * image) {
     image->channels = 0;
 }
 
-void ld_free_image_batch(ld_image_batch_t * batch) {
+void ld_free_image_batch(ld_image_batch_t* batch) {
     if (batch == nullptr) {
         return;
     }
 
-    for (int i = 0; i < batch->count; ++i) {
-        ld_free_image(&batch->images[i]);
+    if (batch->images != nullptr && batch->count > 0) {
+        for (int i = 0; i < batch->count; ++i) {
+            ld_free_image(&batch->images[i]);
+        }
     }
 
     std::free(batch->images);
@@ -348,13 +257,15 @@ void ld_free_image_batch(ld_image_batch_t * batch) {
     batch->count = 0;
 }
 
-void ld_free_video(ld_video_t * video) {
+void ld_free_video(ld_video_t* video) {
     if (video == nullptr) {
         return;
     }
 
-    for (int i = 0; i < video->frame_count; ++i) {
-        ld_free_image(&video->frames[i]);
+    if (video->frames != nullptr && video->frame_count > 0) {
+        for (int i = 0; i < video->frame_count; ++i) {
+            ld_free_image(&video->frames[i]);
+        }
     }
 
     std::free(video->frames);

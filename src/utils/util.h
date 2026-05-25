@@ -8,6 +8,11 @@
 
 #include "ggml-backend.h"
 
+namespace sd {
+template <typename T>
+class Tensor;
+}
+
 #define SAFE_STR(s) ((s) ? (s) : "")
 #define BOOL_STR(b) ((b) ? "true" : "false")
 
@@ -23,6 +28,11 @@ bool starts_with(const std::string& str, const std::string& start);
 bool contains(const std::string& str, const std::string& substr);
 
 std::string sd_format(const char* fmt, ...);
+std::u32string utf8_to_utf32(const std::string& utf8_str);
+std::string utf32_to_utf8(const std::u32string& utf32_str);
+std::u32string unicode_value_to_utf32(int unicode_value);
+std::vector<std::pair<std::string, float>> parse_prompt_attention(const std::string& text);
+sd::Tensor<float> clip_preprocess(const sd::Tensor<float>& image, int target_width, int target_height);
 
 void replace_all_chars(std::string& str, char target, char replacement);
 
@@ -35,6 +45,7 @@ bool is_directory(const std::string& path);
 std::string path_join(const std::string& p1, const std::string& p2);
 std::vector<std::string> split_string(const std::string& str, char delimiter);
 void pretty_bytes_progress(int step, int steps, uint64_t bytes_processed, float elapsed_seconds);
+void pretty_progress(int step, int steps, float time);
 
 void log_printf(ld_log_level_t level, const char* file, int line, const char* format, ...);
 

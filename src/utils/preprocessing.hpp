@@ -94,10 +94,10 @@ static inline void preprocessing_tensor_frame_to_sd_image(const sd::Tensor<float
 }
 
 static inline sd::Tensor<float> ld_image_to_preprocessing_tensor(ld_image_t image) {
-    sd::Tensor<float> tensor({static_cast<int64_t>(image.width), static_cast<int64_t>(image.height), static_cast<int64_t>(image.channel), 1});
+    sd::Tensor<float> tensor({static_cast<int64_t>(image.width), static_cast<int64_t>(image.height), static_cast<int64_t>(image.channels), 1});
     for (uint32_t y = 0; y < image.height; ++y) {
         for (uint32_t x = 0; x < image.width; ++x) {
-            for (uint32_t c = 0; c < image.channel; ++c) {
+            for (uint32_t c = 0; c < image.channels; ++c) {
                 preprocessing_set_4d(tensor, sd_image_get_f32(image, x, y, c), x, y, c, 0);
             }
         }
@@ -321,7 +321,7 @@ bool preprocess_canny(ld_image_t img, float high_threshold, float low_threshold,
         for (uint32_t ix = 0; ix < img.width; ++ix) {
             float gray = preprocessing_get_4d(image_gray, ix, iy, 0, 0);
             gray       = inverse ? 1.0f - gray : gray;
-            for (uint32_t c = 0; c < img.channel; ++c) {
+            for (uint32_t c = 0; c < img.channels; ++c) {
                 preprocessing_set_4d(image, gray, ix, iy, c, 0);
             }
         }

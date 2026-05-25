@@ -47,6 +47,11 @@ enum SDVersion {
     VERSION_COUNT,
 };
 
+enum PMVersion {
+    PM_VERSION_1,
+    PM_VERSION_2,
+};
+
 static inline bool ld_version_is_sd1(SDVersion version) {
     return version == VERSION_SD1 || version == VERSION_SD1_INPAINT ||
            version == VERSION_SD1_PIX2PIX || version == VERSION_SD1_TINY_UNET ||

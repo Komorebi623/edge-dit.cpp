@@ -112,6 +112,15 @@ typedef struct ld_lora_t {
     bool high_noise;
 } ld_lora_t;
 
+typedef struct ld_tiling_params_t {
+    bool enabled;
+    int tile_size_x;
+    int tile_size_y;
+    float target_overlap;
+    float rel_size_x;
+    float rel_size_y;
+} ld_tiling_params_t;
+
 typedef struct ld_context_params_t {
     const char * model_path;
 

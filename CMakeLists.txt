@@ -19,6 +19,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+add_compile_definitions(GGML_MAX_NAME=128)
+
 option(LDIT_BUILD_EXAMPLES "Build examples" ON)
 option(LDIT_BUILD_SHARED_LIBS "Build light-dit as a shared library" OFF)
 
@@ -79,9 +81,17 @@ file(GLOB LDIT_UTIL_SOURCES CONFIGURE_DEPENDS
     "src/utils/*.hpp"
 )
 
+file(GLOB_RECURSE LDIT_DIT_MODEL_SOURCES CONFIGURE_DEPENDS
+    "src/dit_models/*.cpp"
+    "src/dit_models/*.h"
+    "src/dit_models/*.hpp"
+)
+list(FILTER LDIT_DIT_MODEL_SOURCES EXCLUDE REGEX ".*/super_resolution/.*")
+
 set(LDIT_SOURCES
     ${LDIT_CORE_SOURCES}
     ${LDIT_UTIL_SOURCES}
+    ${LDIT_DIT_MODEL_SOURCES}
     "src/utils/model_io/binary_io.h"
     "src/utils/model_io/gguf_io.cpp"
     "src/utils/model_io/gguf_io.h"
@@ -104,7 +114,9 @@ target_include_directories(lightdit
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src
 )
 
 target_link_libraries(lightdit

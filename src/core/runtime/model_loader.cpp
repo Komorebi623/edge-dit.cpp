@@ -7,6 +7,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <regex>
 #include <thread>
 
@@ -60,6 +62,107 @@ static bool is_unused_tensor(const std::string& name) {
         }
     }
     return false;
+}
+
+static bool split_tensor_chunk_base(const std::string& name, std::string* base, int* chunk_index) {
+    if (ends_with(name, ".weight") || ends_with(name, ".bias")) {
+        if (base != nullptr) {
+            *base = name;
+        }
+        if (chunk_index != nullptr) {
+            *chunk_index = 0;
+        }
+        return true;
+    }
+
+    const size_t dot = name.rfind('.');
+    if (dot == std::string::npos || dot + 1 >= name.size()) {
+        return false;
+    }
+
+    int value = 0;
+    for (size_t i = dot + 1; i < name.size(); ++i) {
+        if (name[i] < '0' || name[i] > '9') {
+            return false;
+        }
+        value = value * 10 + (name[i] - '0');
+    }
+
+    const std::string candidate_base = name.substr(0, dot);
+    if (!ends_with(candidate_base, ".weight") && !ends_with(candidate_base, ".bias")) {
+        return false;
+    }
+
+    if (base != nullptr) {
+        *base = candidate_base;
+    }
+    if (chunk_index != nullptr) {
+        *chunk_index = value;
+    }
+    return true;
+}
+
+static bool tensor_shape_matches_ggml(const ggml_tensor* tensor, const TensorStorage& storage) {
+    if (tensor == nullptr) {
+        return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (tensor->ne[i] != storage.ne[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool find_split_concat_dim(const ggml_tensor* fused,
+                                  const TensorStorage& chunk,
+                                  int* concat_dim) {
+    if (fused == nullptr) {
+        return false;
+    }
+
+    for (int dim = 0; dim < 4; ++dim) {
+        if (fused->ne[dim] <= chunk.ne[dim]) {
+            continue;
+        }
+
+        bool other_dims_match = true;
+        for (int i = 0; i < 4; ++i) {
+            if (i == dim) {
+                continue;
+            }
+            if (fused->ne[i] != chunk.ne[i]) {
+                other_dims_match = false;
+                break;
+            }
+        }
+        if (!other_dims_match) {
+            continue;
+        }
+
+        if (concat_dim != nullptr) {
+            *concat_dim = dim;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+static int64_t split_chunk_offset_elems(const String2TensorStorage& storage_map,
+                                        const std::string& base,
+                                        int chunk_index,
+                                        int concat_dim) {
+    int64_t offset = 0;
+    for (int i = 0; i < chunk_index; ++i) {
+        const std::string chunk_name = i == 0 ? base : base + "." + std::to_string(i);
+        auto it = storage_map.find(chunk_name);
+        if (it == storage_map.end()) {
+            return -1;
+        }
+        offset += it->second.ne[concat_dim];
+    }
+    return offset;
 }
 
 const char* ld_version_name(SDVersion version) {
@@ -345,7 +448,7 @@ void ModelLoader::add_tensor_storage(const TensorStorage& tensor_storage) {
 }
 
 bool ModelLoader::init_from_file(const std::string& file_path, const std::string& prefix) {
-    clear();
+    last_error_.clear();
     if (is_directory(file_path)) {
         LOG_INFO("load %s using diffusers directory format", file_path.c_str());
         return init_from_diffusers_directory(file_path, prefix);
@@ -876,12 +979,37 @@ bool ModelLoader::load_tensors(std::map<std::string, ggml_tensor*>& tensors,
                                int n_threads,
                                bool enable_mmap) {
     std::set<std::string> tensor_names_in_file;
+    std::mutex load_mutex;
+    std::vector<std::unique_ptr<ggml_tensor>> tensor_views;
+
     auto on_new_tensor_cb = [&](const TensorStorage& tensor_storage, ggml_tensor** dst_tensor) -> bool {
         const std::string& name = tensor_storage.name;
-        tensor_names_in_file.insert(name);
+        std::lock_guard<std::mutex> lock(load_mutex);
 
         auto it = tensors.find(name);
-        if (it == tensors.end()) {
+        if (it != tensors.end()) {
+            ggml_tensor* real = it->second;
+            if (!tensor_shape_matches_ggml(real, tensor_storage)) {
+                int concat_dim = -1;
+                if (!find_split_concat_dim(real, tensor_storage, &concat_dim)) {
+                    LOG_ERROR("tensor '%s' has wrong shape in model file", name.c_str());
+                    return false;
+                }
+            } else {
+                tensor_names_in_file.insert(name);
+                *dst_tensor = real;
+                return true;
+            }
+        }
+
+        std::string base_name;
+        int chunk_index = 0;
+        if (!split_tensor_chunk_base(name, &base_name, &chunk_index)) {
+            base_name = name;
+        }
+
+        auto fused_it = tensors.find(base_name);
+        if (fused_it == tensors.end()) {
             for (const std::string& ignore_tensor : ignore_tensors) {
                 if (starts_with(name, ignore_tensor)) {
                     return true;
@@ -891,14 +1019,49 @@ bool ModelLoader::load_tensors(std::map<std::string, ggml_tensor*>& tensors,
             return true;
         }
 
-        ggml_tensor* real = it->second;
-        for (int i = 0; i < 4; ++i) {
-            if (real->ne[i] != tensor_storage.ne[i]) {
-                LOG_ERROR("tensor '%s' has wrong shape in model file", name.c_str());
-                return false;
-            }
+        ggml_tensor* fused = fused_it->second;
+        int concat_dim = -1;
+        if (!find_split_concat_dim(fused, tensor_storage, &concat_dim)) {
+            LOG_ERROR("tensor '%s' cannot be loaded into '%s': incompatible split shape",
+                      name.c_str(),
+                      base_name.c_str());
+            return false;
         }
-        *dst_tensor = real;
+
+        const int64_t offset_elems = split_chunk_offset_elems(tensor_storage_map_,
+                                                              base_name,
+                                                              chunk_index,
+                                                              concat_dim);
+        if (offset_elems < 0 || offset_elems + tensor_storage.ne[concat_dim] > fused->ne[concat_dim]) {
+            LOG_ERROR("tensor '%s' cannot be loaded into '%s': invalid split offset",
+                      name.c_str(),
+                      base_name.c_str());
+            return false;
+        }
+
+        if (fused->data == nullptr) {
+            LOG_ERROR("tensor '%s' cannot be loaded into '%s': destination has no data buffer",
+                      name.c_str(),
+                      base_name.c_str());
+            return false;
+        }
+
+        tensor_views.emplace_back(new ggml_tensor(*fused));
+        ggml_tensor* view = tensor_views.back().get();
+        for (int i = 0; i < 4; ++i) {
+            view->ne[i] = tensor_storage.ne[i];
+        }
+
+        size_t byte_offset = 0;
+        if (concat_dim == 0) {
+            byte_offset = static_cast<size_t>(offset_elems) * ggml_type_size(fused->type) / ggml_blck_size(fused->type);
+        } else {
+            byte_offset = static_cast<size_t>(offset_elems) * static_cast<size_t>(fused->nb[concat_dim]);
+        }
+        view->data = static_cast<char*>(fused->data) + byte_offset;
+
+        tensor_names_in_file.insert(base_name);
+        *dst_tensor = view;
         return true;
     };
 
