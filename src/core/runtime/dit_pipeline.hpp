@@ -4,7 +4,6 @@
 #include <string>
 
 #include "core/runtime/model.h"
-#include "runtime/model_loader.hpp"
 #include "runtime/model_runtime.hpp"
 
 namespace lightdit {
@@ -17,10 +16,14 @@ public:
     DiTPipeline(const DiTPipeline&) = delete;
     DiTPipeline& operator=(const DiTPipeline&) = delete;
 
-    bool init(const ld_context_params_t& params,
-              ModelRuntime& runtime,
-              ModelLoader& loader,
-              std::string* error);
+    bool prepare(const ld_context_params_t& params,
+             ModelRuntime& runtime,
+             const ModelLoader& loader,
+             ModelLoader::TensorMap* tensors,
+             ModelLoader::IgnoreTensorSet* ignore_tensors,
+             std::string* error);
+
+    void mark_ready();
 
     ld_status_t generate_image(const ld_image_generation_params_t* params,
                                ld_image_batch_t* out,
@@ -54,6 +57,10 @@ private:
     bool bind_weights(std::string* error);
     bool validate_image_params(const ld_image_generation_params_t* params, std::string* error) const;
     bool validate_video_params(const ld_video_generation_params_t* params, std::string* error) const;
+    bool prepare_weights(const ModelLoader& loader,
+                     ModelLoader::TensorMap* tensors,
+                     ModelLoader::IgnoreTensorSet* ignore_tensors,
+                     std::string* error);
 };
 
 } // namespace lightdit

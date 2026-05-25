@@ -44,10 +44,21 @@ public:
                                    int n_threads,
                                    bool use_mmap,
                                    std::string* error);
+    bool prepare_flux_runtime_weights(const ModelLoader& loader,
+                                  ggml_backend_t backend,
+                                  ggml_backend_t clip_backend,
+                                  ggml_backend_t vae_backend,
+                                  bool offload_params_to_cpu,
+                                  ModelLoader::TensorMap* tensors,
+                                  ModelLoader::IgnoreTensorSet* ignore_tensors,
+                                  std::string* error);
     bool encode_flux_prompt(const char* prompt,
                             int n_threads,
                             int clip_skip,
                             std::string* error);
+    void mark_runtime_weights_loaded() {
+        runtime_weights_loaded_ = true;
+    }
     bool generate_flux_image(const ld_image_generation_params_t* params,
                              int batch_index,
                              int n_threads,

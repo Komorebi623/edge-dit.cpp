@@ -462,6 +462,119 @@ bool LDModel::initialize_flux_transformer_spec(const ModelLoader& loader,
     return true;
 }
 
+bool LDModel::prepare_flux_runtime_weights(const ModelLoader& loader,
+                                           ggml_backend_t diffusion_backend,
+                                           ggml_backend_t text_backend,
+                                           ggml_backend_t vae_backend,
+                                           bool offload_params_to_cpu,
+                                           ModelLoader::TensorMap* tensors,
+                                           ModelLoader::IgnoreTensorSet* ignore_tensors,
+                                           std::string* error) {
+    if (!ld_version_is_flux(version_) && !ld_version_is_flux2(version_)) {
+        return true;
+    }
+
+    if (tensors == nullptr || ignore_tensors == nullptr) {
+        if (error != nullptr) {
+            *error = "LDModel::prepare_flux_runtime_weights got null tensor containers";
+        }
+        return false;
+    }
+
+    tensors->clear();
+    ignore_tensors->clear();
+
+    runtime_weights_loaded_ = false;
+
+    if (flux_runner_ == nullptr || (diffusion_backend != nullptr && flux_backend_ != diffusion_backend)) {
+        if (!initialize_flux_transformer_spec(loader,
+                                              diffusion_backend,
+                                              offload_params_to_cpu,
+                                              error)) {
+            return false;
+        }
+    }
+
+    if (flux_runner_ == nullptr) {
+        if (error != nullptr) {
+            *error = "Flux parameter spec is not initialized";
+        }
+        return false;
+    }
+
+    if (!flux_runner_->alloc_params_buffer()) {
+        if (error != nullptr) {
+            *error = "failed to allocate Flux transformer parameter buffer";
+        }
+        return false;
+    }
+
+    flux_runner_->get_param_tensors(*tensors, "model.diffusion_model");
+
+    if (has_component("clip_l") || has_component("t5xxl")) {
+        conditioner_backend_ = text_backend != nullptr ? text_backend : ggml_backend_cpu_init();
+        if (conditioner_backend_ == nullptr) {
+            if (error != nullptr) {
+                *error = "failed to initialize backend for Flux text encoders";
+            }
+            return false;
+        }
+
+        owns_conditioner_backend_ = text_backend == nullptr;
+
+        conditioner_ = std::make_shared<FluxCLIPEmbedder>(conditioner_backend_,
+                                                          offload_params_to_cpu,
+                                                          loader.get_tensor_storage_map());
+
+        conditioner_->alloc_params_buffer();
+        conditioner_->get_param_tensors(*tensors);
+    }
+
+    if (has_component("vae")) {
+        vae_backend_ = vae_backend != nullptr ? vae_backend : ggml_backend_cpu_init();
+        if (vae_backend_ == nullptr) {
+            if (error != nullptr) {
+                *error = "failed to initialize backend for Flux VAE";
+            }
+            return false;
+        }
+
+        owns_vae_backend_ = vae_backend == nullptr;
+
+        vae_ = std::make_shared<AutoEncoderKL>(vae_backend_,
+                                               offload_params_to_cpu,
+                                               loader.get_tensor_storage_map(),
+                                               "first_stage_model",
+                                               true,
+                                               false,
+                                               version_);
+
+        vae_->alloc_params_buffer();
+        vae_->get_param_tensors(*tensors, "first_stage_model");
+    }
+
+    *ignore_tensors = {
+        "vae.",
+        "cond_stage_model.",
+        "model.diffusion_model.__x0__",
+        "model.diffusion_model.__32x32__",
+        "model.diffusion_model.__index_timestep_zero__",
+    };
+
+    if (!conditioner_) {
+        ignore_tensors->insert("text_encoders.");
+    }
+
+    if (!vae_) {
+        ignore_tensors->insert("first_stage_model.");
+    } else {
+        ignore_tensors->insert("first_stage_model.encoder");
+        ignore_tensors->insert("first_stage_model.quant");
+    }
+
+    return true;
+}
+
 bool LDModel::load_flux_runtime_weights(ModelLoader& loader,
                                         ggml_backend_t diffusion_backend,
                                         ggml_backend_t text_backend,

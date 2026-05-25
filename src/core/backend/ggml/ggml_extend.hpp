@@ -29,7 +29,8 @@
 #include "backend/ggml/ggml_extend_backend.hpp"
 #include "backend/ggml/ggml_graph_cut.h"
 
-#include "model.h"
+#include "light-dit.h"
+#include "core/runtime/model_loader.h"
 #include "core/tensor/tensor.hpp"
 
 #include "utils/rng.hpp"

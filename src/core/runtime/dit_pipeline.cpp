@@ -7,42 +7,91 @@
 
 namespace lightdit {
 
-bool DiTPipeline::init(const ld_context_params_t& params,
-                       ModelRuntime& runtime,
-                       ModelLoader& loader,
-                       std::string* error) {
+    bool DiTPipeline::prepare(const ld_context_params_t& params,
+                          ModelRuntime& runtime,
+                          const ModelLoader& loader,
+                          ModelLoader::TensorMap* tensors,
+                          ModelLoader::IgnoreTensorSet* ignore_tensors,
+                          std::string* error) {
     ready_ = false;
     runtime_ = &runtime;
-    loader_ = &loader;
+    loader_ = nullptr;
     version_ = loader.version();
     model_.reset();
 
-    if (version_ == VERSION_COUNT) {
+    if (tensors == nullptr || ignore_tensors == nullptr) {
         if (error != nullptr) {
-            *error = "DiTPipeline::init got unknown model version";
+            *error = "DiTPipeline::prepare got null tensor containers";
         }
         return false;
     }
 
-    if (!build_components(params, error)) {
-        return false;
-    }
-    if (!bind_weights(error)) {
+    if (version_ == VERSION_COUNT) {
+        if (error != nullptr) {
+            *error = "DiTPipeline::prepare got unknown model version";
+        }
         return false;
     }
 
-    ready_ = true;
-    return true;
+    model_ = std::make_unique<LDModel>(version_);
+
+    model_->build_manifest(loader);
+
+    if (!model_->validate(error)) {
+        return false;
+    }
+
+    if (!model_->initialize_flux_transformer_spec(loader,
+                                                  runtime_->backend(),
+                                                  runtime_->offload_params_to_cpu(),
+                                                  error)) {
+        return false;
+    }
+
+    return prepare_weights(loader, tensors, ignore_tensors, error);
+}
+
+bool DiTPipeline::prepare_weights(const ModelLoader& loader,
+                                  ModelLoader::TensorMap* tensors,
+                                  ModelLoader::IgnoreTensorSet* ignore_tensors,
+                                  std::string* error) {
+    if (model_ == nullptr) {
+        if (error != nullptr) {
+            *error = "DiTPipeline::prepare_weights called before model is built";
+        }
+        return false;
+    }
+
+    return model_->prepare_flux_runtime_weights(loader,
+                                                runtime_->backend(),
+                                                runtime_->clip_backend(),
+                                                runtime_->vae_backend(),
+                                                runtime_->offload_params_to_cpu(),
+                                                tensors,
+                                                ignore_tensors,
+                                                error);
+}
+
+void DiTPipeline::mark_ready() {
+    const bool ok = (runtime_ != nullptr &&
+                     model_ != nullptr &&
+                     version_ != VERSION_COUNT);
+
+    if (ok) {
+        model_->mark_runtime_weights_loaded();
+    }
+
+    ready_ = ok;
 }
 
 bool DiTPipeline::build_components(const ld_context_params_t& params, std::string* error) {
     (void)params;
     model_ = std::make_unique<LDModel>(version_);
-    model_->build_manifest(loader_->raw_loader());
+    model_->build_manifest(*loader_);
     if (!model_->validate(error)) {
         return false;
     }
-    if (!model_->initialize_flux_transformer_spec(loader_->raw_loader(),
+    if (!model_->initialize_flux_transformer_spec(*loader_,
                                                   runtime_->backend(),
                                                   runtime_->offload_params_to_cpu(),
                                                   error)) {
@@ -52,7 +101,7 @@ bool DiTPipeline::build_components(const ld_context_params_t& params, std::strin
 }
 
 bool DiTPipeline::bind_weights(std::string* error) {
-    if (!model_->load_flux_runtime_weights(loader_->raw_loader(),
+    if (!model_->load_flux_runtime_weights(*loader_,
                                            runtime_->backend(),
                                            runtime_->clip_backend(),
                                            runtime_->vae_backend(),

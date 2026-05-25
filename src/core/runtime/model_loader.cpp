@@ -1,5 +1,5 @@
 #include "core/runtime/model_loader.h"
-
+#include <sstream>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -429,11 +429,325 @@ static bool convert_tensor_data(void* src, ggml_type src_type, void* dst, ggml_t
     return ggml_quantize_chunk(dst_type, tmp.data(), dst, 0, nrows, n_per_row, imatrix.data()) >= 0;
 }
 
+
+bool ModelLoader::init(const ld_context_params_t& params,
+                       PrepareTensorsFn prepare_tensors,
+                       int n_threads,
+                       bool use_mmap,
+                       std::string* error) {
+    clear();
+
+    if (!prepare_tensors) {
+        const std::string msg = "ModelLoader::init got null prepare_tensors callback";
+        if (error != nullptr) {
+            *error = msg;
+        }
+        set_error(msg);
+        return false;
+    }
+
+    if (!load_model_files(params, error)) {
+        return false;
+    }
+
+    if (!finalize_names_and_version(error)) {
+        return false;
+    }
+
+    if (!apply_dtype_policy(params, error)) {
+        return false;
+    }
+
+    tensors_.clear();
+    ignore_tensors_.clear();
+
+    if (!prepare_tensors(*this, &tensors_, &ignore_tensors_, error)) {
+        if (error != nullptr && error->empty()) {
+            *error = "failed to prepare model tensors";
+        }
+        if (error != nullptr) {
+            set_error(*error);
+        }
+        return false;
+    }
+
+    if (!bind_weights(n_threads, use_mmap, error)) {
+        return false;
+    }
+
+    log_weight_stats();
+
+    return true;
+}
+
 void ModelLoader::clear() {
     version_ = VERSION_COUNT;
+
     file_paths_.clear();
     tensor_storage_map_.clear();
     last_error_.clear();
+
+    tensors_.clear();
+    ignore_tensors_.clear();
+
+    external_vae_is_invalid_ = false;
+    use_tae_ = false;
+    tae_preview_only_ = false;
+    use_pmid_ = false;
+}
+
+void ModelLoader::reset() {
+    clear();
+}
+
+bool ModelLoader::non_empty(const char* path) {
+    return path != nullptr && path[0] != '\0';
+}
+
+bool ModelLoader::load_optional_file(const char* path,
+                                     const std::string& prefix,
+                                     const char* label,
+                                     bool required,
+                                     std::string* error) {
+    if (!non_empty(path)) {
+        if (required) {
+            const std::string msg = std::string("missing required ") + label + " path";
+            if (error != nullptr) {
+                *error = msg;
+            }
+            set_error(msg);
+            return false;
+        }
+        return false;
+    }
+
+    LOG_INFO("loading %s from '%s'", label, path);
+
+    if (!init_from_file(path, prefix)) {
+        const std::string msg = last_error_.empty()
+                                    ? std::string("loading ") + label + " from '" + path + "' failed"
+                                    : last_error_;
+
+        if (required) {
+            if (error != nullptr) {
+                *error = msg;
+            }
+            set_error(msg);
+            return false;
+        }
+
+        LOG_WARN("%s", msg.c_str());
+        return false;
+    }
+
+    return true;
+}
+
+bool ModelLoader::load_model_files(const ld_context_params_t& params,
+                                   std::string* error) {
+    bool loaded_any = false;
+
+    loaded_any = load_optional_file(params.model_path,
+                                    "",
+                                    "model",
+                                    false,
+                                    error) || loaded_any;
+
+    const SDVersion hint_version = get_ld_version();
+    const bool is_unet_hint = hint_version != VERSION_COUNT &&
+                              ld_version_is_unet(hint_version);
+
+    loaded_any = load_optional_file(params.diffusion_model_path,
+                                    "model.diffusion_model.",
+                                    "diffusion model",
+                                    false,
+                                    error) || loaded_any;
+
+    loaded_any = load_optional_file(params.high_noise_diffusion_model_path,
+                                    "model.high_noise_diffusion_model.",
+                                    "high noise diffusion model",
+                                    false,
+                                    error) || loaded_any;
+
+    loaded_any = load_optional_file(params.clip_l_path,
+                                    is_unet_hint
+                                        ? "cond_stage_model.transformer."
+                                        : "text_encoders.clip_l.transformer.",
+                                    "clip_l",
+                                    false,
+                                    error) || loaded_any;
+
+    loaded_any = load_optional_file(params.clip_g_path,
+                                    is_unet_hint
+                                        ? "cond_stage_model.1.transformer."
+                                        : "text_encoders.clip_g.transformer.",
+                                    "clip_g",
+                                    false,
+                                    error) || loaded_any;
+
+    loaded_any = load_optional_file(params.clip_vision_path,
+                                    "cond_stage_model.transformer.",
+                                    "clip_vision",
+                                    false,
+                                    error) || loaded_any;
+
+    loaded_any = load_optional_file(params.t5xxl_path,
+                                    "text_encoders.t5xxl.transformer.",
+                                    "t5xxl",
+                                    false,
+                                    error) || loaded_any;
+
+    loaded_any = load_optional_file(params.llm_path,
+                                    "text_encoders.llm.",
+                                    "llm",
+                                    false,
+                                    error) || loaded_any;
+
+    loaded_any = load_optional_file(params.llm_vision_path,
+                                    "text_encoders.llm.visual.",
+                                    "llm vision",
+                                    false,
+                                    error) || loaded_any;
+
+    if (non_empty(params.vae_path)) {
+        const bool ok = load_optional_file(params.vae_path,
+                                           "vae.",
+                                           "vae",
+                                           false,
+                                           error);
+        external_vae_is_invalid_ = !ok;
+        loaded_any = ok || loaded_any;
+    }
+
+    if (non_empty(params.taesd_path)) {
+        const bool ok = load_optional_file(params.taesd_path,
+                                           "tae.",
+                                           "tae",
+                                           false,
+                                           error);
+        use_tae_ = true;
+        loaded_any = ok || loaded_any;
+    }
+
+    if (!loaded_any || tensor_storage_map_.empty()) {
+        const std::string msg = "no model tensors were loaded";
+        if (error != nullptr) {
+            *error = msg;
+        }
+        set_error(msg);
+        return false;
+    }
+
+    return true;
+}
+
+bool ModelLoader::finalize_names_and_version(std::string* error) {
+    convert_tensors_name();
+
+    version_ = get_ld_version();
+    if (version_ == VERSION_COUNT) {
+        const std::string msg = "failed to infer model version from loaded tensors";
+        if (error != nullptr) {
+            *error = msg;
+        }
+        set_error(msg);
+        return false;
+    }
+
+    LOG_INFO("model loader initialized: version=%s, files=%zu, tensors=%zu",
+             ld_version_name(version_),
+             file_paths_.size(),
+             tensor_storage_map_.size());
+
+    return true;
+}
+
+bool ModelLoader::apply_dtype_policy(const ld_context_params_t& params,
+                                     std::string* error) {
+    (void)error;
+
+    const ggml_type wtype = ld_dtype_to_ggml(params.weight_type);
+    if (wtype != GGML_TYPE_COUNT) {
+        set_wtype_override(wtype);
+    }
+
+    return true;
+}
+
+bool ModelLoader::bind_weights(int n_threads,
+                               bool use_mmap,
+                               std::string* error) {
+    if (tensors_.empty()) {
+        const std::string msg = "no target tensors were prepared for model weights";
+        if (error != nullptr) {
+            *error = msg;
+        }
+        set_error(msg);
+        return false;
+    }
+
+    if (!load_tensors(tensors_, ignore_tensors_, n_threads, use_mmap)) {
+        const std::string msg = last_error_.empty()
+                                    ? "failed to load tensors"
+                                    : last_error_;
+        if (error != nullptr) {
+            *error = msg;
+        }
+        set_error(msg);
+        return false;
+    }
+
+    return true;
+}
+
+ggml_type ModelLoader::ld_dtype_to_ggml(ld_dtype_t dtype) {
+    switch (dtype) {
+        case LD_DTYPE_F32:  return GGML_TYPE_F32;
+        case LD_DTYPE_F16:  return GGML_TYPE_F16;
+        case LD_DTYPE_BF16: return GGML_TYPE_BF16;
+        case LD_DTYPE_Q4_0: return GGML_TYPE_Q4_0;
+        case LD_DTYPE_Q4_1: return GGML_TYPE_Q4_1;
+        case LD_DTYPE_Q5_0: return GGML_TYPE_Q5_0;
+        case LD_DTYPE_Q5_1: return GGML_TYPE_Q5_1;
+        case LD_DTYPE_Q8_0: return GGML_TYPE_Q8_0;
+        case LD_DTYPE_Q2_K: return GGML_TYPE_Q2_K;
+        case LD_DTYPE_Q3_K: return GGML_TYPE_Q3_K;
+        case LD_DTYPE_Q4_K: return GGML_TYPE_Q4_K;
+        case LD_DTYPE_Q5_K: return GGML_TYPE_Q5_K;
+        case LD_DTYPE_Q6_K: return GGML_TYPE_Q6_K;
+        case LD_DTYPE_AUTO:
+        default:
+            return GGML_TYPE_COUNT;
+    }
+}
+
+std::string ModelLoader::wtype_stat_to_str(const std::map<ggml_type, uint32_t>& stat) {
+    std::ostringstream ss;
+    bool first = true;
+
+    for (const auto& [type, count] : stat) {
+        if (!first) {
+            ss << "|";
+        }
+        first = false;
+        ss << ggml_type_name(type) << ":" << count;
+    }
+
+    return ss.str();
+}
+
+void ModelLoader::log_weight_stats() const {
+    LOG_INFO("Weight type stat: %s",
+             wtype_stat_to_str(get_wtype_stat()).c_str());
+
+    LOG_INFO("Conditioner weight type stat: %s",
+             wtype_stat_to_str(get_conditioner_wtype_stat()).c_str());
+
+    LOG_INFO("Diffusion model weight type stat: %s",
+             wtype_stat_to_str(get_diffusion_model_wtype_stat()).c_str());
+
+    LOG_INFO("VAE weight type stat: %s",
+             wtype_stat_to_str(get_vae_wtype_stat()).c_str());
 }
 
 void ModelLoader::set_error(const std::string& error) {
@@ -747,12 +1061,14 @@ std::map<ggml_type, uint32_t> ModelLoader::get_vae_wtype_stat() const {
     });
 }
 
-std::vector<std::string> ModelLoader::get_tensor_names() const {
+std::vector<std::string> ModelLoader::tensor_names() const {
     std::vector<std::string> names;
     names.reserve(tensor_storage_map_.size());
+
     for (const auto& item : tensor_storage_map_) {
         names.push_back(item.first);
     }
+
     return names;
 }
 

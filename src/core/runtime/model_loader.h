@@ -1,6 +1,6 @@
 #ifndef LD_MODEL_LOADER_H
 #define LD_MODEL_LOADER_H
-
+#include "light-dit.h"
 #include <functional>
 #include <map>
 #include <set>
@@ -138,51 +138,138 @@ using TensorTypeRules = std::vector<std::pair<std::string, ggml_type>>;
 TensorTypeRules parse_tensor_type_rules(const std::string& tensor_type_rules);
 const char* ld_version_name(SDVersion version);
 
-class ModelLoader {
+class ModelLoader final {
 public:
-    bool init_from_file(const std::string& file_path, const std::string& prefix = "");
+    using TensorMap = std::map<std::string, ggml_tensor*>;
+    using IgnoreTensorSet = std::set<std::string>;
+
+    // Pipeline 在这个 callback 里根据 loader 的 metadata 创建 tensor。
+    using PrepareTensorsFn = std::function<bool(
+        const ModelLoader& loader,
+        TensorMap* tensors,
+        IgnoreTensorSet* ignore_tensors,
+        std::string* error
+    )>;
+
+public:
+    ModelLoader() = default;
+    ~ModelLoader() = default;
+
+    ModelLoader(const ModelLoader&) = delete;
+    ModelLoader& operator=(const ModelLoader&) = delete;
+
+    // Engine 只调用这一个入口。
+    bool init(const ld_context_params_t& params,
+              PrepareTensorsFn prepare_tensors,
+              int n_threads,
+              bool use_mmap,
+              std::string* error);
+
+    void reset();
+
+public:
+    // 只读查询接口：Pipeline callback 需要用。
+    SDVersion version() const { return version_; }
+
+    bool external_vae_is_invalid() const { return external_vae_is_invalid_; }
+    bool use_tae() const { return use_tae_; }
+    bool tae_preview_only() const { return tae_preview_only_; }
+    bool use_pmid() const { return use_pmid_; }
+
+    String2TensorStorage& get_tensor_storage_map() {
+        return tensor_storage_map_;
+    }
+
+    const String2TensorStorage& get_tensor_storage_map() const {
+        return tensor_storage_map_;
+    }
+    const std::vector<std::string>& file_paths() const { return file_paths_; }
+    const std::string& get_last_error() const { return last_error_; }
+
+    std::vector<std::string> tensor_names() const;
+    int64_t get_params_mem_size(ggml_backend_t backend,
+                                ggml_type type = GGML_TYPE_COUNT) const;
+
+public:
+    // 顶层流程步骤：只给 init() 调。
+    bool load_model_files(const ld_context_params_t& params, std::string* error);
+    bool finalize_names_and_version(std::string* error);
+    bool apply_dtype_policy(const ld_context_params_t& params, std::string* error);
+    bool bind_weights(int n_threads, bool use_mmap, std::string* error);
+
+    // 单文件读取：原 core ModelLoader 的能力，全部内收。
+    bool init_from_file(const std::string& file_path,
+                        const std::string& prefix = "");
     void convert_tensors_name();
+
     bool init_from_file_and_convert_name(const std::string& file_path,
                                          const std::string& prefix = "",
                                          SDVersion version = VERSION_COUNT);
 
+    bool init_from_gguf_file(const std::string& file_path,
+                             const std::string& prefix = "");
+    bool init_from_safetensors_file(const std::string& file_path,
+                                    const std::string& prefix = "");
+    bool init_from_safetensors_index_file(const std::string& file_path,
+                                          const std::string& prefix = "");
+    bool init_from_diffusers_directory(const std::string& dir_path,
+                                       const std::string& prefix = "");
+
+    // 权重绑定：原来的 load_tensors 也不再暴露给 Engine。
+    bool load_tensors(on_new_tensor_cb_t on_new_tensor_cb,
+                      int n_threads = 0,
+                      bool use_mmap = false);
+
+    bool load_tensors(TensorMap& tensors,
+                      IgnoreTensorSet ignore_tensors = {},
+                      int n_threads = 0,
+                      bool use_mmap = false);
+
+    // dtype / version / stats。
     SDVersion get_ld_version();
+
     std::map<ggml_type, uint32_t> get_wtype_stat() const;
     std::map<ggml_type, uint32_t> get_conditioner_wtype_stat() const;
     std::map<ggml_type, uint32_t> get_diffusion_model_wtype_stat() const;
     std::map<ggml_type, uint32_t> get_vae_wtype_stat() const;
 
-    String2TensorStorage& get_tensor_storage_map() { return tensor_storage_map_; }
-    const String2TensorStorage& get_tensor_storage_map() const { return tensor_storage_map_; }
-    const std::vector<std::string>& get_file_paths() const { return file_paths_; }
-    const std::string& get_last_error() const { return last_error_; }
+    void set_wtype_override(ggml_type wtype,
+                            std::string tensor_type_rules = "");
 
-    std::vector<std::string> get_tensor_names() const;
+    bool tensor_should_be_converted(const TensorStorage& tensor_storage,
+                                    ggml_type type) const;
 
-    void set_wtype_override(ggml_type wtype, std::string tensor_type_rules = "");
-    bool load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_threads = 0, bool use_mmap = false);
-    bool load_tensors(std::map<std::string, ggml_tensor*>& tensors,
-                      std::set<std::string> ignore_tensors = {},
-                      int n_threads = 0,
-                      bool use_mmap = false);
-
-    bool tensor_should_be_converted(const TensorStorage& tensor_storage, ggml_type type) const;
-    int64_t get_params_mem_size(ggml_backend_t backend, ggml_type type = GGML_TYPE_COUNT) const;
+    void log_weight_stats() const;
 
 private:
-    SDVersion version_ = VERSION_COUNT;
-    std::vector<std::string> file_paths_;
-    String2TensorStorage tensor_storage_map_;
-    std::string last_error_;
-
     void clear();
     void set_error(const std::string& error);
     void add_tensor_storage(const TensorStorage& tensor_storage);
 
-    bool init_from_gguf_file(const std::string& file_path, const std::string& prefix = "");
-    bool init_from_safetensors_file(const std::string& file_path, const std::string& prefix = "");
-    bool init_from_safetensors_index_file(const std::string& file_path, const std::string& prefix = "");
-    bool init_from_diffusers_directory(const std::string& dir_path, const std::string& prefix = "");
+    bool load_optional_file(const char* path,
+                            const std::string& prefix,
+                            const char* label,
+                            bool required,
+                            std::string* error);
+
+    static bool non_empty(const char* path);
+    static ggml_type ld_dtype_to_ggml(ld_dtype_t dtype);
+    static std::string wtype_stat_to_str(const std::map<ggml_type, uint32_t>& stat);
+
+private:
+    SDVersion version_ = VERSION_COUNT;
+
+    std::vector<std::string> file_paths_;
+    String2TensorStorage tensor_storage_map_;
+    std::string last_error_;
+
+    TensorMap tensors_;
+    IgnoreTensorSet ignore_tensors_;
+
+    bool external_vae_is_invalid_ = false;
+    bool use_tae_ = false;
+    bool tae_preview_only_ = false;
+    bool use_pmid_ = false;
 };
 
 #endif

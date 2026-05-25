@@ -11,7 +11,8 @@
 #include <unordered_map>
 
 #include "backend/ggml/ggml_extend.hpp"
-#include "model.h"
+#include "light-dit.h"
+#include "core/runtime/model_loader.h"
 #include "tokenizers/t5_unigram_tokenizer.h"
 
 class T5LayerNorm : public UnaryBlock {

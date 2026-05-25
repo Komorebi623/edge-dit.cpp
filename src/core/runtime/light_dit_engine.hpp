@@ -5,7 +5,7 @@
 
 #include "light-dit.h"
 #include "runtime/model_runtime.hpp"
-#include "runtime/model_loader.hpp"
+#include "runtime/model_loader.h"
 #include "runtime/dit_pipeline.hpp"
 
 namespace lightdit {

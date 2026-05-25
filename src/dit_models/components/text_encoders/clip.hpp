@@ -2,7 +2,8 @@
 #define __CLIP_HPP__
 
 #include "backend/ggml/ggml_extend.hpp"
-#include "model.h"
+#include "light-dit.h"
+#include "core/runtime/model_loader.h"
 #include "tokenizers/clip_tokenizer.h"
 
 /*================================================ FrozenCLIPEmbedder ================================================*/

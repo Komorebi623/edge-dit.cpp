@@ -8,7 +8,8 @@
 #include "dit_models/components/common/modulation.hpp"
 #include "dit_models/components/common/normalization.hpp"
 #include "dit_models/components/common/rope.hpp"
-#include "model.h"
+#include "light-dit.h"
+#include "core/runtime/model_loader.h"
 
 #define FLUX_GRAPH_SIZE 10240
 
