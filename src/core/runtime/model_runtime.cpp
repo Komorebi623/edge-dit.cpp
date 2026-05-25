@@ -1,12 +1,96 @@
 #include "runtime/model_runtime.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <cstring>
 #include <thread>
 
 #include "utils/rng_philox.hpp"
 #include "utils/util.h"
 
 namespace lightdit {
+namespace {
+
+std::string lowercase(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+std::string requested_backend_name() {
+    const char* value = std::getenv("LDIT_BACKEND");
+    if (value == nullptr || std::strlen(value) == 0) {
+        value = std::getenv("LIGHTDIT_BACKEND");
+    }
+    if (value == nullptr) {
+        return "";
+    }
+    return value;
+}
+
+bool is_auto_backend(const std::string& name) {
+    return name.empty() || lowercase(name) == "auto" || lowercase(name) == "default";
+}
+
+bool device_name_matches(ggml_backend_dev_t dev, const std::string& requested) {
+    if (dev == nullptr) {
+        return false;
+    }
+
+    const std::string request = lowercase(requested);
+    if (request == "gpu") {
+        const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+        return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
+    }
+
+    const char* name = ggml_backend_dev_name(dev);
+    return name != nullptr && contains(lowercase(name), request);
+}
+
+ggml_backend_t init_explicit_backend(const std::string& requested) {
+    const std::string request = lowercase(requested);
+    if (request == "cpu") {
+        return ggml_backend_cpu_init();
+    }
+
+    ggml_backend_load_all_once();
+    const size_t device_count = ggml_backend_dev_count();
+    for (size_t i = 0; i < device_count; ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (!device_name_matches(dev, requested)) {
+            continue;
+        }
+
+        ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
+        if (backend != nullptr) {
+            return backend;
+        }
+    }
+
+    return init_named_backend(requested);
+}
+
+std::string available_backend_names() {
+    ggml_backend_load_all_once();
+    std::string result;
+    const size_t device_count = ggml_backend_dev_count();
+    for (size_t i = 0; i < device_count; ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        const char* name = ggml_backend_dev_name(dev);
+        if (name == nullptr) {
+            continue;
+        }
+        if (!result.empty()) {
+            result += ", ";
+        }
+        result += name;
+    }
+    return result.empty() ? "none" : result;
+}
+
+}  // namespace
 
 ModelRuntime::~ModelRuntime() {
     reset();
@@ -74,9 +158,20 @@ bool ModelRuntime::init_rng(const ld_context_params_t& params, std::string* erro
 }
 
 bool ModelRuntime::init_backends(const ld_context_params_t& params, std::string* error) {
-    backends_.backend = init_named_backend();
+    const std::string requested_backend = requested_backend_name();
+    if (is_auto_backend(requested_backend)) {
+        backends_.backend = init_named_backend();
+    } else {
+        LOG_INFO("requested backend: %s", requested_backend.c_str());
+        backends_.backend = init_explicit_backend(requested_backend);
+    }
+
     if (backends_.backend == nullptr) {
-        return fail(error, "failed to initialize default ggml backend");
+        std::string msg = is_auto_backend(requested_backend)
+                              ? "failed to initialize default ggml backend"
+                              : "failed to initialize requested ggml backend '" + requested_backend +
+                                    "'; available backends: " + available_backend_names();
+        return fail(error, msg);
     }
     LOG_INFO("default backend: %s", ggml_backend_name(backends_.backend));
 

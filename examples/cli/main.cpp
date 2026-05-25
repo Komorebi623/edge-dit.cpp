@@ -26,6 +26,8 @@ static void print_usage(const char* prog) {
         "  -s, --seed <int64>        Seed, default: -1\n"
         "  -t, --threads <int>       Thread count, default: 0\n"
         "  --guidance <float>        Flux distilled guidance, default: 3.5\n"
+        "  --backend <name>          Backend: auto, cpu, cuda, gpu. Default: auto\n"
+        "  --gpu                     Alias for --backend gpu\n"
         "  --help              Show this help\n",
         prog,
         prog
@@ -61,6 +63,7 @@ struct FluxCliArgs {
     const char* t5xxl_path = nullptr;
     const char* prompt = nullptr;
     const char* output_path = "output.png";
+    const char* backend = nullptr;
 
     int width = 1024;
     int height = 1024;
@@ -125,6 +128,10 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             const char* v = require_value(key);
             if (!v) return false;
             args->guidance = std::strtof(v, nullptr);
+        } else if (std::strcmp(key, "--backend") == 0) {
+            args->backend = require_value(key);
+        } else if (std::strcmp(key, "--gpu") == 0) {
+            args->backend = "gpu";
         } else if (std::strcmp(key, "--help") == 0 || std::strcmp(key, "-h") == 0) {
             return false;
         } else {
@@ -175,6 +182,10 @@ int main(int argc, char** argv) {
     if (!parse_args(argc, argv, &args)) {
         print_usage(argv[0]);
         return 1;
+    }
+
+    if (args.backend != nullptr && std::strlen(args.backend) > 0) {
+        setenv("LDIT_BACKEND", args.backend, 1);
     }
 
     ld_context_params_t ctx_params;

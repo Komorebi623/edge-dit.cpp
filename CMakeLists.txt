@@ -75,6 +75,12 @@ file(GLOB_RECURSE LDIT_CORE_SOURCES CONFIGURE_DEPENDS
     "src/core/*.hpp"
 )
 
+file(GLOB LDIT_API_SOURCES CONFIGURE_DEPENDS
+    "src/*.cpp"
+    "src/*.h"
+    "src/*.hpp"
+)
+
 file(GLOB LDIT_UTIL_SOURCES CONFIGURE_DEPENDS
     "src/utils/*.cpp"
     "src/utils/*.h"
@@ -89,6 +95,7 @@ file(GLOB_RECURSE LDIT_DIT_MODEL_SOURCES CONFIGURE_DEPENDS
 list(FILTER LDIT_DIT_MODEL_SOURCES EXCLUDE REGEX ".*/super_resolution/.*")
 
 set(LDIT_SOURCES
+    ${LDIT_API_SOURCES}
     ${LDIT_CORE_SOURCES}
     ${LDIT_UTIL_SOURCES}
     ${LDIT_DIT_MODEL_SOURCES}
