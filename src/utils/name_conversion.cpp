@@ -662,6 +662,34 @@ std::string convert_other_dit_to_original_anima(std::string name) {
     return name;
 }
 
+std::string convert_diffusers_dit_to_original_wan(std::string name) {
+    static const std::vector<std::pair<std::string, std::string>> top_map = {
+        {"condition_embedder.text_embedder.linear_1.", "text_embedding.0."},
+        {"condition_embedder.text_embedder.linear_2.", "text_embedding.2."},
+        {"condition_embedder.time_embedder.linear_1.", "time_embedding.0."},
+        {"condition_embedder.time_embedder.linear_2.", "time_embedding.2."},
+        {"condition_embedder.time_proj.", "time_projection.1."},
+        {"proj_out.", "head.head."},
+        {"scale_shift_table", "head.modulation"},
+    };
+    replace_with_prefix_map(name, top_map);
+
+    static const std::vector<std::pair<std::string, std::string>> block_map = {
+        {".attn1.", ".self_attn."},
+        {".attn2.", ".cross_attn."},
+        {".to_q.", ".q."},
+        {".to_k.", ".k."},
+        {".to_v.", ".v."},
+        {".to_out.0.", ".o."},
+        {".ffn.net.0.proj.", ".ffn.0."},
+        {".ffn.net.2.", ".ffn.2."},
+        {".norm2.", ".norm3."},
+        {".scale_shift_table", ".modulation"},
+    };
+    replace_with_name_map(name, block_map);
+    return name;
+}
+
 std::string convert_diffusion_model_name(std::string name, std::string prefix, SDVersion version) {
     if (ld_version_is_sd1(version) || ld_version_is_sd2(version)) {
         name = convert_diffusers_unet_to_original_sd1(name);
@@ -671,6 +699,8 @@ std::string convert_diffusion_model_name(std::string name, std::string prefix, S
         name = convert_diffusers_dit_to_original_sd3(name);
     } else if (ld_version_is_flux(version) || ld_version_is_flux2(version)) {
         name = convert_diffusers_dit_to_original_flux(name);
+    } else if (ld_version_is_wan(version)) {
+        name = convert_diffusers_dit_to_original_wan(name);
     } else if (ld_version_is_z_image(version)) {
         name = convert_diffusers_dit_to_original_lumina2(name);
     } else if (ld_version_is_anima(version)) {
@@ -848,7 +878,7 @@ std::string convert_diffusers_qwen_image_vae_to_wan(std::string name) {
 }
 
 std::string convert_first_stage_model_name(std::string name, std::string prefix, SDVersion version) {
-    if (ld_version_is_qwen_image(version)) {
+    if (ld_version_is_qwen_image(version) || ld_version_is_wan(version)) {
         return convert_diffusers_qwen_image_vae_to_wan(name);
     }
 

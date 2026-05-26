@@ -85,6 +85,7 @@ void ld_video_generation_params_init(ld_video_generation_params_t * params) {
     params->moe_boundary = 0.5f;
     ld_sample_params_init(&params->sample);
     ld_sample_params_init(&params->high_noise_sample);
+    params->high_noise_sample.steps = -1;
 }
 
 ld_context_t* ld_create_context(const ld_context_params_t* params) {

@@ -17,13 +17,31 @@ using scheduler_t = ld_scheduler_t;
 
 constexpr sample_method_t EULER_SAMPLE_METHOD = LD_SAMPLER_EULER;
 constexpr sample_method_t EULER_A_SAMPLE_METHOD = LD_SAMPLER_EULER_A;
+constexpr sample_method_t HEUN_SAMPLE_METHOD = LD_SAMPLER_HEUN;
+constexpr sample_method_t DPM2_SAMPLE_METHOD = LD_SAMPLER_DPM2;
+constexpr sample_method_t DPMPP2S_A_SAMPLE_METHOD = LD_SAMPLER_DPM_PLUS_PLUS_2S_A;
+constexpr sample_method_t DPMPP2M_SAMPLE_METHOD = LD_SAMPLER_DPM_PLUS_PLUS_2M;
+constexpr sample_method_t DPMPP2Mv2_SAMPLE_METHOD = LD_SAMPLER_DPM_PLUS_PLUS_2M_V2;
+constexpr sample_method_t IPNDM_SAMPLE_METHOD = LD_SAMPLER_IPNDM;
+constexpr sample_method_t IPNDM_V_SAMPLE_METHOD = LD_SAMPLER_IPNDM_V;
 constexpr sample_method_t LCM_SAMPLE_METHOD = LD_SAMPLER_LCM;
 constexpr sample_method_t TCD_SAMPLE_METHOD = LD_SAMPLER_TCD;
 constexpr sample_method_t DDIM_TRAILING_SAMPLE_METHOD = LD_SAMPLER_DDIM_TRAILING;
+constexpr sample_method_t RES_MULTISTEP_SAMPLE_METHOD = LD_SAMPLER_RES_MULTISTEP;
+constexpr sample_method_t RES_2S_SAMPLE_METHOD = LD_SAMPLER_RES_2S;
+constexpr sample_method_t ER_SDE_SAMPLE_METHOD = LD_SAMPLER_ER_SDE;
 
 constexpr scheduler_t DISCRETE_SCHEDULER = LD_SCHEDULER_DISCRETE;
+constexpr scheduler_t KARRAS_SCHEDULER = LD_SCHEDULER_KARRAS;
+constexpr scheduler_t EXPONENTIAL_SCHEDULER = LD_SCHEDULER_EXPONENTIAL;
+constexpr scheduler_t AYS_SCHEDULER = LD_SCHEDULER_AYS;
+constexpr scheduler_t GITS_SCHEDULER = LD_SCHEDULER_GITS;
+constexpr scheduler_t SGM_UNIFORM_SCHEDULER = LD_SCHEDULER_SGM_UNIFORM;
 constexpr scheduler_t SIMPLE_SCHEDULER = LD_SCHEDULER_SIMPLE;
+constexpr scheduler_t SMOOTHSTEP_SCHEDULER = LD_SCHEDULER_SMOOTHSTEP;
+constexpr scheduler_t KL_OPTIMAL_SCHEDULER = LD_SCHEDULER_KL_OPTIMAL;
 constexpr scheduler_t LCM_SCHEDULER = LD_SCHEDULER_LCM;
+constexpr scheduler_t BONG_TANGENT_SCHEDULER = LD_SCHEDULER_BONG_TANGENT;
 
 struct RuntimeBackends {
     ggml_backend_t backend = nullptr;

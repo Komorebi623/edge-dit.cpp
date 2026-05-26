@@ -245,6 +245,9 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
     if (file_exists(model_index_path) && read_json_file(model_index_path, &index, &error)) {
         if (index.contains("_class_name") && index["_class_name"].is_string()) {
             const std::string klass = index["_class_name"].get<std::string>();
+            if (contains(klass, "Wan")) {
+                return VERSION_WAN2;
+            }
             if (contains(klass, "Flux")) {
                 return VERSION_FLUX;
             }
@@ -261,6 +264,9 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
     if (file_exists(transformer_config_path) && read_json_file(transformer_config_path, &index, &error)) {
         if (index.contains("_class_name") && index["_class_name"].is_string()) {
             const std::string klass = index["_class_name"].get<std::string>();
+            if (contains(klass, "Wan")) {
+                return VERSION_WAN2;
+            }
             if (contains(klass, "Flux")) {
                 return VERSION_FLUX;
             }
@@ -592,9 +598,11 @@ bool ModelLoader::load_model_files(const ld_context_params_t& params,
 }
 
 bool ModelLoader::finalize_names_and_version(std::string* error) {
+    const SDVersion hinted_version = version_;
     convert_tensors_name();
 
-    version_ = get_ld_version();
+    const SDVersion inferred_version = get_ld_version();
+    version_ = inferred_version != VERSION_COUNT ? inferred_version : hinted_version;
     if (version_ == VERSION_COUNT) {
         const std::string msg = "failed to infer model version from loaded tensors";
         if (error != nullptr) {
@@ -892,10 +900,54 @@ bool ModelLoader::init_from_diffusers_directory(const std::string& dir_path, con
             continue;
         }
 
-        const std::string component_prefix = (version_ == VERSION_FLUX) ? component.flux_prefix : component.sd_prefix;
+        std::string component_prefix = (version_ == VERSION_FLUX) ? component.flux_prefix : component.sd_prefix;
+        if (ld_version_is_wan(version_)) {
+            if (std::strcmp(component.dir, "text_encoder") == 0) {
+                component_prefix = "text_encoders.t5xxl.transformer.";
+            } else if (std::strcmp(component.dir, "text_encoder_2") == 0 ||
+                       std::strcmp(component.dir, "text_encoder_3") == 0 ||
+                       std::strcmp(component.dir, "unet") == 0) {
+                continue;
+            }
+        }
         bool loaded = false;
         std::set<std::string> tried;
+        if (version_ == VERSION_FLUX && std::strcmp(component.dir, "transformer") == 0) {
+            const std::vector<std::string> top_level_flux_weights = {
+                path_join(dir_path, "flux1-dev.safetensors"),
+                path_join(dir_path, "flux1-schnell.safetensors"),
+                path_join(dir_path, "flux.safetensors"),
+            };
+            for (const std::string& top_level_flux : top_level_flux_weights) {
+                if (!file_exists(top_level_flux)) {
+                    continue;
+                }
+                const size_t before = tensor_storage_map_.size();
+                loaded = init_from_safetensors_file(top_level_flux, component_prefix);
+                if (loaded) {
+                    LOG_INFO("loaded diffusers component '%s' from top-level Flux weights '%s' (%zu tensors)",
+                             component.dir,
+                             top_level_flux.c_str(),
+                             tensor_storage_map_.size() - before);
+                    break;
+                }
+            }
+        }
+        if (version_ == VERSION_FLUX && std::strcmp(component.dir, "vae") == 0) {
+            const std::string top_level_ae = path_join(dir_path, "ae.safetensors");
+            if (file_exists(top_level_ae)) {
+                const size_t before = tensor_storage_map_.size();
+                loaded = init_from_safetensors_file(top_level_ae, component_prefix);
+                if (loaded) {
+                    LOG_INFO("loaded diffusers component '%s' from '%s' (%zu tensors)",
+                             component.dir, top_level_ae.c_str(), tensor_storage_map_.size() - before);
+                }
+            }
+        }
         for (const std::string& candidate : component_weight_candidates(component_dir)) {
+            if (loaded) {
+                break;
+            }
             if (!tried.insert(candidate).second || !file_exists(candidate)) {
                 continue;
             }
