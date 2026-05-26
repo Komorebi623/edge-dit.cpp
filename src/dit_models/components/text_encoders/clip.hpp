@@ -251,9 +251,14 @@ enum CLIPVersion {
 class CLIPTextModel : public GGMLBlock {
 protected:
     void init_params(ggml_context* ctx, const String2TensorStorage& tensor_storage_map = {}, const std::string prefix = "") override {
-        if (version == OPEN_CLIP_VIT_BIGG_14) {
-            enum ggml_type wtype      = GGML_TYPE_F32;
-            params["text_projection"] = ggml_new_tensor_2d(ctx, wtype, projection_dim, hidden_size);
+        auto proj_it = tensor_storage_map.find(prefix + "text_projection");
+        if (version == OPEN_CLIP_VIT_BIGG_14 || proj_it != tensor_storage_map.end()) {
+            enum ggml_type wtype = GGML_TYPE_F32;
+            if (proj_it != tensor_storage_map.end()) {
+                wtype          = proj_it->second.type;
+                projection_dim = static_cast<int32_t>(proj_it->second.ne[1]);
+            }
+            params["text_projection"] = ggml_new_tensor_2d(ctx, wtype, hidden_size, projection_dim);
         }
     }
 

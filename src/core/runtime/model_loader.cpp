@@ -219,6 +219,15 @@ static std::string parent_path(const std::string& file_path) {
     return fs::path(file_path).parent_path().string();
 }
 
+static bool is_sd3_diffusers_transformer_file(const std::string& file_path) {
+    std::string normalized = file_path;
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    return contains(normalized, "/transformer/") &&
+           (ends_with(normalized, "diffusion_pytorch_model.safetensors") ||
+            ends_with(normalized, "diffusion_pytorch_model.fp16.safetensors") ||
+            ends_with(normalized, "diffusion_pytorch_model.safetensors.index.json"));
+}
+
 static bool read_json_file(const std::string& path, nlohmann::json* json, std::string* error) {
     std::ifstream file(path);
     if (!file.is_open()) {
@@ -512,6 +521,11 @@ bool ModelLoader::load_model_files(const ld_context_params_t& params,
     const SDVersion hint_version = get_ld_version();
     const bool is_unet_hint = hint_version != VERSION_COUNT &&
                               ld_version_is_unet(hint_version);
+
+    if (non_empty(params.diffusion_model_path) &&
+        is_sd3_diffusers_transformer_file(params.diffusion_model_path)) {
+        version_ = VERSION_SD3;
+    }
 
     loaded_any = load_optional_file(params.diffusion_model_path,
                                     "model.diffusion_model.",
@@ -994,6 +1008,9 @@ SDVersion ModelLoader::get_ld_version() {
 
     for (const auto& item : tensor_storage_map_) {
         const std::string& name = item.second.name;
+        if (contains(name, "model.diffusion_model.joint_blocks.")) {
+            return VERSION_SD3;
+        }
         if (contains(name, "model.diffusion_model.double_blocks.") || contains(name, "transformer.double_blocks.")) {
             has_flux_double = true;
         }

@@ -20,13 +20,14 @@ static void print_usage(const char* prog) {
     std::fprintf(stderr,
         "Usage:\n"
         "  %s --model <model-or-diffusers-dir> --prompt <text> [options]\n"
-        "  %s --diffusion-model <path> --vae <path> --clip_l <path> --t5xxl <path> --prompt <text> [options]\n\n"
+        "  %s --diffusion-model <path> --vae <path> --clip_l <path> [--clip_g <path>] --t5xxl <path> --prompt <text> [options]\n\n"
         "Options:\n"
         "  --video                   Generate video frames instead of an image\n"
         "  --video-format <fmt>      Video format: auto, avi, mp4, mov, mkv, webm. Default: auto\n"
-        "  --diffusion-model <path>  Standalone Flux transformer weights\n"
+        "  --diffusion-model <path>  Standalone DiT transformer weights\n"
         "  --vae <path>              Standalone VAE weights\n"
         "  --clip_l <path>           CLIP-L text encoder weights\n"
+        "  --clip_g <path>           CLIP-G text encoder weights\n"
         "  --t5xxl <path>            T5XXL text encoder weights\n"
         "  -o, --output <path>       Output image/video path, default: output.png\n"
         "  -W, --width <int>         Image width, default: 1024\n"
@@ -37,6 +38,8 @@ static void print_usage(const char* prog) {
         "  -s, --seed <int64>        Seed, default: -1\n"
         "  -t, --threads <int>       Thread count, default: 0\n"
         "  --guidance <float>        Flux distilled guidance, default: 3.5\n"
+        "  --cfg-scale <float>       Classifier-free guidance scale, default: 1.0\n"
+        "  --flow-shift <float>      Flow scheduler shift, default: model default\n"
         "  --backend <name>          Backend: auto, cpu, cuda, gpu. Default: auto\n"
         "  --gpu                     Alias for --backend gpu\n"
         "  --help              Show this help\n",
@@ -540,6 +543,7 @@ struct FluxCliArgs {
     const char* diffusion_model_path = nullptr;
     const char* vae_path = nullptr;
     const char* clip_l_path = nullptr;
+    const char* clip_g_path = nullptr;
     const char* t5xxl_path = nullptr;
     const char* prompt = nullptr;
     const char* output_path = "output.png";
@@ -556,6 +560,8 @@ struct FluxCliArgs {
 
     int64_t seed = -1;
     float guidance = 3.5f;
+    float cfg_scale = 1.0f;
+    float flow_shift = 0.0f;
 };
 
 static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
@@ -586,6 +592,8 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->vae_path = require_value(key);
         } else if (std::strcmp(key, "--clip_l") == 0) {
             args->clip_l_path = require_value(key);
+        } else if (std::strcmp(key, "--clip_g") == 0) {
+            args->clip_g_path = require_value(key);
         } else if (std::strcmp(key, "--t5xxl") == 0) {
             args->t5xxl_path = require_value(key);
         } else if (std::strcmp(key, "--prompt") == 0 || std::strcmp(key, "-p") == 0) {
@@ -624,6 +632,14 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             const char* v = require_value(key);
             if (!v) return false;
             args->guidance = std::strtof(v, nullptr);
+        } else if (std::strcmp(key, "--cfg-scale") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->cfg_scale = std::strtof(v, nullptr);
+        } else if (std::strcmp(key, "--flow-shift") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->flow_shift = std::strtof(v, nullptr);
         } else if (std::strcmp(key, "--backend") == 0) {
             args->backend = require_value(key);
         } else if (std::strcmp(key, "--gpu") == 0) {
@@ -712,6 +728,7 @@ int main(int argc, char** argv) {
     ctx_params.diffusion_model_path = args.diffusion_model_path;
     ctx_params.vae_path = args.vae_path;
     ctx_params.clip_l_path = args.clip_l_path;
+    ctx_params.clip_g_path = args.clip_g_path;
     ctx_params.t5xxl_path = args.t5xxl_path;
 
     if (args.threads > 0) {
@@ -744,9 +761,10 @@ int main(int argc, char** argv) {
         gen_params.sample.sampler = LD_SAMPLER_AUTO;
         gen_params.sample.scheduler = LD_SCHEDULER_AUTO;
         gen_params.sample.steps = args.steps;
-        gen_params.sample.cfg_scale = 1.0f;
+        gen_params.sample.cfg_scale = args.cfg_scale;
         gen_params.sample.image_cfg_scale = 1.0f;
         gen_params.sample.distilled_guidance = args.guidance;
+        gen_params.sample.flow_shift = args.flow_shift;
 
         ld_video_t output;
         ld_status_t status = ld_generate_video(ctx, &gen_params, &output);
@@ -798,9 +816,10 @@ int main(int argc, char** argv) {
         gen_params.sample.sampler = LD_SAMPLER_AUTO;
         gen_params.sample.scheduler = LD_SCHEDULER_AUTO;
         gen_params.sample.steps = args.steps;
-        gen_params.sample.cfg_scale = 1.0f;
+        gen_params.sample.cfg_scale = args.cfg_scale;
         gen_params.sample.image_cfg_scale = 1.0f;
         gen_params.sample.distilled_guidance = args.guidance;
+        gen_params.sample.flow_shift = args.flow_shift;
 
         ld_image_batch_t output;
         ld_status_t status = ld_generate_image(ctx, &gen_params, &output);

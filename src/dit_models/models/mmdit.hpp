@@ -324,9 +324,9 @@ public:
         auto m     = adaLN_modulation_1->forward(ctx, ggml_silu(ctx->ggml_ctx, c));  // [N, n_mods * hidden_size]
         auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, n_mods, 0);
 
-        auto shift_msa = m_vec[0];  // [N, hidden_size]
-        auto scale_msa = m_vec[1];  // [N, hidden_size]
         if (!pre_only) {
+            auto shift_msa = m_vec[0];  // [N, hidden_size]
+            auto scale_msa = m_vec[1];  // [N, hidden_size]
             auto gate_msa  = m_vec[2];  // [N, hidden_size]
             auto shift_mlp = m_vec[3];  // [N, hidden_size]
             auto scale_mlp = m_vec[4];  // [N, hidden_size]
@@ -338,6 +338,8 @@ public:
 
             return {qkv, {x, gate_msa, shift_mlp, scale_mlp, gate_mlp}};
         } else {
+            auto scale_msa = m_vec[0];  // [N, hidden_size]
+            auto shift_msa = m_vec[1];  // [N, hidden_size]
             auto attn_in = modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
             auto qkv     = attn->pre_attention(ctx, attn_in);
 
@@ -597,8 +599,8 @@ public:
 
         auto m     = adaLN_modulation_1->forward(ctx, ggml_silu(ctx->ggml_ctx, c));  // [N, 2 * hidden_size]
         auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, 2, 0);
-        auto shift = m_vec[0];  // [N, hidden_size]
-        auto scale = m_vec[1];  // [N, hidden_size]
+        auto scale = m_vec[0];  // [N, hidden_size]
+        auto shift = m_vec[1];  // [N, hidden_size]
 
         x = modulate(ctx->ggml_ctx, norm_final->forward(ctx, x), shift, scale);
         x = linear->forward(ctx, x);
