@@ -2,7 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include "ggml.h"
-#include "core/tensor/tensor.hpp"
+#include "utils/tensor.hpp"
 
 const float wan_21_latent_rgb_proj[16][3] = {
     {0.015123f, -0.148418f, 0.479828f},

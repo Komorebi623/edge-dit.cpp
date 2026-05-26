@@ -11,7 +11,7 @@
 #include <sstream>
 #include <thread>
 
-#include "core/tensor/tensor.hpp"
+#include "utils/tensor.hpp"
 
 bool ends_with(const std::string& str, const std::string& ending) {
     return str.size() >= ending.size() &&

@@ -31,7 +31,7 @@
 
 #include "light-dit.h"
 #include "core/runtime/model_loader.h"
-#include "core/tensor/tensor.hpp"
+#include "utils/tensor.hpp"
 
 #include "utils/rng.hpp"
 #include "backend/ggml/tensor_ggml.hpp"

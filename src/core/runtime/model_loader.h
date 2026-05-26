@@ -152,7 +152,6 @@ public:
     void reset();
 
 public:
-    // 只读查询接口：Pipeline callback 需要用。
     SDVersion version() const { return version_; }
 
     bool external_vae_is_invalid() const { return external_vae_is_invalid_; }
@@ -175,7 +174,6 @@ public:
                                 ggml_type type = GGML_TYPE_COUNT) const;
 
 public:
-    // 顶层流程步骤：只给 init() 调。
     bool load_model_files(const ld_context_params_t& params, std::string* error);
     bool finalize_names_and_version(std::string* error);
     bool apply_dtype_policy(const ld_context_params_t& params, std::string* error);
@@ -186,7 +184,6 @@ public:
                       std::string* error);
     bool bind_weights(int n_threads, bool use_mmap, std::string* error);
 
-    // 单文件读取：原 core ModelLoader 的能力，全部内收。
     bool init_from_file(const std::string& file_path,
                         const std::string& prefix = "");
     void convert_tensors_name();

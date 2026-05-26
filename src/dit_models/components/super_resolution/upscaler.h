@@ -3,7 +3,7 @@
 
 #include "dit_models/components/super_resolution/esrgan.hpp"
 #include "light-dit/all.h"
-#include "core/tensor/tensor.hpp"
+#include "utils/tensor.hpp"
 
 #include <memory>
 #include <string>
