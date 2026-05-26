@@ -29,7 +29,6 @@ bool LightDitEngine::init(const ld_ctx_params_t* params) {
     try {
         runtime_      = std::make_unique<ModelRuntime>();
         model_loader_ = std::make_unique<ModelLoader>();
-        dit_pipeline_ = std::make_unique<DiTPipeline>();
     } catch (const std::exception& e) {
         set_error(std::string("failed to allocate engine components: ") + e.what());
         cleanup();
@@ -42,42 +41,57 @@ bool LightDitEngine::init(const ld_ctx_params_t* params) {
         return false;
     }
 
-    auto prepare_tensors = [this](const ModelLoader& loader,
-                                ModelLoader::TensorMap* tensors,
-                                ModelLoader::IgnoreTensorSet* ignore_tensors,
-                                std::string* error) -> bool {
-        (void)tensors;
-        (void)ignore_tensors;
-
-        if (runtime_ == nullptr || dit_pipeline_ == nullptr) {
-            if (error != nullptr) {
-                *error = "LightDitEngine::init got null runtime or pipeline";
-            }
-            return false;
-        }
-
-        return dit_pipeline_->prepare(ctx_params_,
-                              *runtime_,
-                              loader,
-                              tensors,
-                              ignore_tensors,
-                              error);
-    };
-
-    if (!model_loader_->init(ctx_params_,
-                             prepare_tensors,
-                             runtime_->n_threads(),
-                             runtime_->use_mmap(),
-                             &last_error_)) {
-        set_error(last_error_.empty() ? "ModelLoader::init failed" : last_error_);
+    if (!model_loader_->load_model_files(ctx_params_, &last_error_)) {
+        set_error(last_error_.empty() ? "ModelLoader::load_model_files failed" : last_error_);
         cleanup();
         return false;
     }
 
+    if (!model_loader_->finalize_names_and_version(&last_error_)) {
+        set_error(last_error_.empty() ? "ModelLoader::finalize_names_and_version failed" : last_error_);
+        cleanup();
+        return false;
+    }
+
+    if (!model_loader_->apply_dtype_policy(ctx_params_, &last_error_)) {
+        set_error(last_error_.empty() ? "ModelLoader::apply_dtype_policy failed" : last_error_);
+        cleanup();
+        return false;
+    }
+
+    dit_pipeline_ = create_dit_pipeline(model_loader_->version(), &last_error_);
+    if (dit_pipeline_ == nullptr) {
+        set_error(last_error_.empty() ? "failed to create DiT pipeline" : last_error_);
+        cleanup();
+        return false;
+    }
+
+    PipelineTensorRegistry registry;
+    if (!dit_pipeline_->prepare(ctx_params_,
+                                *runtime_,
+                                *model_loader_,
+                                registry,
+                                &last_error_)) {
+        set_error(last_error_.empty() ? "DiT pipeline prepare failed" : last_error_);
+        cleanup();
+        return false;
+    }
+
+    if (!model_loader_->bind_weights(registry.tensors(),
+                                     registry.ignore_tensors(),
+                                     runtime_->n_threads(),
+                                     runtime_->use_mmap(),
+                                     &last_error_)) {
+        set_error(last_error_.empty() ? "ModelLoader::bind_weights failed" : last_error_);
+        cleanup();
+        return false;
+    }
+
+    model_loader_->log_weight_stats();
+    dit_pipeline_->mark_ready();
+
     LOG_INFO("LightDitEngine initialized successfully, version=%s",
              ld_version_name(dit_pipeline_->version()));
-
-    dit_pipeline_->mark_ready();
     return true;
 }
 

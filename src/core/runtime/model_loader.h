@@ -1,7 +1,6 @@
 #ifndef LD_MODEL_LOADER_H
 #define LD_MODEL_LOADER_H
 #include "light-dit.h"
-#include <functional>
 #include <map>
 #include <set>
 #include <string>
@@ -143,27 +142,12 @@ public:
     using TensorMap = std::map<std::string, ggml_tensor*>;
     using IgnoreTensorSet = std::set<std::string>;
 
-    // Pipeline 在这个 callback 里根据 loader 的 metadata 创建 tensor。
-    using PrepareTensorsFn = std::function<bool(
-        const ModelLoader& loader,
-        TensorMap* tensors,
-        IgnoreTensorSet* ignore_tensors,
-        std::string* error
-    )>;
-
 public:
     ModelLoader() = default;
     ~ModelLoader() = default;
 
     ModelLoader(const ModelLoader&) = delete;
     ModelLoader& operator=(const ModelLoader&) = delete;
-
-    // Engine 只调用这一个入口。
-    bool init(const ld_context_params_t& params,
-              PrepareTensorsFn prepare_tensors,
-              int n_threads,
-              bool use_mmap,
-              std::string* error);
 
     void reset();
 
@@ -195,6 +179,11 @@ public:
     bool load_model_files(const ld_context_params_t& params, std::string* error);
     bool finalize_names_and_version(std::string* error);
     bool apply_dtype_policy(const ld_context_params_t& params, std::string* error);
+    bool bind_weights(const TensorMap& tensors,
+                      const IgnoreTensorSet& ignore_tensors,
+                      int n_threads,
+                      bool use_mmap,
+                      std::string* error);
     bool bind_weights(int n_threads, bool use_mmap, std::string* error);
 
     // 单文件读取：原 core ModelLoader 的能力，全部内收。

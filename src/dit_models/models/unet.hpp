@@ -2,7 +2,6 @@
 #define __UNET_HPP__
 
 #include "dit_models/components/common/common_block.hpp"
-#include "model.h"
 
 /*==================================================== UnetModel =====================================================*/
 

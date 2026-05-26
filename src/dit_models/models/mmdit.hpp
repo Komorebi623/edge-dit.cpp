@@ -4,7 +4,6 @@
 #include <memory>
 
 #include "backend/ggml/ggml_extend.hpp"
-#include "model.h"
 
 #define MMDIT_GRAPH_SIZE 10240
 

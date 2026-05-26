@@ -3,8 +3,6 @@
 
 #include "backend/ggml/ggml_extend.hpp"
 
-#include "model.h"
-
 /*
     ===================================    TinyAutoEncoder  ===================================
     References:

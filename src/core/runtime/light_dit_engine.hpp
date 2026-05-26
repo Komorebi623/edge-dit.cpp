@@ -4,9 +4,9 @@
 #include <string>
 
 #include "light-dit.h"
+#include "dit_models/pipelines/dit_pipeline.hpp"
 #include "runtime/model_runtime.hpp"
 #include "runtime/model_loader.h"
-#include "runtime/dit_pipeline.hpp"
 
 namespace lightdit {
 
@@ -51,7 +51,6 @@ private:
     std::unique_ptr<DiTPipeline> dit_pipeline_;
 
     std::string last_error_;
-    void reset_components();
     void set_error(const std::string& msg);
 };
 

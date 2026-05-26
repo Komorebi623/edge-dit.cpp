@@ -430,56 +430,6 @@ static bool convert_tensor_data(void* src, ggml_type src_type, void* dst, ggml_t
 }
 
 
-bool ModelLoader::init(const ld_context_params_t& params,
-                       PrepareTensorsFn prepare_tensors,
-                       int n_threads,
-                       bool use_mmap,
-                       std::string* error) {
-    clear();
-
-    if (!prepare_tensors) {
-        const std::string msg = "ModelLoader::init got null prepare_tensors callback";
-        if (error != nullptr) {
-            *error = msg;
-        }
-        set_error(msg);
-        return false;
-    }
-
-    if (!load_model_files(params, error)) {
-        return false;
-    }
-
-    if (!finalize_names_and_version(error)) {
-        return false;
-    }
-
-    if (!apply_dtype_policy(params, error)) {
-        return false;
-    }
-
-    tensors_.clear();
-    ignore_tensors_.clear();
-
-    if (!prepare_tensors(*this, &tensors_, &ignore_tensors_, error)) {
-        if (error != nullptr && error->empty()) {
-            *error = "failed to prepare model tensors";
-        }
-        if (error != nullptr) {
-            set_error(*error);
-        }
-        return false;
-    }
-
-    if (!bind_weights(n_threads, use_mmap, error)) {
-        return false;
-    }
-
-    log_weight_stats();
-
-    return true;
-}
-
 void ModelLoader::clear() {
     version_ = VERSION_COUNT;
 
@@ -698,6 +648,16 @@ bool ModelLoader::bind_weights(int n_threads,
     }
 
     return true;
+}
+
+bool ModelLoader::bind_weights(const TensorMap& tensors,
+                               const IgnoreTensorSet& ignore_tensors,
+                               int n_threads,
+                               bool use_mmap,
+                               std::string* error) {
+    tensors_ = tensors;
+    ignore_tensors_ = ignore_tensors;
+    return bind_weights(n_threads, use_mmap, error);
 }
 
 ggml_type ModelLoader::ld_dtype_to_ggml(ld_dtype_t dtype) {

@@ -1,6 +1,5 @@
 #include "dit_models/components/super_resolution/upscaler.h"
 #include "backend/ggml/ggml_extend.hpp"
-#include "model.h"
 #include "light-dit/all.h"
 #include "utils/util.h"
 

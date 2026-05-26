@@ -1,4 +1,4 @@
-#include "core/runtime/model.h"
+#include "dit_models/pipelines/flux_pipeline.hpp"
 
 #include <algorithm>
 #include <cinttypes>
@@ -13,7 +13,6 @@
 #include "dit_models/models/flux.hpp"
 #include "ggml.h"
 #include "utils/preprocessing.hpp"
-#include "utils/rng_philox.hpp"
 #include "utils/util.h"
 
 static constexpr size_t LD_MODEL_EXAMPLE_LIMIT = 3;
@@ -229,33 +228,70 @@ static ld_status_t ld_tensor_to_image(const sd::Tensor<float>& tensor, ld_image_
     return LD_STATUS_OK;
 }
 
-LDModel::LDModel(SDVersion version)
+namespace lightdit {
+
+FluxPipeline::FluxPipeline(SDVersion version)
     : version_(version) {
 }
 
-LDModel::~LDModel() {
+FluxPipeline::~FluxPipeline() {
     reset_flux_runner();
 }
 
-void LDModel::reset_flux_runner() {
+bool FluxPipeline::prepare(const ld_context_params_t& params,
+                           ModelRuntime& runtime,
+                           const ModelLoader& loader,
+                           PipelineTensorRegistry& registry,
+                           std::string* error) {
+    (void)params;
+    ready_ = false;
+    runtime_ = &runtime;
+    version_ = loader.version();
+
+    if (!ld_version_is_flux(version_) && !ld_version_is_flux2(version_)) {
+        if (error != nullptr) {
+            *error = "FluxPipeline got non-Flux model version";
+        }
+        return false;
+    }
+
+    build_manifest(loader);
+    if (!validate(error)) {
+        return false;
+    }
+    if (!initialize_flux_transformer_spec(loader,
+                                          runtime_->backend(),
+                                          runtime_->offload_params_to_cpu(),
+                                          error)) {
+        return false;
+    }
+
+    return prepare_flux_runtime_weights(loader,
+                                        runtime_->backend(),
+                                        runtime_->clip_backend(),
+                                        runtime_->vae_backend(),
+                                        runtime_->offload_params_to_cpu(),
+                                        registry,
+                                        error);
+}
+
+void FluxPipeline::mark_ready() {
+    const bool ok = runtime_ != nullptr &&
+                    version_ != VERSION_COUNT &&
+                    flux_runner_ != nullptr;
+    if (ok) {
+        runtime_weights_loaded_ = true;
+    }
+    ready_ = ok;
+}
+
+void FluxPipeline::reset_flux_runner() {
     conditioner_.reset();
     vae_.reset();
     flux_runner_.reset();
-    if (owns_flux_backend_ && flux_backend_ != nullptr) {
-        ggml_backend_free(flux_backend_);
-    }
-    if (owns_conditioner_backend_ && conditioner_backend_ != nullptr) {
-        ggml_backend_free(conditioner_backend_);
-    }
-    if (owns_vae_backend_ && vae_backend_ != nullptr) {
-        ggml_backend_free(vae_backend_);
-    }
     flux_backend_ = nullptr;
     conditioner_backend_ = nullptr;
     vae_backend_ = nullptr;
-    owns_flux_backend_ = false;
-    owns_conditioner_backend_ = false;
-    owns_vae_backend_ = false;
     flux_declared_tensors_ = 0;
     runtime_weights_loaded_ = false;
     flux_missing_tensors_.clear();
@@ -263,8 +299,8 @@ void LDModel::reset_flux_runner() {
     flux_unexpected_tensors_.clear();
 }
 
-LDModelComponent* LDModel::find_or_add_component(const std::string& name) {
-    for (LDModelComponent& component : components_) {
+PipelineComponent* FluxPipeline::find_or_add_component(const std::string& name) {
+    for (PipelineComponent& component : components_) {
         if (component.name == name) {
             return &component;
         }
@@ -274,8 +310,8 @@ LDModelComponent* LDModel::find_or_add_component(const std::string& name) {
     return &components_.back();
 }
 
-bool LDModel::has_component(const std::string& name) const {
-    for (const LDModelComponent& component : components_) {
+bool FluxPipeline::has_component(const std::string& name) const {
+    for (const PipelineComponent& component : components_) {
         if (component.name == name && component.tensor_count > 0) {
             return true;
         }
@@ -283,14 +319,12 @@ bool LDModel::has_component(const std::string& name) const {
     return false;
 }
 
-void LDModel::build_manifest(const ModelLoader& loader) {
+void FluxPipeline::build_manifest(const ModelLoader& loader) {
     components_.clear();
-    smoke_loaded_tensors_ = 0;
-    smoke_loaded_bytes_ = 0;
 
     for (const auto& item : loader.get_tensor_storage_map()) {
         const TensorStorage& tensor = item.second;
-        LDModelComponent* component = find_or_add_component(tensor_component_name(tensor.name));
+        PipelineComponent* component = find_or_add_component(tensor_component_name(tensor.name));
         component->tensor_count++;
         component->bytes += tensor.nbytes_to_read();
         component->type_counts[tensor.type]++;
@@ -299,11 +333,11 @@ void LDModel::build_manifest(const ModelLoader& loader) {
         }
     }
 
-    std::sort(components_.begin(), components_.end(), [](const LDModelComponent& a, const LDModelComponent& b) {
+    std::sort(components_.begin(), components_.end(), [](const PipelineComponent& a, const PipelineComponent& b) {
         return a.name < b.name;
     });
 
-    for (const LDModelComponent& component : components_) {
+    for (const PipelineComponent& component : components_) {
         LOG_INFO("model component %-12s tensors=%zu bytes=%.2fMB types=[%s]",
                  component.name.c_str(),
                  component.tensor_count,
@@ -315,9 +349,9 @@ void LDModel::build_manifest(const ModelLoader& loader) {
     }
 }
 
-bool LDModel::validate(std::string* error) const {
+bool FluxPipeline::validate(std::string* error) const {
     auto has_component = [&](const std::string& name) {
-        for (const LDModelComponent& component : components_) {
+        for (const PipelineComponent& component : components_) {
             if (component.name == name && component.tensor_count > 0) {
                 return true;
             }
@@ -346,7 +380,7 @@ bool LDModel::validate(std::string* error) const {
     return true;
 }
 
-bool LDModel::initialize_flux_transformer_spec(const ModelLoader& loader,
+bool FluxPipeline::initialize_flux_transformer_spec(const ModelLoader& loader,
                                                ggml_backend_t backend,
                                                bool offload_params_to_cpu,
                                                std::string* error) {
@@ -356,14 +390,13 @@ bool LDModel::initialize_flux_transformer_spec(const ModelLoader& loader,
         return true;
     }
 
-    flux_backend_ = backend != nullptr ? backend : ggml_backend_cpu_init();
-    if (flux_backend_ == nullptr) {
+    if (backend == nullptr) {
         if (error != nullptr) {
-            *error = "failed to initialize backend for Flux parameter spec";
+            *error = "FluxPipeline requires a non-null diffusion backend from ModelRuntime";
         }
         return false;
     }
-    owns_flux_backend_ = backend == nullptr;
+    flux_backend_ = backend;
 
     try {
         flux_runner_.reset(new Flux::FluxRunner(flux_backend_,
@@ -462,27 +495,18 @@ bool LDModel::initialize_flux_transformer_spec(const ModelLoader& loader,
     return true;
 }
 
-bool LDModel::prepare_flux_runtime_weights(const ModelLoader& loader,
+bool FluxPipeline::prepare_flux_runtime_weights(const ModelLoader& loader,
                                            ggml_backend_t diffusion_backend,
                                            ggml_backend_t text_backend,
                                            ggml_backend_t vae_backend,
                                            bool offload_params_to_cpu,
-                                           ModelLoader::TensorMap* tensors,
-                                           ModelLoader::IgnoreTensorSet* ignore_tensors,
+                                           PipelineTensorRegistry& registry,
                                            std::string* error) {
     if (!ld_version_is_flux(version_) && !ld_version_is_flux2(version_)) {
         return true;
     }
 
-    if (tensors == nullptr || ignore_tensors == nullptr) {
-        if (error != nullptr) {
-            *error = "LDModel::prepare_flux_runtime_weights got null tensor containers";
-        }
-        return false;
-    }
-
-    tensors->clear();
-    ignore_tensors->clear();
+    registry.clear();
 
     runtime_weights_loaded_ = false;
 
@@ -509,37 +533,33 @@ bool LDModel::prepare_flux_runtime_weights(const ModelLoader& loader,
         return false;
     }
 
-    flux_runner_->get_param_tensors(*tensors, "model.diffusion_model");
+    flux_runner_->get_param_tensors(registry.tensors(), "model.diffusion_model");
 
     if (has_component("clip_l") || has_component("t5xxl")) {
-        conditioner_backend_ = text_backend != nullptr ? text_backend : ggml_backend_cpu_init();
-        if (conditioner_backend_ == nullptr) {
+        if (text_backend == nullptr) {
             if (error != nullptr) {
-                *error = "failed to initialize backend for Flux text encoders";
+                *error = "FluxPipeline requires a non-null text encoder backend from ModelRuntime";
             }
             return false;
         }
-
-        owns_conditioner_backend_ = text_backend == nullptr;
+        conditioner_backend_ = text_backend;
 
         conditioner_ = std::make_shared<FluxCLIPEmbedder>(conditioner_backend_,
                                                           offload_params_to_cpu,
                                                           loader.get_tensor_storage_map());
 
         conditioner_->alloc_params_buffer();
-        conditioner_->get_param_tensors(*tensors);
+        conditioner_->get_param_tensors(registry.tensors());
     }
 
     if (has_component("vae")) {
-        vae_backend_ = vae_backend != nullptr ? vae_backend : ggml_backend_cpu_init();
-        if (vae_backend_ == nullptr) {
+        if (vae_backend == nullptr) {
             if (error != nullptr) {
-                *error = "failed to initialize backend for Flux VAE";
+                *error = "FluxPipeline requires a non-null VAE backend from ModelRuntime";
             }
             return false;
         }
-
-        owns_vae_backend_ = vae_backend == nullptr;
+        vae_backend_ = vae_backend;
 
         vae_ = std::make_shared<AutoEncoderKL>(vae_backend_,
                                                offload_params_to_cpu,
@@ -550,176 +570,162 @@ bool LDModel::prepare_flux_runtime_weights(const ModelLoader& loader,
                                                version_);
 
         vae_->alloc_params_buffer();
-        vae_->get_param_tensors(*tensors, "first_stage_model");
+        vae_->get_param_tensors(registry.tensors(), "first_stage_model");
     }
 
-    *ignore_tensors = {
-        "vae.",
-        "cond_stage_model.",
-        "model.diffusion_model.__x0__",
-        "model.diffusion_model.__32x32__",
-        "model.diffusion_model.__index_timestep_zero__",
-    };
+    registry.ignore_prefix("vae.");
+    registry.ignore_prefix("cond_stage_model.");
+    registry.ignore_prefix("model.diffusion_model.__x0__");
+    registry.ignore_prefix("model.diffusion_model.__32x32__");
+    registry.ignore_prefix("model.diffusion_model.__index_timestep_zero__");
 
     if (!conditioner_) {
-        ignore_tensors->insert("text_encoders.");
+        registry.ignore_prefix("text_encoders.");
     }
 
     if (!vae_) {
-        ignore_tensors->insert("first_stage_model.");
+        registry.ignore_prefix("first_stage_model.");
     } else {
-        ignore_tensors->insert("first_stage_model.encoder");
-        ignore_tensors->insert("first_stage_model.quant");
+        registry.ignore_prefix("first_stage_model.encoder");
+        registry.ignore_prefix("first_stage_model.quant");
     }
 
     return true;
 }
 
-bool LDModel::load_flux_runtime_weights(ModelLoader& loader,
-                                        ggml_backend_t diffusion_backend,
-                                        ggml_backend_t text_backend,
-                                        ggml_backend_t vae_backend,
-                                        bool offload_params_to_cpu,
-                                        int n_threads,
-                                        bool use_mmap,
-                                        std::string* error) {
-    if (!ld_version_is_flux(version_) && !ld_version_is_flux2(version_)) {
-        return true;
-    }
-
-    if (flux_runner_ == nullptr || (diffusion_backend != nullptr && flux_backend_ != diffusion_backend)) {
-        if (!initialize_flux_transformer_spec(loader,
-                                              diffusion_backend,
-                                              offload_params_to_cpu,
-                                              error)) {
-            return false;
-        }
-    }
-
-    if (flux_runner_ == nullptr) {
-        if (error != nullptr) {
-            *error = "Flux parameter spec is not initialized";
-        }
-        return false;
-    }
-
-    if (!flux_runner_->alloc_params_buffer()) {
-        if (error != nullptr) {
-            *error = "failed to allocate Flux transformer parameter buffer";
-        }
-        return false;
-    }
-
-    std::map<std::string, ggml_tensor*> tensors;
-    flux_runner_->get_param_tensors(tensors, "model.diffusion_model");
-
-    if (has_component("clip_l") || has_component("t5xxl")) {
-        conditioner_backend_ = text_backend != nullptr ? text_backend : ggml_backend_cpu_init();
-        if (conditioner_backend_ == nullptr) {
-            if (error != nullptr) {
-                *error = "failed to initialize backend for Flux text encoders";
-            }
-            return false;
-        }
-        owns_conditioner_backend_ = text_backend == nullptr;
-        conditioner_ = std::make_shared<FluxCLIPEmbedder>(conditioner_backend_,
-                                                          offload_params_to_cpu,
-                                                          loader.get_tensor_storage_map());
-        conditioner_->alloc_params_buffer();
-        conditioner_->get_param_tensors(tensors);
-    }
-
-    if (has_component("vae")) {
-        vae_backend_ = vae_backend != nullptr ? vae_backend : ggml_backend_cpu_init();
-        if (vae_backend_ == nullptr) {
-            if (error != nullptr) {
-                *error = "failed to initialize backend for Flux VAE";
-            }
-            return false;
-        }
-        owns_vae_backend_ = vae_backend == nullptr;
-        vae_ = std::make_shared<AutoEncoderKL>(vae_backend_,
-                                               offload_params_to_cpu,
-                                               loader.get_tensor_storage_map(),
-                                               "first_stage_model",
-                                               true,
-                                               false,
-                                               version_);
-        vae_->alloc_params_buffer();
-        vae_->get_param_tensors(tensors, "first_stage_model");
-    }
-
-    std::set<std::string> ignore_tensors = {
-        "vae.",
-        "cond_stage_model.",
-        "model.diffusion_model.__x0__",
-        "model.diffusion_model.__32x32__",
-        "model.diffusion_model.__index_timestep_zero__",
-    };
-    if (!conditioner_) {
-        ignore_tensors.insert("text_encoders.");
-    }
-    if (!vae_) {
-        ignore_tensors.insert("first_stage_model.");
-    } else {
-        ignore_tensors.insert("first_stage_model.encoder");
-        ignore_tensors.insert("first_stage_model.quant");
-    }
-
-    if (!loader.load_tensors(tensors, ignore_tensors, n_threads, use_mmap)) {
-        if (error != nullptr) {
-            *error = loader.get_last_error().empty()
-                         ? "failed to load Flux transformer weights"
-                         : loader.get_last_error();
-        }
-        return false;
-    }
-
-    const size_t conditioner_size = conditioner_ ? conditioner_->get_params_buffer_size() : 0;
-    const size_t vae_size = vae_ ? vae_->get_params_buffer_size() : 0;
-    LOG_INFO("flux runtime weights loaded: text_encoders=%zuMB diffusion=%zuMB vae=%zuMB total=%zuMB",
-             conditioner_size / (1024 * 1024),
-             flux_runner_->get_params_buffer_size() / (1024 * 1024),
-             vae_size / (1024 * 1024),
-             (conditioner_size + flux_runner_->get_params_buffer_size() + vae_size) / (1024 * 1024));
-    runtime_weights_loaded_ = true;
-    return true;
-}
-
-bool LDModel::encode_flux_prompt(const char* prompt,
-                                 int n_threads,
-                                 int clip_skip,
-                                 std::string* error) {
-    if (!conditioner_) {
-        if (error != nullptr) {
-            *error = "Flux text encoders are not loaded";
-        }
-        return false;
-    }
-
-    ConditionerParams params;
-    params.text = prompt != nullptr ? prompt : "";
-    params.clip_skip = clip_skip;
-
-    SDCondition condition = conditioner_->get_learned_condition(n_threads, params);
-    if (condition.empty()) {
-        if (error != nullptr) {
-            *error = "Flux prompt encoding returned empty condition";
-        }
-        return false;
-    }
-
-    LOG_INFO("flux prompt encoded: cross_attn=%s vector=%s",
-             format_tensor_shape(condition.c_crossattn).c_str(),
-             format_tensor_shape(condition.c_vector).c_str());
-    return true;
-}
-
-bool LDModel::can_generate_flux_image() const {
+bool FluxPipeline::can_generate_image() const {
     return runtime_weights_loaded_ && flux_runner_ != nullptr && conditioner_ != nullptr && vae_ != nullptr;
 }
 
-bool LDModel::generate_flux_image(const ld_image_generation_params_t* params,
+bool FluxPipeline::validate_image_params(const ld_image_generation_params_t* params, std::string* error) const {
+    if (params == nullptr) {
+        if (error != nullptr) {
+            *error = "image generation params are null";
+        }
+        return false;
+    }
+    if (params->width <= 0 || params->height <= 0) {
+        if (error != nullptr) {
+            *error = "image width and height must be positive";
+        }
+        return false;
+    }
+    if (params->batch_count <= 0) {
+        if (error != nullptr) {
+            *error = "image batch_count must be positive";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool FluxPipeline::validate_video_params(const ld_video_generation_params_t* params, std::string* error) const {
+    if (params == nullptr) {
+        if (error != nullptr) {
+            *error = "video generation params are null";
+        }
+        return false;
+    }
+    if (params->width <= 0 || params->height <= 0 || params->frames <= 0) {
+        if (error != nullptr) {
+            *error = "video width, height, and frames must be positive";
+        }
+        return false;
+    }
+    return true;
+}
+
+ld_status_t FluxPipeline::generate_image(const ld_image_generation_params_t* params,
+                                         ld_image_batch_t* out,
+                                         std::string* error) {
+    if (!ready_ || runtime_ == nullptr) {
+        if (error != nullptr) {
+            *error = "FluxPipeline is not initialized";
+        }
+        return LD_STATUS_MODEL_LOAD_FAILED;
+    }
+    if (out == nullptr) {
+        if (error != nullptr) {
+            *error = "image output is null";
+        }
+        return LD_STATUS_INVALID_ARGUMENT;
+    }
+    out->images = nullptr;
+    out->count = 0;
+
+    if (!validate_image_params(params, error)) {
+        return LD_STATUS_INVALID_ARGUMENT;
+    }
+    if (!can_generate_image()) {
+        if (error != nullptr) {
+            *error = "current Flux pipeline needs transformer, CLIP-L, T5XXL, and VAE weights";
+        }
+        return LD_STATUS_UNSUPPORTED;
+    }
+
+    const int count = params->batch_count > 0 ? params->batch_count : 1;
+    ld_image_t* images = static_cast<ld_image_t*>(std::calloc(static_cast<size_t>(count), sizeof(ld_image_t)));
+    if (images == nullptr) {
+        if (error != nullptr) {
+            *error = "failed to allocate image batch";
+        }
+        return LD_STATUS_OUT_OF_MEMORY;
+    }
+
+    for (int i = 0; i < count; ++i) {
+        if (!generate_one_image(params, i, runtime_->n_threads(), &images[i], error)) {
+            for (int j = 0; j <= i; ++j) {
+                std::free(images[j].data);
+            }
+            std::free(images);
+            return LD_STATUS_GENERATION_FAILED;
+        }
+    }
+
+    out->images = images;
+    out->count = count;
+    return LD_STATUS_OK;
+}
+
+ld_status_t FluxPipeline::generate_video(const ld_video_generation_params_t* params,
+                                         ld_video_t* out,
+                                         std::string* error) {
+    if (out != nullptr) {
+        out->frames = nullptr;
+        out->frame_count = 0;
+    }
+    if (!validate_video_params(params, error)) {
+        return LD_STATUS_INVALID_ARGUMENT;
+    }
+    if (error != nullptr) {
+        *error = "video generation is not implemented in FluxPipeline";
+    }
+    return LD_STATUS_UNSUPPORTED;
+}
+
+bool FluxPipeline::supports_image_generation() const {
+    return ready_;
+}
+
+bool FluxPipeline::supports_video_generation() const {
+    return false;
+}
+
+ld_sampler_t FluxPipeline::default_sample_method() const {
+    return LD_SAMPLER_EULER;
+}
+
+ld_scheduler_t FluxPipeline::default_scheduler(ld_sampler_t method) const {
+    if (method == LD_SAMPLER_LCM || method == LD_SAMPLER_TCD) {
+        return LD_SCHEDULER_LCM;
+    }
+    if (method == LD_SAMPLER_DDIM_TRAILING) {
+        return LD_SCHEDULER_SIMPLE;
+    }
+    return LD_SCHEDULER_DISCRETE;
+}
+
+bool FluxPipeline::generate_one_image(const ld_image_generation_params_t* params,
                                   int batch_index,
                                   int n_threads,
                                   ld_image_t* image,
@@ -730,7 +736,7 @@ bool LDModel::generate_flux_image(const ld_image_generation_params_t* params,
         }
         return false;
     }
-    if (!can_generate_flux_image()) {
+    if (!can_generate_image()) {
         if (error != nullptr) {
             *error = "full Flux runtime is not loaded; need transformer, CLIP-L, T5XXL, and VAE weights";
         }
@@ -784,7 +790,14 @@ bool LDModel::generate_flux_image(const ld_image_generation_params_t* params,
                                          ? params->sample.distilled_guidance
                                          : 3.5f;
     const int64_t seed = params->seed >= 0 ? params->seed : 42;
-    std::shared_ptr<RNG> rng = std::make_shared<PhiloxRNG>(static_cast<uint64_t>(seed + batch_index));
+    std::shared_ptr<RNG> rng = runtime_->rng_ptr();
+    if (!rng) {
+        if (error != nullptr) {
+            *error = "FluxPipeline has no RNG from ModelRuntime";
+        }
+        return false;
+    }
+    rng->manual_seed(static_cast<uint64_t>(seed + batch_index));
 
     sd::Tensor<float> init_latent = sd::zeros<float>({latent_w, latent_h, 16, 1});
     sd::Tensor<float> noise = sd::Tensor<float>::randn(init_latent.shape(), rng);
@@ -869,106 +882,4 @@ bool LDModel::generate_flux_image(const ld_image_generation_params_t* params,
     return true;
 }
 
-bool LDModel::smoke_load_small_tensors(ModelLoader& loader,
-                                       int max_tensors,
-                                       size_t max_tensor_bytes,
-                                       int n_threads,
-                                       bool use_mmap,
-                                       std::string* error) {
-    smoke_loaded_tensors_ = 0;
-    smoke_loaded_bytes_ = 0;
-
-    if (max_tensors <= 0 || max_tensor_bytes == 0) {
-        return true;
-    }
-
-    std::vector<TensorStorage> candidates;
-    for (const auto& item : loader.get_tensor_storage_map()) {
-        const TensorStorage& tensor = item.second;
-        if (tensor.nbytes_to_read() <= static_cast<int64_t>(max_tensor_bytes)) {
-            candidates.push_back(tensor);
-        }
-    }
-
-    std::sort(candidates.begin(), candidates.end(), [](const TensorStorage& a, const TensorStorage& b) {
-        if (a.nbytes_to_read() != b.nbytes_to_read()) {
-            return a.nbytes_to_read() < b.nbytes_to_read();
-        }
-        return a.name < b.name;
-    });
-
-    if (candidates.empty()) {
-        LOG_WARN("model smoke load skipped: no tensor <= %zu bytes", max_tensor_bytes);
-        return true;
-    }
-
-    if (static_cast<int>(candidates.size()) > max_tensors) {
-        candidates.resize(static_cast<size_t>(max_tensors));
-    }
-
-    std::set<std::string> selected_names;
-    size_t data_bytes = 0;
-    for (const TensorStorage& tensor : candidates) {
-        selected_names.insert(tensor.name);
-        data_bytes += static_cast<size_t>(std::max<int64_t>(tensor.nbytes(), tensor.nbytes_to_read()));
-    }
-
-    const size_t mem_size = data_bytes + candidates.size() * ggml_tensor_overhead() + 8 * 1024 * 1024;
-    ggml_init_params init_params;
-    init_params.mem_size = mem_size;
-    init_params.mem_buffer = nullptr;
-    init_params.no_alloc = false;
-
-    ggml_context* ggml_ctx = ggml_init(init_params);
-    if (ggml_ctx == nullptr) {
-        if (error != nullptr) {
-            *error = "ggml_init failed for model smoke load";
-        }
-        return false;
-    }
-
-    std::map<std::string, ggml_tensor*> loaded_tensors;
-    auto callback = [&](const TensorStorage& tensor, ggml_tensor** dst_tensor) -> bool {
-        if (selected_names.find(tensor.name) == selected_names.end()) {
-            return true;
-        }
-
-        ggml_tensor* dst = ggml_new_tensor(ggml_ctx, tensor.type, tensor.n_dims, tensor.ne);
-        if (dst == nullptr || dst->data == nullptr) {
-            return false;
-        }
-        ggml_set_name(dst, tensor.name.c_str());
-        loaded_tensors[tensor.name] = dst;
-        *dst_tensor = dst;
-        return true;
-    };
-
-    const bool ok = loader.load_tensors(callback, n_threads, use_mmap);
-    if (!ok) {
-        if (error != nullptr) {
-            *error = loader.get_last_error().empty() ? "model smoke load failed" : loader.get_last_error();
-        }
-        ggml_free(ggml_ctx);
-        return false;
-    }
-
-    for (const TensorStorage& tensor : candidates) {
-        auto it = loaded_tensors.find(tensor.name);
-        if (it == loaded_tensors.end()) {
-            if (error != nullptr) {
-                *error = "model smoke load did not receive selected tensor: " + tensor.name;
-            }
-            ggml_free(ggml_ctx);
-            return false;
-        }
-        smoke_loaded_tensors_++;
-        smoke_loaded_bytes_ += tensor.nbytes_to_read();
-    }
-
-    LOG_INFO("model smoke loaded %d small tensors (%.2fKB)",
-             smoke_loaded_tensors_,
-             smoke_loaded_bytes_ / 1024.0);
-
-    ggml_free(ggml_ctx);
-    return true;
-}
+}  // namespace lightdit

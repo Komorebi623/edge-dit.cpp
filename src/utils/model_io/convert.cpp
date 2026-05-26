@@ -3,7 +3,6 @@
 #include <regex>
 #include <vector>
 
-#include "model.h"
 #include "utils/model_io/gguf_io.h"
 #include "utils/model_io/safetensors_io.h"
 #include "utils/util.h"

@@ -2,7 +2,6 @@
 #define __ESRGAN_HPP__
 
 #include "backend/ggml/ggml_extend.hpp"
-#include "model.h"
 
 /*
     ===================================    ESRGAN  ===================================

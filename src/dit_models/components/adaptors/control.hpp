@@ -2,7 +2,6 @@
 #define __CONTROL_HPP__
 
 #include "dit_models/components/common/common_block.hpp"
-#include "model.h"
 
 #define CONTROL_NET_GRAPH_SIZE 1536
 
