@@ -219,6 +219,23 @@ static std::string parent_path(const std::string& file_path) {
     return fs::path(file_path).parent_path().string();
 }
 
+static std::string resolve_model_path(const std::string& file_path) {
+    if (file_exists(file_path) || is_directory(file_path)) {
+        return file_path;
+    }
+
+    if (has_suffix(file_path, ".safetensors")) {
+        const std::string index_path = file_path + ".index.json";
+        if (file_exists(index_path)) {
+            return index_path;
+        }
+    }
+
+    return file_path;
+}
+
+static bool read_json_file(const std::string& path, nlohmann::json* json, std::string* error);
+
 static bool is_sd3_diffusers_transformer_file(const std::string& file_path) {
     std::string normalized = file_path;
     std::replace(normalized.begin(), normalized.end(), '\\', '/');
@@ -226,6 +243,64 @@ static bool is_sd3_diffusers_transformer_file(const std::string& file_path) {
            (ends_with(normalized, "diffusion_pytorch_model.safetensors") ||
             ends_with(normalized, "diffusion_pytorch_model.fp16.safetensors") ||
             ends_with(normalized, "diffusion_pytorch_model.safetensors.index.json"));
+}
+
+static SDVersion infer_transformer_file_version(const std::string& file_path) {
+    std::string normalized = file_path;
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    if (!contains(normalized, "/transformer/")) {
+        return VERSION_COUNT;
+    }
+
+    const std::string config_path = path_join(parent_path(file_path), "config.json");
+    std::string error;
+    nlohmann::json config;
+    if (!file_exists(config_path) || !read_json_file(config_path, &config, &error)) {
+        return is_sd3_diffusers_transformer_file(file_path) ? VERSION_SD3 : VERSION_COUNT;
+    }
+
+    if (config.contains("_class_name") && config["_class_name"].is_string()) {
+        const std::string klass = config["_class_name"].get<std::string>();
+        if (contains(klass, "QwenImage") || contains(klass, "Qwen")) {
+            return VERSION_QWEN_IMAGE;
+        }
+        if (contains(klass, "Flux")) {
+            return VERSION_FLUX;
+        }
+        if (contains(klass, "SD3") || contains(klass, "StableDiffusion3")) {
+            return VERSION_SD3;
+        }
+        if (contains(klass, "Wan")) {
+            return VERSION_WAN2;
+        }
+    }
+
+    return VERSION_COUNT;
+}
+
+static std::string resolve_flux_transformer_component_path(const std::string& file_path) {
+    std::string normalized = file_path;
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    if (!contains(normalized, "/transformer/")) {
+        return file_path;
+    }
+
+    const std::string model_dir = parent_path(parent_path(file_path));
+    const std::vector<std::string> top_level_flux_weights = {
+        path_join(model_dir, "flux1-dev.safetensors"),
+        path_join(model_dir, "flux1-schnell.safetensors"),
+        path_join(model_dir, "flux.safetensors"),
+    };
+    for (const std::string& candidate : top_level_flux_weights) {
+        if (file_exists(candidate)) {
+            LOG_INFO("using top-level Flux transformer weights '%s' instead of component weights '%s'",
+                     candidate.c_str(),
+                     file_path.c_str());
+            return candidate;
+        }
+    }
+
+    return file_path;
 }
 
 static bool read_json_file(const std::string& path, nlohmann::json* json, std::string* error) {
@@ -257,6 +332,9 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
             if (contains(klass, "Wan")) {
                 return VERSION_WAN2;
             }
+            if (contains(klass, "QwenImage") || contains(klass, "Qwen Image")) {
+                return VERSION_QWEN_IMAGE;
+            }
             if (contains(klass, "Flux")) {
                 return VERSION_FLUX;
             }
@@ -275,6 +353,9 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
             const std::string klass = index["_class_name"].get<std::string>();
             if (contains(klass, "Wan")) {
                 return VERSION_WAN2;
+            }
+            if (contains(klass, "QwenImage") || contains(klass, "Qwen")) {
+                return VERSION_QWEN_IMAGE;
             }
             if (contains(klass, "Flux")) {
                 return VERSION_FLUX;
@@ -511,6 +592,18 @@ bool ModelLoader::load_optional_file(const char* path,
 bool ModelLoader::load_model_files(const ld_context_params_t& params,
                                    std::string* error) {
     bool loaded_any = false;
+    auto load_user_component = [&](const char* path,
+                                   const std::string& prefix,
+                                   const char* label) -> bool {
+        if (!non_empty(path)) {
+            return true;
+        }
+        if (!load_optional_file(path, prefix, label, true, error)) {
+            return false;
+        }
+        loaded_any = true;
+        return true;
+    };
 
     loaded_any = load_optional_file(params.model_path,
                                     "",
@@ -522,81 +615,94 @@ bool ModelLoader::load_model_files(const ld_context_params_t& params,
     const bool is_unet_hint = hint_version != VERSION_COUNT &&
                               ld_version_is_unet(hint_version);
 
-    if (non_empty(params.diffusion_model_path) &&
-        is_sd3_diffusers_transformer_file(params.diffusion_model_path)) {
-        version_ = VERSION_SD3;
+    std::string diffusion_model_path;
+    if (non_empty(params.diffusion_model_path)) {
+        diffusion_model_path = params.diffusion_model_path;
+        const SDVersion transformer_file_version = infer_transformer_file_version(diffusion_model_path);
+        if (transformer_file_version != VERSION_COUNT) {
+            version_ = transformer_file_version;
+        }
+        if (version_ == VERSION_FLUX) {
+            diffusion_model_path = resolve_flux_transformer_component_path(diffusion_model_path);
+        }
     }
 
-    loaded_any = load_optional_file(params.diffusion_model_path,
-                                    "model.diffusion_model.",
-                                    "diffusion model",
-                                    false,
-                                    error) || loaded_any;
+    if (!load_user_component(diffusion_model_path.empty() ? nullptr : diffusion_model_path.c_str(),
+                             "model.diffusion_model.",
+                             "diffusion model")) {
+        return false;
+    }
 
-    loaded_any = load_optional_file(params.high_noise_diffusion_model_path,
-                                    "model.high_noise_diffusion_model.",
-                                    "high noise diffusion model",
-                                    false,
-                                    error) || loaded_any;
+    if (!load_user_component(params.high_noise_diffusion_model_path,
+                             "model.high_noise_diffusion_model.",
+                             "high noise diffusion model")) {
+        return false;
+    }
 
-    loaded_any = load_optional_file(params.clip_l_path,
-                                    is_unet_hint
-                                        ? "cond_stage_model.transformer."
-                                        : "text_encoders.clip_l.transformer.",
-                                    "clip_l",
-                                    false,
-                                    error) || loaded_any;
+    if (!load_user_component(params.clip_l_path,
+                             is_unet_hint
+                                 ? "cond_stage_model.transformer."
+                                 : "text_encoders.clip_l.transformer.",
+                             "clip_l")) {
+        return false;
+    }
 
-    loaded_any = load_optional_file(params.clip_g_path,
-                                    is_unet_hint
-                                        ? "cond_stage_model.1.transformer."
-                                        : "text_encoders.clip_g.transformer.",
-                                    "clip_g",
-                                    false,
-                                    error) || loaded_any;
+    if (!load_user_component(params.clip_g_path,
+                             is_unet_hint
+                                 ? "cond_stage_model.1.transformer."
+                                 : "text_encoders.clip_g.transformer.",
+                             "clip_g")) {
+        return false;
+    }
 
-    loaded_any = load_optional_file(params.clip_vision_path,
-                                    "cond_stage_model.transformer.",
-                                    "clip_vision",
-                                    false,
-                                    error) || loaded_any;
+    if (!load_user_component(params.clip_vision_path,
+                             "cond_stage_model.transformer.",
+                             "clip_vision")) {
+        return false;
+    }
 
-    loaded_any = load_optional_file(params.t5xxl_path,
-                                    "text_encoders.t5xxl.transformer.",
-                                    "t5xxl",
-                                    false,
-                                    error) || loaded_any;
+    if (!load_user_component(params.t5xxl_path,
+                             "text_encoders.t5xxl.transformer.",
+                             "t5xxl")) {
+        return false;
+    }
 
-    loaded_any = load_optional_file(params.llm_path,
-                                    "text_encoders.llm.",
-                                    "llm",
-                                    false,
-                                    error) || loaded_any;
+    if (!load_user_component(params.llm_path,
+                             "text_encoders.llm.",
+                             "llm")) {
+        return false;
+    }
 
-    loaded_any = load_optional_file(params.llm_vision_path,
-                                    "text_encoders.llm.visual.",
-                                    "llm vision",
-                                    false,
-                                    error) || loaded_any;
+    if (!load_user_component(params.llm_vision_path,
+                             "text_encoders.llm.visual.",
+                             "llm vision")) {
+        return false;
+    }
 
     if (non_empty(params.vae_path)) {
         const bool ok = load_optional_file(params.vae_path,
                                            "vae.",
                                            "vae",
-                                           false,
+                                           true,
                                            error);
         external_vae_is_invalid_ = !ok;
-        loaded_any = ok || loaded_any;
+        if (!ok) {
+            return false;
+        }
+        loaded_any = true;
     }
 
     if (non_empty(params.taesd_path)) {
         const bool ok = load_optional_file(params.taesd_path,
                                            "tae.",
                                            "tae",
-                                           false,
+                                           true,
                                            error);
         use_tae_ = true;
-        loaded_any = ok || loaded_any;
+        if (!ok) {
+            return false;
+        }
+        loaded_any = true;
     }
 
     if (!loaded_any || tensor_storage_map_.empty()) {
@@ -745,18 +851,23 @@ void ModelLoader::add_tensor_storage(const TensorStorage& tensor_storage) {
 
 bool ModelLoader::init_from_file(const std::string& file_path, const std::string& prefix) {
     last_error_.clear();
-    if (is_directory(file_path)) {
-        LOG_INFO("load %s using diffusers directory format", file_path.c_str());
-        return init_from_diffusers_directory(file_path, prefix);
+    const std::string resolved_path = resolve_model_path(file_path);
+    if (resolved_path != file_path) {
+        LOG_INFO("resolved model path '%s' to '%s'", file_path.c_str(), resolved_path.c_str());
     }
-    if (is_gguf_file(file_path)) {
-        LOG_INFO("load %s using gguf format", file_path.c_str());
-        return init_from_gguf_file(file_path, prefix);
+
+    if (is_directory(resolved_path)) {
+        LOG_INFO("load %s using diffusers directory format", resolved_path.c_str());
+        return init_from_diffusers_directory(resolved_path, prefix);
     }
-    if (is_safetensors_file(file_path)) {
-        LOG_INFO("load %s using safetensors format", file_path.c_str());
+    if (is_gguf_file(resolved_path)) {
+        LOG_INFO("load %s using gguf format", resolved_path.c_str());
+        return init_from_gguf_file(resolved_path, prefix);
+    }
+    if (is_safetensors_file(resolved_path)) {
+        LOG_INFO("load %s using safetensors format", resolved_path.c_str());
         std::string effective_prefix = prefix;
-        std::string lower_name = fs::path(file_path).filename().string();
+        std::string lower_name = fs::path(resolved_path).filename().string();
         std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) {
             return static_cast<char>(std::tolower(c));
         });
@@ -764,14 +875,14 @@ bool ModelLoader::init_from_file(const std::string& file_path, const std::string
             version_ = VERSION_FLUX;
             effective_prefix = "transformer.";
         }
-        return init_from_safetensors_file(file_path, effective_prefix);
+        return init_from_safetensors_file(resolved_path, effective_prefix);
     }
-    if (is_safetensors_index_file(file_path)) {
-        LOG_INFO("load %s using safetensors shard index format", file_path.c_str());
-        return init_from_safetensors_index_file(file_path, prefix);
+    if (is_safetensors_index_file(resolved_path)) {
+        LOG_INFO("load %s using safetensors shard index format", resolved_path.c_str());
+        return init_from_safetensors_index_file(resolved_path, prefix);
     }
 
-    set_error(file_exists(file_path) ? "unsupported model format: " + file_path : "model path not found: " + file_path);
+    set_error(file_exists(resolved_path) ? "unsupported model format: " + resolved_path : "model path not found: " + resolved_path);
     return false;
 }
 
@@ -924,6 +1035,15 @@ bool ModelLoader::init_from_diffusers_directory(const std::string& dir_path, con
                 continue;
             }
         }
+        if (ld_version_is_qwen_image(version_)) {
+            if (std::strcmp(component.dir, "text_encoder") == 0) {
+                component_prefix = "text_encoders.llm.";
+            } else if (std::strcmp(component.dir, "text_encoder_2") == 0 ||
+                       std::strcmp(component.dir, "text_encoder_3") == 0 ||
+                       std::strcmp(component.dir, "unet") == 0) {
+                continue;
+            }
+        }
         bool loaded = false;
         std::set<std::string> tried;
         if (version_ == VERSION_FLUX && std::strcmp(component.dir, "transformer") == 0) {
@@ -1010,6 +1130,9 @@ SDVersion ModelLoader::get_ld_version() {
         const std::string& name = item.second.name;
         if (contains(name, "model.diffusion_model.joint_blocks.")) {
             return VERSION_SD3;
+        }
+        if (contains(name, "model.diffusion_model.transformer_blocks.0.img_mod.1.weight")) {
+            return VERSION_QWEN_IMAGE;
         }
         if (contains(name, "model.diffusion_model.double_blocks.") || contains(name, "transformer.double_blocks.")) {
             has_flux_double = true;

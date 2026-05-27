@@ -932,9 +932,15 @@ struct SD3CLIPEmbedder : public Conditioner {
         sd::Tensor<float> hidden_states;
         sd::Tensor<float> pooled;
 
-        GGML_ASSERT(clip_l_tokens.size() == clip_chunk_len);
-        GGML_ASSERT(clip_g_tokens.size() == clip_chunk_len);
-        GGML_ASSERT(t5_tokens.size() == t5_chunk_len);
+        if (clip_l) {
+            GGML_ASSERT(clip_l_tokens.size() == clip_chunk_len);
+        }
+        if (clip_g) {
+            GGML_ASSERT(clip_g_tokens.size() == clip_chunk_len);
+        }
+        if (t5) {
+            GGML_ASSERT(t5_tokens.size() == t5_chunk_len);
+        }
 
         // clip_l
         sd::Tensor<float> chunk_hidden_states_l;

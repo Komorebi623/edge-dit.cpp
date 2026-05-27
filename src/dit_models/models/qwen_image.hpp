@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "dit_models/components/common/common_block.hpp"
+#include "dit_models/components/common/common_dit.hpp"
 #include "dit_models/components/common/modulation.hpp"
 #include "dit_models/components/common/rope.hpp"
 
