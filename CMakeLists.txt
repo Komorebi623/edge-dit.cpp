@@ -21,6 +21,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_compile_definitions(GGML_MAX_NAME=128)
 
+find_package(Threads REQUIRED)
+
 option(LDIT_BUILD_EXAMPLES "Build examples" ON)
 option(LDIT_BUILD_TESTS "Build light-dit tests" OFF)
 option(LDIT_BUILD_SHARED_LIBS "Build light-dit as a shared library" OFF)
@@ -143,6 +145,15 @@ if(LDIT_BUILD_EXAMPLES)
     target_link_libraries(ld-cli PRIVATE lightdit)
     target_include_directories(ld-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
     target_compile_features(ld-cli PRIVATE cxx_std_17)
+
+    add_executable(ld-server
+        examples/server/main.cpp
+        examples/server/routes.cpp
+        examples/server/runtime.cpp
+    )
+    target_link_libraries(ld-server PRIVATE lightdit Threads::Threads)
+    target_include_directories(ld-server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+    target_compile_features(ld-server PRIVATE cxx_std_17)
 endif()
 
 if(LDIT_BUILD_TESTS)
@@ -176,5 +187,5 @@ install(TARGETS lightdit
 )
 
 if(LDIT_BUILD_EXAMPLES)
-    install(TARGETS ld-cli RUNTIME DESTINATION bin)
+    install(TARGETS ld-cli ld-server RUNTIME DESTINATION bin)
 endif()
