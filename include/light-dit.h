@@ -89,6 +89,15 @@ typedef enum ld_scheduler_t {
     LD_SCHEDULER_BONG_TANGENT
 } ld_scheduler_t;
 
+typedef enum ld_cache_mode_t {
+    LD_CACHE_DISABLED = 0,
+    LD_CACHE_EASYCACHE,
+    LD_CACHE_UCACHE,
+    LD_CACHE_DBCACHE,
+    LD_CACHE_TAYLORSEER,
+    LD_CACHE_CACHE_DIT
+} ld_cache_mode_t;
+
 typedef struct ld_image_t {
     uint32_t width;
     uint32_t height;
@@ -161,6 +170,25 @@ typedef struct ld_sample_params_t {
     float distilled_guidance;
     float eta;
     float flow_shift;
+
+    ld_cache_mode_t cache_mode;
+    float cache_reuse_threshold;
+    float cache_start_percent;
+    float cache_end_percent;
+    float cache_error_decay_rate;
+    bool cache_use_relative_threshold;
+    bool cache_reset_error_on_compute;
+    int cache_Fn_compute_blocks;
+    int cache_Bn_compute_blocks;
+    float cache_residual_diff_threshold;
+    float cache_max_accumulated_residual_diff;
+    int cache_max_warmup_steps;
+    int cache_max_cached_steps;
+    int cache_max_continuous_cached_steps;
+    int cache_taylorseer_n_derivatives;
+    int cache_taylorseer_skip_interval;
+    const char * cache_scm_mask;
+    bool cache_scm_policy_dynamic;
 } ld_sample_params_t;
 
 typedef struct ld_image_generation_params_t {

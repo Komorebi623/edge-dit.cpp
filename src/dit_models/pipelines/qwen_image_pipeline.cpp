@@ -7,6 +7,7 @@
 #include <cstring>
 #include <vector>
 
+#include "core/optimization/cache/cache_runtime.hpp"
 #include "dit_models/components/autoencoders/vae.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
 #include "dit_models/models/qwen_image.hpp"
@@ -430,17 +431,43 @@ bool QwenImagePipeline::generate_one_image(const ld_image_generation_params_t* p
              seed + batch_index);
 
     sd::Tensor<float> x = init_latent * (1.0f - sigmas[0]) + noise * sigmas[0];
+    cache::CacheRuntime cache_runtime;
+    const bool cache_enabled = cache_runtime.init(params->sample, version_, sigmas);
     for (int step = 0; step < steps; ++step) {
         const float sigma = sigmas[static_cast<size_t>(step)];
         const float sigma_next = sigmas[static_cast<size_t>(step + 1)];
 
         sd::Tensor<float> timesteps({1}, std::vector<float>{sigma * 1000.0f});
-        sd::Tensor<float> model_out = diffusion_->compute(n_threads,
-                                                          x,
-                                                          timesteps,
-                                                          condition.c_crossattn,
-                                                          {},
-                                                          false);
+        cache::CacheStepInfo cache_step;
+        cache_step.step_index = step;
+        cache_step.num_steps = steps;
+        cache_step.sigma = sigma;
+        cache_step.sigma_next = sigma_next;
+        if (cache_enabled) {
+            cache_runtime.begin_step(cache_step);
+        }
+
+        sd::Tensor<float> model_out;
+        const void* condition_key = static_cast<const void*>(&condition);
+        const bool cache_hit = cache_enabled &&
+                               cache_runtime.before_forward(cache::CacheBranch::Main,
+                                                            condition_key,
+                                                            x,
+                                                            &model_out);
+        if (!cache_hit) {
+            model_out = diffusion_->compute(n_threads,
+                                            x,
+                                            timesteps,
+                                            condition.c_crossattn,
+                                            {},
+                                            false);
+            if (!model_out.empty() && cache_enabled) {
+                cache_runtime.after_forward(cache::CacheBranch::Main,
+                                            condition_key,
+                                            x,
+                                            model_out);
+            }
+        }
         if (model_out.empty()) {
             if (error != nullptr) {
                 *error = sd_format("Qwen-Image transformer compute failed at step %d", step + 1);
@@ -457,6 +484,12 @@ bool QwenImagePipeline::generate_one_image(const ld_image_generation_params_t* p
             x += d * (sigma_next - sigma);
         }
         LOG_INFO("qwen-image step %d/%d sigma=%.6f next=%.6f", step + 1, steps, sigma, sigma_next);
+        if (cache_enabled) {
+            cache_runtime.end_step(cache_step);
+        }
+    }
+    if (cache_enabled) {
+        cache_runtime.log_summary(static_cast<size_t>(steps));
     }
     diffusion_->free_compute_buffer();
 

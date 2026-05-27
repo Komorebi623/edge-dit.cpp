@@ -22,7 +22,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_compile_definitions(GGML_MAX_NAME=128)
 
 option(LDIT_BUILD_EXAMPLES "Build examples" ON)
+option(LDIT_BUILD_TESTS "Build light-dit tests" OFF)
 option(LDIT_BUILD_SHARED_LIBS "Build light-dit as a shared library" OFF)
+
+if(LDIT_BUILD_TESTS)
+    enable_testing()
+endif()
 
 option(LDIT_GGML_CUDA   "Enable ggml CUDA backend" OFF)
 option(LDIT_GGML_METAL  "Enable ggml Metal backend" OFF)
@@ -138,6 +143,26 @@ if(LDIT_BUILD_EXAMPLES)
     target_link_libraries(ld-cli PRIVATE lightdit)
     target_include_directories(ld-cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
     target_compile_features(ld-cli PRIVATE cxx_std_17)
+endif()
+
+if(LDIT_BUILD_TESTS)
+    add_executable(cache-smoke
+        tests/cache_smoke.cpp
+        src/core/optimization/cache/cache_config.cpp
+        src/core/optimization/cache/cache_methods.cpp
+        src/core/optimization/cache/cache_runtime.cpp
+        src/core/optimization/cache/cache_types.cpp
+    )
+    target_include_directories(cache-smoke
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/include
+    )
+    target_compile_features(cache-smoke PRIVATE cxx_std_17)
+    add_test(NAME cache-smoke COMMAND cache-smoke)
 endif()
 
 set(LDIT_PUBLIC_HEADERS include/light-dit.h)

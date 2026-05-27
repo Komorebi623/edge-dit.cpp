@@ -1,5 +1,6 @@
 #include "light-dit.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -53,6 +54,23 @@ void ld_sample_params_init(ld_sample_params_t * params) {
     params->distilled_guidance = 3.5f;
     params->eta = 0.0f;
     params->flow_shift = 0.0f;
+    params->cache_mode = LD_CACHE_DISABLED;
+    params->cache_reuse_threshold = INFINITY;
+    params->cache_start_percent = 0.15f;
+    params->cache_end_percent = 0.95f;
+    params->cache_error_decay_rate = 1.0f;
+    params->cache_use_relative_threshold = true;
+    params->cache_reset_error_on_compute = true;
+    params->cache_Fn_compute_blocks = 8;
+    params->cache_Bn_compute_blocks = 0;
+    params->cache_residual_diff_threshold = 0.08f;
+    params->cache_max_accumulated_residual_diff = -1.0f;
+    params->cache_max_warmup_steps = 8;
+    params->cache_max_cached_steps = -1;
+    params->cache_max_continuous_cached_steps = -1;
+    params->cache_taylorseer_n_derivatives = 1;
+    params->cache_taylorseer_skip_interval = 1;
+    params->cache_scm_policy_dynamic = true;
 }
 
 void ld_image_generation_params_init(ld_image_generation_params_t * params) {

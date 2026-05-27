@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <ctime>
 
+#include "core/optimization/cache/cache_runtime.hpp"
 #include "dit_models/components/autoencoders/auto_encoder_kl.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
 #include "utils/util.h"
@@ -389,17 +390,43 @@ bool SD3Pipeline::generate_one_image(const ld_image_generation_params_t* params,
              seed + batch_index);
 
     sd::Tensor<float> x = init_latent * (1.0f - sigmas[0]) + noise * sigmas[0];
+    cache::CacheRuntime cache_runtime;
+    const bool cache_enabled = cache_runtime.init(params->sample, version_, sigmas);
     for (int step = 0; step < steps; ++step) {
         const float sigma = sigmas[static_cast<size_t>(step)];
         const float sigma_next = sigmas[static_cast<size_t>(step + 1)];
         sd::Tensor<float> timesteps({1}, std::vector<float>{sigma * 1000.0f});
+
+        cache::CacheStepInfo cache_step;
+        cache_step.step_index = step;
+        cache_step.num_steps = steps;
+        cache_step.sigma = sigma;
+        cache_step.sigma_next = sigma_next;
+        if (cache_enabled) {
+            cache_runtime.begin_step(cache_step);
+        }
 
         DiffusionParams diffusion_params;
         diffusion_params.x = &x;
         diffusion_params.timesteps = &timesteps;
         diffusion_params.context = &cond.c_crossattn;
         diffusion_params.y = &cond.c_vector;
-        sd::Tensor<float> cond_out = diffusion_->compute(runtime_->n_threads(), diffusion_params);
+        sd::Tensor<float> cond_out;
+        const void* cond_key = static_cast<const void*>(&cond);
+        const bool cond_cache_hit = cache_enabled &&
+                                    cache_runtime.before_forward(cache::CacheBranch::Cond,
+                                                                 cond_key,
+                                                                 x,
+                                                                 &cond_out);
+        if (!cond_cache_hit) {
+            cond_out = diffusion_->compute(runtime_->n_threads(), diffusion_params);
+            if (!cond_out.empty() && cache_enabled) {
+                cache_runtime.after_forward(cache::CacheBranch::Cond,
+                                            cond_key,
+                                            x,
+                                            cond_out);
+            }
+        }
         if (cond_out.empty()) {
             if (error != nullptr) {
                 *error = sd_format("SD3 diffusion compute failed at step %d", step + 1);
@@ -412,7 +439,22 @@ bool SD3Pipeline::generate_one_image(const ld_image_generation_params_t* params,
         if (!uncond.empty()) {
             diffusion_params.context = &uncond.c_crossattn;
             diffusion_params.y = &uncond.c_vector;
-            sd::Tensor<float> uncond_out = diffusion_->compute(runtime_->n_threads(), diffusion_params);
+            sd::Tensor<float> uncond_out;
+            const void* uncond_key = static_cast<const void*>(&uncond);
+            const bool uncond_cache_hit = cache_enabled &&
+                                          cache_runtime.before_forward(cache::CacheBranch::Uncond,
+                                                                       uncond_key,
+                                                                       x,
+                                                                       &uncond_out);
+            if (!uncond_cache_hit) {
+                uncond_out = diffusion_->compute(runtime_->n_threads(), diffusion_params);
+                if (!uncond_out.empty() && cache_enabled) {
+                    cache_runtime.after_forward(cache::CacheBranch::Uncond,
+                                                uncond_key,
+                                                x,
+                                                uncond_out);
+                }
+            }
             if (uncond_out.empty()) {
                 if (error != nullptr) {
                     *error = sd_format("SD3 unconditional diffusion compute failed at step %d", step + 1);
@@ -427,6 +469,12 @@ bool SD3Pipeline::generate_one_image(const ld_image_generation_params_t* params,
         const sd::Tensor<float> d = (x - denoised) / sigma;
         x += d * (sigma_next - sigma);
         LOG_INFO("sd3 step %d/%d sigma=%.6f next=%.6f", step + 1, steps, sigma, sigma_next);
+        if (cache_enabled) {
+            cache_runtime.end_step(cache_step);
+        }
+    }
+    if (cache_enabled) {
+        cache_runtime.log_summary(static_cast<size_t>(steps));
     }
     diffusion_->free_compute_buffer();
 

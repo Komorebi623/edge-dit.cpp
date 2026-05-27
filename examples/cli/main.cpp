@@ -1,12 +1,15 @@
 #include "light-dit.h"
 
+#include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -40,6 +43,31 @@ static void print_usage(const char* prog) {
         "  --guidance <float>        Flux distilled guidance, default: 3.5\n"
         "  --cfg-scale <float>       Classifier-free guidance scale, default: 1.0\n"
         "  --flow-shift <float>      Flow scheduler shift, default: model default\n"
+        "  --cache <mode>            Cache mode: off, easycache, ucache, dbcache, taylorseer, cache-dit\n"
+        "  --cache-threshold <float> EasyCache/UCache reuse threshold\n"
+        "  --cache-start <float>     Cache active window start percent, default: 0.15\n"
+        "  --cache-end <float>       Cache active window end percent, default: 0.95\n"
+        "  --cache-error-decay <f>   UCache accumulated error decay, default: 1.0\n"
+        "  --cache-relative-threshold|--cache-absolute-threshold\n"
+        "                            UCache threshold scale mode, default: relative\n"
+        "  --cache-no-reset-error    Keep UCache accumulated error after full compute\n"
+        "  --cache-fn-blocks <int>   DBCache/CacheDiT front compute blocks, default: 8\n"
+        "  --cache-bn-blocks <int>   DBCache/CacheDiT back compute blocks, default: 0\n"
+        "  --cache-residual-threshold <float>\n"
+        "                            DBCache residual diff threshold, default: 0.08\n"
+        "  --cache-max-accumulated-residual-diff <float>\n"
+        "                            Disable DBCache after accumulated diff reaches this value, -1 means unlimited\n"
+        "  --cache-warmup-steps <int>\n"
+        "                            Cache warmup full-compute steps, default: 8\n"
+        "  --cache-max-cached-steps <int>\n"
+        "                            Max cached steps, -1 means unlimited\n"
+        "  --cache-max-continuous-cached-steps <int>\n"
+        "                            Max continuous cached steps, -1 means unlimited\n"
+        "  --cache-taylor-order <int>\n"
+        "                            TaylorSeer derivative order, default: 1\n"
+        "  --cache-taylor-skip <int> TaylorSeer skip interval, default: 1\n"
+        "  --cache-scm-mask <csv>    Steps computation mask, e.g. 1,0,0,1\n"
+        "  --cache-static-scm        Use static SCM policy for methods that support it\n"
         "  --backend <name>          Backend: auto, cpu, cuda, gpu. Default: auto\n"
         "  --gpu                     Alias for --backend gpu\n"
         "  --help              Show this help\n",
@@ -90,6 +118,147 @@ static std::string lowercase(std::string value) {
         }
     }
     return value;
+}
+
+static int parse_int_value(const char* text, int fallback = 0) {
+    if (text == nullptr) {
+        return fallback;
+    }
+
+    while (std::isspace(static_cast<unsigned char>(*text))) {
+        ++text;
+    }
+
+    bool negative = false;
+    if (*text == '+' || *text == '-') {
+        negative = *text == '-';
+        ++text;
+    }
+
+    int value = 0;
+    bool any = false;
+    while (*text >= '0' && *text <= '9') {
+        any = true;
+        value = value * 10 + (*text - '0');
+        ++text;
+    }
+    if (!any) {
+        return fallback;
+    }
+    return negative ? -value : value;
+}
+
+static int64_t parse_i64_value(const char* text, int64_t fallback = 0) {
+    if (text == nullptr) {
+        return fallback;
+    }
+
+    while (std::isspace(static_cast<unsigned char>(*text))) {
+        ++text;
+    }
+
+    bool negative = false;
+    if (*text == '+' || *text == '-') {
+        negative = *text == '-';
+        ++text;
+    }
+
+    int64_t value = 0;
+    bool any = false;
+    while (*text >= '0' && *text <= '9') {
+        any = true;
+        value = value * 10 + (*text - '0');
+        ++text;
+    }
+    if (!any) {
+        return fallback;
+    }
+    return negative ? -value : value;
+}
+
+static float parse_float_value(const char* text, float fallback = 0.0f) {
+    if (text == nullptr) {
+        return fallback;
+    }
+
+    bool negative = false;
+    while (std::isspace(static_cast<unsigned char>(*text))) {
+        ++text;
+    }
+    if (*text == '+' || *text == '-') {
+        negative = *text == '-';
+        ++text;
+    }
+
+    double value = 0.0;
+    bool any = false;
+    while (*text >= '0' && *text <= '9') {
+        any = true;
+        value = value * 10.0 + static_cast<double>(*text - '0');
+        ++text;
+    }
+
+    if (*text == '.') {
+        ++text;
+        double scale = 0.1;
+        while (*text >= '0' && *text <= '9') {
+            any = true;
+            value += static_cast<double>(*text - '0') * scale;
+            scale *= 0.1;
+            ++text;
+        }
+    }
+
+    if (!any) {
+        return fallback;
+    }
+
+    if (*text == 'e' || *text == 'E') {
+        ++text;
+        const int exp = parse_int_value(text, 0);
+        value *= std::pow(10.0, static_cast<double>(exp));
+    }
+
+    if (negative) {
+        value = -value;
+    }
+    return static_cast<float>(value);
+}
+
+static ld_cache_mode_t parse_cache_mode(const char* text, bool* ok) {
+    if (ok != nullptr) {
+        *ok = true;
+    }
+    std::string mode = lowercase(text != nullptr ? text : "off");
+    for (char& c : mode) {
+        if (c == '_' || c == '.') {
+            c = '-';
+        }
+    }
+
+    if (mode == "off" || mode == "none" || mode == "disabled" || mode == "disable" || mode == "0") {
+        return LD_CACHE_DISABLED;
+    }
+    if (mode == "easycache" || mode == "easy") {
+        return LD_CACHE_EASYCACHE;
+    }
+    if (mode == "ucache" || mode == "u") {
+        return LD_CACHE_UCACHE;
+    }
+    if (mode == "dbcache" || mode == "db") {
+        return LD_CACHE_DBCACHE;
+    }
+    if (mode == "taylorseer" || mode == "taylor" || mode == "taylor-seer") {
+        return LD_CACHE_TAYLORSEER;
+    }
+    if (mode == "cache-dit" || mode == "cachedit") {
+        return LD_CACHE_CACHE_DIT;
+    }
+
+    if (ok != nullptr) {
+        *ok = false;
+    }
+    return LD_CACHE_DISABLED;
 }
 
 static std::string path_extension(const std::string& path) {
@@ -562,6 +731,25 @@ struct FluxCliArgs {
     float guidance = 3.5f;
     float cfg_scale = 1.0f;
     float flow_shift = 0.0f;
+
+    ld_cache_mode_t cache_mode = LD_CACHE_DISABLED;
+    float cache_reuse_threshold = std::numeric_limits<float>::infinity();
+    float cache_start_percent = 0.15f;
+    float cache_end_percent = 0.95f;
+    float cache_error_decay_rate = 1.0f;
+    bool cache_use_relative_threshold = true;
+    bool cache_reset_error_on_compute = true;
+    int cache_Fn_compute_blocks = 8;
+    int cache_Bn_compute_blocks = 0;
+    float cache_residual_diff_threshold = 0.08f;
+    float cache_max_accumulated_residual_diff = -1.0f;
+    int cache_max_warmup_steps = 8;
+    int cache_max_cached_steps = -1;
+    int cache_max_continuous_cached_steps = -1;
+    int cache_taylorseer_n_derivatives = 1;
+    int cache_taylorseer_skip_interval = 1;
+    const char* cache_scm_mask = nullptr;
+    bool cache_scm_policy_dynamic = true;
 };
 
 static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
@@ -603,43 +791,127 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         } else if (std::strcmp(key, "--width") == 0 || std::strcmp(key, "-W") == 0) {
             const char* v = require_value(key);
             if (!v) return false;
-            args->width = std::atoi(v);
+            args->width = parse_int_value(v, args->width);
         } else if (std::strcmp(key, "--height") == 0 || std::strcmp(key, "-H") == 0) {
             const char* v = require_value(key);
             if (!v) return false;
-            args->height = std::atoi(v);
+            args->height = parse_int_value(v, args->height);
         } else if (std::strcmp(key, "--frames") == 0) {
             const char* v = require_value(key);
             if (!v) return false;
-            args->frames = std::atoi(v);
+            args->frames = parse_int_value(v, args->frames);
         } else if (std::strcmp(key, "--fps") == 0) {
             const char* v = require_value(key);
             if (!v) return false;
-            args->fps = std::atoi(v);
+            args->fps = parse_int_value(v, args->fps);
         } else if (std::strcmp(key, "--steps") == 0) {
             const char* v = require_value(key);
             if (!v) return false;
-            args->steps = std::atoi(v);
+            args->steps = parse_int_value(v, args->steps);
         } else if (std::strcmp(key, "--threads") == 0 || std::strcmp(key, "-t") == 0) {
             const char* v = require_value(key);
             if (!v) return false;
-            args->threads = std::atoi(v);
+            args->threads = parse_int_value(v, args->threads);
         } else if (std::strcmp(key, "--seed") == 0 || std::strcmp(key, "-s") == 0) {
             const char* v = require_value(key);
             if (!v) return false;
-            args->seed = std::strtoll(v, nullptr, 10);
+            args->seed = parse_i64_value(v, args->seed);
         } else if (std::strcmp(key, "--guidance") == 0) {
             const char* v = require_value(key);
             if (!v) return false;
-            args->guidance = std::strtof(v, nullptr);
+            args->guidance = parse_float_value(v, args->guidance);
         } else if (std::strcmp(key, "--cfg-scale") == 0) {
             const char* v = require_value(key);
             if (!v) return false;
-            args->cfg_scale = std::strtof(v, nullptr);
+            args->cfg_scale = parse_float_value(v, args->cfg_scale);
         } else if (std::strcmp(key, "--flow-shift") == 0) {
             const char* v = require_value(key);
             if (!v) return false;
-            args->flow_shift = std::strtof(v, nullptr);
+            args->flow_shift = parse_float_value(v, args->flow_shift);
+        } else if (std::strcmp(key, "--cache") == 0 || std::strcmp(key, "--cache-mode") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            bool ok = false;
+            args->cache_mode = parse_cache_mode(v, &ok);
+            if (!ok) {
+                std::fprintf(stderr, "unsupported cache mode: %s\n", v);
+                return false;
+            }
+        } else if (std::strcmp(key, "--cache-threshold") == 0 ||
+                   std::strcmp(key, "--cache-reuse-threshold") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->cache_reuse_threshold = parse_float_value(v, args->cache_reuse_threshold);
+        } else if (std::strcmp(key, "--cache-start") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->cache_start_percent = parse_float_value(v, args->cache_start_percent);
+        } else if (std::strcmp(key, "--cache-end") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->cache_end_percent = parse_float_value(v, args->cache_end_percent);
+        } else if (std::strcmp(key, "--cache-error-decay") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->cache_error_decay_rate = parse_float_value(v, args->cache_error_decay_rate);
+        } else if (std::strcmp(key, "--cache-relative-threshold") == 0) {
+            args->cache_use_relative_threshold = true;
+        } else if (std::strcmp(key, "--cache-absolute-threshold") == 0) {
+            args->cache_use_relative_threshold = false;
+        } else if (std::strcmp(key, "--cache-no-reset-error") == 0) {
+            args->cache_reset_error_on_compute = false;
+        } else if (std::strcmp(key, "--cache-reset-error") == 0) {
+            args->cache_reset_error_on_compute = true;
+        } else if (std::strcmp(key, "--cache-fn-blocks") == 0 ||
+                   std::strcmp(key, "--cache-Fn-compute-blocks") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->cache_Fn_compute_blocks = parse_int_value(v, args->cache_Fn_compute_blocks);
+        } else if (std::strcmp(key, "--cache-bn-blocks") == 0 ||
+                   std::strcmp(key, "--cache-Bn-compute-blocks") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->cache_Bn_compute_blocks = parse_int_value(v, args->cache_Bn_compute_blocks);
+        } else if (std::strcmp(key, "--cache-residual-threshold") == 0 ||
+                   std::strcmp(key, "--cache-residual-diff-threshold") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->cache_residual_diff_threshold = parse_float_value(v, args->cache_residual_diff_threshold);
+        } else if (std::strcmp(key, "--cache-max-accumulated-residual-diff") == 0 ||
+                   std::strcmp(key, "--cache-max-accumulated-residual-diff-threshold") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->cache_max_accumulated_residual_diff =
+                parse_float_value(v, args->cache_max_accumulated_residual_diff);
+        } else if (std::strcmp(key, "--cache-warmup-steps") == 0 ||
+                   std::strcmp(key, "--cache-max-warmup-steps") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->cache_max_warmup_steps = parse_int_value(v, args->cache_max_warmup_steps);
+        } else if (std::strcmp(key, "--cache-max-cached-steps") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->cache_max_cached_steps = parse_int_value(v, args->cache_max_cached_steps);
+        } else if (std::strcmp(key, "--cache-max-continuous-cached-steps") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->cache_max_continuous_cached_steps = parse_int_value(v, args->cache_max_continuous_cached_steps);
+        } else if (std::strcmp(key, "--cache-taylor-order") == 0 ||
+                   std::strcmp(key, "--cache-taylorseer-n-derivatives") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->cache_taylorseer_n_derivatives = parse_int_value(v, args->cache_taylorseer_n_derivatives);
+        } else if (std::strcmp(key, "--cache-taylor-skip") == 0 ||
+                   std::strcmp(key, "--cache-taylorseer-skip-interval") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->cache_taylorseer_skip_interval = parse_int_value(v, args->cache_taylorseer_skip_interval);
+        } else if (std::strcmp(key, "--cache-scm-mask") == 0) {
+            args->cache_scm_mask = require_value(key);
+        } else if (std::strcmp(key, "--cache-static-scm") == 0) {
+            args->cache_scm_policy_dynamic = false;
+        } else if (std::strcmp(key, "--cache-dynamic-scm") == 0) {
+            args->cache_scm_policy_dynamic = true;
         } else if (std::strcmp(key, "--backend") == 0) {
             args->backend = require_value(key);
         } else if (std::strcmp(key, "--gpu") == 0) {
@@ -699,7 +971,79 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         return false;
     }
 
+    if (args->cache_start_percent < 0.0f || args->cache_start_percent > 1.0f ||
+        args->cache_end_percent < 0.0f || args->cache_end_percent > 1.0f ||
+        args->cache_start_percent >= args->cache_end_percent) {
+        std::fprintf(stderr, "cache window must satisfy 0 <= start < end <= 1\n");
+        return false;
+    }
+
+    if (args->cache_reuse_threshold < 0.0f && !std::isinf(args->cache_reuse_threshold)) {
+        std::fprintf(stderr, "cache threshold must be non-negative\n");
+        return false;
+    }
+
+    if (args->cache_error_decay_rate < 0.0f || args->cache_error_decay_rate > 1.0f) {
+        std::fprintf(stderr, "cache error decay must be in [0, 1]\n");
+        return false;
+    }
+
+    if (args->cache_Fn_compute_blocks < 0 || args->cache_Bn_compute_blocks < 0) {
+        std::fprintf(stderr, "cache block counts must be non-negative\n");
+        return false;
+    }
+
+    if (args->cache_residual_diff_threshold < 0.0f) {
+        std::fprintf(stderr, "cache residual threshold must be non-negative\n");
+        return false;
+    }
+
+    if (args->cache_max_accumulated_residual_diff < -1.0f) {
+        std::fprintf(stderr, "cache max accumulated residual diff must be >= -1\n");
+        return false;
+    }
+
+    if (args->cache_max_warmup_steps < 0) {
+        std::fprintf(stderr, "cache warmup steps must be non-negative\n");
+        return false;
+    }
+
+    if (args->cache_taylorseer_n_derivatives < 1) {
+        std::fprintf(stderr, "cache Taylor order must be >= 1\n");
+        return false;
+    }
+
+    if (args->cache_taylorseer_skip_interval < 0) {
+        std::fprintf(stderr, "cache Taylor skip interval must be non-negative\n");
+        return false;
+    }
+
     return true;
+}
+
+static void apply_cache_args(const FluxCliArgs& args, ld_sample_params_t* sample) {
+    if (sample == nullptr) {
+        return;
+    }
+
+    sample->cache_mode = args.cache_mode;
+    sample->cache_reuse_threshold = args.cache_reuse_threshold;
+    sample->cache_start_percent = args.cache_start_percent;
+    sample->cache_end_percent = args.cache_end_percent;
+    sample->cache_error_decay_rate = args.cache_error_decay_rate;
+    sample->cache_use_relative_threshold = args.cache_use_relative_threshold;
+    sample->cache_reset_error_on_compute = args.cache_reset_error_on_compute;
+    sample->cache_Fn_compute_blocks = args.cache_Fn_compute_blocks;
+    sample->cache_Bn_compute_blocks = args.cache_Bn_compute_blocks;
+    sample->cache_residual_diff_threshold = args.cache_residual_diff_threshold;
+    sample->cache_max_accumulated_residual_diff = args.cache_max_accumulated_residual_diff;
+    sample->cache_max_warmup_steps = args.cache_max_warmup_steps;
+    sample->cache_max_cached_steps = args.cache_max_cached_steps;
+    sample->cache_max_continuous_cached_steps = args.cache_max_continuous_cached_steps;
+    sample->cache_taylorseer_n_derivatives = args.cache_taylorseer_n_derivatives;
+    sample->cache_taylorseer_skip_interval = args.cache_taylorseer_skip_interval;
+    sample->cache_scm_mask = args.cache_scm_mask;
+    sample->cache_scm_policy_dynamic = args.cache_scm_policy_dynamic;
 }
 
 int main(int argc, char** argv) {
@@ -765,6 +1109,7 @@ int main(int argc, char** argv) {
         gen_params.sample.image_cfg_scale = 1.0f;
         gen_params.sample.distilled_guidance = args.guidance;
         gen_params.sample.flow_shift = args.flow_shift;
+        apply_cache_args(args, &gen_params.sample);
 
         ld_video_t output;
         ld_status_t status = ld_generate_video(ctx, &gen_params, &output);
@@ -820,6 +1165,7 @@ int main(int argc, char** argv) {
         gen_params.sample.image_cfg_scale = 1.0f;
         gen_params.sample.distilled_guidance = args.guidance;
         gen_params.sample.flow_shift = args.flow_shift;
+        apply_cache_args(args, &gen_params.sample);
 
         ld_image_batch_t output;
         ld_status_t status = ld_generate_image(ctx, &gen_params, &output);

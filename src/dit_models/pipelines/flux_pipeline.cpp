@@ -8,6 +8,7 @@
 #include <memory>
 #include <sstream>
 
+#include "core/optimization/cache/cache_runtime.hpp"
 #include "dit_models/components/autoencoders/auto_encoder_kl.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
 #include "dit_models/models/flux.hpp"
@@ -821,6 +822,8 @@ bool FluxPipeline::generate_one_image(const ld_image_generation_params_t* params
 
     sd::Tensor<float> x = init_latent * (1.0f - sigmas[0]) + noise * sigmas[0];
     sd::Tensor<float> denoised = x;
+    cache::CacheRuntime cache_runtime;
+    const bool cache_enabled = cache_runtime.init(params->sample, version_, sigmas);
     for (int step = 0; step < steps; ++step) {
         const float sigma = sigmas[static_cast<size_t>(step)];
         const float sigma_next = sigmas[static_cast<size_t>(step + 1)];
@@ -831,13 +834,37 @@ bool FluxPipeline::generate_one_image(const ld_image_generation_params_t* params
         sd::Tensor<float> guidance({1}, std::vector<float>{distilled_guidance});
         sd::Tensor<float> noised_input = x;
 
-        sd::Tensor<float> model_out = flux_runner_->compute(n_threads,
+        cache::CacheStepInfo cache_step;
+        cache_step.step_index = step;
+        cache_step.num_steps = steps;
+        cache_step.sigma = sigma;
+        cache_step.sigma_next = sigma_next;
+        if (cache_enabled) {
+            cache_runtime.begin_step(cache_step);
+        }
+
+        sd::Tensor<float> model_out;
+        const void* condition_key = static_cast<const void*>(&condition);
+        const bool cache_hit = cache_enabled &&
+                               cache_runtime.before_forward(cache::CacheBranch::Main,
+                                                            condition_key,
                                                             noised_input,
-                                                            timesteps,
-                                                            condition.c_crossattn,
-                                                            {},
-                                                            condition.c_vector,
-                                                            guidance);
+                                                            &model_out);
+        if (!cache_hit) {
+            model_out = flux_runner_->compute(n_threads,
+                                              noised_input,
+                                              timesteps,
+                                              condition.c_crossattn,
+                                              {},
+                                              condition.c_vector,
+                                              guidance);
+            if (!model_out.empty() && cache_enabled) {
+                cache_runtime.after_forward(cache::CacheBranch::Main,
+                                            condition_key,
+                                            noised_input,
+                                            model_out);
+            }
+        }
         if (model_out.empty()) {
             if (error != nullptr) {
                 *error = sd_format("Flux transformer compute failed at step %d", step + 1);
@@ -854,6 +881,12 @@ bool FluxPipeline::generate_one_image(const ld_image_generation_params_t* params
             x += d * (sigma_next - sigma);
         }
         LOG_INFO("flux step %d/%d sigma=%.6f next=%.6f", step + 1, steps, sigma, sigma_next);
+        if (cache_enabled) {
+            cache_runtime.end_step(cache_step);
+        }
+    }
+    if (cache_enabled) {
+        cache_runtime.log_summary(static_cast<size_t>(steps));
     }
     flux_runner_->free_compute_buffer();
 
