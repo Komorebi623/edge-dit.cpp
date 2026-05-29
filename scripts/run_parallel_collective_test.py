@@ -14,7 +14,7 @@ def main() -> int:
     parser.add_argument("--binary", required=True, help="Path to parallel-collective-test")
     parser.add_argument("--backend", default="cpu", choices=["cpu", "nccl"], help="Communication backend")
     parser.add_argument("--world-size", type=int, default=2, help="Number of local processes")
-    parser.add_argument("--store-path", default=None, help="Shared file store path")
+    parser.add_argument("--store-path", default=None, help="Shared file store path for the CPU backend")
     parser.add_argument("--keep-store", action="store_true", help="Do not delete the store path after the test")
     args = parser.parse_args()
 
@@ -26,6 +26,24 @@ def main() -> int:
     if args.world_size <= 0:
         print("--world-size must be positive", file=sys.stderr)
         return 1
+
+    if args.backend == "nccl":
+        mpirun = shutil.which("mpirun") or shutil.which("mpiexec")
+        if mpirun is None:
+            print("NCCL distributed test requires mpirun or mpiexec", file=sys.stderr)
+            return 1
+
+        cmd = [mpirun]
+        if hasattr(os, "geteuid") and os.geteuid() == 0 and "openmpi" in mpirun.lower():
+            cmd.append("--allow-run-as-root")
+        cmd.extend([
+            "-np",
+            str(args.world_size),
+            str(binary),
+            "--backend",
+            "nccl",
+        ])
+        return subprocess.call(cmd, env=os.environ.copy())
 
     store_path = Path(args.store_path) if args.store_path else Path(tempfile.mkdtemp(prefix="ed-parallel-"))
     store_path.mkdir(parents=True, exist_ok=True)

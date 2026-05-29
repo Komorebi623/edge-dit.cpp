@@ -28,6 +28,7 @@ option(ED_BUILD_TESTS "Build edge-dit tests" OFF)
 option(ED_BUILD_SHARED_LIBS "Build edge-dit as a shared library" OFF)
 option(ED_ENABLE_PARALLEL "Enable edge-dit lightweight parallel runtime" ON)
 option(ED_ENABLE_NCCL "Enable NCCL communication backend" OFF)
+option(ED_ENABLE_MPI "Enable MPI bootstrap for distributed process groups" OFF)
 set(NCCL_ROOT "" CACHE PATH "Path to NCCL installation")
 
 if(ED_BUILD_TESTS)
@@ -67,6 +68,10 @@ if(ED_ENABLE_NCCL)
     if(NOT ED_NCCL_INCLUDE_DIR OR NOT ED_NCCL_LIBRARY)
         message(FATAL_ERROR "ED_ENABLE_NCCL=ON requires NCCL. Set NCCL_ROOT or provide third_party/nccl.")
     endif()
+endif()
+
+if(ED_ENABLE_MPI)
+    find_package(MPI REQUIRED COMPONENTS CXX)
 endif()
 
 if(MSVC)
@@ -179,6 +184,11 @@ if(ED_ENABLE_NCCL)
     target_link_libraries(edgedit PRIVATE CUDA::cudart ${ED_NCCL_LIBRARY})
 endif()
 
+if(ED_ENABLE_MPI)
+    target_compile_definitions(edgedit PUBLIC ED_ENABLE_MPI)
+    target_link_libraries(edgedit PUBLIC MPI::MPI_CXX)
+endif()
+
 target_compile_features(edgedit PUBLIC cxx_std_17)
 
 if(ED_BUILD_EXAMPLES)
@@ -231,6 +241,9 @@ if(ED_BUILD_TESTS)
     if(ED_ENABLE_NCCL)
         target_include_directories(parallel-collective-test PRIVATE ${ED_NCCL_INCLUDE_DIR})
         target_link_libraries(parallel-collective-test PRIVATE CUDA::cudart ${ED_NCCL_LIBRARY})
+    endif()
+    if(ED_ENABLE_MPI)
+        target_link_libraries(parallel-collective-test PRIVATE MPI::MPI_CXX)
     endif()
     add_test(
         NAME parallel-collective-cpu

@@ -1,11 +1,12 @@
 #include "parallel/backends/nccl/nccl_process_group.hpp"
 
-#include <chrono>
+#include <cstdlib>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <stdexcept>
-#include <thread>
+
+#ifdef ED_ENABLE_MPI
+#include <mpi.h>
+#endif
 
 namespace edgedit::parallel {
 namespace {
@@ -44,49 +45,96 @@ ncclRedOp_t to_nccl_reduce_op(ReduceOp op) {
     throw std::invalid_argument("unsupported NCCL reduce op");
 }
 
-void write_unique_id(const std::string& path, const ncclUniqueId& id) {
-    const std::filesystem::path final_path(path);
-    std::filesystem::create_directories(final_path.parent_path());
-    const std::string tmp_path = path + ".tmp";
-    {
-        std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            throw std::runtime_error("failed to write NCCL unique id: " + tmp_path);
-        }
-        out.write(reinterpret_cast<const char*>(&id), sizeof(id));
+int env_int(const char* name, int fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return fallback;
     }
-    std::filesystem::rename(tmp_path, final_path);
+    char* end = nullptr;
+    long parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0') {
+        return fallback;
+    }
+    return static_cast<int>(parsed);
 }
 
-ncclUniqueId read_unique_id(const std::string& path) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
-    while (!std::filesystem::exists(path)) {
-        if (std::chrono::steady_clock::now() > deadline) {
-            throw std::runtime_error("timed out waiting for NCCL unique id: " + path);
+int infer_local_rank(int fallback) {
+    fallback = env_int("LOCAL_RANK", fallback);
+    fallback = env_int("OMPI_COMM_WORLD_LOCAL_RANK", fallback);
+    fallback = env_int("MV2_COMM_WORLD_LOCAL_RANK", fallback);
+    fallback = env_int("SLURM_LOCALID", fallback);
+    fallback = env_int("PMI_LOCAL_RANK", fallback);
+    return fallback;
+}
+
+int infer_global_rank(int fallback) {
+    fallback = env_int("RANK", fallback);
+    fallback = env_int("OMPI_COMM_WORLD_RANK", fallback);
+    fallback = env_int("MV2_COMM_WORLD_RANK", fallback);
+    fallback = env_int("SLURM_PROCID", fallback);
+    fallback = env_int("PMI_RANK", fallback);
+    return fallback;
+}
+
+int infer_world_size(int fallback) {
+    fallback = env_int("WORLD_SIZE", fallback);
+    fallback = env_int("OMPI_COMM_WORLD_SIZE", fallback);
+    fallback = env_int("MV2_COMM_WORLD_SIZE", fallback);
+    fallback = env_int("SLURM_NTASKS", fallback);
+    fallback = env_int("PMI_SIZE", fallback);
+    return fallback;
+}
+
+#ifdef ED_ENABLE_MPI
+struct MpiRuntime {
+    MpiRuntime() {
+        int initialized = 0;
+        MPI_Initialized(&initialized);
+        if (!initialized) {
+            int provided = 0;
+            MPI_Init_thread(nullptr, nullptr, MPI_THREAD_SERIALIZED, &provided);
+            owned = true;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    ncclUniqueId id;
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        throw std::runtime_error("failed to read NCCL unique id: " + path);
+    ~MpiRuntime() {
+        int finalized = 0;
+        MPI_Finalized(&finalized);
+        if (owned && !finalized) {
+            MPI_Finalize();
+        }
     }
-    in.read(reinterpret_cast<char*>(&id), sizeof(id));
-    if (in.gcount() != static_cast<std::streamsize>(sizeof(id))) {
-        throw std::runtime_error("invalid NCCL unique id size: " + path);
-    }
-    return id;
+
+    bool owned = false;
+};
+
+MpiRuntime& mpi_runtime() {
+    static MpiRuntime runtime;
+    return runtime;
 }
+#endif
 
 } // namespace
 
 NcclProcessGroup::NcclProcessGroup(const ParallelConfig& config) : config_(config) {
+#ifdef ED_ENABLE_MPI
+    mpi_runtime();
+    MPI_Comm_rank(MPI_COMM_WORLD, &config_.rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &config_.world_size);
+    config_.local_rank = infer_local_rank(config_.local_rank);
+    config_.device     = config_.local_rank;
+#else
+    config_.rank       = infer_global_rank(config_.rank);
+    config_.world_size = infer_world_size(config_.world_size);
+    config_.local_rank = infer_local_rank(config_.local_rank);
+    config_.device     = config_.local_rank;
+#endif
+
     if (config_.world_size <= 0) {
         throw std::invalid_argument("NCCL world_size must be positive");
     }
-    if (config_.store_path.empty() && config_.world_size > 1) {
-        throw std::invalid_argument("NCCL backend requires store_path for unique id exchange");
+    if (config_.rank < 0 || config_.rank >= config_.world_size) {
+        throw std::invalid_argument("NCCL rank must be in [0, world_size)");
     }
 
     check_cuda(cudaSetDevice(config_.device), "cudaSetDevice");
@@ -212,14 +260,16 @@ void NcclProcessGroup::broadcast(const Buffer& buffer, int root) {
 
 void NcclProcessGroup::init_unique_id() {
     ncclUniqueId id;
-    if (config_.world_size == 1) {
+    if (config_.rank == 0) {
         check_nccl(ncclGetUniqueId(&id), "ncclGetUniqueId");
-    } else if (config_.rank == 0) {
-        check_nccl(ncclGetUniqueId(&id), "ncclGetUniqueId");
-        write_unique_id(config_.store_path, id);
-    } else {
-        id = read_unique_id(config_.store_path);
     }
+#ifdef ED_ENABLE_MPI
+    MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD);
+#else
+    if (config_.world_size != 1) {
+        throw std::runtime_error("distributed NCCL requires ED_ENABLE_MPI=ON for unique id bootstrap");
+    }
+#endif
     check_nccl(ncclCommInitRank(&comm_, config_.world_size, id, config_.rank), "ncclCommInitRank");
 }
 

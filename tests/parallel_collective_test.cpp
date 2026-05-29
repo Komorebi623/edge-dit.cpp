@@ -29,6 +29,28 @@ struct Args {
     std::string store_path;
 };
 
+int env_int(const char* name, int fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return fallback;
+    }
+    char* end = nullptr;
+    long parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0') {
+        return fallback;
+    }
+    return static_cast<int>(parsed);
+}
+
+int infer_local_rank(int fallback) {
+    fallback = env_int("LOCAL_RANK", fallback);
+    fallback = env_int("OMPI_COMM_WORLD_LOCAL_RANK", fallback);
+    fallback = env_int("MV2_COMM_WORLD_LOCAL_RANK", fallback);
+    fallback = env_int("SLURM_LOCALID", fallback);
+    fallback = env_int("PMI_LOCAL_RANK", fallback);
+    return fallback;
+}
+
 int parse_int(const char* value, const char* name) {
     char* end = nullptr;
     long v    = std::strtol(value, &end, 10);
@@ -223,7 +245,7 @@ int main(int argc, char** argv) {
         auto group = edgedit::parallel::create_process_group(config);
         if (config.backend == Backend::kNccl) {
 #ifdef ED_ENABLE_NCCL
-            run_cuda_tests(*group, args.device);
+            run_cuda_tests(*group, infer_local_rank(args.device));
 #else
             throw std::runtime_error("binary was built without NCCL support");
 #endif
@@ -231,7 +253,7 @@ int main(int argc, char** argv) {
             run_host_tests(*group);
         }
 
-        std::cout << "rank " << args.rank << "/" << args.world_size << " backend=" << args.backend << " ok\n";
+        std::cout << "rank " << group->rank() << "/" << group->size() << " backend=" << args.backend << " ok\n";
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "parallel_collective_test failed: " << e.what() << "\n";
