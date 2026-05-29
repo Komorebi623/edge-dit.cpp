@@ -26,9 +26,13 @@ find_package(Threads REQUIRED)
 option(ED_BUILD_EXAMPLES "Build examples" ON)
 option(ED_BUILD_TESTS "Build edge-dit tests" OFF)
 option(ED_BUILD_SHARED_LIBS "Build edge-dit as a shared library" OFF)
+option(ED_ENABLE_PARALLEL "Enable edge-dit lightweight parallel runtime" ON)
+option(ED_ENABLE_NCCL "Enable NCCL communication backend" OFF)
+set(NCCL_ROOT "" CACHE PATH "Path to NCCL installation")
 
 if(ED_BUILD_TESTS)
     enable_testing()
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
 endif()
 
 option(ED_GGML_CUDA   "Enable ggml CUDA backend" OFF)
@@ -37,6 +41,33 @@ option(ED_GGML_VULKAN "Enable ggml Vulkan backend" OFF)
 option(ED_GGML_OPENCL "Enable ggml OpenCL backend" OFF)
 option(ED_GGML_SYCL   "Enable ggml SYCL backend" OFF)
 option(ED_GGML_HIP    "Enable ggml HIP backend" OFF)
+
+if(ED_ENABLE_NCCL)
+    find_package(CUDAToolkit REQUIRED)
+
+    set(_ED_NCCL_HINTS)
+    if(NCCL_ROOT)
+        list(APPEND _ED_NCCL_HINTS "${NCCL_ROOT}")
+    endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nccl")
+        list(APPEND _ED_NCCL_HINTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nccl")
+    endif()
+
+    find_path(ED_NCCL_INCLUDE_DIR
+        NAMES nccl.h
+        HINTS ${_ED_NCCL_HINTS}
+        PATH_SUFFIXES include
+    )
+    find_library(ED_NCCL_LIBRARY
+        NAMES nccl
+        HINTS ${_ED_NCCL_HINTS}
+        PATH_SUFFIXES lib lib64
+    )
+
+    if(NOT ED_NCCL_INCLUDE_DIR OR NOT ED_NCCL_LIBRARY)
+        message(FATAL_ERROR "ED_ENABLE_NCCL=ON requires NCCL. Set NCCL_ROOT or provide third_party/nccl.")
+    endif()
+endif()
 
 if(MSVC)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
@@ -138,6 +169,16 @@ target_link_libraries(edgedit
         ggml
 )
 
+if(ED_ENABLE_PARALLEL)
+    target_compile_definitions(edgedit PUBLIC ED_ENABLE_PARALLEL)
+endif()
+
+if(ED_ENABLE_NCCL)
+    target_compile_definitions(edgedit PUBLIC ED_ENABLE_NCCL)
+    target_include_directories(edgedit PRIVATE ${ED_NCCL_INCLUDE_DIR})
+    target_link_libraries(edgedit PRIVATE CUDA::cudart ${ED_NCCL_LIBRARY})
+endif()
+
 target_compile_features(edgedit PUBLIC cxx_std_17)
 
 if(ED_BUILD_EXAMPLES)
@@ -157,23 +198,49 @@ if(ED_BUILD_EXAMPLES)
 endif()
 
 if(ED_BUILD_TESTS)
-    add_executable(cache-smoke
-        tests/cache_smoke.cpp
-        src/core/optimization/cache/cache_config.cpp
-        src/core/optimization/cache/cache_methods.cpp
-        src/core/optimization/cache/cache_runtime.cpp
-        src/core/optimization/cache/cache_types.cpp
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/cache_smoke.cpp")
+        add_executable(cache-smoke
+            tests/cache_smoke.cpp
+            src/core/optimization/cache/cache_config.cpp
+            src/core/optimization/cache/cache_methods.cpp
+            src/core/optimization/cache/cache_runtime.cpp
+            src/core/optimization/cache/cache_types.cpp
+        )
+        target_include_directories(cache-smoke
+            PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/include
+                ${CMAKE_CURRENT_SOURCE_DIR}/src
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+                ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+                ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/include
+        )
+        target_compile_features(cache-smoke PRIVATE cxx_std_17)
+        add_test(NAME cache-smoke COMMAND cache-smoke)
+    endif()
+
+    add_executable(parallel-collective-test
+        tests/parallel_collective_test.cpp
     )
-    target_include_directories(cache-smoke
+    target_link_libraries(parallel-collective-test PRIVATE edgedit)
+    target_include_directories(parallel-collective-test
         PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core
-            ${CMAKE_CURRENT_SOURCE_DIR}/third_party
-            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/include
     )
-    target_compile_features(cache-smoke PRIVATE cxx_std_17)
-    add_test(NAME cache-smoke COMMAND cache-smoke)
+    target_compile_features(parallel-collective-test PRIVATE cxx_std_17)
+    if(ED_ENABLE_NCCL)
+        target_include_directories(parallel-collective-test PRIVATE ${ED_NCCL_INCLUDE_DIR})
+        target_link_libraries(parallel-collective-test PRIVATE CUDA::cudart ${ED_NCCL_LIBRARY})
+    endif()
+    add_test(
+        NAME parallel-collective-cpu
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_parallel_collective_test.py
+            --binary $<TARGET_FILE:parallel-collective-test>
+            --backend cpu
+            --world-size 2
+    )
 endif()
 
 set(ED_PUBLIC_HEADERS include/edge-dit.h)
