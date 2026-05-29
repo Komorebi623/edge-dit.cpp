@@ -1,5 +1,5 @@
-#ifndef __LD_MODEL_IO_GGUF_IO_H__
-#define __LD_MODEL_IO_GGUF_IO_H__
+#ifndef __ED_MODEL_IO_GGUF_IO_H__
+#define __ED_MODEL_IO_GGUF_IO_H__
 
 #include <string>
 #include <vector>
@@ -14,4 +14,4 @@ bool write_gguf_file(const std::string& file_path,
                      const std::vector<TensorWriteInfo>& tensors,
                      std::string* error = nullptr);
 
-#endif  // __LD_MODEL_IO_GGUF_IO_H__
+#endif  // __ED_MODEL_IO_GGUF_IO_H__

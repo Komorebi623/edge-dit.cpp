@@ -73,7 +73,7 @@ bool has_text(const char* text) {
     return text != nullptr && text[0] != '\0';
 }
 
-std::string display_model_path(const ld_context_params_t& params) {
+std::string display_model_path(const ed_context_params_t& params) {
     if (has_text(params.model_path)) {
         return params.model_path;
     }
@@ -84,9 +84,9 @@ std::string display_model_path(const ld_context_params_t& params) {
 }
 
 struct Args {
-    LightDitServerParams server;
-    ld_context_params_t context = {};
-    LightDitDefaultGenerationParams defaults;
+    EdgeDitServerParams server;
+    ed_context_params_t context = {};
+    EdgeDitDefaultGenerationParams defaults;
     const char* backend = nullptr;
 };
 
@@ -95,7 +95,7 @@ bool parse_args(int argc, char** argv, Args* args) {
         return false;
     }
 
-    ld_context_params_init(&args->context);
+    ed_context_params_init(&args->context);
 
     for (int i = 1; i < argc; ++i) {
         const char* key = argv[i];
@@ -168,7 +168,7 @@ bool parse_args(int argc, char** argv, Args* args) {
         } else if (std::strcmp(key, "--cache") == 0 || std::strcmp(key, "--cache-mode") == 0) {
             const char* value = require_value(key);
             if (value == nullptr) return false;
-            if (!ld_cache_mode_from_string(value, &args->defaults.cache_mode)) {
+            if (!ed_cache_mode_from_string(value, &args->defaults.cache_mode)) {
                 std::fprintf(stderr, "unsupported cache mode: %s\n", value);
                 return false;
             }
@@ -223,18 +223,18 @@ int main(int argc, char** argv) {
     }
 
     if (has_text(args.backend)) {
-        setenv("LDIT_BACKEND", args.backend, 1);
+        setenv("ED_BACKEND", args.backend, 1);
     }
 
-    std::fprintf(stderr, "loading light-dit model: %s\n", display_model_path(args.context).c_str());
-    ld_context_t* ctx = ld_create_context(&args.context);
+    std::fprintf(stderr, "loading edge-dit model: %s\n", display_model_path(args.context).c_str());
+    ed_context_t* ctx = ed_create_context(&args.context);
     if (ctx == nullptr) {
-        std::fprintf(stderr, "failed to create light-dit context\n");
+        std::fprintf(stderr, "failed to create edge-dit context\n");
         return 2;
     }
 
     std::mutex ctx_mutex;
-    LightDitServerRuntime runtime;
+    EdgeDitServerRuntime runtime;
     runtime.ctx = ctx;
     runtime.ctx_mutex = &ctx_mutex;
     runtime.server = &args.server;
@@ -265,13 +265,13 @@ int main(int argc, char** argv) {
         });
     }
 
-    register_lightdit_routes(server, runtime);
+    register_edgedit_routes(server, runtime);
 
-    std::fprintf(stderr, "light-dit server listening on http://%s:%d\n",
+    std::fprintf(stderr, "edge-dit server listening on http://%s:%d\n",
                  args.server.host.c_str(),
                  args.server.port);
     const bool ok = server.listen(args.server.host, args.server.port);
 
-    ld_free_context(ctx);
+    ed_free_context(ctx);
     return ok ? 0 : 3;
 }

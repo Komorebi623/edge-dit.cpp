@@ -1,5 +1,5 @@
-#ifndef __LD_MODEL_IO_BINARY_IO_H__
-#define __LD_MODEL_IO_BINARY_IO_H__
+#ifndef __ED_MODEL_IO_BINARY_IO_H__
+#define __ED_MODEL_IO_BINARY_IO_H__
 
 #include <cstdint>
 #include <ostream>
@@ -54,4 +54,4 @@ namespace model_io {
 
 }  // namespace model_io
 
-#endif  // __LD_MODEL_IO_BINARY_IO_H__
+#endif  // __ED_MODEL_IO_BINARY_IO_H__

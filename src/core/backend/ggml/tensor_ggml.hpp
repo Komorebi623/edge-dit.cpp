@@ -1,5 +1,5 @@
-#ifndef __LD_TENSOR_GGML_HPP__
-#define __LD_TENSOR_GGML_HPP__
+#ifndef __ED_TENSOR_GGML_HPP__
+#define __ED_TENSOR_GGML_HPP__
 
 #include <array>
 #include <cstring>

@@ -1,8 +1,8 @@
-#ifndef __LD_UPSCALER_H__
-#define __LD_UPSCALER_H__
+#ifndef __ED_UPSCALER_H__
+#define __ED_UPSCALER_H__
 
 #include "dit_models/components/super_resolution/esrgan.hpp"
-#include "light-dit/all.h"
+#include "edge-dit.h"
 #include "utils/tensor.hpp"
 
 #include <memory>
@@ -27,7 +27,7 @@ struct UpscalerGGML {
                         int n_threads);
     void set_max_graph_vram_bytes(size_t max_vram_bytes);
     sd::Tensor<float> upscale_tensor(const sd::Tensor<float>& input_tensor);
-    ld_image_t upscale(ld_image_t input_image, uint32_t upscale_factor);
+    ed_image_t upscale(ed_image_t input_image, uint32_t upscale_factor);
 };
 
-#endif  // __LD_UPSCALER_H__
+#endif  // __ED_UPSCALER_H__

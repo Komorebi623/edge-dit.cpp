@@ -377,13 +377,13 @@ def run_case(args: argparse.Namespace, case: CacheCase, env: dict[str, str]) -> 
 
 def main() -> int:
     root = repo_root()
-    default_cli_cache = root / "build-cuda" / "bin" / "ld-cli-cache"
-    default_cli = default_cli_cache if default_cli_cache.is_file() else root / "build-cuda" / "bin" / "ld-cli"
+    default_cli_cache = root / "build-cuda" / "bin" / "ed-cli-cache"
+    default_cli = default_cli_cache if default_cli_cache.is_file() else root / "build-cuda" / "bin" / "ed-cli"
 
-    parser = argparse.ArgumentParser(description="Benchmark Flux cache modes with ld-cli.")
-    parser.add_argument("--cli", type=Path, default=default_cli, help="Path to ld-cli or ld-cli-cache")
+    parser = argparse.ArgumentParser(description="Benchmark Flux cache modes with ed-cli.")
+    parser.add_argument("--cli", type=Path, default=default_cli, help="Path to ed-cli or ed-cli-cache")
     parser.add_argument("--model", required=True, help="Flux model or diffusers directory")
-    parser.add_argument("--backend", default="cuda", help="Backend passed to ld-cli")
+    parser.add_argument("--backend", default="cuda", help="Backend passed to ed-cli")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--width", type=int, default=1024)
     parser.add_argument("--height", type=int, default=1024)
@@ -408,7 +408,7 @@ def main() -> int:
         "--extra-cli-arg",
         action="append",
         default=[],
-        help="Extra raw argument appended to every ld-cli call. Repeat for multiple args.",
+        help="Extra raw argument appended to every ed-cli call. Repeat for multiple args.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running them")
     parser.add_argument("--continue-on-error", action="store_true")
@@ -425,7 +425,7 @@ def main() -> int:
             print(f"warning: CLI not found for dry-run: {args.cli}", file=sys.stderr)
         else:
             print(f"error: CLI not found: {args.cli}", file=sys.stderr)
-            print("hint: build ld-cli first or pass --cli /path/to/ld-cli-cache", file=sys.stderr)
+            print("hint: build ed-cli first or pass --cli /path/to/ed-cli-cache", file=sys.stderr)
             return 2
 
     args.out_dir.mkdir(parents=True, exist_ok=True)

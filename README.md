@@ -1,13 +1,13 @@
-# light-dit.cpp
+# edge-dit.cpp
 
-`light-dit.cpp` 是一个基于 C/C++ 的 DiT 推理项目，提供 `ld-cli` 命令行工具运行 SD3、Flux、Wan、Qwen-Image 等模型。
+`edge-dit.cpp` 是一个基于 C/C++ 的 DiT 推理项目，提供 `ed-cli` 命令行工具运行 SD3、Flux、Wan、Qwen-Image 等模型。
 
 ## 编译
 
 进入项目目录：
 
 ```bash
-cd /export/home/liuyiming54/light-dit.cpp
+cd /export/home/liuyiming54/edge-dit.cpp
 ```
 
 编译：
@@ -20,7 +20,7 @@ bash ./scripts/build_cpu.sh
 编译完成后，命令行程序位于：
 
 ```bash
-./build-cuda/bin/ld-cli
+./build-cuda/bin/ed-cli
 ```
 
 ## 基本用法
@@ -28,7 +28,7 @@ bash ./scripts/build_cpu.sh
 使用 diffusers 目录加载模型：
 
 ```bash
-./build-cuda/bin/ld-cli --backend cuda \
+./build-cuda/bin/ed-cli --backend cuda \
   --model /path/to/diffusers-model-dir \
   -p "prompt text" \
   -W 1024 -H 1024 --steps 50 -s 0 \
@@ -38,7 +38,7 @@ bash ./scripts/build_cpu.sh
 使用组件式路径加载模型：
 
 ```bash
-./build-cuda/bin/ld-cli --backend cuda \
+./build-cuda/bin/ed-cli --backend cuda \
   --diffusion-model /path/to/transformer.safetensors \
   --clip_l /path/to/clip_l.safetensors \
   --clip_g /path/to/clip_g.safetensors \
@@ -54,7 +54,7 @@ bash ./scripts/build_cpu.sh
 ### SD3 diffusers 目录
 
 ```bash
-./build-cuda/bin/ld-cli --backend cuda \
+./build-cuda/bin/ed-cli --backend cuda \
   --model /export/home/liuyiming54/models/stable-diffusion-3-medium-diffusers \
   -p "a cute cat holding a white sign with the exact text 'sd3.cpp' written clearly on it" \
   -W 1024 -H 1024 --steps 50 -s 0 \
@@ -65,7 +65,7 @@ bash ./scripts/build_cpu.sh
 ### SD3 组件式加载
 
 ```bash
-./build-cuda/bin/ld-cli --backend cuda \
+./build-cuda/bin/ed-cli --backend cuda \
   --diffusion-model /export/home/liuyiming54/models/stable-diffusion-3-medium-diffusers/transformer/diffusion_pytorch_model.safetensors \
   --clip_l /export/home/liuyiming54/models/stable-diffusion-3-medium-diffusers/text_encoder/model.safetensors \
   --clip_g /export/home/liuyiming54/models/stable-diffusion-3-medium-diffusers/text_encoder_2/model.safetensors \
@@ -80,18 +80,18 @@ bash ./scripts/build_cpu.sh
 ### Flux diffusers 目录
 
 ```bash
-./build-cuda/bin/ld-cli --backend cuda \
+./build-cuda/bin/ed-cli --backend cuda \
   --model /mnt/cfs/9n-das-admin/llm_models/flux-dev/ \
   -p "a cinematic photo of a glass teapot on a wooden table, soft morning light" \
   -W 1024 -H 1024 --steps 50 -s 0 \
   --guidance 3.5 \
-  -o flux_lightdit_test.png
+  -o flux_edgedit_test.png
 ```
 
 ### Flux 组件式加载
 
 ```bash
-./build-cuda/bin/ld-cli --backend cuda \
+./build-cuda/bin/ed-cli --backend cuda \
   --diffusion-model /mnt/cfs/9n-das-admin/llm_models/flux-dev/transformer/diffusion_pytorch_model.safetensors.index.json \
   --clip_l /mnt/cfs/9n-das-admin/llm_models/flux-dev/text_encoder/model.safetensors \
   --t5xxl /mnt/cfs/9n-das-admin/llm_models/flux-dev/text_encoder_2/model.safetensors.index.json \
@@ -105,7 +105,7 @@ bash ./scripts/build_cpu.sh
 ### Wan 文生视频 diffusers 目录
 
 ```bash
-./build-cuda/bin/ld-cli --backend cuda \
+./build-cuda/bin/ed-cli --backend cuda \
   --video \
   --model /export/home/liuyiming54/models/Wan2.1-T2V-1.3B-Diffusers \
   -p "a small robot walking through a rainy neon street, cinematic lighting" \
@@ -117,7 +117,7 @@ bash ./scripts/build_cpu.sh
 ### Qwen-Image
 
 ```bash
-./build-cuda/bin/ld-cli --backend cuda \
+./build-cuda/bin/ed-cli --backend cuda \
   --model /export/home/liuyiming54/models/Qwen-Image \
   -p "a cute cat holding a white sign with the exact text 'qwen image' written clearly on it" \
   -W 1024 -H 1024 --steps 50 -s 0 \

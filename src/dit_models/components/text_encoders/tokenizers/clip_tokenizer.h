@@ -1,5 +1,5 @@
-#ifndef __LD_TOKENIZERS_CLIP_TOKENIZER_H__
-#define __LD_TOKENIZERS_CLIP_TOKENIZER_H__
+#ifndef __ED_TOKENIZERS_CLIP_TOKENIZER_H__
+#define __ED_TOKENIZERS_CLIP_TOKENIZER_H__
 
 #include <cstddef>
 #include <string>
@@ -17,4 +17,4 @@ public:
     explicit CLIPTokenizer(int pad_token_id = 49407, const std::string& merges_utf8_str = "");
 };
 
-#endif  // __LD_TOKENIZERS_CLIP_TOKENIZER_H__
+#endif  // __ED_TOKENIZERS_CLIP_TOKENIZER_H__

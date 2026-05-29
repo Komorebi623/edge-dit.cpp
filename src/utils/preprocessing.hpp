@@ -93,7 +93,7 @@ static inline void preprocessing_tensor_frame_to_sd_image(const sd::Tensor<float
     }
 }
 
-static inline sd::Tensor<float> ld_image_to_preprocessing_tensor(ld_image_t image) {
+static inline sd::Tensor<float> ed_image_to_preprocessing_tensor(ed_image_t image) {
     sd::Tensor<float> tensor({static_cast<int64_t>(image.width), static_cast<int64_t>(image.height), static_cast<int64_t>(image.channels), 1});
     for (uint32_t y = 0; y < image.height; ++y) {
         for (uint32_t x = 0; x < image.width; ++x) {
@@ -291,7 +291,7 @@ static inline void threshold_hystersis(sd::Tensor<float>* img, float high_thresh
     }
 }
 
-bool preprocess_canny(ld_image_t img, float high_threshold, float low_threshold, float weak, float strong, bool inverse) {
+bool preprocess_canny(ed_image_t img, float high_threshold, float low_threshold, float weak, float strong, bool inverse) {
     float kX[9] = {
         -1, 0, 1,
         -2, 0, 2,
@@ -306,7 +306,7 @@ bool preprocess_canny(ld_image_t img, float high_threshold, float low_threshold,
     sd::Tensor<float> sf_kx({3, 3, 1, 1}, std::vector<float>(kX, kX + 9));
     sd::Tensor<float> sf_ky({3, 3, 1, 1}, std::vector<float>(kY, kY + 9));
 
-    sd::Tensor<float> image      = ld_image_to_preprocessing_tensor(img);
+    sd::Tensor<float> image      = ed_image_to_preprocessing_tensor(img);
     sd::Tensor<float> image_gray = grayscale_tensor(image);
     image_gray                   = convolve_tensor(image_gray, gkernel, 2);
     sd::Tensor<float> iX         = convolve_tensor(image_gray, sf_kx, 1);

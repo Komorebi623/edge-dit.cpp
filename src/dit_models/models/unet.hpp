@@ -186,12 +186,12 @@ public:
 
     UnetModelBlock(SDVersion version = VERSION_SD1, const String2TensorStorage& tensor_storage_map = {})
         : version(version) {
-        if (ld_version_is_sd2(version)) {
+        if (ed_version_is_sd2(version)) {
             context_dim           = 1024;
             num_head_channels     = 64;
             num_heads             = -1;
             use_linear_projection = true;
-        } else if (ld_version_is_sdxl(version)) {
+        } else if (ed_version_is_sdxl(version)) {
             context_dim           = 2048;
             attention_resolutions = {4, 2};
             channel_mult          = {1, 2, 4};
@@ -211,9 +211,9 @@ public:
             num_heads             = -1;
             use_linear_projection = true;
         }
-        if (ld_version_is_inpaint(version)) {
+        if (ed_version_is_inpaint(version)) {
             in_channels = 9;
-        } else if (ld_version_is_unet_edit(version)) {
+        } else if (ed_version_is_unet_edit(version)) {
             in_channels = 8;
         }
         if (version == VERSION_SD1_TINY_UNET || version == VERSION_SD2_TINY_UNET || version == VERSION_SDXS_512_DS || version == VERSION_SDXS_09) {
@@ -232,7 +232,7 @@ public:
         // time_embed_1 is nn.SiLU()
         blocks["time_embed.2"] = std::shared_ptr<GGMLBlock>(new Linear(time_embed_dim, time_embed_dim));
 
-        if (ld_version_is_sdxl(version) || version == VERSION_SVD) {
+        if (ed_version_is_sdxl(version) || version == VERSION_SVD) {
             blocks["label_emb.0.0"] = std::shared_ptr<GGMLBlock>(new Linear(adm_in_channels, time_embed_dim));
             // label_emb_1 is nn.SiLU()
             blocks["label_emb.0.2"] = std::shared_ptr<GGMLBlock>(new Linear(time_embed_dim, time_embed_dim));

@@ -1143,7 +1143,7 @@ namespace WAN {
         }
 
         sd::Tensor<float> vae_output_to_latents(const sd::Tensor<float>& vae_output, std::shared_ptr<RNG> rng) override {
-            LD_UNUSED(rng);
+            ED_UNUSED(rng);
             return vae_output;
         }
 

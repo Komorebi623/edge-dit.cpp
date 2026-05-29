@@ -1,5 +1,5 @@
-#ifndef __LD_TENSOR_STORAGE_H__
-#define __LD_TENSOR_STORAGE_H__
+#ifndef __ED_TENSOR_STORAGE_H__
+#define __ED_TENSOR_STORAGE_H__
 
 #include <cstddef>
 #include <cstdint>
@@ -11,7 +11,7 @@
 
 #include "ggml.h"
 
-#define LD_MAX_DIMS 5
+#define ED_MAX_DIMS 5
 
 struct TensorStorage {
     std::string name;
@@ -21,7 +21,7 @@ struct TensorStorage {
     bool is_f8_e5m2         = false;
     bool is_f64             = false;
     bool is_i64             = false;
-    int64_t ne[LD_MAX_DIMS] = {1, 1, 1, 1, 1};
+    int64_t ne[ED_MAX_DIMS] = {1, 1, 1, 1, 1};
     int n_dims              = 0;
 
     std::string storage_key;
@@ -40,7 +40,7 @@ struct TensorStorage {
 
     int64_t nelements() const {
         int64_t n = 1;
-        for (int i = 0; i < LD_MAX_DIMS; i++) {
+        for (int i = 0; i < ED_MAX_DIMS; i++) {
             n *= ne[i];
         }
         return n;
@@ -87,7 +87,7 @@ struct TensorStorage {
     }
 
     void reverse_ne() {
-        int64_t new_ne[LD_MAX_DIMS] = {1, 1, 1, 1, 1};
+        int64_t new_ne[ED_MAX_DIMS] = {1, 1, 1, 1, 1};
         for (int i = 0; i < n_dims; i++) {
             new_ne[i] = ne[n_dims - 1 - i];
         }
@@ -110,9 +110,9 @@ struct TensorStorage {
         }
         ss << name << " | " << type_name << " | ";
         ss << n_dims << " [";
-        for (int i = 0; i < LD_MAX_DIMS; i++) {
+        for (int i = 0; i < ED_MAX_DIMS; i++) {
             ss << ne[i];
-            if (i != LD_MAX_DIMS - 1) {
+            if (i != ED_MAX_DIMS - 1) {
                 ss << ", ";
             }
         }
@@ -122,11 +122,11 @@ struct TensorStorage {
 };
 
 struct TensorWriteInfo {
-    int64_t ne[LD_MAX_DIMS] = {1, 1, 1, 1, 1};
+    int64_t ne[ED_MAX_DIMS] = {1, 1, 1, 1, 1};
     int n_dims              = 0;
     ggml_tensor* tensor     = nullptr;
 };
 
 typedef std::function<bool(const TensorStorage&, ggml_tensor**)> on_new_tensor_cb_t;
 
-#endif  // __LD_TENSOR_STORAGE_H__
+#endif  // __ED_TENSOR_STORAGE_H__

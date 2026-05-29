@@ -1,5 +1,5 @@
-#ifndef __LD_GGML_GRAPH_CUT_H__
-#define __LD_GGML_GRAPH_CUT_H__
+#ifndef __ED_GGML_GRAPH_CUT_H__
+#define __ED_GGML_GRAPH_CUT_H__
 
 #include <array>
 #include <string>

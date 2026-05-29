@@ -8,7 +8,7 @@
 #include "core/optimization/cache/tensor_cache_utils.hpp"
 #include "utils/util.h"
 
-namespace lightdit {
+namespace edgedit {
 namespace cache {
 namespace {
 
@@ -1058,4 +1058,4 @@ std::unique_ptr<CacheMethod> create_cache_method(CacheMode mode) {
 }
 
 }  // namespace cache
-}  // namespace lightdit
+}  // namespace edgedit

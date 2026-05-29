@@ -5,18 +5,18 @@
 #include <string>
 #include <vector>
 
-#include "light-dit.h"
+#include "edge-dit.h"
 #include "json.hpp"
 
 using json = nlohmann::json;
 
-struct LightDitServerParams {
+struct EdgeDitServerParams {
     std::string host = "127.0.0.1";
     int port = 8080;
     bool verbose = false;
 };
 
-struct LightDitDefaultGenerationParams {
+struct EdgeDitDefaultGenerationParams {
     int width = 1024;
     int height = 1024;
     int steps = 20;
@@ -25,39 +25,39 @@ struct LightDitDefaultGenerationParams {
     float image_cfg_scale = 1.0f;
     float distilled_guidance = 3.5f;
     float flow_shift = 0.0f;
-    ld_sampler_t sampler = LD_SAMPLER_AUTO;
-    ld_scheduler_t scheduler = LD_SCHEDULER_AUTO;
-    ld_cache_mode_t cache_mode = LD_CACHE_DISABLED;
+    ed_sampler_t sampler = ED_SAMPLER_AUTO;
+    ed_scheduler_t scheduler = ED_SCHEDULER_AUTO;
+    ed_cache_mode_t cache_mode = ED_CACHE_DISABLED;
 };
 
-struct LightDitServerRuntime {
-    ld_context_t* ctx = nullptr;
+struct EdgeDitServerRuntime {
+    ed_context_t* ctx = nullptr;
     std::mutex* ctx_mutex = nullptr;
-    const LightDitServerParams* server = nullptr;
-    const ld_context_params_t* context = nullptr;
-    const LightDitDefaultGenerationParams* defaults = nullptr;
+    const EdgeDitServerParams* server = nullptr;
+    const ed_context_params_t* context = nullptr;
+    const EdgeDitDefaultGenerationParams* defaults = nullptr;
     std::string display_model_path;
 };
 
-struct LightDitImageRequest {
-    ld_image_generation_params_t params = {};
+struct EdgeDitImageRequest {
+    ed_image_generation_params_t params = {};
     std::string prompt;
     std::string negative_prompt;
     std::string cache_scm_mask;
 };
 
-std::string ld_status_to_string(ld_status_t status);
-std::string ld_cache_mode_to_string(ld_cache_mode_t mode);
-bool ld_cache_mode_from_string(const std::string& text, ld_cache_mode_t* mode);
-bool ld_sampler_from_string(const std::string& text, ld_sampler_t* sampler);
-bool ld_scheduler_from_string(const std::string& text, ld_scheduler_t* scheduler);
+std::string ed_status_to_string(ed_status_t status);
+std::string ed_cache_mode_to_string(ed_cache_mode_t mode);
+bool ed_cache_mode_from_string(const std::string& text, ed_cache_mode_t* mode);
+bool ed_sampler_from_string(const std::string& text, ed_sampler_t* sampler);
+bool ed_scheduler_from_string(const std::string& text, ed_scheduler_t* scheduler);
 
 std::string base64_encode(const std::vector<uint8_t>& bytes);
-bool image_to_png_bytes(const ld_image_t& image, std::vector<uint8_t>* bytes);
+bool image_to_png_bytes(const ed_image_t& image, std::vector<uint8_t>* bytes);
 
 bool build_image_request(const json& body,
-                         const LightDitServerRuntime& runtime,
-                         LightDitImageRequest* request,
+                         const EdgeDitServerRuntime& runtime,
+                         EdgeDitImageRequest* request,
                          std::string* error);
 
-json build_capabilities_response(const LightDitServerRuntime& runtime);
+json build_capabilities_response(const EdgeDitServerRuntime& runtime);

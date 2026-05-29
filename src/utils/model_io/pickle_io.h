@@ -1,5 +1,5 @@
-#ifndef __LD_MODEL_IO_PICKLE_IO_H__
-#define __LD_MODEL_IO_PICKLE_IO_H__
+#ifndef __ED_MODEL_IO_PICKLE_IO_H__
+#define __ED_MODEL_IO_PICKLE_IO_H__
 
 #include <cstddef>
 #include <cstdint>
@@ -18,4 +18,4 @@ bool parse_torch_state_dict_pickle(const uint8_t* buffer,
                                    std::unordered_map<std::string, uint64_t>& storage_nbytes,
                                    std::string* error = nullptr);
 
-#endif  // __LD_MODEL_IO_PICKLE_IO_H__
+#endif  // __ED_MODEL_IO_PICKLE_IO_H__

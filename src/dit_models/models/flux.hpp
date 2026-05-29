@@ -8,7 +8,7 @@
 #include "dit_models/components/common/modulation.hpp"
 #include "dit_models/components/common/normalization.hpp"
 #include "dit_models/components/common/rope.hpp"
-#include "light-dit.h"
+#include "edge-dit.h"
 #include "core/runtime/model_loader.h"
 
 #define FLUX_GRAPH_SIZE 10240
@@ -1151,7 +1151,7 @@ namespace Flux {
                 flux_params.semantic_txt_norm = true;
                 flux_params.use_yak_mlp       = true;
                 flux_params.vec_in_dim        = 0;
-            } else if (ld_version_is_flux2(version)) {
+            } else if (ed_version_is_flux2(version)) {
                 flux_params.in_channels      = 128;
                 flux_params.patch_size       = 1;
                 flux_params.out_channels     = 128;
@@ -1345,7 +1345,7 @@ namespace Flux {
                 set_backend_tensor_data(mod_index_arange, mod_index_arange_vec.data());
             }
             std::set<int> txt_arange_dims;
-            if (ld_version_is_flux2(version)) {
+            if (ed_version_is_flux2(version)) {
                 txt_arange_dims    = {3};
                 increase_ref_index = true;
             } else if (version == VERSION_OVIS_IMAGE) {

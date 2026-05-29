@@ -1,5 +1,5 @@
-#ifndef __LD_TOKENIZERS_MISTRAL_TOKENIZER_H__
-#define __LD_TOKENIZERS_MISTRAL_TOKENIZER_H__
+#ifndef __ED_TOKENIZERS_MISTRAL_TOKENIZER_H__
+#define __ED_TOKENIZERS_MISTRAL_TOKENIZER_H__
 
 #include <string>
 
@@ -13,4 +13,4 @@ public:
     explicit MistralTokenizer(const std::string& merges_utf8_str = "", const std::string& vocab_utf8_str = "");
 };
 
-#endif  // __LD_TOKENIZERS_MISTRAL_TOKENIZER_H__
+#endif  // __ED_TOKENIZERS_MISTRAL_TOKENIZER_H__

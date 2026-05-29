@@ -3,4 +3,4 @@
 #include "httplib.h"
 #include "runtime.h"
 
-void register_lightdit_routes(httplib::Server& server, LightDitServerRuntime& runtime);
+void register_edgedit_routes(httplib::Server& server, EdgeDitServerRuntime& runtime);

@@ -1,5 +1,5 @@
-#ifndef __LD_TENSOR_HPP__
-#define __LD_TENSOR_HPP__
+#ifndef __ED_TENSOR_HPP__
+#define __ED_TENSOR_HPP__
 
 #include <algorithm>
 #include <cmath>

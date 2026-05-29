@@ -2,7 +2,7 @@
 #define __CLIP_HPP__
 
 #include "backend/ggml/ggml_extend.hpp"
-#include "light-dit.h"
+#include "edge-dit.h"
 #include "core/runtime/model_loader.h"
 #include "tokenizers/clip_tokenizer.h"
 

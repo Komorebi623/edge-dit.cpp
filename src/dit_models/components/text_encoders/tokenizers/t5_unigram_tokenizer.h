@@ -1,5 +1,5 @@
-#ifndef __LD_TOKENIZERS_T5_UNIGRAM_TOKENIZER_H__
-#define __LD_TOKENIZERS_T5_UNIGRAM_TOKENIZER_H__
+#ifndef __ED_TOKENIZERS_T5_UNIGRAM_TOKENIZER_H__
+#define __ED_TOKENIZERS_T5_UNIGRAM_TOKENIZER_H__
 
 #include <cstddef>
 #include <memory>
@@ -67,4 +67,4 @@ public:
     std::vector<int> encode(const std::string& input, on_new_token_cb_t on_new_token_cb = nullptr) override;
 };
 
-#endif  // __LD_TOKENIZERS_T5_UNIGRAM_TOKENIZER_H__
+#endif  // __ED_TOKENIZERS_T5_UNIGRAM_TOKENIZER_H__

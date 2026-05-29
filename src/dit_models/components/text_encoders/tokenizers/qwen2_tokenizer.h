@@ -1,5 +1,5 @@
-#ifndef __LD_TOKENIZERS_QWEN2_TOKENIZER_H__
-#define __LD_TOKENIZERS_QWEN2_TOKENIZER_H__
+#ifndef __ED_TOKENIZERS_QWEN2_TOKENIZER_H__
+#define __ED_TOKENIZERS_QWEN2_TOKENIZER_H__
 
 #include <string>
 
@@ -13,4 +13,4 @@ public:
     explicit Qwen2Tokenizer(const std::string& merges_utf8_str = "");
 };
 
-#endif  // __LD_TOKENIZERS_QWEN2_TOKENIZER_H__
+#endif  // __ED_TOKENIZERS_QWEN2_TOKENIZER_H__

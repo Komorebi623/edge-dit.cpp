@@ -364,7 +364,7 @@ struct PickleStorageInfo {
 struct PickleTensorInfo {
     TensorStorage tensor_storage;
     int stride_n_dims = 0;
-    int64_t stride[LD_MAX_DIMS]{1, 1, 1, 1, 1};
+    int64_t stride[ED_MAX_DIMS]{1, 1, 1, 1, 1};
 };
 
 struct PickleValue {
@@ -966,14 +966,14 @@ bool parse_torch_state_dict_pickle(const uint8_t* buffer,
                     tensor.tensor_storage.offset      = (uint64_t)args.items[1].int_value * args.items[0].storage.raw_element_nbytes;
 
                     for (const auto& item : args.items[2].items) {
-                        if (item.kind != PickleValue::INT || tensor.tensor_storage.n_dims >= LD_MAX_DIMS) {
+                        if (item.kind != PickleValue::INT || tensor.tensor_storage.n_dims >= ED_MAX_DIMS) {
                             return false;
                         }
                         tensor.tensor_storage.ne[tensor.tensor_storage.n_dims++] = item.int_value;
                     }
 
                     for (const auto& item : args.items[3].items) {
-                        if (item.kind != PickleValue::INT || tensor.stride_n_dims >= LD_MAX_DIMS) {
+                        if (item.kind != PickleValue::INT || tensor.stride_n_dims >= ED_MAX_DIMS) {
                             return false;
                         }
                         tensor.stride[tensor.stride_n_dims++] = item.int_value;

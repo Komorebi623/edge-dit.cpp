@@ -2,10 +2,10 @@
 
 #include "utils/util.h"
 
-namespace lightdit {
+namespace edgedit {
 namespace cache {
 
-bool CacheRuntime::init(const ld_sample_params_t& sample_params,
+bool CacheRuntime::init(const ed_sample_params_t& sample_params,
                         SDVersion version,
                         const std::vector<float>& sigmas) {
     config_ = cache_config_from_sample_params(sample_params);
@@ -83,4 +83,4 @@ void CacheRuntime::log_summary(size_t total_steps) const {
 }
 
 }  // namespace cache
-}  // namespace lightdit
+}  // namespace edgedit

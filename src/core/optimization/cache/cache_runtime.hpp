@@ -6,14 +6,14 @@
 #include "core/optimization/cache/cache_method.hpp"
 #include "core/optimization/cache/cache_types.hpp"
 
-namespace lightdit {
+namespace edgedit {
 namespace cache {
 
 class CacheRuntime {
 public:
     CacheRuntime() = default;
 
-    bool init(const ld_sample_params_t& sample_params,
+    bool init(const ed_sample_params_t& sample_params,
               SDVersion version,
               const std::vector<float>& sigmas);
 
@@ -45,4 +45,4 @@ private:
 };
 
 }  // namespace cache
-}  // namespace lightdit
+}  // namespace edgedit

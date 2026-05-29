@@ -1,6 +1,6 @@
 #include "dit_models/components/super_resolution/upscaler.h"
 #include "backend/ggml/ggml_extend.hpp"
-#include "light-dit/all.h"
+#include "edge-dit.h"
 #include "utils/util.h"
 
 UpscalerGGML::UpscalerGGML(int n_threads,
@@ -79,22 +79,22 @@ sd::Tensor<float> UpscalerGGML::upscale_tensor(const sd::Tensor<float>& input_te
     return upscaled;
 }
 
-ld_image_t UpscalerGGML::upscale(ld_image_t input_image, uint32_t upscale_factor) {
+ed_image_t UpscalerGGML::upscale(ed_image_t input_image, uint32_t upscale_factor) {
     // upscale_factor, unused for RealESRGAN_x4plus_anime_6B.pth
-    ld_image_t upscaled_image = {0, 0, 0, nullptr};
+    ed_image_t upscaled_image = {0, 0, 0, nullptr};
     int output_width          = (int)input_image.width * esrgan_upscaler->scale;
     int output_height         = (int)input_image.height * esrgan_upscaler->scale;
     LOG_INFO("upscaling from (%i x %i) to (%i x %i)",
              input_image.width, input_image.height, output_width, output_height);
 
-    sd::Tensor<float> input_tensor = ld_image_to_tensor(input_image);
+    sd::Tensor<float> input_tensor = ed_image_to_tensor(input_image);
     sd::Tensor<float> upscaled;
     int64_t t0 = ggml_time_ms();
     upscaled   = upscale_tensor(input_tensor);
     if (upscaled.empty()) {
         return upscaled_image;
     }
-    ld_image_t upscaled_data = tensor_to_sd_image(upscaled);
+    ed_image_t upscaled_data = tensor_to_sd_image(upscaled);
     int64_t t3               = ggml_time_ms();
     LOG_INFO("input_image_tensor upscaled, taking %.2fs", (t3 - t0) / 1000.0f);
     upscaled_image = upscaled_data;
@@ -130,7 +130,7 @@ upscaler_ctx_t* new_upscaler_ctx(const char* esrgan_path_c_str,
     return upscaler_ctx;
 }
 
-ld_image_t upscale(upscaler_ctx_t* upscaler_ctx, ld_image_t input_image, uint32_t upscale_factor) {
+ed_image_t upscale(upscaler_ctx_t* upscaler_ctx, ed_image_t input_image, uint32_t upscale_factor) {
     return upscaler_ctx->upscaler->upscale(input_image, upscale_factor);
 }
 

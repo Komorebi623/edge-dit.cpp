@@ -1,5 +1,5 @@
-#ifndef __LD_TOKENIZERS_BPE_TOKENIZER_H__
-#define __LD_TOKENIZERS_BPE_TOKENIZER_H__
+#ifndef __ED_TOKENIZERS_BPE_TOKENIZER_H__
+#define __ED_TOKENIZERS_BPE_TOKENIZER_H__
 
 #include <cstddef>
 #include <cstdint>
@@ -37,4 +37,4 @@ public:
     std::vector<int> encode(const std::string& text, on_new_token_cb_t on_new_token_cb = nullptr) override;
 };
 
-#endif  // __LD_TOKENIZERS_BPE_TOKENIZER_H__
+#endif  // __ED_TOKENIZERS_BPE_TOKENIZER_H__

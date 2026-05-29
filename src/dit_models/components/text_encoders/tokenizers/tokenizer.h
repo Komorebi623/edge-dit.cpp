@@ -1,5 +1,5 @@
-#ifndef __LD_TOKENIZERS_TOKENIZER_H__
-#define __LD_TOKENIZERS_TOKENIZER_H__
+#ifndef __ED_TOKENIZERS_TOKENIZER_H__
+#define __ED_TOKENIZERS_TOKENIZER_H__
 
 #include <cstddef>
 #include <cstdint>
@@ -50,4 +50,4 @@ public:
     std::string decode(const std::vector<int>& tokens) const;
 };
 
-#endif  // __LD_TOKENIZERS_TOKENIZER_H__
+#endif  // __ED_TOKENIZERS_TOKENIZER_H__

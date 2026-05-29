@@ -1,6 +1,6 @@
-#ifndef LD_MODEL_LOADER_H
-#define LD_MODEL_LOADER_H
-#include "light-dit.h"
+#ifndef ED_MODEL_LOADER_H
+#define ED_MODEL_LOADER_H
+#include "edge-dit.h"
 #include <map>
 #include <set>
 #include <string>
@@ -51,83 +51,83 @@ enum PMVersion {
     PM_VERSION_2,
 };
 
-static inline bool ld_version_is_sd1(SDVersion version) {
+static inline bool ed_version_is_sd1(SDVersion version) {
     return version == VERSION_SD1 || version == VERSION_SD1_INPAINT ||
            version == VERSION_SD1_PIX2PIX || version == VERSION_SD1_TINY_UNET ||
            version == VERSION_SDXS_512_DS;
 }
 
-static inline bool ld_version_is_sd2(SDVersion version) {
+static inline bool ed_version_is_sd2(SDVersion version) {
     return version == VERSION_SD2 || version == VERSION_SD2_INPAINT ||
            version == VERSION_SD2_TINY_UNET || version == VERSION_SDXS_09;
 }
 
-static inline bool ld_version_is_sdxl(SDVersion version) {
+static inline bool ed_version_is_sdxl(SDVersion version) {
     return version == VERSION_SDXL || version == VERSION_SDXL_INPAINT ||
            version == VERSION_SDXL_PIX2PIX || version == VERSION_SDXL_SSD1B ||
            version == VERSION_SDXL_VEGA;
 }
 
-static inline bool ld_version_is_unet(SDVersion version) {
-    return ld_version_is_sd1(version) || ld_version_is_sd2(version) || ld_version_is_sdxl(version);
+static inline bool ed_version_is_unet(SDVersion version) {
+    return ed_version_is_sd1(version) || ed_version_is_sd2(version) || ed_version_is_sdxl(version);
 }
 
-static inline bool ld_version_is_sd3(SDVersion version) {
+static inline bool ed_version_is_sd3(SDVersion version) {
     return version == VERSION_SD3;
 }
 
-static inline bool ld_version_is_flux(SDVersion version) {
+static inline bool ed_version_is_flux(SDVersion version) {
     return version == VERSION_FLUX || version == VERSION_FLUX_FILL ||
            version == VERSION_FLUX_CONTROLS || version == VERSION_FLEX_2 ||
            version == VERSION_OVIS_IMAGE || version == VERSION_CHROMA_RADIANCE;
 }
 
-static inline bool ld_version_is_flux2(SDVersion version) {
+static inline bool ed_version_is_flux2(SDVersion version) {
     return version == VERSION_FLUX2 || version == VERSION_FLUX2_KLEIN;
 }
 
-static inline bool ld_version_is_wan(SDVersion version) {
+static inline bool ed_version_is_wan(SDVersion version) {
     return version == VERSION_WAN2 || version == VERSION_WAN2_2_I2V || version == VERSION_WAN2_2_TI2V;
 }
 
-static inline bool ld_version_is_qwen_image(SDVersion version) {
+static inline bool ed_version_is_qwen_image(SDVersion version) {
     return version == VERSION_QWEN_IMAGE;
 }
 
-static inline bool ld_version_is_anima(SDVersion version) {
+static inline bool ed_version_is_anima(SDVersion version) {
     return version == VERSION_ANIMA;
 }
 
-static inline bool ld_version_is_z_image(SDVersion version) {
+static inline bool ed_version_is_z_image(SDVersion version) {
     return version == VERSION_Z_IMAGE;
 }
 
-static inline bool ld_version_is_ernie_image(SDVersion version) {
+static inline bool ed_version_is_ernie_image(SDVersion version) {
     return version == VERSION_ERNIE_IMAGE;
 }
 
-static inline bool ld_version_uses_flux2_vae(SDVersion version) {
-    return ld_version_is_flux2(version) || ld_version_is_ernie_image(version);
+static inline bool ed_version_uses_flux2_vae(SDVersion version) {
+    return ed_version_is_flux2(version) || ed_version_is_ernie_image(version);
 }
 
-static inline bool ld_version_is_inpaint(SDVersion version) {
+static inline bool ed_version_is_inpaint(SDVersion version) {
     return version == VERSION_SD1_INPAINT || version == VERSION_SD2_INPAINT ||
            version == VERSION_SDXL_INPAINT || version == VERSION_FLUX_FILL ||
            version == VERSION_FLEX_2;
 }
 
-static inline bool ld_version_is_dit(SDVersion version) {
-    return ld_version_is_flux(version) || ld_version_is_flux2(version) ||
-           ld_version_is_sd3(version) || ld_version_is_wan(version) ||
-           ld_version_is_qwen_image(version) || ld_version_is_anima(version) ||
-           ld_version_is_z_image(version) || ld_version_is_ernie_image(version);
+static inline bool ed_version_is_dit(SDVersion version) {
+    return ed_version_is_flux(version) || ed_version_is_flux2(version) ||
+           ed_version_is_sd3(version) || ed_version_is_wan(version) ||
+           ed_version_is_qwen_image(version) || ed_version_is_anima(version) ||
+           ed_version_is_z_image(version) || ed_version_is_ernie_image(version);
 }
 
-static inline bool ld_version_is_unet_edit(SDVersion version) {
+static inline bool ed_version_is_unet_edit(SDVersion version) {
     return version == VERSION_SD1_PIX2PIX || version == VERSION_SDXL_PIX2PIX;
 }
 
-static inline bool ld_version_is_control(SDVersion version) {
+static inline bool ed_version_is_control(SDVersion version) {
     return version == VERSION_FLUX_CONTROLS || version == VERSION_FLEX_2;
 }
 
@@ -135,7 +135,7 @@ using String2TensorStorage = OrderedMap<std::string, TensorStorage>;
 using TensorTypeRules = std::vector<std::pair<std::string, ggml_type>>;
 
 TensorTypeRules parse_tensor_type_rules(const std::string& tensor_type_rules);
-const char* ld_version_name(SDVersion version);
+const char* ed_version_name(SDVersion version);
 
 class ModelLoader final {
 public:
@@ -174,9 +174,9 @@ public:
                                 ggml_type type = GGML_TYPE_COUNT) const;
 
 public:
-    bool load_model_files(const ld_context_params_t& params, std::string* error);
+    bool load_model_files(const ed_context_params_t& params, std::string* error);
     bool finalize_names_and_version(std::string* error);
-    bool apply_dtype_policy(const ld_context_params_t& params, std::string* error);
+    bool apply_dtype_policy(const ed_context_params_t& params, std::string* error);
     bool bind_weights(const TensorMap& tensors,
                       const IgnoreTensorSet& ignore_tensors,
                       int n_threads,
@@ -239,7 +239,7 @@ private:
                             std::string* error);
 
     static bool non_empty(const char* path);
-    static ggml_type ld_dtype_to_ggml(ld_dtype_t dtype);
+    static ggml_type ed_dtype_to_ggml(ed_dtype_t dtype);
     static std::string wtype_stat_to_str(const std::map<ggml_type, uint32_t>& stat);
 
 private:

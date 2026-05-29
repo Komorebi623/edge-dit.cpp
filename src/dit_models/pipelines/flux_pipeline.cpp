@@ -16,7 +16,7 @@
 #include "utils/preprocessing.hpp"
 #include "utils/util.h"
 
-static constexpr size_t LD_MODEL_EXAMPLE_LIMIT = 3;
+static constexpr size_t ED_MODEL_EXAMPLE_LIMIT = 3;
 
 static std::string tensor_component_name(const std::string& name) {
     if (starts_with(name, "model.diffusion_model.")) {
@@ -173,22 +173,22 @@ static bool tensor_decl_matches_split_storage(const ggml_tensor* expected,
     return concat_size == expected->ne[concat_dim];
 }
 
-static float ld_flux_time_shift(float mu, float sigma, float t) {
+static float ed_flux_time_shift(float mu, float sigma, float t) {
     return std::exp(mu) / (std::exp(mu) + std::pow((1.0f / t - 1.0f), sigma));
 }
 
-static float ld_flux_t_to_sigma(float t, float shift) {
+static float ed_flux_t_to_sigma(float t, float shift) {
     t = t + 1.0f;
-    return ld_flux_time_shift(shift, 1.0f, t / 1000.0f);
+    return ed_flux_time_shift(shift, 1.0f, t / 1000.0f);
 }
 
-static std::vector<float> ld_flux_discrete_sigmas(int steps, float shift) {
+static std::vector<float> ed_flux_discrete_sigmas(int steps, float shift) {
     std::vector<float> result;
     if (steps <= 0) {
         return result;
     }
     if (steps == 1) {
-        result.push_back(ld_flux_t_to_sigma(999.0f, shift));
+        result.push_back(ed_flux_t_to_sigma(999.0f, shift));
         result.push_back(0.0f);
         return result;
     }
@@ -197,19 +197,19 @@ static std::vector<float> ld_flux_discrete_sigmas(int steps, float shift) {
     result.reserve(static_cast<size_t>(steps) + 1);
     for (int i = 0; i < steps; ++i) {
         const float t = 999.0f - step * static_cast<float>(i);
-        result.push_back(ld_flux_t_to_sigma(t, shift));
+        result.push_back(ed_flux_t_to_sigma(t, shift));
     }
     result.push_back(0.0f);
     return result;
 }
 
-static ld_status_t ld_tensor_to_image(const sd::Tensor<float>& tensor, ld_image_t* image) {
+static ed_status_t ed_tensor_to_image(const sd::Tensor<float>& tensor, ed_image_t* image) {
     if (image == nullptr || tensor.empty()) {
-        return LD_STATUS_INVALID_ARGUMENT;
+        return ED_STATUS_INVALID_ARGUMENT;
     }
     const auto& shape = tensor.shape();
     if (shape.size() != 4 || shape[2] <= 0 || shape[3] <= 0) {
-        return LD_STATUS_INVALID_ARGUMENT;
+        return ED_STATUS_INVALID_ARGUMENT;
     }
 
     const size_t width = static_cast<size_t>(shape[0]);
@@ -218,7 +218,7 @@ static ld_status_t ld_tensor_to_image(const sd::Tensor<float>& tensor, ld_image_
     const size_t nbytes = width * height * channels;
     uint8_t* data = static_cast<uint8_t*>(std::malloc(nbytes));
     if (data == nullptr) {
-        return LD_STATUS_OUT_OF_MEMORY;
+        return ED_STATUS_OUT_OF_MEMORY;
     }
 
     preprocessing_tensor_frame_to_sd_image(tensor, 0, data);
@@ -226,10 +226,10 @@ static ld_status_t ld_tensor_to_image(const sd::Tensor<float>& tensor, ld_image_
     image->height = static_cast<uint32_t>(height);
     image->channels = static_cast<uint32_t>(channels);
     image->data = data;
-    return LD_STATUS_OK;
+    return ED_STATUS_OK;
 }
 
-namespace lightdit {
+namespace edgedit {
 
 FluxPipeline::FluxPipeline(SDVersion version)
     : version_(version) {
@@ -239,7 +239,7 @@ FluxPipeline::~FluxPipeline() {
     reset_flux_runner();
 }
 
-bool FluxPipeline::prepare(const ld_context_params_t& params,
+bool FluxPipeline::prepare(const ed_context_params_t& params,
                            ModelRuntime& runtime,
                            const ModelLoader& loader,
                            PipelineTensorRegistry& registry,
@@ -249,7 +249,7 @@ bool FluxPipeline::prepare(const ld_context_params_t& params,
     runtime_ = &runtime;
     version_ = loader.version();
 
-    if (!ld_version_is_flux(version_) && !ld_version_is_flux2(version_)) {
+    if (!ed_version_is_flux(version_) && !ed_version_is_flux2(version_)) {
         if (error != nullptr) {
             *error = "FluxPipeline got non-Flux model version";
         }
@@ -329,7 +329,7 @@ void FluxPipeline::build_manifest(const ModelLoader& loader) {
         component->tensor_count++;
         component->bytes += tensor.nbytes_to_read();
         component->type_counts[tensor.type]++;
-        if (component->examples.size() < LD_MODEL_EXAMPLE_LIMIT) {
+        if (component->examples.size() < ED_MODEL_EXAMPLE_LIMIT) {
             component->examples.push_back(tensor.name);
         }
     }
@@ -360,7 +360,7 @@ bool FluxPipeline::validate(std::string* error) const {
         return false;
     };
 
-    if (ld_version_is_flux(version_) || ld_version_is_flux2(version_)) {
+    if (ed_version_is_flux(version_) || ed_version_is_flux2(version_)) {
         if (!has_component("diffusion")) {
             if (error != nullptr) {
                 *error = "Flux model is missing diffusion/transformer tensors";
@@ -387,7 +387,7 @@ bool FluxPipeline::initialize_flux_transformer_spec(const ModelLoader& loader,
                                                std::string* error) {
     reset_flux_runner();
 
-    if (!ld_version_is_flux(version_) && !ld_version_is_flux2(version_)) {
+    if (!ed_version_is_flux(version_) && !ed_version_is_flux2(version_)) {
         return true;
     }
 
@@ -503,7 +503,7 @@ bool FluxPipeline::prepare_flux_runtime_weights(const ModelLoader& loader,
                                            bool offload_params_to_cpu,
                                            PipelineTensorRegistry& registry,
                                            std::string* error) {
-    if (!ld_version_is_flux(version_) && !ld_version_is_flux2(version_)) {
+    if (!ed_version_is_flux(version_) && !ed_version_is_flux2(version_)) {
         return true;
     }
 
@@ -598,7 +598,7 @@ bool FluxPipeline::can_generate_image() const {
     return runtime_weights_loaded_ && flux_runner_ != nullptr && conditioner_ != nullptr && vae_ != nullptr;
 }
 
-bool FluxPipeline::validate_image_params(const ld_image_generation_params_t* params, std::string* error) const {
+bool FluxPipeline::validate_image_params(const ed_image_generation_params_t* params, std::string* error) const {
     if (params == nullptr) {
         if (error != nullptr) {
             *error = "image generation params are null";
@@ -620,7 +620,7 @@ bool FluxPipeline::validate_image_params(const ld_image_generation_params_t* par
     return true;
 }
 
-bool FluxPipeline::validate_video_params(const ld_video_generation_params_t* params, std::string* error) const {
+bool FluxPipeline::validate_video_params(const ed_video_generation_params_t* params, std::string* error) const {
     if (params == nullptr) {
         if (error != nullptr) {
             *error = "video generation params are null";
@@ -636,41 +636,41 @@ bool FluxPipeline::validate_video_params(const ld_video_generation_params_t* par
     return true;
 }
 
-ld_status_t FluxPipeline::generate_image(const ld_image_generation_params_t* params,
-                                         ld_image_batch_t* out,
+ed_status_t FluxPipeline::generate_image(const ed_image_generation_params_t* params,
+                                         ed_image_batch_t* out,
                                          std::string* error) {
     if (!ready_ || runtime_ == nullptr) {
         if (error != nullptr) {
             *error = "FluxPipeline is not initialized";
         }
-        return LD_STATUS_MODEL_LOAD_FAILED;
+        return ED_STATUS_MODEL_LOAD_FAILED;
     }
     if (out == nullptr) {
         if (error != nullptr) {
             *error = "image output is null";
         }
-        return LD_STATUS_INVALID_ARGUMENT;
+        return ED_STATUS_INVALID_ARGUMENT;
     }
     out->images = nullptr;
     out->count = 0;
 
     if (!validate_image_params(params, error)) {
-        return LD_STATUS_INVALID_ARGUMENT;
+        return ED_STATUS_INVALID_ARGUMENT;
     }
     if (!can_generate_image()) {
         if (error != nullptr) {
             *error = "current Flux pipeline needs transformer, CLIP-L, T5XXL, and VAE weights";
         }
-        return LD_STATUS_UNSUPPORTED;
+        return ED_STATUS_UNSUPPORTED;
     }
 
     const int count = params->batch_count > 0 ? params->batch_count : 1;
-    ld_image_t* images = static_cast<ld_image_t*>(std::calloc(static_cast<size_t>(count), sizeof(ld_image_t)));
+    ed_image_t* images = static_cast<ed_image_t*>(std::calloc(static_cast<size_t>(count), sizeof(ed_image_t)));
     if (images == nullptr) {
         if (error != nullptr) {
             *error = "failed to allocate image batch";
         }
-        return LD_STATUS_OUT_OF_MEMORY;
+        return ED_STATUS_OUT_OF_MEMORY;
     }
 
     for (int i = 0; i < count; ++i) {
@@ -679,29 +679,29 @@ ld_status_t FluxPipeline::generate_image(const ld_image_generation_params_t* par
                 std::free(images[j].data);
             }
             std::free(images);
-            return LD_STATUS_GENERATION_FAILED;
+            return ED_STATUS_GENERATION_FAILED;
         }
     }
 
     out->images = images;
     out->count = count;
-    return LD_STATUS_OK;
+    return ED_STATUS_OK;
 }
 
-ld_status_t FluxPipeline::generate_video(const ld_video_generation_params_t* params,
-                                         ld_video_t* out,
+ed_status_t FluxPipeline::generate_video(const ed_video_generation_params_t* params,
+                                         ed_video_t* out,
                                          std::string* error) {
     if (out != nullptr) {
         out->frames = nullptr;
         out->frame_count = 0;
     }
     if (!validate_video_params(params, error)) {
-        return LD_STATUS_INVALID_ARGUMENT;
+        return ED_STATUS_INVALID_ARGUMENT;
     }
     if (error != nullptr) {
         *error = "video generation is not implemented in FluxPipeline";
     }
-    return LD_STATUS_UNSUPPORTED;
+    return ED_STATUS_UNSUPPORTED;
 }
 
 bool FluxPipeline::supports_image_generation() const {
@@ -712,24 +712,24 @@ bool FluxPipeline::supports_video_generation() const {
     return false;
 }
 
-ld_sampler_t FluxPipeline::default_sample_method() const {
-    return LD_SAMPLER_EULER;
+ed_sampler_t FluxPipeline::default_sample_method() const {
+    return ED_SAMPLER_EULER;
 }
 
-ld_scheduler_t FluxPipeline::default_scheduler(ld_sampler_t method) const {
-    if (method == LD_SAMPLER_LCM || method == LD_SAMPLER_TCD) {
-        return LD_SCHEDULER_LCM;
+ed_scheduler_t FluxPipeline::default_scheduler(ed_sampler_t method) const {
+    if (method == ED_SAMPLER_LCM || method == ED_SAMPLER_TCD) {
+        return ED_SCHEDULER_LCM;
     }
-    if (method == LD_SAMPLER_DDIM_TRAILING) {
-        return LD_SCHEDULER_SIMPLE;
+    if (method == ED_SAMPLER_DDIM_TRAILING) {
+        return ED_SCHEDULER_SIMPLE;
     }
-    return LD_SCHEDULER_DISCRETE;
+    return ED_SCHEDULER_DISCRETE;
 }
 
-bool FluxPipeline::generate_one_image(const ld_image_generation_params_t* params,
+bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params,
                                   int batch_index,
                                   int n_threads,
-                                  ld_image_t* image,
+                                  ed_image_t* image,
                                   std::string* error) {
     if (params == nullptr || image == nullptr) {
         if (error != nullptr) {
@@ -802,7 +802,7 @@ bool FluxPipeline::generate_one_image(const ld_image_generation_params_t* params
 
     sd::Tensor<float> init_latent = sd::zeros<float>({latent_w, latent_h, 16, 1});
     sd::Tensor<float> noise = sd::Tensor<float>::randn(init_latent.shape(), rng);
-    std::vector<float> sigmas = ld_flux_discrete_sigmas(steps, flow_shift);
+    std::vector<float> sigmas = ed_flux_discrete_sigmas(steps, flow_shift);
     if (sigmas.size() < 2) {
         if (error != nullptr) {
             *error = "failed to create Flux sigma schedule";
@@ -891,7 +891,7 @@ bool FluxPipeline::generate_one_image(const ld_image_generation_params_t* params
     flux_runner_->free_compute_buffer();
 
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
-    ld_tiling_params_t tiling_params{};
+    ed_tiling_params_t tiling_params{};
     sd::Tensor<float> decoded = vae_->decode(n_threads,
                                              vae_latents,
                                              tiling_params,
@@ -905,14 +905,14 @@ bool FluxPipeline::generate_one_image(const ld_image_generation_params_t* params
         return false;
     }
 
-    const ld_status_t status = ld_tensor_to_image(decoded, image);
-    if (status != LD_STATUS_OK) {
+    const ed_status_t status = ed_tensor_to_image(decoded, image);
+    if (status != ED_STATUS_OK) {
         if (error != nullptr) {
-            *error = status == LD_STATUS_OUT_OF_MEMORY ? "failed to allocate decoded image" : "decoded Flux tensor has invalid shape";
+            *error = status == ED_STATUS_OUT_OF_MEMORY ? "failed to allocate decoded image" : "decoded Flux tensor has invalid shape";
         }
         return false;
     }
     return true;
 }
 
-}  // namespace lightdit
+}  // namespace edgedit

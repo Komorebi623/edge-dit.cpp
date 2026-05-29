@@ -459,12 +459,12 @@ public:
 
     ggml_tensor* decode(GGMLRunnerContext* ctx, ggml_tensor* z) {
         auto decoder = std::dynamic_pointer_cast<TinyVideoDecoder>(blocks["decoder"]);
-        if (ld_version_is_wan(version)) {
+        if (ed_version_is_wan(version)) {
             // (W, H, C, T) -> (W, H, T, C)
             z = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, z, 0, 1, 3, 2));
         }
         auto result = decoder->forward(ctx, z);
-        if (ld_version_is_wan(version)) {
+        if (ed_version_is_wan(version)) {
             // (W, H, C, T) -> (W, H, T, C)
             result = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, result, 0, 1, 3, 2));
         }
@@ -501,9 +501,9 @@ public:
     TAESD(bool decode_only = true, SDVersion version = VERSION_SD1)
         : decode_only(decode_only) {
         bool use_midblock_gn = false;
-        taef2                = ld_version_is_flux2(version);
+        taef2                = ed_version_is_flux2(version);
 
-        if (ld_version_is_dit(version)) {
+        if (ed_version_is_dit(version)) {
             z_channels = 16;
         }
         if (taef2) {
@@ -561,7 +561,7 @@ struct TinyImageAutoEncoder : public VAE {
     }
 
     sd::Tensor<float> vae_output_to_latents(const sd::Tensor<float>& vae_output, std::shared_ptr<RNG> rng) override {
-        LD_UNUSED(rng);
+        ED_UNUSED(rng);
         return vae_output;
     }
 
@@ -623,7 +623,7 @@ struct TinyVideoAutoEncoder : public VAE {
     }
 
     sd::Tensor<float> vae_output_to_latents(const sd::Tensor<float>& vae_output, std::shared_ptr<RNG> rng) override {
-        LD_UNUSED(rng);
+        ED_UNUSED(rng);
         return vae_output;
     }
 

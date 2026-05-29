@@ -1,4 +1,4 @@
-#include "light-dit.h"
+#include "edge-dit.h"
 
 #include <cctype>
 #include <cerrno>
@@ -76,7 +76,7 @@ static void print_usage(const char* prog) {
     );
 }
 
-static bool save_png(const char* path, const ld_image_t& image) {
+static bool save_png(const char* path, const ed_image_t& image) {
     if (path == nullptr || image.data == nullptr) {
         return false;
     }
@@ -225,7 +225,7 @@ static float parse_float_value(const char* text, float fallback = 0.0f) {
     return static_cast<float>(value);
 }
 
-static ld_cache_mode_t parse_cache_mode(const char* text, bool* ok) {
+static ed_cache_mode_t parse_cache_mode(const char* text, bool* ok) {
     if (ok != nullptr) {
         *ok = true;
     }
@@ -237,28 +237,28 @@ static ld_cache_mode_t parse_cache_mode(const char* text, bool* ok) {
     }
 
     if (mode == "off" || mode == "none" || mode == "disabled" || mode == "disable" || mode == "0") {
-        return LD_CACHE_DISABLED;
+        return ED_CACHE_DISABLED;
     }
     if (mode == "easycache" || mode == "easy") {
-        return LD_CACHE_EASYCACHE;
+        return ED_CACHE_EASYCACHE;
     }
     if (mode == "ucache" || mode == "u") {
-        return LD_CACHE_UCACHE;
+        return ED_CACHE_UCACHE;
     }
     if (mode == "dbcache" || mode == "db") {
-        return LD_CACHE_DBCACHE;
+        return ED_CACHE_DBCACHE;
     }
     if (mode == "taylorseer" || mode == "taylor" || mode == "taylor-seer") {
-        return LD_CACHE_TAYLORSEER;
+        return ED_CACHE_TAYLORSEER;
     }
     if (mode == "cache-dit" || mode == "cachedit") {
-        return LD_CACHE_CACHE_DIT;
+        return ED_CACHE_CACHE_DIT;
     }
 
     if (ok != nullptr) {
         *ok = false;
     }
-    return LD_CACHE_DISABLED;
+    return ED_CACHE_DISABLED;
 }
 
 static std::string path_extension(const std::string& path) {
@@ -353,7 +353,7 @@ static std::string find_imageio_ffmpeg_in_conda(const char* conda_prefix) {
 }
 
 static std::string find_ffmpeg_binary() {
-    const char* configured = std::getenv("LDIT_FFMPEG");
+    const char* configured = std::getenv("ED_FFMPEG");
     if (configured != nullptr && configured[0] != '\0') {
         return configured;
     }
@@ -371,7 +371,7 @@ static std::string find_ffmpeg_binary() {
     return "ffmpeg";
 }
 
-static bool write_rgb_frame(FILE* pipe, const ld_image_t& image, std::vector<uint8_t>* scratch) {
+static bool write_rgb_frame(FILE* pipe, const ed_image_t& image, std::vector<uint8_t>* scratch) {
     if (pipe == nullptr || image.data == nullptr || scratch == nullptr) {
         return false;
     }
@@ -436,7 +436,7 @@ static bool write_binary_file(const char* path, const std::vector<uint8_t>& data
     return ok;
 }
 
-static bool image_to_rgb(const ld_image_t& image, std::vector<uint8_t>* rgb) {
+static bool image_to_rgb(const ed_image_t& image, std::vector<uint8_t>* rgb) {
     if (image.data == nullptr || rgb == nullptr || image.width == 0 || image.height == 0) {
         return false;
     }
@@ -477,12 +477,12 @@ struct AviIndexEntry {
     uint32_t size = 0;
 };
 
-static bool save_mjpg_avi(const char* path, const ld_video_t& video, int fps, int quality) {
+static bool save_mjpg_avi(const char* path, const ed_video_t& video, int fps, int quality) {
     if (path == nullptr || video.frames == nullptr || video.frame_count <= 0 || fps <= 0) {
         return false;
     }
 
-    const ld_image_t& first = video.frames[0];
+    const ed_image_t& first = video.frames[0];
     if (first.data == nullptr || first.width == 0 || first.height == 0) {
         return false;
     }
@@ -570,7 +570,7 @@ static bool save_mjpg_avi(const char* path, const ld_video_t& video, int fps, in
     std::vector<uint8_t> jpg;
 
     for (int i = 0; i < video.frame_count; ++i) {
-        const ld_image_t& frame = video.frames[i];
+        const ed_image_t& frame = video.frames[i];
         if (frame.width != width || frame.height != height || !image_to_rgb(frame, &rgb)) {
             std::fprintf(stderr, "video frame %d has invalid or inconsistent data\n", i);
             return false;
@@ -623,7 +623,7 @@ static bool save_mjpg_avi(const char* path, const ld_video_t& video, int fps, in
     return write_binary_file(path, avi);
 }
 
-static bool save_ffmpeg_video(const char* path, const ld_video_t& video, int fps) {
+static bool save_ffmpeg_video(const char* path, const ed_video_t& video, int fps) {
     if (path == nullptr || video.frames == nullptr || video.frame_count <= 0) {
         return false;
     }
@@ -631,13 +631,13 @@ static bool save_ffmpeg_video(const char* path, const ld_video_t& video, int fps
         fps = 16;
     }
 
-    const ld_image_t& first = video.frames[0];
+    const ed_image_t& first = video.frames[0];
     if (first.data == nullptr || first.width == 0 || first.height == 0) {
         return false;
     }
 
     for (int i = 0; i < video.frame_count; ++i) {
-        const ld_image_t& frame = video.frames[i];
+        const ed_image_t& frame = video.frames[i];
         if (frame.data == nullptr || frame.width != first.width || frame.height != first.height) {
             std::fprintf(stderr, "video frame %d has inconsistent dimensions\n", i);
             return false;
@@ -686,7 +686,7 @@ static bool save_ffmpeg_video(const char* path, const ld_video_t& video, int fps
     const int status = pclose(pipe);
     if (!ok || status != 0) {
         if (status == 32512) {
-            std::fprintf(stderr, "ffmpeg was not found; install ffmpeg, add it to PATH, or set LDIT_FFMPEG\n");
+            std::fprintf(stderr, "ffmpeg was not found; install ffmpeg, add it to PATH, or set ED_FFMPEG\n");
         } else {
             std::fprintf(stderr, "ffmpeg failed while writing video, status=%d\n", status);
         }
@@ -695,7 +695,7 @@ static bool save_ffmpeg_video(const char* path, const ld_video_t& video, int fps
     return true;
 }
 
-static bool save_video(const char* path, const ld_video_t& video, int fps) {
+static bool save_video(const char* path, const ed_video_t& video, int fps) {
     const std::string ext = path_extension(path != nullptr ? path : "");
     if (ext == ".avi") {
         return save_mjpg_avi(path, video, fps, 95);
@@ -732,7 +732,7 @@ struct FluxCliArgs {
     float cfg_scale = 1.0f;
     float flow_shift = 0.0f;
 
-    ld_cache_mode_t cache_mode = LD_CACHE_DISABLED;
+    ed_cache_mode_t cache_mode = ED_CACHE_DISABLED;
     float cache_reuse_threshold = std::numeric_limits<float>::infinity();
     float cache_start_percent = 0.15f;
     float cache_end_percent = 0.95f;
@@ -1021,7 +1021,7 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
     return true;
 }
 
-static void apply_cache_args(const FluxCliArgs& args, ld_sample_params_t* sample) {
+static void apply_cache_args(const FluxCliArgs& args, ed_sample_params_t* sample) {
     if (sample == nullptr) {
         return;
     }
@@ -1062,11 +1062,11 @@ int main(int argc, char** argv) {
     }
 
     if (args.backend != nullptr && std::strlen(args.backend) > 0) {
-        setenv("LDIT_BACKEND", args.backend, 1);
+        setenv("ED_BACKEND", args.backend, 1);
     }
 
-    ld_context_params_t ctx_params;
-    ld_context_params_init(&ctx_params);
+    ed_context_params_t ctx_params;
+    ed_context_params_init(&ctx_params);
 
     ctx_params.model_path = args.model_path;
     ctx_params.diffusion_model_path = args.diffusion_model_path;
@@ -1082,19 +1082,19 @@ int main(int argc, char** argv) {
     /*
      * Flux 测试阶段先让内部自动识别 dtype / sampler / scheduler。
      * 如果你的模型是量化 GGUF，也可以在这里手动指定：
-     *   ctx_params.weight_type = LD_DTYPE_Q8_0;
+     *   ctx_params.weight_type = ED_DTYPE_Q8_0;
      */
-    ctx_params.weight_type = LD_DTYPE_AUTO;
+    ctx_params.weight_type = ED_DTYPE_AUTO;
 
-    ld_context_t* ctx = ld_create_context(&ctx_params);
+    ed_context_t* ctx = ed_create_context(&ctx_params);
     if (ctx == nullptr) {
-        std::fprintf(stderr, "failed to create light-dit context\n");
+        std::fprintf(stderr, "failed to create edge-dit context\n");
         return 2;
     }
 
     if (args.video) {
-        ld_video_generation_params_t gen_params;
-        ld_video_generation_params_init(&gen_params);
+        ed_video_generation_params_t gen_params;
+        ed_video_generation_params_init(&gen_params);
 
         gen_params.prompt = args.prompt;
         gen_params.negative_prompt = "";
@@ -1102,8 +1102,8 @@ int main(int argc, char** argv) {
         gen_params.height = args.height;
         gen_params.frames = args.frames;
         gen_params.seed = args.seed;
-        gen_params.sample.sampler = LD_SAMPLER_AUTO;
-        gen_params.sample.scheduler = LD_SCHEDULER_AUTO;
+        gen_params.sample.sampler = ED_SAMPLER_AUTO;
+        gen_params.sample.scheduler = ED_SCHEDULER_AUTO;
         gen_params.sample.steps = args.steps;
         gen_params.sample.cfg_scale = args.cfg_scale;
         gen_params.sample.image_cfg_scale = 1.0f;
@@ -1111,38 +1111,38 @@ int main(int argc, char** argv) {
         gen_params.sample.flow_shift = args.flow_shift;
         apply_cache_args(args, &gen_params.sample);
 
-        ld_video_t output;
-        ld_status_t status = ld_generate_video(ctx, &gen_params, &output);
-        if (status != LD_STATUS_OK) {
-            std::fprintf(stderr, "ld_generate_video failed, status=%d\n", static_cast<int>(status));
-            const char* err = ld_get_last_error(ctx);
+        ed_video_t output;
+        ed_status_t status = ed_generate_video(ctx, &gen_params, &output);
+        if (status != ED_STATUS_OK) {
+            std::fprintf(stderr, "ed_generate_video failed, status=%d\n", static_cast<int>(status));
+            const char* err = ed_get_last_error(ctx);
             if (err != nullptr && std::strlen(err) > 0) {
                 std::fprintf(stderr, "last error: %s\n", err);
             }
-            ld_free_context(ctx);
+            ed_free_context(ctx);
             return 3;
         }
 
         if (output.frame_count <= 0 || output.frames == nullptr) {
             std::fprintf(stderr, "generation succeeded but video output is empty\n");
-            ld_free_context(ctx);
+            ed_free_context(ctx);
             return 4;
         }
 
         const std::string output_path = video_output_path(args.output_path, args.video_format);
         if (!save_video(output_path.c_str(), output, args.fps)) {
             std::fprintf(stderr, "failed to save output video: %s\n", output_path.c_str());
-            ld_free_video(&output);
-            ld_free_context(ctx);
+            ed_free_video(&output);
+            ed_free_context(ctx);
             return 5;
         }
 
         std::printf("saved video to %s\n", output_path.c_str());
 
-        ld_free_video(&output);
+        ed_free_video(&output);
     } else {
-        ld_image_generation_params_t gen_params;
-        ld_image_generation_params_init(&gen_params);
+        ed_image_generation_params_t gen_params;
+        ed_image_generation_params_init(&gen_params);
 
         gen_params.prompt = args.prompt;
         gen_params.negative_prompt = "";
@@ -1158,8 +1158,8 @@ int main(int argc, char** argv) {
          * - cfg_scale 设为 1.0，避免传统 CFG 负条件分支
          * - distilled_guidance 用 Flux 常见值 3.5
          */
-        gen_params.sample.sampler = LD_SAMPLER_AUTO;
-        gen_params.sample.scheduler = LD_SCHEDULER_AUTO;
+        gen_params.sample.sampler = ED_SAMPLER_AUTO;
+        gen_params.sample.scheduler = ED_SCHEDULER_AUTO;
         gen_params.sample.steps = args.steps;
         gen_params.sample.cfg_scale = args.cfg_scale;
         gen_params.sample.image_cfg_scale = 1.0f;
@@ -1167,39 +1167,39 @@ int main(int argc, char** argv) {
         gen_params.sample.flow_shift = args.flow_shift;
         apply_cache_args(args, &gen_params.sample);
 
-        ld_image_batch_t output;
-        ld_status_t status = ld_generate_image(ctx, &gen_params, &output);
+        ed_image_batch_t output;
+        ed_status_t status = ed_generate_image(ctx, &gen_params, &output);
 
-        if (status != LD_STATUS_OK) {
-            std::fprintf(stderr, "ld_generate_image failed, status=%d\n", static_cast<int>(status));
+        if (status != ED_STATUS_OK) {
+            std::fprintf(stderr, "ed_generate_image failed, status=%d\n", static_cast<int>(status));
 
-            const char* err = ld_get_last_error(ctx);
+            const char* err = ed_get_last_error(ctx);
             if (err != nullptr && std::strlen(err) > 0) {
                 std::fprintf(stderr, "last error: %s\n", err);
             }
 
-            ld_free_context(ctx);
+            ed_free_context(ctx);
             return 3;
         }
 
         if (output.count <= 0 || output.images == nullptr) {
             std::fprintf(stderr, "generation succeeded but output is empty\n");
-            ld_free_context(ctx);
+            ed_free_context(ctx);
             return 4;
         }
 
         if (!save_png(args.output_path, output.images[0])) {
             std::fprintf(stderr, "failed to save output image: %s\n", args.output_path);
-            ld_free_image_batch(&output);
-            ld_free_context(ctx);
+            ed_free_image_batch(&output);
+            ed_free_context(ctx);
             return 5;
         }
 
         std::printf("saved image to %s\n", args.output_path);
 
-        ld_free_image_batch(&output);
+        ed_free_image_batch(&output);
     }
-    ld_free_context(ctx);
+    ed_free_context(ctx);
 
     return 0;
 }

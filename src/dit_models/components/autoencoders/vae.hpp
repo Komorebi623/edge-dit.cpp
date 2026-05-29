@@ -69,7 +69,7 @@ public:
         int scale_factor = 8;
         if (version == VERSION_WAN2_2_TI2V) {
             scale_factor = 16;
-        } else if (ld_version_uses_flux2_vae(version)) {
+        } else if (ed_version_uses_flux2_vae(version)) {
             scale_factor = 16;
         } else if (version == VERSION_CHROMA_RADIANCE) {
             scale_factor = 1;
@@ -82,7 +82,7 @@ public:
     void get_tile_sizes(int& tile_size_x,
                         int& tile_size_y,
                         float& tile_overlap,
-                        const ld_tiling_params_t& params,
+                        const ed_tiling_params_t& params,
                         int64_t latent_x,
                         int64_t latent_y,
                         float encoding_factor = 1.0f) {
@@ -110,7 +110,7 @@ public:
 
     sd::Tensor<float> encode(int n_threads,
                              const sd::Tensor<float>& x,
-                             ld_tiling_params_t tiling_params,
+                             ed_tiling_params_t tiling_params,
                              bool circular_x = false,
                              bool circular_y = false) {
         int64_t t0              = ggml_time_ms();
@@ -157,7 +157,7 @@ public:
 
     sd::Tensor<float> decode(int n_threads,
                              const sd::Tensor<float>& x,
-                             ld_tiling_params_t tiling_params,
+                             ed_tiling_params_t tiling_params,
                              bool decode_video = false,
                              bool circular_x   = false,
                              bool circular_y   = false,
@@ -212,7 +212,7 @@ public:
     virtual sd::Tensor<float> diffusion_to_vae_latents(const sd::Tensor<float>& latents)                           = 0;
     virtual sd::Tensor<float> vae_to_diffusion_latents(const sd::Tensor<float>& latents)                           = 0;
     virtual void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors, const std::string prefix)         = 0;
-    virtual void set_conv2d_scale(float scale) { LD_UNUSED(scale); };
+    virtual void set_conv2d_scale(float scale) { ED_UNUSED(scale); };
 };
 
 struct FakeVAE : public VAE {
@@ -226,13 +226,13 @@ struct FakeVAE : public VAE {
     sd::Tensor<float> _compute(const int n_threads,
                                const sd::Tensor<float>& z,
                                bool decode_graph) override {
-        LD_UNUSED(n_threads);
-        LD_UNUSED(decode_graph);
+        ED_UNUSED(n_threads);
+        ED_UNUSED(decode_graph);
         return z;
     }
 
     sd::Tensor<float> vae_output_to_latents(const sd::Tensor<float>& vae_output, std::shared_ptr<RNG> rng) override {
-        LD_UNUSED(rng);
+        ED_UNUSED(rng);
         return vae_output;
     }
 

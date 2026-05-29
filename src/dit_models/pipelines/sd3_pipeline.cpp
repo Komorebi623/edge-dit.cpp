@@ -11,7 +11,7 @@
 #include "dit_models/components/text_encoders/conditioner.hpp"
 #include "utils/util.h"
 
-namespace lightdit {
+namespace edgedit {
 namespace {
 
 float sd3_time_snr_shift(float shift, float t) {
@@ -23,13 +23,13 @@ float sd3_t_to_sigma(float t, float shift) {
     return sd3_time_snr_shift(shift, t / 1000.0f);
 }
 
-ld_status_t tensor_to_image(const sd::Tensor<float>& tensor, ld_image_t* image) {
+ed_status_t tensor_to_image(const sd::Tensor<float>& tensor, ed_image_t* image) {
     if (image == nullptr || tensor.empty()) {
-        return LD_STATUS_INVALID_ARGUMENT;
+        return ED_STATUS_INVALID_ARGUMENT;
     }
     const auto& shape = tensor.shape();
     if (shape.size() != 4 || shape[2] <= 0 || shape[3] <= 0) {
-        return LD_STATUS_INVALID_ARGUMENT;
+        return ED_STATUS_INVALID_ARGUMENT;
     }
 
     const size_t width = static_cast<size_t>(shape[0]);
@@ -38,7 +38,7 @@ ld_status_t tensor_to_image(const sd::Tensor<float>& tensor, ld_image_t* image) 
     const size_t nbytes = width * height * channels;
     uint8_t* data = static_cast<uint8_t*>(std::malloc(nbytes));
     if (data == nullptr) {
-        return LD_STATUS_OUT_OF_MEMORY;
+        return ED_STATUS_OUT_OF_MEMORY;
     }
 
     const size_t pixels = width * height;
@@ -59,7 +59,7 @@ ld_status_t tensor_to_image(const sd::Tensor<float>& tensor, ld_image_t* image) 
     image->height = static_cast<uint32_t>(height);
     image->channels = static_cast<uint32_t>(channels);
     image->data = data;
-    return LD_STATUS_OK;
+    return ED_STATUS_OK;
 }
 
 }  // namespace
@@ -68,7 +68,7 @@ SD3Pipeline::SD3Pipeline(SDVersion version)
     : version_(version) {
 }
 
-bool SD3Pipeline::prepare(const ld_context_params_t&,
+bool SD3Pipeline::prepare(const ed_context_params_t&,
                           ModelRuntime& runtime,
                           const ModelLoader& loader,
                           PipelineTensorRegistry& registry,
@@ -168,14 +168,14 @@ void SD3Pipeline::mark_ready() {
              vae_ != nullptr;
 }
 
-ld_status_t SD3Pipeline::generate_image(const ld_image_generation_params_t* params,
-                                        ld_image_batch_t* out,
+ed_status_t SD3Pipeline::generate_image(const ed_image_generation_params_t* params,
+                                        ed_image_batch_t* out,
                                         std::string* error) {
     if (!ready_ || runtime_ == nullptr) {
         if (error != nullptr) {
             *error = "SD3Pipeline is not initialized";
         }
-        return LD_STATUS_MODEL_LOAD_FAILED;
+        return ED_STATUS_MODEL_LOAD_FAILED;
     }
     if (out != nullptr) {
         out->images = nullptr;
@@ -185,26 +185,26 @@ ld_status_t SD3Pipeline::generate_image(const ld_image_generation_params_t* para
         if (error != nullptr) {
             *error = "image output is null";
         }
-        return LD_STATUS_INVALID_ARGUMENT;
+        return ED_STATUS_INVALID_ARGUMENT;
     }
 
     if (!validate_image_params(params, error)) {
-        return LD_STATUS_INVALID_ARGUMENT;
+        return ED_STATUS_INVALID_ARGUMENT;
     }
     if (!can_generate_image()) {
         if (error != nullptr) {
             *error = "current SD3 pipeline needs transformer, text encoders, and VAE weights";
         }
-        return LD_STATUS_UNSUPPORTED;
+        return ED_STATUS_UNSUPPORTED;
     }
 
     const int count = params->batch_count > 0 ? params->batch_count : 1;
-    ld_image_t* images = static_cast<ld_image_t*>(std::calloc(static_cast<size_t>(count), sizeof(ld_image_t)));
+    ed_image_t* images = static_cast<ed_image_t*>(std::calloc(static_cast<size_t>(count), sizeof(ed_image_t)));
     if (images == nullptr) {
         if (error != nullptr) {
             *error = "failed to allocate image batch";
         }
-        return LD_STATUS_OUT_OF_MEMORY;
+        return ED_STATUS_OUT_OF_MEMORY;
     }
 
     for (int i = 0; i < count; ++i) {
@@ -213,17 +213,17 @@ ld_status_t SD3Pipeline::generate_image(const ld_image_generation_params_t* para
                 std::free(images[j].data);
             }
             std::free(images);
-            return LD_STATUS_GENERATION_FAILED;
+            return ED_STATUS_GENERATION_FAILED;
         }
     }
 
     out->images = images;
     out->count = count;
-    return LD_STATUS_OK;
+    return ED_STATUS_OK;
 }
 
-ld_status_t SD3Pipeline::generate_video(const ld_video_generation_params_t*,
-                                        ld_video_t* out,
+ed_status_t SD3Pipeline::generate_video(const ed_video_generation_params_t*,
+                                        ed_video_t* out,
                                         std::string* error) {
     if (out != nullptr) {
         out->frames = nullptr;
@@ -232,24 +232,24 @@ ld_status_t SD3Pipeline::generate_video(const ld_video_generation_params_t*,
     if (error != nullptr) {
         *error = "video generation is not supported by SD3Pipeline";
     }
-    return LD_STATUS_UNSUPPORTED;
+    return ED_STATUS_UNSUPPORTED;
 }
 
-ld_scheduler_t SD3Pipeline::default_scheduler(ld_sampler_t method) const {
-    if (method == LD_SAMPLER_LCM || method == LD_SAMPLER_TCD) {
-        return LD_SCHEDULER_LCM;
+ed_scheduler_t SD3Pipeline::default_scheduler(ed_sampler_t method) const {
+    if (method == ED_SAMPLER_LCM || method == ED_SAMPLER_TCD) {
+        return ED_SCHEDULER_LCM;
     }
-    if (method == LD_SAMPLER_DDIM_TRAILING) {
-        return LD_SCHEDULER_SIMPLE;
+    if (method == ED_SAMPLER_DDIM_TRAILING) {
+        return ED_SCHEDULER_SIMPLE;
     }
-    return LD_SCHEDULER_DISCRETE;
+    return ED_SCHEDULER_DISCRETE;
 }
 
 bool SD3Pipeline::can_generate_image() const {
     return ready_ && runtime_ != nullptr && conditioner_ != nullptr && diffusion_ != nullptr && vae_ != nullptr;
 }
 
-bool SD3Pipeline::validate_image_params(const ld_image_generation_params_t* params,
+bool SD3Pipeline::validate_image_params(const ed_image_generation_params_t* params,
                                         std::string* error) const {
     if (params == nullptr) {
         if (error != nullptr) {
@@ -293,9 +293,9 @@ std::vector<float> SD3Pipeline::build_sigmas(int steps, float shift) const {
     return sigmas;
 }
 
-bool SD3Pipeline::generate_one_image(const ld_image_generation_params_t* params,
+bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
                                      int batch_index,
-                                     ld_image_t* image,
+                                     ed_image_t* image,
                                      std::string* error) {
     if (!can_generate_image()) {
         if (error != nullptr) {
@@ -342,10 +342,10 @@ bool SD3Pipeline::generate_one_image(const ld_image_generation_params_t* params,
     const int latent_w = params->width / vae_scale_factor;
     const int latent_h = params->height / vae_scale_factor;
     const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
-    const ld_sampler_t sampler = params->sample.sampler == LD_SAMPLER_AUTO
+    const ed_sampler_t sampler = params->sample.sampler == ED_SAMPLER_AUTO
                                      ? default_sample_method()
                                      : params->sample.sampler;
-    if (sampler != LD_SAMPLER_EULER) {
+    if (sampler != ED_SAMPLER_EULER) {
         if (error != nullptr) {
             *error = "SD3Pipeline currently implements the old default Euler flow path only";
         }
@@ -479,7 +479,7 @@ bool SD3Pipeline::generate_one_image(const ld_image_generation_params_t* params,
     diffusion_->free_compute_buffer();
 
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
-    ld_tiling_params_t tiling_params{};
+    ed_tiling_params_t tiling_params{};
     sd::Tensor<float> decoded = vae_->decode(runtime_->n_threads(),
                                              vae_latents,
                                              tiling_params,
@@ -493,14 +493,14 @@ bool SD3Pipeline::generate_one_image(const ld_image_generation_params_t* params,
         return false;
     }
 
-    const ld_status_t status = tensor_to_image(decoded, image);
-    if (status != LD_STATUS_OK) {
+    const ed_status_t status = tensor_to_image(decoded, image);
+    if (status != ED_STATUS_OK) {
         if (error != nullptr) {
-            *error = status == LD_STATUS_OUT_OF_MEMORY ? "failed to allocate decoded image" : "decoded SD3 tensor has invalid shape";
+            *error = status == ED_STATUS_OUT_OF_MEMORY ? "failed to allocate decoded image" : "decoded SD3 tensor has invalid shape";
         }
         return false;
     }
     return true;
 }
 
-}  // namespace lightdit
+}  // namespace edgedit

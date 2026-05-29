@@ -1,13 +1,13 @@
-# light-dit Server
+# edge-dit Server
 
-`ld-server` is a small HTTP wrapper around the public light-dit C API. It keeps one
+`ed-server` is a small HTTP wrapper around the public edge-dit C API. It keeps one
 model context loaded in-process and serializes generation calls through that
 context.
 
 ## Start
 
 ```bash
-./build-cuda/bin/ld-server \
+./build-cuda/bin/ed-server \
   --backend cuda \
   --model /mnt/cfs/9n-das-admin/llm_models/flux-dev/ \
   --host 0.0.0.0 \
@@ -17,19 +17,19 @@ context.
   --guidance 3.5
 ```
 
-Canonical endpoints use the `ld` prefix, matching `ld-cli` and the `ld_*` C API:
+Canonical endpoints use the `ed` prefix, matching `ed-cli` and the `ed_*` C API:
 
-- `GET /ld/v1/health`
-- `GET /ld/v1/models`
-- `GET /ld/v1/capabilities`
-- `POST /ld/v1/images/generations`
+- `GET /ed/v1/health`
+- `GET /ed/v1/models`
+- `GET /ed/v1/capabilities`
+- `POST /ed/v1/images/generations`
 
-Aliases are also registered for `/lightdit/v1/...` and `/light-dit/v1/...`.
+Aliases are also registered for `/edgedit/v1/...` and `/edge-dit/v1/...`.
 
 ## Generate An Image
 
 ```bash
-curl -s http://127.0.0.1:8080/ld/v1/images/generations \
+curl -s http://127.0.0.1:8080/ed/v1/images/generations \
   -H 'Content-Type: application/json' \
   -d '{
     "prompt": "a cinematic photo of a glass teapot on a wooden table, soft morning light",

@@ -119,7 +119,7 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
                                       const std::map<std::string, std::string>& orig_embedding_map,
                                       SDVersion version = VERSION_SD1,
                                       PMVersion pv      = PM_VERSION_1)
-        : version(version), pm_version(pv), tokenizer(ld_version_is_sd2(version) ? 0 : 49407) {
+        : version(version), pm_version(pv), tokenizer(ed_version_is_sd2(version) ? 0 : 49407) {
         for (const auto& kv : orig_embedding_map) {
             std::string name = kv.first;
             std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -127,11 +127,11 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
             tokenizer.add_special_token(name);
         }
         bool force_clip_f32 = !embedding_map.empty();
-        if (ld_version_is_sd1(version)) {
+        if (ed_version_is_sd1(version)) {
             text_model = std::make_shared<CLIPTextModelRunner>(backend, offload_params_to_cpu, tensor_storage_map, "cond_stage_model.transformer.text_model", OPENAI_CLIP_VIT_L_14, true, force_clip_f32);
-        } else if (ld_version_is_sd2(version)) {
+        } else if (ed_version_is_sd2(version)) {
             text_model = std::make_shared<CLIPTextModelRunner>(backend, offload_params_to_cpu, tensor_storage_map, "cond_stage_model.transformer.text_model", OPEN_CLIP_VIT_H_14, true, force_clip_f32);
-        } else if (ld_version_is_sdxl(version)) {
+        } else if (ed_version_is_sdxl(version)) {
             text_model  = std::make_shared<CLIPTextModelRunner>(backend, offload_params_to_cpu, tensor_storage_map, "cond_stage_model.transformer.text_model", OPENAI_CLIP_VIT_L_14, false, force_clip_f32);
             text_model2 = std::make_shared<CLIPTextModelRunner>(backend, offload_params_to_cpu, tensor_storage_map, "cond_stage_model.1.transformer.text_model", OPEN_CLIP_VIT_BIGG_14, false, force_clip_f32);
         }
@@ -139,28 +139,28 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
 
     void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors) override {
         text_model->get_param_tensors(tensors, "cond_stage_model.transformer.text_model");
-        if (ld_version_is_sdxl(version)) {
+        if (ed_version_is_sdxl(version)) {
             text_model2->get_param_tensors(tensors, "cond_stage_model.1.transformer.text_model");
         }
     }
 
     void alloc_params_buffer() override {
         text_model->alloc_params_buffer();
-        if (ld_version_is_sdxl(version)) {
+        if (ed_version_is_sdxl(version)) {
             text_model2->alloc_params_buffer();
         }
     }
 
     void free_params_buffer() override {
         text_model->free_params_buffer();
-        if (ld_version_is_sdxl(version)) {
+        if (ed_version_is_sdxl(version)) {
             text_model2->free_params_buffer();
         }
     }
 
     size_t get_params_buffer_size() override {
         size_t buffer_size = text_model->get_params_buffer_size();
-        if (ld_version_is_sdxl(version)) {
+        if (ed_version_is_sdxl(version)) {
             buffer_size += text_model2->get_params_buffer_size();
         }
         return buffer_size;
@@ -168,21 +168,21 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
 
     void set_max_graph_vram_bytes(size_t max_vram_bytes) override {
         text_model->set_max_graph_vram_bytes(max_vram_bytes);
-        if (ld_version_is_sdxl(version)) {
+        if (ed_version_is_sdxl(version)) {
             text_model2->set_max_graph_vram_bytes(max_vram_bytes);
         }
     }
 
     void set_flash_attention_enabled(bool enabled) override {
         text_model->set_flash_attention_enabled(enabled);
-        if (ld_version_is_sdxl(version)) {
+        if (ed_version_is_sdxl(version)) {
             text_model2->set_flash_attention_enabled(enabled);
         }
     }
 
     void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) override {
         text_model->set_weight_adapter(adapter);
-        if (ld_version_is_sdxl(version)) {
+        if (ed_version_is_sdxl(version)) {
             text_model2->set_weight_adapter(adapter);
         }
     }
@@ -325,7 +325,7 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
             int32_t clean_index = 0;
             if (curr_text == "BREAK" && curr_weight == -1.0f) {
                 // Pad token array up to chunk size at this point.
-                // TODO: This is a hardcoded chunk_len, like in light-dit.cpp, make it a parameter for the future?
+                // TODO: This is a hardcoded chunk_len, like in edge-dit.cpp, make it a parameter for the future?
                 // Also, this is 75 instead of 77 to leave room for BOS and EOS tokens.
                 int padding_size = 75 - (tokens_acc % 75);
                 for (int j = 0; j < padding_size; j++) {
@@ -435,7 +435,7 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
 
             if (curr_text == "BREAK" && curr_weight == -1.0f) {
                 // Pad token array up to chunk size at this point.
-                // TODO: This is a hardcoded chunk_len, like in light-dit.cpp, make it a parameter for the future?
+                // TODO: This is a hardcoded chunk_len, like in edge-dit.cpp, make it a parameter for the future?
                 // Also, this is 75 instead of 77 to leave room for BOS and EOS tokens.
                 size_t current_size = tokens.size();
                 size_t padding_size = (75 - (current_size % 75)) % 75;  // Ensure no negative padding
@@ -476,7 +476,7 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
         sd::Tensor<float> pooled;
 
         if (clip_skip <= 0) {
-            clip_skip = (ld_version_is_sd2(version) || ld_version_is_sdxl(version)) ? 2 : 1;
+            clip_skip = (ed_version_is_sd2(version) || ed_version_is_sdxl(version)) ? 2 : 1;
         }
 
         size_t chunk_len   = 77;
@@ -490,7 +490,7 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
             sd::Tensor<int32_t> input_ids({static_cast<int64_t>(chunk_tokens.size())}, chunk_tokens);
             sd::Tensor<int32_t> input_ids2;
             size_t max_token_idx = 0;
-            if (ld_version_is_sdxl(version)) {
+            if (ed_version_is_sdxl(version)) {
                 auto it = std::find(chunk_tokens.begin(), chunk_tokens.end(), tokenizer.EOS_TOKEN_ID);
                 if (it != chunk_tokens.end()) {
                     std::fill(std::next(it), chunk_tokens.end(), 0);
@@ -515,7 +515,7 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
                                                                false,
                                                                clip_skip);
                 GGML_ASSERT(!chunk_hidden_states.empty());
-                if (ld_version_is_sdxl(version)) {
+                if (ed_version_is_sdxl(version)) {
                     auto chunk_hidden_states2 = text_model2->compute(n_threads,
                                                                      input_ids2,
                                                                      num_custom_embeddings,
@@ -554,7 +554,7 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
         }
 
         sd::Tensor<float> vec;
-        if (ld_version_is_sdxl(version)) {
+        if (ed_version_is_sdxl(version)) {
             int out_dim = 256;
             GGML_ASSERT(!pooled.empty());
             vec = sd::Tensor<float>({adm_in_channels});
@@ -1656,9 +1656,9 @@ struct LLMEmbedder : public Conditioner {
         LLM::LLMArch arch = LLM::LLMArch::QWEN2_5_VL;
         if (version == VERSION_FLUX2) {
             arch = LLM::LLMArch::MISTRAL_SMALL_3_2;
-        } else if (ld_version_is_ernie_image(version)) {
+        } else if (ed_version_is_ernie_image(version)) {
             arch = LLM::LLMArch::MINISTRAL_3_3B;
-        } else if (ld_version_is_z_image(version) || version == VERSION_OVIS_IMAGE || version == VERSION_FLUX2_KLEIN) {
+        } else if (ed_version_is_z_image(version) || version == VERSION_OVIS_IMAGE || version == VERSION_FLUX2_KLEIN) {
             arch = LLM::LLMArch::QWEN3;
         }
         if (arch == LLM::LLMArch::MISTRAL_SMALL_3_2 || arch == LLM::LLMArch::MINISTRAL_3_3B) {
@@ -1832,7 +1832,7 @@ struct LLMEmbedder : public Conditioner {
 
         int64_t t0 = ggml_time_ms();
 
-        if (ld_version_is_qwen_image(version)) {
+        if (ed_version_is_qwen_image(version)) {
             if (llm->enable_vision && conditioner_params.ref_images != nullptr && !conditioner_params.ref_images->empty()) {
                 LOG_INFO("QwenImageEditPlusPipeline");
                 prompt_template_encode_start_idx = 64;
@@ -1912,14 +1912,14 @@ struct LLMEmbedder : public Conditioner {
             prompt_attn_range.second = static_cast<int>(prompt.size());
 
             prompt += "[/INST]";
-        } else if (ld_version_is_ernie_image(version)) {
+        } else if (ed_version_is_ernie_image(version)) {
             prompt_template_encode_start_idx = 0;
             out_layers                       = {25};  // -2
 
             prompt_attn_range.first = 0;
             prompt += conditioner_params.text;
             prompt_attn_range.second = static_cast<int>(prompt.size());
-        } else if (ld_version_is_z_image(version)) {
+        } else if (ed_version_is_z_image(version)) {
             prompt_template_encode_start_idx = 0;
             out_layers                       = {35};  // -2
 

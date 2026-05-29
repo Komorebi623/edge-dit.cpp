@@ -165,7 +165,7 @@ static int64_t split_chunk_offset_elems(const String2TensorStorage& storage_map,
     return offset;
 }
 
-const char* ld_version_name(SDVersion version) {
+const char* ed_version_name(SDVersion version) {
     switch (version) {
         case VERSION_SD1: return "sd1";
         case VERSION_SD1_INPAINT: return "sd1-inpaint";
@@ -589,7 +589,7 @@ bool ModelLoader::load_optional_file(const char* path,
     return true;
 }
 
-bool ModelLoader::load_model_files(const ld_context_params_t& params,
+bool ModelLoader::load_model_files(const ed_context_params_t& params,
                                    std::string* error) {
     bool loaded_any = false;
     auto load_user_component = [&](const char* path,
@@ -613,7 +613,7 @@ bool ModelLoader::load_model_files(const ld_context_params_t& params,
 
     const SDVersion hint_version = get_ld_version();
     const bool is_unet_hint = hint_version != VERSION_COUNT &&
-                              ld_version_is_unet(hint_version);
+                              ed_version_is_unet(hint_version);
 
     std::string diffusion_model_path;
     if (non_empty(params.diffusion_model_path)) {
@@ -733,18 +733,18 @@ bool ModelLoader::finalize_names_and_version(std::string* error) {
     }
 
     LOG_INFO("model loader initialized: version=%s, files=%zu, tensors=%zu",
-             ld_version_name(version_),
+             ed_version_name(version_),
              file_paths_.size(),
              tensor_storage_map_.size());
 
     return true;
 }
 
-bool ModelLoader::apply_dtype_policy(const ld_context_params_t& params,
+bool ModelLoader::apply_dtype_policy(const ed_context_params_t& params,
                                      std::string* error) {
     (void)error;
 
-    const ggml_type wtype = ld_dtype_to_ggml(params.weight_type);
+    const ggml_type wtype = ed_dtype_to_ggml(params.weight_type);
     if (wtype != GGML_TYPE_COUNT) {
         set_wtype_override(wtype);
     }
@@ -788,22 +788,22 @@ bool ModelLoader::bind_weights(const TensorMap& tensors,
     return bind_weights(n_threads, use_mmap, error);
 }
 
-ggml_type ModelLoader::ld_dtype_to_ggml(ld_dtype_t dtype) {
+ggml_type ModelLoader::ed_dtype_to_ggml(ed_dtype_t dtype) {
     switch (dtype) {
-        case LD_DTYPE_F32:  return GGML_TYPE_F32;
-        case LD_DTYPE_F16:  return GGML_TYPE_F16;
-        case LD_DTYPE_BF16: return GGML_TYPE_BF16;
-        case LD_DTYPE_Q4_0: return GGML_TYPE_Q4_0;
-        case LD_DTYPE_Q4_1: return GGML_TYPE_Q4_1;
-        case LD_DTYPE_Q5_0: return GGML_TYPE_Q5_0;
-        case LD_DTYPE_Q5_1: return GGML_TYPE_Q5_1;
-        case LD_DTYPE_Q8_0: return GGML_TYPE_Q8_0;
-        case LD_DTYPE_Q2_K: return GGML_TYPE_Q2_K;
-        case LD_DTYPE_Q3_K: return GGML_TYPE_Q3_K;
-        case LD_DTYPE_Q4_K: return GGML_TYPE_Q4_K;
-        case LD_DTYPE_Q5_K: return GGML_TYPE_Q5_K;
-        case LD_DTYPE_Q6_K: return GGML_TYPE_Q6_K;
-        case LD_DTYPE_AUTO:
+        case ED_DTYPE_F32:  return GGML_TYPE_F32;
+        case ED_DTYPE_F16:  return GGML_TYPE_F16;
+        case ED_DTYPE_BF16: return GGML_TYPE_BF16;
+        case ED_DTYPE_Q4_0: return GGML_TYPE_Q4_0;
+        case ED_DTYPE_Q4_1: return GGML_TYPE_Q4_1;
+        case ED_DTYPE_Q5_0: return GGML_TYPE_Q5_0;
+        case ED_DTYPE_Q5_1: return GGML_TYPE_Q5_1;
+        case ED_DTYPE_Q8_0: return GGML_TYPE_Q8_0;
+        case ED_DTYPE_Q2_K: return GGML_TYPE_Q2_K;
+        case ED_DTYPE_Q3_K: return GGML_TYPE_Q3_K;
+        case ED_DTYPE_Q4_K: return GGML_TYPE_Q4_K;
+        case ED_DTYPE_Q5_K: return GGML_TYPE_Q5_K;
+        case ED_DTYPE_Q6_K: return GGML_TYPE_Q6_K;
+        case ED_DTYPE_AUTO:
         default:
             return GGML_TYPE_COUNT;
     }
@@ -913,7 +913,7 @@ bool ModelLoader::init_from_file_and_convert_name(const std::string& file_path, 
     }
     convert_tensors_name();
     LOG_INFO("model loader initialized: version=%s, files=%zu, tensors=%zu",
-             ld_version_name(version_), file_paths_.size(), tensor_storage_map_.size());
+             ed_version_name(version_), file_paths_.size(), tensor_storage_map_.size());
     return true;
 }
 
@@ -1026,7 +1026,7 @@ bool ModelLoader::init_from_diffusers_directory(const std::string& dir_path, con
         }
 
         std::string component_prefix = (version_ == VERSION_FLUX) ? component.flux_prefix : component.sd_prefix;
-        if (ld_version_is_wan(version_)) {
+        if (ed_version_is_wan(version_)) {
             if (std::strcmp(component.dir, "text_encoder") == 0) {
                 component_prefix = "text_encoders.t5xxl.transformer.";
             } else if (std::strcmp(component.dir, "text_encoder_2") == 0 ||
@@ -1035,7 +1035,7 @@ bool ModelLoader::init_from_diffusers_directory(const std::string& dir_path, con
                 continue;
             }
         }
-        if (ld_version_is_qwen_image(version_)) {
+        if (ed_version_is_qwen_image(version_)) {
             if (std::strcmp(component.dir, "text_encoder") == 0) {
                 component_prefix = "text_encoders.llm.";
             } else if (std::strcmp(component.dir, "text_encoder_2") == 0 ||
@@ -1281,7 +1281,7 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_thread
         return false;
     }
 
-    const int num_threads_to_use = std::max(1, n_threads_p > 0 ? n_threads_p : ld_get_num_physical_cores());
+    const int num_threads_to_use = std::max(1, n_threads_p > 0 ? n_threads_p : ed_get_num_physical_cores());
     const int64_t start_time = ggml_time_ms();
     std::atomic<uint64_t> bytes_processed(0);
     size_t total_tensors_processed = 0;

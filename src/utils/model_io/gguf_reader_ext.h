@@ -1,5 +1,5 @@
-#ifndef __LD_MODEL_IO_GGUF_READER_EXT_H__
-#define __LD_MODEL_IO_GGUF_READER_EXT_H__
+#ifndef __ED_MODEL_IO_GGUF_READER_EXT_H__
+#define __ED_MODEL_IO_GGUF_READER_EXT_H__
 
 #include <cstdint>
 #include <cstring>
@@ -232,4 +232,4 @@ public:
     size_t data_offset() const { return data_offset_; }
 };
 
-#endif  // __LD_MODEL_IO_GGUF_READER_EXT_H__
+#endif  // __ED_MODEL_IO_GGUF_READER_EXT_H__

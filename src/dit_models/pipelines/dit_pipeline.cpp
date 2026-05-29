@@ -6,25 +6,25 @@
 #include "dit_models/pipelines/wan_pipeline.hpp"
 #include "utils/util.h"
 
-namespace lightdit {
+namespace edgedit {
 
 std::unique_ptr<DiTPipeline> create_dit_pipeline(SDVersion version,
                                                  std::string* error) {
-    if (ld_version_is_flux(version) || ld_version_is_flux2(version)) {
+    if (ed_version_is_flux(version) || ed_version_is_flux2(version)) {
         return std::make_unique<FluxPipeline>(version);
     }
-    if (ld_version_is_sd3(version)) {
+    if (ed_version_is_sd3(version)) {
         return std::make_unique<SD3Pipeline>(version);
     }
-    if (ld_version_is_qwen_image(version)) {
+    if (ed_version_is_qwen_image(version)) {
         return std::make_unique<QwenImagePipeline>(version);
     }
-    if (ld_version_is_wan(version)) {
+    if (ed_version_is_wan(version)) {
         return std::make_unique<WanPipeline>(version);
     }
 
     const std::string msg = "unsupported DiT pipeline version: " +
-                            std::string(ld_version_name(version));
+                            std::string(ed_version_name(version));
     if (error != nullptr) {
         *error = msg;
     }
@@ -32,4 +32,4 @@ std::unique_ptr<DiTPipeline> create_dit_pipeline(SDVersion version,
     return nullptr;
 }
 
-}  // namespace lightdit
+}  // namespace edgedit

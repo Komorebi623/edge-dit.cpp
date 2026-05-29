@@ -540,8 +540,8 @@ public:
                        const String2TensorStorage& tensor_storage_map = {},
                        const std::string& prefix                      = "")
         : version(version), decode_only(decode_only), use_video_decoder(use_video_decoder) {
-        if (ld_version_is_dit(version)) {
-            if (ld_version_uses_flux2_vae(version)) {
+        if (ed_version_is_dit(version)) {
+            if (ed_version_uses_flux2_vae(version)) {
                 dd_config.z_channels = 32;
                 embed_dim            = 32;
             } else {
@@ -586,7 +586,7 @@ public:
 
     ggml_tensor* decode(GGMLRunnerContext* ctx, ggml_tensor* z) {
         // z: [N, z_channels, h, w]
-        if (ld_version_uses_flux2_vae(version)) {
+        if (ed_version_uses_flux2_vae(version)) {
             // [N, C*p*p, h, w] -> [N, C, h*p, w*p]
             int64_t p = 2;
 
@@ -627,7 +627,7 @@ public:
             z               = quant_conv->forward(ctx, z);  // [N, 2*embed_dim, h/8, w/8]
             // sd::ggml_graph_cut::mark_graph_cut(z, "vae.encode.final", "z");
         }
-        if (ld_version_uses_flux2_vae(version)) {
+        if (ed_version_uses_flux2_vae(version)) {
             z = ggml_ext_chunk(ctx->ggml_ctx, z, 2, 2)[0];
 
             // [N, C, H, W] -> [N, C*p*p, H/p, W/p]
@@ -650,7 +650,7 @@ public:
 
     int get_encoder_output_channels() {
         int factor = dd_config.double_z ? 2 : 1;
-        if (ld_version_uses_flux2_vae(version)) {
+        if (ed_version_uses_flux2_vae(version)) {
             return dd_config.z_channels * 4;
         }
         return dd_config.z_channels * factor;
@@ -671,19 +671,19 @@ struct AutoEncoderKL : public VAE {
                   bool use_video_decoder = false,
                   SDVersion version      = VERSION_SD1)
         : decode_only(decode_only), VAE(version, backend, offload_params_to_cpu) {
-        if (ld_version_is_sd1(version) || ld_version_is_sd2(version)) {
+        if (ed_version_is_sd1(version) || ed_version_is_sd2(version)) {
             scale_factor = 0.18215f;
             shift_factor = 0.f;
-        } else if (ld_version_is_sdxl(version)) {
+        } else if (ed_version_is_sdxl(version)) {
             scale_factor = 0.13025f;
             shift_factor = 0.f;
-        } else if (ld_version_is_sd3(version)) {
+        } else if (ed_version_is_sd3(version)) {
             scale_factor = 1.5305f;
             shift_factor = 0.0609f;
-        } else if (ld_version_is_flux(version) || ld_version_is_z_image(version)) {
+        } else if (ed_version_is_flux(version) || ed_version_is_z_image(version)) {
             scale_factor = 0.3611f;
             shift_factor = 0.1159f;
-        } else if (ld_version_uses_flux2_vae(version)) {
+        } else if (ed_version_uses_flux2_vae(version)) {
             scale_factor = 1.0f;
             shift_factor = 0.f;
         }
@@ -757,7 +757,7 @@ struct AutoEncoderKL : public VAE {
     }
 
     sd::Tensor<float> vae_output_to_latents(const sd::Tensor<float>& vae_output, std::shared_ptr<RNG> rng) override {
-        if (ld_version_uses_flux2_vae(version)) {
+        if (ed_version_uses_flux2_vae(version)) {
             return vae_output;
         } else if (version == VERSION_SD1_PIX2PIX) {
             return sd::ops::chunk(vae_output, 2, 2)[0];
@@ -768,7 +768,7 @@ struct AutoEncoderKL : public VAE {
 
     std::pair<sd::Tensor<float>, sd::Tensor<float>> get_latents_mean_std(const sd::Tensor<float>& latents, int channel_dim) {
         GGML_ASSERT(channel_dim >= 0 && static_cast<size_t>(channel_dim) < static_cast<size_t>(latents.dim()));
-        if (ld_version_uses_flux2_vae(version)) {
+        if (ed_version_uses_flux2_vae(version)) {
             GGML_ASSERT(latents.shape()[channel_dim] == 128);
             std::vector<int64_t> stats_shape(static_cast<size_t>(latents.dim()), 1);
             stats_shape[static_cast<size_t>(channel_dim)] = latents.shape()[channel_dim];
@@ -814,7 +814,7 @@ struct AutoEncoderKL : public VAE {
     }
 
     sd::Tensor<float> diffusion_to_vae_latents(const sd::Tensor<float>& latents) override {
-        if (ld_version_uses_flux2_vae(version)) {
+        if (ed_version_uses_flux2_vae(version)) {
             int channel_dim                = 2;
             auto [mean_tensor, std_tensor] = get_latents_mean_std(latents, channel_dim);
             return (latents * std_tensor) / scale_factor + mean_tensor;
@@ -823,7 +823,7 @@ struct AutoEncoderKL : public VAE {
     }
 
     sd::Tensor<float> vae_to_diffusion_latents(const sd::Tensor<float>& latents) override {
-        if (ld_version_uses_flux2_vae(version)) {
+        if (ed_version_uses_flux2_vae(version)) {
             int channel_dim                = 2;
             auto [mean_tensor, std_tensor] = get_latents_mean_std(latents, channel_dim);
             return ((latents - mean_tensor) * scale_factor) / std_tensor;

@@ -11,7 +11,7 @@
 #include <unordered_map>
 
 #include "backend/ggml/ggml_extend.hpp"
-#include "light-dit.h"
+#include "edge-dit.h"
 #include "core/runtime/model_loader.h"
 #include "tokenizers/t5_unigram_tokenizer.h"
 

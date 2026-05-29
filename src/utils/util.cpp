@@ -102,7 +102,7 @@ int round_up_to(int value, int base) {
     return ((value + base - 1) / base) * base;
 }
 
-int ld_get_num_physical_cores() {
+int ed_get_num_physical_cores() {
     const unsigned int n = std::thread::hardware_concurrency();
     return n == 0 ? 4 : static_cast<int>(n);
 }
@@ -164,13 +164,13 @@ void pretty_progress(int step, int steps, float time) {
     }
 }
 
-void log_printf(ld_log_level_t level, const char* file, int line, const char* format, ...) {
+void log_printf(ed_log_level_t level, const char* file, int line, const char* format, ...) {
     const char* level_name = "debug";
     switch (level) {
-        case LD_LOG_INFO: level_name = "info"; break;
-        case LD_LOG_WARN: level_name = "warn"; break;
-        case LD_LOG_ERROR: level_name = "error"; break;
-        case LD_LOG_DEBUG:
+        case ED_LOG_INFO: level_name = "info"; break;
+        case ED_LOG_WARN: level_name = "warn"; break;
+        case ED_LOG_ERROR: level_name = "error"; break;
+        case ED_LOG_DEBUG:
         default: break;
     }
 

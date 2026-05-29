@@ -3,31 +3,31 @@
 #include <memory>
 #include <string>
 
-#include "light-dit.h"
+#include "edge-dit.h"
 #include "dit_models/pipelines/dit_pipeline.hpp"
 #include "runtime/model_runtime.hpp"
 #include "runtime/model_loader.h"
 
-namespace lightdit {
+namespace edgedit {
 
-class LightDitEngine final {
+class EdgeDitEngine final {
 public:
-    LightDitEngine() = default;
-    ~LightDitEngine() = default;
+    EdgeDitEngine() = default;
+    ~EdgeDitEngine() = default;
 
-    LightDitEngine(const LightDitEngine&) = delete;
-    LightDitEngine& operator=(const LightDitEngine&) = delete;
+    EdgeDitEngine(const EdgeDitEngine&) = delete;
+    EdgeDitEngine& operator=(const EdgeDitEngine&) = delete;
 
-    bool init(const ld_ctx_params_t* params);
+    bool init(const ed_ctx_params_t* params);
 
-    ld_status_t generate_image(
-        const ld_image_generation_params_t* params,
-        ld_image_batch_t* out
+    ed_status_t generate_image(
+        const ed_image_generation_params_t* params,
+        ed_image_batch_t* out
     );
 
-    ld_status_t generate_video(
-        const ld_video_generation_params_t* params,
-        ld_video_t* out
+    ed_status_t generate_video(
+        const ed_video_generation_params_t* params,
+        ed_video_t* out
     );
 
     bool supports_image_generation() const;
@@ -45,7 +45,7 @@ public:
     }
 
 private:
-    ld_ctx_params_t ctx_params_ = {};
+    ed_ctx_params_t ctx_params_ = {};
     std::unique_ptr<ModelRuntime> runtime_;
     std::unique_ptr<ModelLoader> model_loader_;
     std::unique_ptr<DiTPipeline> dit_pipeline_;
@@ -54,4 +54,4 @@ private:
     void set_error(const std::string& msg);
 };
 
-} // namespace lightdit
+} // namespace edgedit

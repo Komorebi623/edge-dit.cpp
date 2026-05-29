@@ -16,7 +16,7 @@ struct FluxRunner;
 struct Conditioner;
 struct VAE;
 
-namespace lightdit {
+namespace edgedit {
 
 struct PipelineComponent {
     std::string name;
@@ -33,7 +33,7 @@ public:
 
     const char* name() const override { return "flux"; }
 
-    bool prepare(const ld_context_params_t& params,
+    bool prepare(const ed_context_params_t& params,
                  ModelRuntime& runtime,
                  const ModelLoader& loader,
                  PipelineTensorRegistry& registry,
@@ -41,12 +41,12 @@ public:
 
     void mark_ready() override;
 
-    ld_status_t generate_image(const ld_image_generation_params_t* params,
-                               ld_image_batch_t* out,
+    ed_status_t generate_image(const ed_image_generation_params_t* params,
+                               ed_image_batch_t* out,
                                std::string* error) override;
 
-    ld_status_t generate_video(const ld_video_generation_params_t* params,
-                               ld_video_t* out,
+    ed_status_t generate_video(const ed_video_generation_params_t* params,
+                               ed_video_t* out,
                                std::string* error) override;
 
     SDVersion version() const override { return version_; }
@@ -55,8 +55,8 @@ public:
     bool supports_image_generation() const override;
     bool supports_video_generation() const override;
 
-    ld_sampler_t default_sample_method() const override;
-    ld_scheduler_t default_scheduler(ld_sampler_t method) const override;
+    ed_sampler_t default_sample_method() const override;
+    ed_scheduler_t default_scheduler(ed_sampler_t method) const override;
 
 private:
     bool ready_ = false;
@@ -99,16 +99,16 @@ private:
                                       std::string* error);
 
     bool can_generate_image() const;
-    bool generate_one_image(const ld_image_generation_params_t* params,
+    bool generate_one_image(const ed_image_generation_params_t* params,
                             int batch_index,
                             int n_threads,
-                            ld_image_t* image,
+                            ed_image_t* image,
                             std::string* error);
 
-    bool validate_image_params(const ld_image_generation_params_t* params,
+    bool validate_image_params(const ed_image_generation_params_t* params,
                                std::string* error) const;
-    bool validate_video_params(const ld_video_generation_params_t* params,
+    bool validate_video_params(const ed_video_generation_params_t* params,
                                std::string* error) const;
 };
 
-}  // namespace lightdit
+}  // namespace edgedit

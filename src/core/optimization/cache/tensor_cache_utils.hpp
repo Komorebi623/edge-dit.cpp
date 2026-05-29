@@ -5,7 +5,7 @@
 
 #include "utils/tensor.hpp"
 
-namespace lightdit {
+namespace edgedit {
 namespace cache {
 
 inline bool store_tensor_diff(std::vector<float>* diff,
@@ -82,4 +82,4 @@ inline float residual_diff(const std::vector<float>& prev, const std::vector<flo
 }
 
 }  // namespace cache
-}  // namespace lightdit
+}  // namespace edgedit

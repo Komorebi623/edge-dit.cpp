@@ -5,7 +5,7 @@
 #include <cmath>
 #include <string>
 
-namespace lightdit {
+namespace edgedit {
 namespace cache {
 
 namespace {
@@ -62,7 +62,7 @@ std::vector<int> parse_steps_computation_mask(const char* mask) {
     return result;
 }
 
-static float cache_reuse_threshold(const ld_sample_params_t& params, CacheMode mode) {
+static float cache_reuse_threshold(const ed_sample_params_t& params, CacheMode mode) {
     float threshold = params.cache_reuse_threshold;
     if (std::isinf(threshold)) {
         if (mode == CacheMode::EasyCache) {
@@ -74,7 +74,7 @@ static float cache_reuse_threshold(const ld_sample_params_t& params, CacheMode m
     return std::max(0.0f, threshold);
 }
 
-CacheConfig cache_config_from_sample_params(const ld_sample_params_t& params) {
+CacheConfig cache_config_from_sample_params(const ed_sample_params_t& params) {
     CacheConfig cfg;
     cfg.mode = cache_mode_from_ld(params.cache_mode);
     const float start_percent = clamp_percent(params.cache_start_percent, 0.15f);
@@ -117,4 +117,4 @@ CacheConfig cache_config_from_sample_params(const ld_sample_params_t& params) {
 }
 
 }  // namespace cache
-}  // namespace lightdit
+}  // namespace edgedit

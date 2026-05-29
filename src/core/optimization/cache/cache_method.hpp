@@ -6,7 +6,7 @@
 #include "core/optimization/cache/cache_types.hpp"
 #include "utils/tensor.hpp"
 
-namespace lightdit {
+namespace edgedit {
 namespace cache {
 
 struct CacheForwardContext {
@@ -40,4 +40,4 @@ struct CacheMethod {
 std::unique_ptr<CacheMethod> create_cache_method(CacheMode mode);
 
 }  // namespace cache
-}  // namespace lightdit
+}  // namespace edgedit

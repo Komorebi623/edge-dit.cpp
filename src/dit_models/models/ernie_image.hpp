@@ -1,5 +1,5 @@
-#ifndef __LD_ERNIE_IMAGE_HPP__
-#define __LD_ERNIE_IMAGE_HPP__
+#ifndef __ED_ERNIE_IMAGE_HPP__
+#define __ED_ERNIE_IMAGE_HPP__
 
 #include <memory>
 #include <vector>
@@ -438,4 +438,4 @@ namespace ErnieImage {
     };
 }  // namespace ErnieImage
 
-#endif  // __LD_ERNIE_IMAGE_HPP__
+#endif  // __ED_ERNIE_IMAGE_HPP__

@@ -9,8 +9,8 @@ CLEAN_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 env PATH=${CLEAN_PATH} ${CMAKE_BIN} -S . -B build-cpu \
   -DCMAKE_BUILD_TYPE=Release \
-  -DLDIT_BUILD_EXAMPLES=ON
+  -DED_BUILD_EXAMPLES=ON
 
 env PATH=${CLEAN_PATH} ${CMAKE_BIN} --build build-cpu -j
 
-./build-cpu/bin/ld-cli --help
+./build-cpu/bin/ed-cli --help

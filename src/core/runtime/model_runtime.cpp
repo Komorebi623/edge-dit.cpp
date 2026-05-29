@@ -9,7 +9,7 @@
 #include "utils/rng_philox.hpp"
 #include "utils/util.h"
 
-namespace lightdit {
+namespace edgedit {
 namespace {
 
 std::string lowercase(std::string value) {
@@ -20,10 +20,7 @@ std::string lowercase(std::string value) {
 }
 
 std::string requested_backend_name() {
-    const char* value = std::getenv("LDIT_BACKEND");
-    if (value == nullptr || std::strlen(value) == 0) {
-        value = std::getenv("LIGHTDIT_BACKEND");
-    }
+    const char* value = std::getenv("ED_BACKEND");
     if (value == nullptr) {
         return "";
     }
@@ -96,14 +93,14 @@ ModelRuntime::~ModelRuntime() {
     reset();
 }
 
-bool ModelRuntime::init(const ld_context_params_t* params, std::string* error) {
+bool ModelRuntime::init(const ed_context_params_t* params, std::string* error) {
     if (params == nullptr) {
         return fail(error, "ModelRuntime::init got null params");
     }
     return init(*params, error);
 }
 
-bool ModelRuntime::init(const ld_context_params_t& params, std::string* error) {
+bool ModelRuntime::init(const ed_context_params_t& params, std::string* error) {
     reset();
     ggml_log_set(ggml_log_callback_default, nullptr);
 
@@ -124,7 +121,7 @@ bool ModelRuntime::init(const ld_context_params_t& params, std::string* error) {
     return true;
 }
 
-bool ModelRuntime::init_threads(const ld_context_params_t& params, std::string* error) {
+bool ModelRuntime::init_threads(const ed_context_params_t& params, std::string* error) {
     (void)error;
     n_threads_ = params.n_threads;
     if (n_threads_ <= 0) {
@@ -133,7 +130,7 @@ bool ModelRuntime::init_threads(const ld_context_params_t& params, std::string* 
     return true;
 }
 
-bool ModelRuntime::init_flags(const ld_context_params_t& params, std::string* error) {
+bool ModelRuntime::init_flags(const ed_context_params_t& params, std::string* error) {
     (void)error;
     use_mmap_ = params.use_mmap;
     offload_params_to_cpu_ = params.offload_params_to_cpu;
@@ -149,7 +146,7 @@ bool ModelRuntime::init_flags(const ld_context_params_t& params, std::string* er
     return true;
 }
 
-bool ModelRuntime::init_rng(const ld_context_params_t& params, std::string* error) {
+bool ModelRuntime::init_rng(const ed_context_params_t& params, std::string* error) {
     (void)params;
     (void)error;
     rng_ = std::make_shared<PhiloxRNG>();
@@ -157,7 +154,7 @@ bool ModelRuntime::init_rng(const ld_context_params_t& params, std::string* erro
     return true;
 }
 
-bool ModelRuntime::init_backends(const ld_context_params_t& params, std::string* error) {
+bool ModelRuntime::init_backends(const ed_context_params_t& params, std::string* error) {
     const std::string requested_backend = requested_backend_name();
     if (is_auto_backend(requested_backend)) {
         backends_.backend = init_named_backend();
@@ -251,4 +248,4 @@ bool ModelRuntime::fail(std::string* error, const std::string& msg) {
     return false;
 }
 
-} // namespace lightdit
+} // namespace edgedit

@@ -19,7 +19,7 @@
 #include "utils/util.h"
 
 // This implementation is intentionally Wan-only.  It keeps the old repository's
-// proven inference order but removes the giant LightDitGGML coupling:
+// proven inference order but removes the giant EdgeDitGGML coupling:
 //   T5 condition -> Flow denoise with WanModel -> WanVAE video decode.
 //
 // Stage-1 support:
@@ -35,9 +35,9 @@
 //   - LoRA/cache/preview callbacks
 //
 // The components are still registered and loadable for I2V/VACE, but generation
-// returns LD_STATUS_UNSUPPORTED until the corresponding condition tensors are wired.
+// returns ED_STATUS_UNSUPPORTED until the corresponding condition tensors are wired.
 
-namespace lightdit {
+namespace edgedit {
 namespace {
 
 constexpr int kWanDefaultSteps = 20;
@@ -51,7 +51,7 @@ static bool is_blank(const char* p) {
     return p == nullptr || p[0] == '\0';
 }
 
-static bool wants_uncond(const ld_video_generation_params_t* params) {
+static bool wants_uncond(const ed_video_generation_params_t* params) {
     if (params == nullptr) {
         return false;
     }
@@ -61,43 +61,43 @@ static bool wants_uncond(const ld_video_generation_params_t* params) {
     return params->sample.cfg_scale != 0.0f && params->sample.cfg_scale != 1.0f;
 }
 
-static scheduler_t to_internal_scheduler(ld_scheduler_t scheduler) {
+static scheduler_t to_internal_scheduler(ed_scheduler_t scheduler) {
     switch (scheduler) {
-        case LD_SCHEDULER_KARRAS:
+        case ED_SCHEDULER_KARRAS:
             return KARRAS_SCHEDULER;
-        case LD_SCHEDULER_EXPONENTIAL:
+        case ED_SCHEDULER_EXPONENTIAL:
             return EXPONENTIAL_SCHEDULER;
-        case LD_SCHEDULER_AYS:
+        case ED_SCHEDULER_AYS:
             return AYS_SCHEDULER;
-        case LD_SCHEDULER_GITS:
+        case ED_SCHEDULER_GITS:
             return GITS_SCHEDULER;
-        case LD_SCHEDULER_SGM_UNIFORM:
+        case ED_SCHEDULER_SGM_UNIFORM:
             return SGM_UNIFORM_SCHEDULER;
-        case LD_SCHEDULER_SIMPLE:
+        case ED_SCHEDULER_SIMPLE:
             return SIMPLE_SCHEDULER;
-        case LD_SCHEDULER_SMOOTHSTEP:
+        case ED_SCHEDULER_SMOOTHSTEP:
             return SMOOTHSTEP_SCHEDULER;
-        case LD_SCHEDULER_KL_OPTIMAL:
+        case ED_SCHEDULER_KL_OPTIMAL:
             return KL_OPTIMAL_SCHEDULER;
-        case LD_SCHEDULER_LCM:
+        case ED_SCHEDULER_LCM:
             return LCM_SCHEDULER;
-        case LD_SCHEDULER_BONG_TANGENT:
+        case ED_SCHEDULER_BONG_TANGENT:
             return BONG_TANGENT_SCHEDULER;
-        case LD_SCHEDULER_AUTO:
-        case LD_SCHEDULER_DISCRETE:
+        case ED_SCHEDULER_AUTO:
+        case ED_SCHEDULER_DISCRETE:
         default:
             return DISCRETE_SCHEDULER;
     }
 }
 
-static float resolve_eta(const ld_sample_params_t& params) {
+static float resolve_eta(const ed_sample_params_t& params) {
     if (std::isfinite(params.eta)) {
         return params.eta;
     }
     switch (params.sampler) {
-        case LD_SAMPLER_EULER_A:
-        case LD_SAMPLER_DPM_PLUS_PLUS_2S_A:
-        case LD_SAMPLER_ER_SDE:
+        case ED_SAMPLER_EULER_A:
+        case ED_SAMPLER_DPM_PLUS_PLUS_2S_A:
+        case ED_SAMPLER_ER_SDE:
             return 1.0f;
         default:
             return 0.0f;
@@ -112,17 +112,17 @@ static float resolve_cfg(float cfg) {
     return cfg == 0.0f ? 1.0f : cfg;
 }
 
-static ld_scheduler_t resolve_scheduler(ld_scheduler_t scheduler, ld_sampler_t sampler) {
-    if (scheduler != LD_SCHEDULER_AUTO) {
+static ed_scheduler_t resolve_scheduler(ed_scheduler_t scheduler, ed_sampler_t sampler) {
+    if (scheduler != ED_SCHEDULER_AUTO) {
         return scheduler;
     }
-    if (sampler == LD_SAMPLER_LCM || sampler == LD_SAMPLER_TCD) {
-        return LD_SCHEDULER_LCM;
+    if (sampler == ED_SAMPLER_LCM || sampler == ED_SAMPLER_TCD) {
+        return ED_SCHEDULER_LCM;
     }
-    if (sampler == LD_SAMPLER_DDIM_TRAILING) {
-        return LD_SCHEDULER_SIMPLE;
+    if (sampler == ED_SAMPLER_DDIM_TRAILING) {
+        return ED_SCHEDULER_SIMPLE;
     }
-    return LD_SCHEDULER_DISCRETE;
+    return ED_SCHEDULER_DISCRETE;
 }
 
 static uint8_t clamp_float_to_u8(float value) {
@@ -130,8 +130,8 @@ static uint8_t clamp_float_to_u8(float value) {
     return static_cast<uint8_t>(value * 255.0f);
 }
 
-static ld_image_t tensor_frame_to_image(const sd::Tensor<float>& tensor, int frame_index) {
-    ld_image_t image{};
+static ed_image_t tensor_frame_to_image(const sd::Tensor<float>& tensor, int frame_index) {
+    ed_image_t image{};
     if (tensor.empty() || frame_index < 0) {
         return image;
     }
@@ -224,7 +224,7 @@ bool WanPipeline::has_prefix(const ModelLoader& loader, const std::string& prefi
     return false;
 }
 
-bool WanPipeline::prepare(const ld_context_params_t&,
+bool WanPipeline::prepare(const ed_context_params_t&,
                           ModelRuntime& runtime,
                           const ModelLoader& loader,
                           PipelineTensorRegistry& registry,
@@ -234,7 +234,7 @@ bool WanPipeline::prepare(const ld_context_params_t&,
     version_ = loader.version();
     registry.clear();
 
-    if (!ld_version_is_wan(version_)) {
+    if (!ed_version_is_wan(version_)) {
         return set_error(error, "WanPipeline got non-Wan model version");
     }
 
@@ -469,7 +469,7 @@ int WanPipeline::image_seq_len(int width, int height) const {
     return (height / scale) * (width / scale);
 }
 
-bool WanPipeline::validate_video_params(const ld_video_generation_params_t* params,
+bool WanPipeline::validate_video_params(const ed_video_generation_params_t* params,
                                         std::string* error) const {
     if (params == nullptr) {
         return set_error(error, "video generation params are null");
@@ -492,7 +492,7 @@ sd::Tensor<float> WanPipeline::generate_init_latent(int width, int height, int f
     return sd::zeros<float>({W, H, T, C, 1});
 }
 
-bool WanPipeline::prepare_text_conditions(const ld_video_generation_params_t* params,
+bool WanPipeline::prepare_text_conditions(const ed_video_generation_params_t* params,
                                           const sd::Tensor<float>& concat_latent,
                                           const sd::Tensor<float>& clip_vision_output,
                                           WanVideoConditionPack* conditions,
@@ -528,12 +528,12 @@ bool WanPipeline::prepare_text_conditions(const ld_video_generation_params_t* pa
     return true;
 }
 
-std::vector<float> WanPipeline::build_sigmas(const ld_sample_params_t& params,
+std::vector<float> WanPipeline::build_sigmas(const ed_sample_params_t& params,
                                              int width,
                                              int height,
                                              int total_steps) const {
     const int steps = resolve_steps(total_steps);
-    const ld_scheduler_t scheduler = resolve_scheduler(params.scheduler, params.sampler);
+    const ed_scheduler_t scheduler = resolve_scheduler(params.scheduler, params.sampler);
     return denoiser_->get_sigmas(steps,
                                  image_seq_len(width, height),
                                  to_internal_scheduler(scheduler),
@@ -621,7 +621,7 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                                              const sd::Tensor<float>& x_start,
                                              const std::vector<float>& sigmas,
                                              const WanVideoConditionPack& conditions,
-                                             const ld_sample_params_t& sample_params,
+                                             const ed_sample_params_t& sample_params,
                                              const sd::Tensor<float>& init_latent,
                                              const sd::Tensor<float>& denoise_mask,
                                              const sd::Tensor<float>& vace_context,
@@ -754,7 +754,7 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
     return denoiser_->inverse_noise_scaling(sigmas.back(), x);
 }
 
-sd::Tensor<float> WanPipeline::sample_video_latent(const ld_video_generation_params_t* params,
+sd::Tensor<float> WanPipeline::sample_video_latent(const ed_video_generation_params_t* params,
                                                    const WanVideoConditionPack& conditions,
                                                    const sd::Tensor<float>& init_latent,
                                                    const sd::Tensor<float>& noise,
@@ -829,13 +829,13 @@ sd::Tensor<float> WanPipeline::sample_video_latent(const ld_video_generation_par
                          error);
 }
 
-ld_status_t WanPipeline::decode_video_latent(const sd::Tensor<float>& latent,
-                                             const ld_tiling_params_t& tiling,
-                                             ld_video_t* out,
+ed_status_t WanPipeline::decode_video_latent(const sd::Tensor<float>& latent,
+                                             const ed_tiling_params_t& tiling,
+                                             ed_video_t* out,
                                              std::string* error) {
     if (latent.empty()) {
         set_error(error, "Wan final latent is empty");
-        return LD_STATUS_GENERATION_FAILED;
+        return ED_STATUS_GENERATION_FAILED;
     }
 
     const int64_t t0 = ggml_time_ms();
@@ -851,15 +851,15 @@ ld_status_t WanPipeline::decode_video_latent(const sd::Tensor<float>& latent,
 
     if (video.empty()) {
         set_error(error, "Wan VAE decode failed");
-        return LD_STATUS_GENERATION_FAILED;
+        return ED_STATUS_GENERATION_FAILED;
     }
 
     const int frame_count = static_cast<int>(video.shape()[2]);
-    ld_image_t* frames = static_cast<ld_image_t*>(std::calloc(static_cast<size_t>(frame_count),
-                                                              sizeof(ld_image_t)));
+    ed_image_t* frames = static_cast<ed_image_t*>(std::calloc(static_cast<size_t>(frame_count),
+                                                              sizeof(ed_image_t)));
     if (frames == nullptr) {
         set_error(error, "failed to allocate Wan video frames");
-        return LD_STATUS_OUT_OF_MEMORY;
+        return ED_STATUS_OUT_OF_MEMORY;
     }
 
     for (int i = 0; i < frame_count; ++i) {
@@ -870,42 +870,42 @@ ld_status_t WanPipeline::decode_video_latent(const sd::Tensor<float>& latent,
             }
             std::free(frames);
             set_error(error, "failed to convert Wan decoded tensor to image");
-            return LD_STATUS_OUT_OF_MEMORY;
+            return ED_STATUS_OUT_OF_MEMORY;
         }
     }
 
     out->frames = frames;
     out->frame_count = frame_count;
-    return LD_STATUS_OK;
+    return ED_STATUS_OK;
 }
 
-ld_status_t WanPipeline::generate_image(const ld_image_generation_params_t*,
-                                        ld_image_batch_t* out,
+ed_status_t WanPipeline::generate_image(const ed_image_generation_params_t*,
+                                        ed_image_batch_t* out,
                                         std::string* error) {
     if (out != nullptr) {
         out->images = nullptr;
         out->count = 0;
     }
     set_error(error, "WanPipeline supports video generation only");
-    return LD_STATUS_UNSUPPORTED;
+    return ED_STATUS_UNSUPPORTED;
 }
 
-ld_status_t WanPipeline::generate_video(const ld_video_generation_params_t* params,
-                                        ld_video_t* out,
+ed_status_t WanPipeline::generate_video(const ed_video_generation_params_t* params,
+                                        ed_video_t* out,
                                         std::string* error) {
     if (out == nullptr) {
         set_error(error, "video output is null");
-        return LD_STATUS_INVALID_ARGUMENT;
+        return ED_STATUS_INVALID_ARGUMENT;
     }
     out->frames = nullptr;
     out->frame_count = 0;
 
     if (!ready_ || runtime_ == nullptr || !conditioner_ || !diffusion_ || !vae_ || !denoiser_) {
         set_error(error, "WanPipeline is not ready");
-        return LD_STATUS_MODEL_LOAD_FAILED;
+        return ED_STATUS_MODEL_LOAD_FAILED;
     }
     if (!validate_video_params(params, error)) {
-        return LD_STATUS_INVALID_ARGUMENT;
+        return ED_STATUS_INVALID_ARGUMENT;
     }
 
     // Stage-1 intentionally supports T2V.  For I2V/VACE the model components are
@@ -913,18 +913,18 @@ ld_status_t WanPipeline::generate_video(const ld_video_generation_params_t* para
     // wired before generation is safe.
     if (clip_vision_ != nullptr || params->init_image != nullptr || params->end_image != nullptr) {
         set_error(error, "Wan I2V/FLF2V generation is not wired yet in WanPipeline stage 1");
-        return LD_STATUS_UNSUPPORTED;
+        return ED_STATUS_UNSUPPORTED;
     }
     if ((params->control_frames != nullptr && params->control_frame_count > 0) ||
         diffusion_->get_desc() == "Wan2.1-VACE-1.3B" ||
         diffusion_->get_desc() == "Wan2.x-VACE-14B") {
         set_error(error, "Wan VACE/control video generation is not wired yet in WanPipeline stage 1");
-        return LD_STATUS_UNSUPPORTED;
+        return ED_STATUS_UNSUPPORTED;
     }
     if (params->loras != nullptr && params->lora_count > 0) {
         LOG_WARN("WanPipeline stage 1 ignores LoRA list; apply LoRA before prepare() or add adapter wiring");
     }
-    if (params->sample.sampler != LD_SAMPLER_AUTO && params->sample.sampler != LD_SAMPLER_EULER) {
+    if (params->sample.sampler != ED_SAMPLER_AUTO && params->sample.sampler != ED_SAMPLER_EULER) {
         LOG_WARN("WanPipeline stage 1 uses deterministic Euler; requested sampler %d is ignored",
                  static_cast<int>(params->sample.sampler));
     }
@@ -946,13 +946,13 @@ ld_status_t WanPipeline::generate_video(const ld_video_generation_params_t* para
                                                          params->frames);
     if (init_latent.empty()) {
         set_error(error, "failed to create Wan init latent");
-        return LD_STATUS_GENERATION_FAILED;
+        return ED_STATUS_GENERATION_FAILED;
     }
 
     sd::Tensor<float> noise = sd::randn_like<float>(init_latent, rng_);
     if (noise.empty()) {
         set_error(error, "failed to create Wan noise latent");
-        return LD_STATUS_GENERATION_FAILED;
+        return ED_STATUS_GENERATION_FAILED;
     }
 
     WanVideoConditionPack conditions;
@@ -961,7 +961,7 @@ ld_status_t WanPipeline::generate_video(const ld_video_generation_params_t* para
                                  sd::Tensor<float>(),
                                  &conditions,
                                  error)) {
-        return LD_STATUS_GENERATION_FAILED;
+        return ED_STATUS_GENERATION_FAILED;
     }
 
     const int64_t sample_start = ggml_time_ms();
@@ -979,21 +979,21 @@ ld_status_t WanPipeline::generate_video(const ld_video_generation_params_t* para
         if (error != nullptr && error->empty()) {
             *error = "Wan sampling failed";
         }
-        return LD_STATUS_GENERATION_FAILED;
+        return ED_STATUS_GENERATION_FAILED;
     }
 
-    ld_tiling_params_t tiling{};
+    ed_tiling_params_t tiling{};
     return decode_video_latent(final_latent, tiling, out, error);
 }
 
-ld_scheduler_t WanPipeline::default_scheduler(ld_sampler_t method) const {
-    if (method == LD_SAMPLER_LCM || method == LD_SAMPLER_TCD) {
-        return LD_SCHEDULER_LCM;
+ed_scheduler_t WanPipeline::default_scheduler(ed_sampler_t method) const {
+    if (method == ED_SAMPLER_LCM || method == ED_SAMPLER_TCD) {
+        return ED_SCHEDULER_LCM;
     }
-    if (method == LD_SAMPLER_DDIM_TRAILING) {
-        return LD_SCHEDULER_SIMPLE;
+    if (method == ED_SAMPLER_DDIM_TRAILING) {
+        return ED_SCHEDULER_SIMPLE;
     }
-    return LD_SCHEDULER_DISCRETE;
+    return ED_SCHEDULER_DISCRETE;
 }
 
-}  // namespace lightdit
+}  // namespace edgedit

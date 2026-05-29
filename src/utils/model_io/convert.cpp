@@ -78,7 +78,7 @@ static bool load_tensors_for_export(ModelLoader& model_loader,
 bool convert(const char* input_path,
              const char* vae_path,
              const char* output_path,
-             ld_type_t output_type,
+             ed_type_t output_type,
              const char* tensor_type_rules,
              bool convert_name) {
     ModelLoader model_loader;

@@ -3,10 +3,10 @@
 #include <string>
 #include <vector>
 
-#include "light-dit.h"
+#include "edge-dit.h"
 #include "runtime/model_loader.h"
 
-namespace lightdit {
+namespace edgedit {
 namespace cache {
 
 enum class CacheMode {
@@ -104,14 +104,14 @@ struct CacheRegionPlan {
     bool can_reuse = false;
 };
 
-inline CacheMode cache_mode_from_ld(ld_cache_mode_t mode) {
+inline CacheMode cache_mode_from_ld(ed_cache_mode_t mode) {
     switch (mode) {
-        case LD_CACHE_EASYCACHE: return CacheMode::EasyCache;
-        case LD_CACHE_UCACHE: return CacheMode::UCache;
-        case LD_CACHE_DBCACHE: return CacheMode::DBCache;
-        case LD_CACHE_TAYLORSEER: return CacheMode::TaylorSeer;
-        case LD_CACHE_CACHE_DIT: return CacheMode::CacheDiT;
-        case LD_CACHE_DISABLED:
+        case ED_CACHE_EASYCACHE: return CacheMode::EasyCache;
+        case ED_CACHE_UCACHE: return CacheMode::UCache;
+        case ED_CACHE_DBCACHE: return CacheMode::DBCache;
+        case ED_CACHE_TAYLORSEER: return CacheMode::TaylorSeer;
+        case ED_CACHE_CACHE_DIT: return CacheMode::CacheDiT;
+        case ED_CACHE_DISABLED:
         default: return CacheMode::Disabled;
     }
 }
@@ -120,4 +120,4 @@ const char* cache_mode_name(CacheMode mode);
 CacheModelSpec cache_model_spec_for_version(SDVersion version);
 
 }  // namespace cache
-}  // namespace lightdit
+}  // namespace edgedit

@@ -35,8 +35,8 @@ CUDAToolkit_ROOT=${CUDA_ROOT} \
 PATH=${CLEAN_PATH} \
 ${CMAKE_BIN} -S . -B "${BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE=Release \
-  -DLDIT_BUILD_EXAMPLES=ON \
-  -DLDIT_GGML_CUDA=ON \
+  -DED_BUILD_EXAMPLES=ON \
+  -DED_GGML_CUDA=ON \
   -DGGML_CUDA_NCCL=OFF \
   -DCMAKE_C_COMPILER=/usr/bin/gcc \
   -DCMAKE_CXX_COMPILER=/usr/bin/g++ \
@@ -50,4 +50,4 @@ env -u LD_LIBRARY_PATH -u LIBRARY_PATH -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLU
 PATH=${CLEAN_PATH} \
 ${CMAKE_BIN} --build "${BUILD_DIR}" -j
 
-"./${BUILD_DIR}/bin/ld-cli" --help
+"./${BUILD_DIR}/bin/ed-cli" --help

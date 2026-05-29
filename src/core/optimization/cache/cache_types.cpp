@@ -1,6 +1,6 @@
 #include "core/optimization/cache/cache_types.hpp"
 
-namespace lightdit {
+namespace edgedit {
 namespace cache {
 
 const char* cache_mode_name(CacheMode mode) {
@@ -19,7 +19,7 @@ CacheModelSpec cache_model_spec_for_version(SDVersion version) {
     CacheModelSpec spec;
     spec.version = version;
 
-    if (ld_version_is_flux(version) || ld_version_is_flux2(version)) {
+    if (ed_version_is_flux(version) || ed_version_is_flux2(version)) {
         spec.model_name = "flux";
         spec.regions.push_back({"double", "flux.double_blocks", 19,
                                 CacheRegionPattern::ImageText,
@@ -36,7 +36,7 @@ CacheModelSpec cache_model_spec_for_version(SDVersion version) {
         return spec;
     }
 
-    if (ld_version_is_qwen_image(version)) {
+    if (ed_version_is_qwen_image(version)) {
         spec.model_name = "qwen_image";
         spec.regions.push_back({"transformer", "qwen_image.transformer_blocks", 60,
                                 CacheRegionPattern::ImageText,
@@ -47,7 +47,7 @@ CacheModelSpec cache_model_spec_for_version(SDVersion version) {
         return spec;
     }
 
-    if (ld_version_is_sd3(version)) {
+    if (ed_version_is_sd3(version)) {
         spec.model_name = "sd3";
         spec.separate_cfg = true;
         spec.regions.push_back({"joint", "mmdit.joint_blocks", 24,
@@ -59,7 +59,7 @@ CacheModelSpec cache_model_spec_for_version(SDVersion version) {
         return spec;
     }
 
-    if (ld_version_is_wan(version)) {
+    if (ed_version_is_wan(version)) {
         spec.model_name = "wan";
         spec.separate_cfg = true;
         spec.regions.push_back({"blocks", "wan.blocks", 40,
@@ -76,4 +76,4 @@ CacheModelSpec cache_model_spec_for_version(SDVersion version) {
 }
 
 }  // namespace cache
-}  // namespace lightdit
+}  // namespace edgedit

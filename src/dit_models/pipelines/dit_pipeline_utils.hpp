@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace lightdit {
+namespace edgedit {
 
 inline float calculate_shift(int64_t image_seq_len,
                              int64_t base_seq_len = 256,
@@ -24,4 +24,4 @@ inline int64_t packed_latent_seq_len(int64_t width, int64_t height, int64_t vae_
     return (latent_w / 2) * (latent_h / 2);
 }
 
-}  // namespace lightdit
+}  // namespace edgedit

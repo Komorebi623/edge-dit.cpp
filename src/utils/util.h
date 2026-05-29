@@ -1,5 +1,5 @@
-#ifndef LD_UTIL_H
-#define LD_UTIL_H
+#ifndef ED_UTIL_H
+#define ED_UTIL_H
 
 #include <cstdint>
 #include <memory>
@@ -16,11 +16,11 @@ class Tensor;
 #define SAFE_STR(s) ((s) ? (s) : "")
 #define BOOL_STR(b) ((b) ? "true" : "false")
 
-enum ld_log_level_t {
-    LD_LOG_DEBUG = 0,
-    LD_LOG_INFO,
-    LD_LOG_WARN,
-    LD_LOG_ERROR,
+enum ed_log_level_t {
+    ED_LOG_DEBUG = 0,
+    ED_LOG_INFO,
+    ED_LOG_WARN,
+    ED_LOG_ERROR,
 };
 
 bool ends_with(const std::string& str, const std::string& ending);
@@ -37,7 +37,7 @@ sd::Tensor<float> clip_preprocess(const sd::Tensor<float>& image, int target_wid
 void replace_all_chars(std::string& str, char target, char replacement);
 
 int round_up_to(int value, int base);
-int ld_get_num_physical_cores();
+int ed_get_num_physical_cores();
 
 bool file_exists(const std::string& filename);
 bool is_directory(const std::string& path);
@@ -47,7 +47,7 @@ std::vector<std::string> split_string(const std::string& str, char delimiter);
 void pretty_bytes_progress(int step, int steps, uint64_t bytes_processed, float elapsed_seconds);
 void pretty_progress(int step, int steps, float time);
 
-void log_printf(ld_log_level_t level, const char* file, int line, const char* format, ...);
+void log_printf(ed_log_level_t level, const char* file, int line, const char* format, ...);
 
 std::string trim(const std::string& s);
 
@@ -75,9 +75,9 @@ private:
 
 bool sd_backend_is(ggml_backend_t backend, const std::string& name);
 
-#define LOG_DEBUG(format, ...) log_printf(LD_LOG_DEBUG, __FILE__, __LINE__, format, ##__VA_ARGS__)
-#define LOG_INFO(format, ...) log_printf(LD_LOG_INFO, __FILE__, __LINE__, format, ##__VA_ARGS__)
-#define LOG_WARN(format, ...) log_printf(LD_LOG_WARN, __FILE__, __LINE__, format, ##__VA_ARGS__)
-#define LOG_ERROR(format, ...) log_printf(LD_LOG_ERROR, __FILE__, __LINE__, format, ##__VA_ARGS__)
+#define LOG_DEBUG(format, ...) log_printf(ED_LOG_DEBUG, __FILE__, __LINE__, format, ##__VA_ARGS__)
+#define LOG_INFO(format, ...) log_printf(ED_LOG_INFO, __FILE__, __LINE__, format, ##__VA_ARGS__)
+#define LOG_WARN(format, ...) log_printf(ED_LOG_WARN, __FILE__, __LINE__, format, ##__VA_ARGS__)
+#define LOG_ERROR(format, ...) log_printf(ED_LOG_ERROR, __FILE__, __LINE__, format, ##__VA_ARGS__)
 
 #endif

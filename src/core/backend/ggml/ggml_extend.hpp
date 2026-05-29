@@ -29,7 +29,7 @@
 #include "backend/ggml/ggml_extend_backend.hpp"
 #include "backend/ggml/ggml_graph_cut.h"
 
-#include "light-dit.h"
+#include "edge-dit.h"
 #include "core/runtime/model_loader.h"
 #include "utils/tensor.hpp"
 
@@ -43,8 +43,8 @@
 #define __STATIC_INLINE__ static inline
 #endif
 
-#ifndef LD_UNUSED
-#define LD_UNUSED(x) (void)(x)
+#ifndef ED_UNUSED
+#define ED_UNUSED(x) (void)(x)
 #endif
 
 __STATIC_INLINE__ int align_up_offset(int n, int multiple) {
@@ -225,7 +225,7 @@ __STATIC_INLINE__ ggml_fp16_t ggml_ext_tensor_get_f16(const ggml_tensor* tensor,
     return *(ggml_fp16_t*)((char*)(tensor->data) + i3 * tensor->nb[3] + i2 * tensor->nb[2] + i1 * tensor->nb[1] + i0 * tensor->nb[0]);
 }
 
-__STATIC_INLINE__ float sd_image_get_f32(ld_image_t image, int64_t iw, int64_t ih, int64_t ic, bool scale = true) {
+__STATIC_INLINE__ float sd_image_get_f32(ed_image_t image, int64_t iw, int64_t ih, int64_t ic, bool scale = true) {
     float value = *(image.data + ih * image.width * image.channels + iw * image.channels + ic);
     if (scale) {
         value /= 255.f;
@@ -505,7 +505,7 @@ __STATIC_INLINE__ uint8_t* ggml_tensor_to_sd_image(ggml_tensor* input, int idx, 
     return image_data;
 }
 
-__STATIC_INLINE__ void ld_image_to_ggml_tensor(ld_image_t image,
+__STATIC_INLINE__ void ed_image_to_ggml_tensor(ed_image_t image,
                                                ggml_tensor* tensor,
                                                bool scale = true) {
     GGML_ASSERT(image.width == tensor->ne[0]);

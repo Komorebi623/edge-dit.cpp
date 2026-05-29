@@ -9,9 +9,9 @@ cd "${REPO_ROOT}"
 # 直接改这里
 ###############################################################################
 
-# 如果你的 build-cuda/bin/ld-cli 已经支持 --cache，就用这个。
-# 如果你手动重链了 ld-cli-cache，就改成 ./build-cuda/bin/ld-cli-cache。
-CLI="./build-cuda/bin/ld-cli"
+# 如果你的 build-cuda/bin/ed-cli 已经支持 --cache，就用这个。
+# 如果你手动重链了 ed-cli-cache，就改成 ./build-cuda/bin/ed-cli-cache。
+CLI="./build-cuda/bin/ed-cli"
 
 BACKEND="cuda"
 MODEL="/mnt/cfs/9n-das-admin/llm_models/flux-dev/"
@@ -94,7 +94,7 @@ CACHE_DIT_ARGS=(
   --cache-taylor-skip 1
 )
 
-# 追加到每个 ld-cli 调用的额外参数。不需要就留空。
+# 追加到每个 ed-cli 调用的额外参数。不需要就留空。
 EXTRA_CLI_ARGS=(
   # --some-extra-flag
 )

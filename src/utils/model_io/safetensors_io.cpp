@@ -161,13 +161,13 @@ bool read_safetensors_file(const std::string& file_path,
             return false;
         }
 
-        if (shape.size() > LD_MAX_DIMS) {
+        if (shape.size() > ED_MAX_DIMS) {
             set_error(error, "invalid tensor '" + name + "'");
             return false;
         }
 
         int n_dims              = (int)shape.size();
-        int64_t ne[LD_MAX_DIMS] = {1, 1, 1, 1, 1};
+        int64_t ne[ED_MAX_DIMS] = {1, 1, 1, 1, 1};
         for (int i = 0; i < n_dims; i++) {
             ne[i] = shape[i].get<int64_t>();
         }

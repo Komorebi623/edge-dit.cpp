@@ -5,7 +5,7 @@
 
 #include "core/optimization/cache/cache_types.hpp"
 
-namespace lightdit {
+namespace edgedit {
 namespace cache {
 
 struct DBCacheConfig {
@@ -66,7 +66,7 @@ struct CacheConfig {
 };
 
 std::vector<int> parse_steps_computation_mask(const char* mask);
-CacheConfig cache_config_from_sample_params(const ld_sample_params_t& params);
+CacheConfig cache_config_from_sample_params(const ed_sample_params_t& params);
 
 }  // namespace cache
-}  // namespace lightdit
+}  // namespace edgedit

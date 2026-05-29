@@ -14,7 +14,7 @@ struct FrozenCLIPVisionEmbedder;
 struct VAE;
 struct RNG;
 
-namespace lightdit {
+namespace edgedit {
 
 class WanPipeline final : public DiTPipeline {
 public:
@@ -23,7 +23,7 @@ public:
 
     const char* name() const override { return "wan"; }
 
-    bool prepare(const ld_context_params_t& params,
+    bool prepare(const ed_context_params_t& params,
                  ModelRuntime& runtime,
                  const ModelLoader& loader,
                  PipelineTensorRegistry& registry,
@@ -31,12 +31,12 @@ public:
 
     void mark_ready() override;
 
-    ld_status_t generate_image(const ld_image_generation_params_t* params,
-                               ld_image_batch_t* out,
+    ed_status_t generate_image(const ed_image_generation_params_t* params,
+                               ed_image_batch_t* out,
                                std::string* error) override;
 
-    ld_status_t generate_video(const ld_video_generation_params_t* params,
-                               ld_video_t* out,
+    ed_status_t generate_video(const ed_video_generation_params_t* params,
+                               ed_video_t* out,
                                std::string* error) override;
 
     SDVersion version() const override { return version_; }
@@ -45,8 +45,8 @@ public:
     bool supports_image_generation() const override { return false; }
     bool supports_video_generation() const override { return ready_; }
 
-    ld_sampler_t default_sample_method() const override { return LD_SAMPLER_EULER; }
-    ld_scheduler_t default_scheduler(ld_sampler_t method) const override;
+    ed_sampler_t default_sample_method() const override { return ED_SAMPLER_EULER; }
+    ed_scheduler_t default_scheduler(ed_sampler_t method) const override;
 
 private:
     struct WanVideoConditionPack {
@@ -89,18 +89,18 @@ private:
     int latent_frames(int frames) const;
     int image_seq_len(int width, int height) const;
 
-    bool validate_video_params(const ld_video_generation_params_t* params,
+    bool validate_video_params(const ed_video_generation_params_t* params,
                                std::string* error) const;
 
     sd::Tensor<float> generate_init_latent(int width, int height, int frames) const;
 
-    bool prepare_text_conditions(const ld_video_generation_params_t* params,
+    bool prepare_text_conditions(const ed_video_generation_params_t* params,
                                  const sd::Tensor<float>& concat_latent,
                                  const sd::Tensor<float>& clip_vision_output,
                                  WanVideoConditionPack* conditions,
                                  std::string* error);
 
-    std::vector<float> build_sigmas(const ld_sample_params_t& params,
+    std::vector<float> build_sigmas(const ed_sample_params_t& params,
                                     int width,
                                     int height,
                                     int total_steps) const;
@@ -127,14 +127,14 @@ private:
                                     const sd::Tensor<float>& x_start,
                                     const std::vector<float>& sigmas,
                                     const WanVideoConditionPack& conditions,
-                                    const ld_sample_params_t& sample_params,
+                                    const ed_sample_params_t& sample_params,
                                     const sd::Tensor<float>& init_latent,
                                     const sd::Tensor<float>& denoise_mask,
                                     const sd::Tensor<float>& vace_context,
                                     float vace_strength,
                                     std::string* error);
 
-    sd::Tensor<float> sample_video_latent(const ld_video_generation_params_t* params,
+    sd::Tensor<float> sample_video_latent(const ed_video_generation_params_t* params,
                                           const WanVideoConditionPack& conditions,
                                           const sd::Tensor<float>& init_latent,
                                           const sd::Tensor<float>& noise,
@@ -142,9 +142,9 @@ private:
                                           const sd::Tensor<float>& vace_context,
                                           std::string* error);
 
-    ld_status_t decode_video_latent(const sd::Tensor<float>& latent,
-                                    const ld_tiling_params_t& tiling,
-                                    ld_video_t* out,
+    ed_status_t decode_video_latent(const sd::Tensor<float>& latent,
+                                    const ed_tiling_params_t& tiling,
+                                    ed_video_t* out,
                                     std::string* error);
 
     static bool has_prefix(const ModelLoader& loader, const std::string& prefix);
@@ -152,4 +152,4 @@ private:
     static int64_t resolve_seed(int64_t seed);
 };
 
-}  // namespace lightdit
+}  // namespace edgedit

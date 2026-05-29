@@ -691,19 +691,19 @@ std::string convert_diffusers_dit_to_original_wan(std::string name) {
 }
 
 std::string convert_diffusion_model_name(std::string name, std::string prefix, SDVersion version) {
-    if (ld_version_is_sd1(version) || ld_version_is_sd2(version)) {
+    if (ed_version_is_sd1(version) || ed_version_is_sd2(version)) {
         name = convert_diffusers_unet_to_original_sd1(name);
-    } else if (ld_version_is_sdxl(version)) {
+    } else if (ed_version_is_sdxl(version)) {
         name = convert_diffusers_unet_to_original_sdxl(name);
-    } else if (ld_version_is_sd3(version)) {
+    } else if (ed_version_is_sd3(version)) {
         name = convert_diffusers_dit_to_original_sd3(name);
-    } else if (ld_version_is_flux(version) || ld_version_is_flux2(version)) {
+    } else if (ed_version_is_flux(version) || ed_version_is_flux2(version)) {
         name = convert_diffusers_dit_to_original_flux(name);
-    } else if (ld_version_is_wan(version)) {
+    } else if (ed_version_is_wan(version)) {
         name = convert_diffusers_dit_to_original_wan(name);
-    } else if (ld_version_is_z_image(version)) {
+    } else if (ed_version_is_z_image(version)) {
         name = convert_diffusers_dit_to_original_lumina2(name);
-    } else if (ld_version_is_anima(version)) {
+    } else if (ed_version_is_anima(version)) {
         name = convert_other_dit_to_original_anima(name);
     }
     return name;
@@ -878,7 +878,7 @@ std::string convert_diffusers_qwen_image_vae_to_wan(std::string name) {
 }
 
 std::string convert_first_stage_model_name(std::string name, std::string prefix, SDVersion version) {
-    if (ld_version_is_qwen_image(version) || ld_version_is_wan(version)) {
+    if (ed_version_is_qwen_image(version) || ed_version_is_wan(version)) {
         return convert_diffusers_qwen_image_vae_to_wan(name);
     }
 
@@ -1172,7 +1172,7 @@ std::string convert_tensor_name(std::string name, SDVersion version) {
 
         // LOG_DEBUG("name %s %d", name.c_str(), version);
 
-        if (ld_version_is_unet(version) || is_underline || is_lycoris_underline) {
+        if (ed_version_is_unet(version) || is_underline || is_lycoris_underline) {
             name = convert_sep_to_dot(name);
         }
     }
@@ -1195,7 +1195,7 @@ std::string convert_tensor_name(std::string name, SDVersion version) {
         {"te3.", "text_encoders.t5xxl.transformer."},
     };
 
-    if (ld_version_is_flux(version)) {
+    if (ed_version_is_flux(version)) {
         prefix_map["te1."] = "text_encoders.clip_l.transformer.";
     }
 
