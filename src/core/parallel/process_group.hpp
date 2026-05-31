@@ -39,6 +39,9 @@ struct ParallelConfig {
     int local_rank        = 0;
     int device            = 0;
     std::string store_path;
+    int cfg_parallel_size = 1;
+    int tp_parallel_size  = 1;
+    int sp_parallel_size  = 1;
 };
 
 class ProcessGroup {
@@ -48,6 +51,7 @@ public:
     virtual Backend backend() const = 0;
     virtual int rank() const        = 0;
     virtual int size() const        = 0;
+    virtual int local_rank() const  = 0;
     virtual bool enabled() const    = 0;
 
     virtual void barrier() = 0;

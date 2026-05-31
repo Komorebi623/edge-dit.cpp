@@ -163,11 +163,16 @@ int NcclProcessGroup::size() const {
     return config_.world_size;
 }
 
+int NcclProcessGroup::local_rank() const {
+    return config_.local_rank;
+}
+
 bool NcclProcessGroup::enabled() const {
     return config_.world_size > 1;
 }
 
 void NcclProcessGroup::barrier() {
+    set_device();
     int send = config_.rank;
     int recv = 0;
     Buffer in{&send, 1, DataType::kInt32, config_.device};
@@ -187,6 +192,7 @@ void NcclProcessGroup::barrier() {
 }
 
 void NcclProcessGroup::all_reduce(const Buffer& input, const Buffer& output, ReduceOp op) {
+    set_device();
     check_buffer(input);
     check_buffer(output);
     if (input.count != output.count || input.type != output.type) {
@@ -204,6 +210,7 @@ void NcclProcessGroup::all_reduce(const Buffer& input, const Buffer& output, Red
 }
 
 void NcclProcessGroup::all_gather(const Buffer& input, const Buffer& output) {
+    set_device();
     check_buffer(input);
     check_buffer(output);
     if (input.type != output.type || output.count != input.count * static_cast<size_t>(config_.world_size)) {
@@ -215,6 +222,7 @@ void NcclProcessGroup::all_gather(const Buffer& input, const Buffer& output) {
 }
 
 void NcclProcessGroup::all_to_all(const Buffer& input, const Buffer& output, size_t count_per_peer) {
+    set_device();
     check_buffer(input);
     check_buffer(output);
     const size_t total_count = count_per_peer * static_cast<size_t>(config_.world_size);
@@ -249,6 +257,7 @@ void NcclProcessGroup::all_to_all(const Buffer& input, const Buffer& output, siz
 }
 
 void NcclProcessGroup::broadcast(const Buffer& buffer, int root) {
+    set_device();
     check_buffer(buffer);
     if (root < 0 || root >= config_.world_size) {
         throw std::invalid_argument("NCCL broadcast root is out of range");
@@ -271,6 +280,10 @@ void NcclProcessGroup::init_unique_id() {
     }
 #endif
     check_nccl(ncclCommInitRank(&comm_, config_.world_size, id, config_.rank), "ncclCommInitRank");
+}
+
+void NcclProcessGroup::set_device() const {
+    check_cuda(cudaSetDevice(config_.device), "cudaSetDevice");
 }
 
 void NcclProcessGroup::check_buffer(const Buffer& buffer) const {

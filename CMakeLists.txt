@@ -151,6 +151,10 @@ set(ED_SOURCES
     "src/utils/model_io/tensor_storage.h"
 )
 
+if(NOT ED_ENABLE_NCCL)
+    list(FILTER ED_SOURCES EXCLUDE REGEX ".*/src/core/parallel/backends/nccl/.*")
+endif()
+
 if(ED_BUILD_SHARED_LIBS)
     add_library(edgedit SHARED ${ED_SOURCES})
     target_compile_definitions(edgedit PRIVATE ED_BUILD_DLL)

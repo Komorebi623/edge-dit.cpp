@@ -22,6 +22,7 @@ public:
     Backend backend() const override;
     int rank() const override;
     int size() const override;
+    int local_rank() const override;
     bool enabled() const override;
 
     void barrier() override;
@@ -32,6 +33,7 @@ public:
     void broadcast(const Buffer& buffer, int root) override;
 
 private:
+    void set_device() const;
     void init_unique_id();
     void check_buffer(const Buffer& buffer) const;
 

@@ -14,3 +14,6 @@
 .vscode/
 .idea/
 .DS_Store
+
+# local benchmark outputs
+/test_outputs/

@@ -16,6 +16,7 @@ public:
     Backend backend() const override;
     int rank() const override;
     int size() const override;
+    int local_rank() const override;
     bool enabled() const override;
 
     void barrier() override;

@@ -13,6 +13,7 @@
 #include "dit_models/components/text_encoders/conditioner.hpp"
 #include "dit_models/models/flux.hpp"
 #include "ggml.h"
+#include "parallel/cfg_parallel.hpp"
 #include "utils/preprocessing.hpp"
 #include "utils/util.h"
 
@@ -778,6 +779,21 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         }
         return false;
     }
+
+    const float cfg_scale = params->sample.cfg_scale > 0.0f ? params->sample.cfg_scale : 1.0f;
+    SDCondition uncond;
+    if (cfg_scale != 1.0f) {
+        ConditionerParams uncond_params;
+        uncond_params.text = params->negative_prompt != nullptr ? params->negative_prompt : "";
+        uncond_params.clip_skip = -1;
+        uncond = conditioner_->get_learned_condition(n_threads, uncond_params);
+        if (uncond.empty()) {
+            if (error != nullptr) {
+                *error = "Flux negative prompt encoding returned empty condition";
+            }
+            return false;
+        }
+    }
     LOG_INFO("flux prompt encoded: cross_attn=%s vector=%s",
              format_tensor_shape(condition.c_crossattn).c_str(),
              format_tensor_shape(condition.c_vector).c_str());
@@ -810,7 +826,7 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         return false;
     }
 
-    LOG_INFO("flux txt2img: %dx%d latent=%dx%d steps=%d shift=%.2f guidance=%.2f seed=%" PRId64,
+    LOG_INFO("flux txt2img: %dx%d latent=%dx%d steps=%d shift=%.2f guidance=%.2f cfg=%.2f seed=%" PRId64,
              params->width,
              params->height,
              latent_w,
@@ -818,12 +834,14 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
              steps,
              flow_shift,
              distilled_guidance,
+             cfg_scale,
              seed + batch_index);
 
     sd::Tensor<float> x = init_latent * (1.0f - sigmas[0]) + noise * sigmas[0];
     sd::Tensor<float> denoised = x;
     cache::CacheRuntime cache_runtime;
     const bool cache_enabled = cache_runtime.init(params->sample, version_, sigmas);
+    const int64_t sample_start_ms = ggml_time_ms();
     for (int step = 0; step < steps; ++step) {
         const float sigma = sigmas[static_cast<size_t>(step)];
         const float sigma_next = sigmas[static_cast<size_t>(step + 1)];
@@ -843,14 +861,59 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
             cache_runtime.begin_step(cache_step);
         }
 
+        const bool use_cfg_parallel = !uncond.empty() &&
+                                      parallel::cfg_parallel_available(runtime_->parallel_context());
+        const int cfg_rank = parallel::cfg_parallel_rank(runtime_->parallel_context());
+
         sd::Tensor<float> model_out;
         const void* condition_key = static_cast<const void*>(&condition);
-        const bool cache_hit = cache_enabled &&
-                               cache_runtime.before_forward(cache::CacheBranch::Main,
+        const cache::CacheBranch condition_branch = uncond.empty() ? cache::CacheBranch::Main
+                                                                   : cache::CacheBranch::Cond;
+        const bool cache_hit = !use_cfg_parallel &&
+                               cache_enabled &&
+                               cache_runtime.before_forward(condition_branch,
                                                             condition_key,
                                                             noised_input,
                                                             &model_out);
-        if (!cache_hit) {
+        if (use_cfg_parallel) {
+            const bool local_is_uncond = cfg_rank == 0;
+            const SDCondition& local_condition = local_is_uncond ? uncond : condition;
+            const cache::CacheBranch local_branch = local_is_uncond ? cache::CacheBranch::Uncond
+                                                                    : cache::CacheBranch::Cond;
+            const void* local_key = static_cast<const void*>(&local_condition);
+            sd::Tensor<float> local_out;
+            const bool local_cache_hit = cache_enabled &&
+                                         cache_runtime.before_forward(local_branch,
+                                                                      local_key,
+                                                                      noised_input,
+                                                                      &local_out);
+            if (!local_cache_hit) {
+                local_out = flux_runner_->compute(n_threads,
+                                                  noised_input,
+                                                  timesteps,
+                                                  local_condition.c_crossattn,
+                                                  {},
+                                                  local_condition.c_vector,
+                                                  guidance);
+                if (!local_out.empty() && cache_enabled) {
+                    cache_runtime.after_forward(local_branch,
+                                                local_key,
+                                                noised_input,
+                                                local_out);
+                }
+            }
+            std::vector<sd::Tensor<float>> gathered;
+            if (local_out.empty() ||
+                !parallel::cfg_all_gather(*runtime_->parallel_context(), local_out, &gathered, error) ||
+                gathered.size() != 2) {
+                if (error != nullptr && error->empty()) {
+                    *error = sd_format("Flux CFG parallel gather failed at step %d", step + 1);
+                }
+                flux_runner_->free_compute_buffer();
+                return false;
+            }
+            model_out = gathered[0] + cfg_scale * (gathered[1] - gathered[0]);
+        } else if (!cache_hit) {
             model_out = flux_runner_->compute(n_threads,
                                               noised_input,
                                               timesteps,
@@ -859,11 +922,43 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                                               condition.c_vector,
                                               guidance);
             if (!model_out.empty() && cache_enabled) {
-                cache_runtime.after_forward(cache::CacheBranch::Main,
+                cache_runtime.after_forward(condition_branch,
                                             condition_key,
                                             noised_input,
                                             model_out);
             }
+        }
+        if (!uncond.empty() && !use_cfg_parallel) {
+            sd::Tensor<float> uncond_out;
+            const void* uncond_key = static_cast<const void*>(&uncond);
+            const bool uncond_cache_hit = cache_enabled &&
+                                          cache_runtime.before_forward(cache::CacheBranch::Uncond,
+                                                                       uncond_key,
+                                                                       noised_input,
+                                                                       &uncond_out);
+            if (!uncond_cache_hit) {
+                uncond_out = flux_runner_->compute(n_threads,
+                                                   noised_input,
+                                                   timesteps,
+                                                   uncond.c_crossattn,
+                                                   {},
+                                                   uncond.c_vector,
+                                                   guidance);
+                if (!uncond_out.empty() && cache_enabled) {
+                    cache_runtime.after_forward(cache::CacheBranch::Uncond,
+                                                uncond_key,
+                                                noised_input,
+                                                uncond_out);
+                }
+            }
+            if (uncond_out.empty()) {
+                if (error != nullptr) {
+                    *error = sd_format("Flux unconditional transformer compute failed at step %d", step + 1);
+                }
+                flux_runner_->free_compute_buffer();
+                return false;
+            }
+            model_out = uncond_out + cfg_scale * (model_out - uncond_out);
         }
         if (model_out.empty()) {
             if (error != nullptr) {
@@ -888,7 +983,13 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
     if (cache_enabled) {
         cache_runtime.log_summary(static_cast<size_t>(steps));
     }
+    const int64_t sample_end_ms = ggml_time_ms();
+    LOG_INFO("flux sampling completed, taking %.2fs", (sample_end_ms - sample_start_ms) / 1000.0f);
     flux_runner_->free_compute_buffer();
+
+    if (runtime_->parallel_context() != nullptr && !runtime_->parallel_context()->is_root()) {
+        return true;
+    }
 
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
     ed_tiling_params_t tiling_params{};

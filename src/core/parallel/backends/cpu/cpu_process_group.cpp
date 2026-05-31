@@ -56,6 +56,10 @@ int CpuProcessGroup::size() const {
     return config_.world_size;
 }
 
+int CpuProcessGroup::local_rank() const {
+    return config_.local_rank;
+}
+
 bool CpuProcessGroup::enabled() const {
     return config_.backend != Backend::kNone && config_.world_size > 1;
 }
