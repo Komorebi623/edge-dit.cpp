@@ -1,10 +1,81 @@
 #include "runtime/edge_dit_engine.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <exception>
+#include <stdexcept>
 
 #include "utils/util.h"
 
 namespace edgedit {
+namespace {
+
+std::string lower_copy(const char* value) {
+    std::string out = value != nullptr ? value : "";
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return out;
+}
+
+int env_int(const char* name, int fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return fallback;
+    }
+    char* end = nullptr;
+    long parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0') {
+        return fallback;
+    }
+    return static_cast<int>(parsed);
+}
+
+int inferred_world_size() {
+    int world_size = env_int("WORLD_SIZE", 1);
+    world_size = env_int("OMPI_COMM_WORLD_SIZE", world_size);
+    world_size = env_int("MV2_COMM_WORLD_SIZE", world_size);
+    world_size = env_int("SLURM_NTASKS", world_size);
+    world_size = env_int("PMI_SIZE", world_size);
+    return world_size;
+}
+
+int requested_parallel_world_size(const ed_ctx_params_t& params) {
+    return std::max({1, params.cfg_parallel_size, params.tp_parallel_size, params.sp_parallel_size});
+}
+
+bool runtime_backend_is_cpu() {
+    const std::string backend = lower_copy(std::getenv("ED_BACKEND"));
+    return backend == "cpu";
+}
+
+parallel::ParallelConfig make_parallel_config(const ed_ctx_params_t& params) {
+    parallel::ParallelConfig config;
+    config.cfg_parallel_size = params.cfg_parallel_size > 0 ? params.cfg_parallel_size : 1;
+    config.tp_parallel_size  = params.tp_parallel_size > 0 ? params.tp_parallel_size : 1;
+    config.sp_parallel_size  = params.sp_parallel_size > 0 ? params.sp_parallel_size : 1;
+
+    const int requested_world_size = requested_parallel_world_size(params);
+    const int world_size = inferred_world_size();
+    if (requested_world_size <= 1 && world_size <= 1) {
+        config.backend = parallel::Backend::kNone;
+        return config;
+    }
+
+    if (world_size > 1 && requested_world_size > 1 && world_size != requested_world_size) {
+        throw std::invalid_argument("launched worker count must match requested parallel size");
+    }
+
+    if (runtime_backend_is_cpu()) {
+        throw std::invalid_argument("distributed CPU runtime backend is not wired into engine execution yet");
+    }
+
+    config.backend = parallel::Backend::kNccl;
+    return config;
+}
+
+} // namespace
 
 bool EdgeDitEngine::init(const ed_ctx_params_t* params) {
     last_error_.clear();
@@ -19,14 +90,17 @@ bool EdgeDitEngine::init(const ed_ctx_params_t* params) {
     dit_pipeline_.reset();
     model_loader_.reset();
     runtime_.reset();
+    parallel_context_.reset();
 
     auto cleanup = [&]() {
         dit_pipeline_.reset();
         model_loader_.reset();
         runtime_.reset();
+        parallel_context_.reset();
     };
 
     try {
+        parallel_context_ = parallel::create_parallel_context(make_parallel_config(ctx_params_));
         runtime_      = std::make_unique<ModelRuntime>();
         model_loader_ = std::make_unique<ModelLoader>();
     } catch (const std::exception& e) {
@@ -34,6 +108,8 @@ bool EdgeDitEngine::init(const ed_ctx_params_t* params) {
         cleanup();
         return false;
     }
+
+    runtime_->set_parallel_context(parallel_context_.get());
 
     if (!runtime_->init(ctx_params_, &last_error_)) {
         set_error(last_error_.empty() ? "ModelRuntime::init failed" : last_error_);
@@ -89,9 +165,17 @@ bool EdgeDitEngine::init(const ed_ctx_params_t* params) {
 
     model_loader_->log_weight_stats();
     dit_pipeline_->mark_ready();
+    if (parallel_context_ != nullptr && parallel_context_->enabled()) {
+        parallel_context_->world_group().barrier();
+    }
 
-    LOG_INFO("EdgeDitEngine initialized successfully, version=%s",
-             ed_version_name(dit_pipeline_->version()));
+    if (parallel_is_root()) {
+        LOG_INFO("EdgeDitEngine initialized successfully, version=%s, parallel=%s rank=%d/%d",
+                 ed_version_name(dit_pipeline_->version()),
+                 parallel_context_ != nullptr ? parallel::backend_name(parallel_context_->backend()) : "none",
+                 parallel_rank(),
+                 parallel_world_size());
+    }
     return true;
 }
 
@@ -127,6 +211,11 @@ ed_status_t EdgeDitEngine::generate_image(const ed_image_generation_params_t* pa
             ed_free_image_batch(out);
         }
         return status;
+    }
+
+    if (!parallel_is_root()) {
+        ed_free_image_batch(out);
+        return ED_STATUS_OK;
     }
 
     if (out->images == nullptr || out->count <= 0) {
@@ -171,6 +260,11 @@ ed_status_t EdgeDitEngine::generate_video(const ed_video_generation_params_t* pa
         return status;
     }
 
+    if (!parallel_is_root()) {
+        ed_free_video(out);
+        return ED_STATUS_OK;
+    }
+
     if (out->frames == nullptr || out->frame_count <= 0) {
         ed_free_video(out);
         set_error("DiT pipeline returned empty video");
@@ -193,6 +287,26 @@ sample_method_t EdgeDitEngine::get_default_sample_method() const {
 
 scheduler_t EdgeDitEngine::get_default_scheduler(sample_method_t method) const {
     return dit_pipeline_ != nullptr ? dit_pipeline_->default_scheduler(method) : DISCRETE_SCHEDULER;
+}
+
+bool EdgeDitEngine::parallel_enabled() const {
+    return parallel_context_ != nullptr && parallel_context_->enabled();
+}
+
+bool EdgeDitEngine::parallel_is_root() const {
+    return parallel_context_ == nullptr || parallel_context_->is_root();
+}
+
+int EdgeDitEngine::parallel_rank() const {
+    return parallel_context_ != nullptr ? parallel_context_->rank() : 0;
+}
+
+int EdgeDitEngine::parallel_world_size() const {
+    return parallel_context_ != nullptr ? parallel_context_->world_size() : 1;
+}
+
+int EdgeDitEngine::parallel_local_rank() const {
+    return parallel_context_ != nullptr ? parallel_context_->local_rank() : 0;
 }
 
 void EdgeDitEngine::set_error(const std::string& msg) {

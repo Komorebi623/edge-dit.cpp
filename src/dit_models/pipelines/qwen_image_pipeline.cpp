@@ -13,6 +13,7 @@
 #include "dit_models/models/qwen_image.hpp"
 #include "dit_models/models/wan.hpp"
 #include "ggml.h"
+#include "parallel/cfg_parallel.hpp"
 #include "utils/util.h"
 
 static constexpr float ED_QWEN_FLOW_SHIFT_DEFAULT = 3.0f;
@@ -381,6 +382,20 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
         return false;
     }
 
+    const float cfg_scale = params->sample.cfg_scale > 0.0f ? params->sample.cfg_scale : 1.0f;
+    SDCondition uncond;
+    if (cfg_scale != 1.0f) {
+        ConditionerParams uncond_params;
+        uncond_params.text = params->negative_prompt != nullptr ? params->negative_prompt : "";
+        uncond = conditioner_->get_learned_condition(n_threads, uncond_params);
+        if (uncond.empty() || uncond.c_crossattn.empty()) {
+            if (error != nullptr) {
+                *error = "Qwen-Image negative prompt encoding returned empty condition";
+            }
+            return false;
+        }
+    }
+
     const int vae_scale_factor = vae_->get_scale_factor();
     const int latent_w = params->width / vae_scale_factor;
     const int latent_h = params->height / vae_scale_factor;
@@ -421,18 +436,20 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
         return false;
     }
 
-    LOG_INFO("qwen-image txt2img: %dx%d latent=%dx%d steps=%d shift=%.2f seed=%" PRId64,
+    LOG_INFO("qwen-image txt2img: %dx%d latent=%dx%d steps=%d shift=%.2f cfg=%.2f seed=%" PRId64,
              params->width,
              params->height,
              latent_w,
              latent_h,
              steps,
              flow_shift,
+             cfg_scale,
              seed + batch_index);
 
     sd::Tensor<float> x = init_latent * (1.0f - sigmas[0]) + noise * sigmas[0];
     cache::CacheRuntime cache_runtime;
     const bool cache_enabled = cache_runtime.init(params->sample, version_, sigmas);
+    const int64_t sample_start_ms = ggml_time_ms();
     for (int step = 0; step < steps; ++step) {
         const float sigma = sigmas[static_cast<size_t>(step)];
         const float sigma_next = sigmas[static_cast<size_t>(step + 1)];
@@ -447,14 +464,58 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
             cache_runtime.begin_step(cache_step);
         }
 
+        const bool use_cfg_parallel = !uncond.empty() &&
+                                      parallel::cfg_parallel_available(runtime_->parallel_context());
+        const int cfg_rank = parallel::cfg_parallel_rank(runtime_->parallel_context());
+
         sd::Tensor<float> model_out;
         const void* condition_key = static_cast<const void*>(&condition);
-        const bool cache_hit = cache_enabled &&
-                               cache_runtime.before_forward(cache::CacheBranch::Main,
+        const cache::CacheBranch condition_branch = uncond.empty() ? cache::CacheBranch::Main
+                                                                   : cache::CacheBranch::Cond;
+        const bool cache_hit = !use_cfg_parallel &&
+                               cache_enabled &&
+                               cache_runtime.before_forward(condition_branch,
                                                             condition_key,
                                                             x,
                                                             &model_out);
-        if (!cache_hit) {
+        if (use_cfg_parallel) {
+            const bool local_is_uncond = cfg_rank == 0;
+            const SDCondition& local_condition = local_is_uncond ? uncond : condition;
+            const cache::CacheBranch local_branch = local_is_uncond ? cache::CacheBranch::Uncond
+                                                                    : cache::CacheBranch::Cond;
+            const void* local_key = static_cast<const void*>(&local_condition);
+            sd::Tensor<float> local_out;
+            const bool local_cache_hit = cache_enabled &&
+                                         cache_runtime.before_forward(local_branch,
+                                                                      local_key,
+                                                                      x,
+                                                                      &local_out);
+            if (!local_cache_hit) {
+                local_out = diffusion_->compute(n_threads,
+                                                x,
+                                                timesteps,
+                                                local_condition.c_crossattn,
+                                                {},
+                                                false);
+                if (!local_out.empty() && cache_enabled) {
+                    cache_runtime.after_forward(local_branch,
+                                                local_key,
+                                                x,
+                                                local_out);
+                }
+            }
+            std::vector<sd::Tensor<float>> gathered;
+            if (local_out.empty() ||
+                !parallel::cfg_all_gather(*runtime_->parallel_context(), local_out, &gathered, error) ||
+                gathered.size() != 2) {
+                if (error != nullptr && error->empty()) {
+                    *error = sd_format("Qwen-Image CFG parallel gather failed at step %d", step + 1);
+                }
+                diffusion_->free_compute_buffer();
+                return false;
+            }
+            model_out = gathered[0] + cfg_scale * (gathered[1] - gathered[0]);
+        } else if (!cache_hit) {
             model_out = diffusion_->compute(n_threads,
                                             x,
                                             timesteps,
@@ -462,11 +523,42 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
                                             {},
                                             false);
             if (!model_out.empty() && cache_enabled) {
-                cache_runtime.after_forward(cache::CacheBranch::Main,
+                cache_runtime.after_forward(condition_branch,
                                             condition_key,
                                             x,
                                             model_out);
             }
+        }
+        if (!uncond.empty() && !use_cfg_parallel) {
+            sd::Tensor<float> uncond_out;
+            const void* uncond_key = static_cast<const void*>(&uncond);
+            const bool uncond_cache_hit = cache_enabled &&
+                                          cache_runtime.before_forward(cache::CacheBranch::Uncond,
+                                                                       uncond_key,
+                                                                       x,
+                                                                       &uncond_out);
+            if (!uncond_cache_hit) {
+                uncond_out = diffusion_->compute(n_threads,
+                                                 x,
+                                                 timesteps,
+                                                 uncond.c_crossattn,
+                                                 {},
+                                                 false);
+                if (!uncond_out.empty() && cache_enabled) {
+                    cache_runtime.after_forward(cache::CacheBranch::Uncond,
+                                                uncond_key,
+                                                x,
+                                                uncond_out);
+                }
+            }
+            if (uncond_out.empty()) {
+                if (error != nullptr) {
+                    *error = sd_format("Qwen-Image unconditional transformer compute failed at step %d", step + 1);
+                }
+                diffusion_->free_compute_buffer();
+                return false;
+            }
+            model_out = uncond_out + cfg_scale * (model_out - uncond_out);
         }
         if (model_out.empty()) {
             if (error != nullptr) {
@@ -491,7 +583,13 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
     if (cache_enabled) {
         cache_runtime.log_summary(static_cast<size_t>(steps));
     }
+    const int64_t sample_end_ms = ggml_time_ms();
+    LOG_INFO("qwen-image sampling completed, taking %.2fs", (sample_end_ms - sample_start_ms) / 1000.0f);
     diffusion_->free_compute_buffer();
+
+    if (runtime_->parallel_context() != nullptr && !runtime_->parallel_context()->is_root()) {
+        return true;
+    }
 
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
     ed_tiling_params_t tiling_params{};

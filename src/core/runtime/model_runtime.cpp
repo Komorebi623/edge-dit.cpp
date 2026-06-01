@@ -46,7 +46,20 @@ bool device_name_matches(ggml_backend_dev_t dev, const std::string& requested) {
     return name != nullptr && contains(lowercase(name), request);
 }
 
-ggml_backend_t init_explicit_backend(const std::string& requested) {
+bool is_generic_gpu_request(const std::string& requested) {
+    const std::string request = lowercase(requested);
+    return request == "gpu" || request == "cuda";
+}
+
+bool is_gpu_device(ggml_backend_dev_t dev) {
+    if (dev == nullptr) {
+        return false;
+    }
+    const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+    return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
+}
+
+ggml_backend_t init_explicit_backend(const std::string& requested, int gpu_device_ordinal) {
     const std::string request = lowercase(requested);
     if (request == "cpu") {
         return ggml_backend_cpu_init();
@@ -54,9 +67,14 @@ ggml_backend_t init_explicit_backend(const std::string& requested) {
 
     ggml_backend_load_all_once();
     const size_t device_count = ggml_backend_dev_count();
+    const bool use_gpu_ordinal = is_generic_gpu_request(requested) && gpu_device_ordinal >= 0;
+    int matched_gpu_index = 0;
     for (size_t i = 0; i < device_count; ++i) {
         ggml_backend_dev_t dev = ggml_backend_dev_get(i);
         if (!device_name_matches(dev, requested)) {
+            continue;
+        }
+        if (use_gpu_ordinal && is_gpu_device(dev) && matched_gpu_index++ != gpu_device_ordinal) {
             continue;
         }
 
@@ -156,11 +174,12 @@ bool ModelRuntime::init_rng(const ed_context_params_t& params, std::string* erro
 
 bool ModelRuntime::init_backends(const ed_context_params_t& params, std::string* error) {
     const std::string requested_backend = requested_backend_name();
+    const int gpu_device_ordinal = parallel_enabled() ? parallel_context_->local_rank() : 0;
     if (is_auto_backend(requested_backend)) {
         backends_.backend = init_named_backend();
     } else {
         LOG_INFO("requested backend: %s", requested_backend.c_str());
-        backends_.backend = init_explicit_backend(requested_backend);
+        backends_.backend = init_explicit_backend(requested_backend, gpu_device_ordinal);
     }
 
     if (backends_.backend == nullptr) {

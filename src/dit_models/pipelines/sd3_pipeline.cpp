@@ -9,6 +9,7 @@
 #include "core/optimization/cache/cache_runtime.hpp"
 #include "dit_models/components/autoencoders/auto_encoder_kl.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
+#include "parallel/cfg_parallel.hpp"
 #include "utils/util.h"
 
 namespace edgedit {
@@ -392,6 +393,7 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
     sd::Tensor<float> x = init_latent * (1.0f - sigmas[0]) + noise * sigmas[0];
     cache::CacheRuntime cache_runtime;
     const bool cache_enabled = cache_runtime.init(params->sample, version_, sigmas);
+    const int64_t sample_start_ms = ggml_time_ms();
     for (int step = 0; step < steps; ++step) {
         const float sigma = sigmas[static_cast<size_t>(step)];
         const float sigma_next = sigmas[static_cast<size_t>(step + 1)];
@@ -406,19 +408,24 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
             cache_runtime.begin_step(cache_step);
         }
 
+        const bool use_cfg_parallel = !uncond.empty() &&
+                                      parallel::cfg_parallel_available(runtime_->parallel_context());
+        const int cfg_rank = parallel::cfg_parallel_rank(runtime_->parallel_context());
+
         DiffusionParams diffusion_params;
         diffusion_params.x = &x;
         diffusion_params.timesteps = &timesteps;
-        diffusion_params.context = &cond.c_crossattn;
-        diffusion_params.y = &cond.c_vector;
         sd::Tensor<float> cond_out;
         const void* cond_key = static_cast<const void*>(&cond);
-        const bool cond_cache_hit = cache_enabled &&
+        const bool cond_cache_hit = !use_cfg_parallel &&
+                                    cache_enabled &&
                                     cache_runtime.before_forward(cache::CacheBranch::Cond,
                                                                  cond_key,
                                                                  x,
                                                                  &cond_out);
-        if (!cond_cache_hit) {
+        if (!use_cfg_parallel && !cond_cache_hit) {
+            diffusion_params.context = &cond.c_crossattn;
+            diffusion_params.y = &cond.c_vector;
             cond_out = diffusion_->compute(runtime_->n_threads(), diffusion_params);
             if (!cond_out.empty() && cache_enabled) {
                 cache_runtime.after_forward(cache::CacheBranch::Cond,
@@ -427,7 +434,7 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
                                             cond_out);
             }
         }
-        if (cond_out.empty()) {
+        if (!use_cfg_parallel && cond_out.empty()) {
             if (error != nullptr) {
                 *error = sd_format("SD3 diffusion compute failed at step %d", step + 1);
             }
@@ -437,16 +444,52 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
 
         sd::Tensor<float> model_out = cond_out;
         if (!uncond.empty()) {
-            diffusion_params.context = &uncond.c_crossattn;
-            diffusion_params.y = &uncond.c_vector;
             sd::Tensor<float> uncond_out;
             const void* uncond_key = static_cast<const void*>(&uncond);
-            const bool uncond_cache_hit = cache_enabled &&
+            const bool uncond_cache_hit = !use_cfg_parallel &&
+                                          cache_enabled &&
                                           cache_runtime.before_forward(cache::CacheBranch::Uncond,
                                                                        uncond_key,
                                                                        x,
                                                                        &uncond_out);
-            if (!uncond_cache_hit) {
+            if (use_cfg_parallel) {
+                const bool local_is_uncond = cfg_rank == 0;
+                const SDCondition& local_condition = local_is_uncond ? uncond : cond;
+                const cache::CacheBranch local_branch = local_is_uncond ? cache::CacheBranch::Uncond
+                                                                        : cache::CacheBranch::Cond;
+                const void* local_key = static_cast<const void*>(&local_condition);
+                sd::Tensor<float> local_out;
+                const bool local_cache_hit = cache_enabled &&
+                                             cache_runtime.before_forward(local_branch,
+                                                                          local_key,
+                                                                          x,
+                                                                          &local_out);
+                if (!local_cache_hit) {
+                    diffusion_params.context = &local_condition.c_crossattn;
+                    diffusion_params.y = &local_condition.c_vector;
+                    local_out = diffusion_->compute(runtime_->n_threads(), diffusion_params);
+                    if (!local_out.empty() && cache_enabled) {
+                        cache_runtime.after_forward(local_branch,
+                                                    local_key,
+                                                    x,
+                                                    local_out);
+                    }
+                }
+                std::vector<sd::Tensor<float>> gathered;
+                if (local_out.empty() ||
+                    !parallel::cfg_all_gather(*runtime_->parallel_context(), local_out, &gathered, error) ||
+                    gathered.size() != 2) {
+                    if (error != nullptr && error->empty()) {
+                        *error = sd_format("SD3 CFG parallel gather failed at step %d", step + 1);
+                    }
+                    diffusion_->free_compute_buffer();
+                    return false;
+                }
+                uncond_out = std::move(gathered[0]);
+                cond_out = std::move(gathered[1]);
+            } else if (!uncond_cache_hit) {
+                diffusion_params.context = &uncond.c_crossattn;
+                diffusion_params.y = &uncond.c_vector;
                 uncond_out = diffusion_->compute(runtime_->n_threads(), diffusion_params);
                 if (!uncond_out.empty() && cache_enabled) {
                     cache_runtime.after_forward(cache::CacheBranch::Uncond,
@@ -476,7 +519,13 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
     if (cache_enabled) {
         cache_runtime.log_summary(static_cast<size_t>(steps));
     }
+    const int64_t sample_end_ms = ggml_time_ms();
+    LOG_INFO("sd3 sampling completed, taking %.2fs", (sample_end_ms - sample_start_ms) / 1000.0f);
     diffusion_->free_compute_buffer();
+
+    if (runtime_->parallel_context() != nullptr && !runtime_->parallel_context()->is_root()) {
+        return true;
+    }
 
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
     ed_tiling_params_t tiling_params{};

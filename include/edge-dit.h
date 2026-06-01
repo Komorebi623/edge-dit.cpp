@@ -158,6 +158,10 @@ typedef struct ed_context_params_t {
     bool diffusion_flash_attention;
 
     float max_vram_gb;
+
+    int cfg_parallel_size;
+    int tp_parallel_size;
+    int sp_parallel_size;
 } ed_context_params_t;
 
 typedef struct ed_sample_params_t {
@@ -267,6 +271,9 @@ ED_API void ed_free_image_batch(ed_image_batch_t * batch);
 ED_API void ed_free_video(ed_video_t * video);
 
 ED_API const char * ed_get_last_error(const ed_context_t * ctx);
+ED_API int ed_context_parallel_rank(const ed_context_t * ctx);
+ED_API int ed_context_parallel_world_size(const ed_context_t * ctx);
+ED_API bool ed_context_parallel_is_root(const ed_context_t * ctx);
 
 #ifdef __cplusplus
 }

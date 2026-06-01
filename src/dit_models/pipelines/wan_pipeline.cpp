@@ -14,6 +14,7 @@
 #include "dit_models/components/autoencoders/tae.hpp"
 #include "dit_models/components/autoencoders/vae.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
+#include "parallel/cfg_parallel.hpp"
 #include "utils/rng.hpp"
 #include "utils/rng_philox.hpp"
 #include "utils/util.h"
@@ -683,26 +684,55 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
         diffusion_params.vace_context = vace_context.empty() ? nullptr : &vace_context;
         diffusion_params.vace_strength = vace_strength;
 
-        sd::Tensor<float> cond_out = run_condition(model,
-                                                   &diffusion_params,
-                                                   conditions.cond,
-                                                   nullptr,
-                                                   nullptr,
-                                                   error);
-        if (cond_out.empty()) {
-            return {};
+        const bool use_cfg_parallel = !conditions.uncond.empty() &&
+                                      conditions.img_cond.empty() &&
+                                      parallel::cfg_parallel_available(runtime_->parallel_context());
+        const int cfg_rank = parallel::cfg_parallel_rank(runtime_->parallel_context());
+
+        sd::Tensor<float> cond_out;
+        if (!use_cfg_parallel) {
+            cond_out = run_condition(model,
+                                     &diffusion_params,
+                                     conditions.cond,
+                                     nullptr,
+                                     nullptr,
+                                     error);
+            if (cond_out.empty()) {
+                return {};
+            }
         }
 
         sd::Tensor<float> uncond_out;
         if (!conditions.uncond.empty()) {
-            uncond_out = run_condition(model,
-                                       &diffusion_params,
-                                       conditions.uncond,
-                                       nullptr,
-                                       nullptr,
-                                       error);
-            if (uncond_out.empty()) {
-                return {};
+            if (use_cfg_parallel) {
+                const SDCondition& local_condition = cfg_rank == 0 ? conditions.uncond : conditions.cond;
+                sd::Tensor<float> local_out = run_condition(model,
+                                                            &diffusion_params,
+                                                            local_condition,
+                                                            nullptr,
+                                                            nullptr,
+                                                            error);
+                std::vector<sd::Tensor<float>> gathered;
+                if (local_out.empty() ||
+                    !parallel::cfg_all_gather(*runtime_->parallel_context(), local_out, &gathered, error) ||
+                    gathered.size() != 2) {
+                    if (error != nullptr && error->empty()) {
+                        *error = sd_format("Wan CFG parallel gather failed at step %d", step);
+                    }
+                    return {};
+                }
+                uncond_out = std::move(gathered[0]);
+                cond_out = std::move(gathered[1]);
+            } else {
+                uncond_out = run_condition(model,
+                                           &diffusion_params,
+                                           conditions.uncond,
+                                           nullptr,
+                                           nullptr,
+                                           error);
+                if (uncond_out.empty()) {
+                    return {};
+                }
             }
         }
 

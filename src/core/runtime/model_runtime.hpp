@@ -7,6 +7,7 @@
 #include "backend/ggml/ggml_extend.hpp"
 #include "ggml-backend.h"
 #include "edge-dit.h"
+#include "parallel/parallel_context.hpp"
 #include "utils/rng.hpp"
 
 namespace edgedit {
@@ -65,6 +66,7 @@ public:
     bool init(const ed_context_params_t& params, std::string* error);
     bool init(const ed_context_params_t* params, std::string* error);
     void reset();
+    void set_parallel_context(parallel::ParallelContext* context) { parallel_context_ = context; }
 
     bool ready() const { return ready_; }
     bool is_ready() const { return ready_; }
@@ -79,6 +81,7 @@ public:
     bool diffusion_flash_attention() const { return diffusion_flash_attention_; }
     bool circular_x() const { return circular_x_; }
     bool circular_y() const { return circular_y_; }
+    bool parallel_enabled() const { return parallel_context_ != nullptr && parallel_context_->enabled(); }
 
     ggml_backend_t backend() const { return backends_.backend; }
     ggml_backend_t clip_backend() const { return backends_.clip_backend; }
@@ -89,6 +92,7 @@ public:
     RNG& sampler_rng() { return *sampler_rng_; }
     std::shared_ptr<RNG> rng_ptr() const { return rng_; }
     std::shared_ptr<RNG> sampler_rng_ptr() const { return sampler_rng_; }
+    parallel::ParallelContext* parallel_context() const { return parallel_context_; }
 
 private:
     bool ready_ = false;
@@ -107,6 +111,7 @@ private:
     bool circular_y_ = false;
 
     RuntimeBackends backends_;
+    parallel::ParallelContext* parallel_context_ = nullptr;
 
     std::shared_ptr<RNG> rng_;
     std::shared_ptr<RNG> sampler_rng_;

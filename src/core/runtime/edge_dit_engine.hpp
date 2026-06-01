@@ -5,6 +5,7 @@
 
 #include "edge-dit.h"
 #include "dit_models/pipelines/dit_pipeline.hpp"
+#include "parallel/parallel_context.hpp"
 #include "runtime/model_runtime.hpp"
 #include "runtime/model_loader.h"
 
@@ -35,6 +36,11 @@ public:
 
     sample_method_t get_default_sample_method() const;
     scheduler_t get_default_scheduler(sample_method_t method) const;
+    bool parallel_enabled() const;
+    bool parallel_is_root() const;
+    int parallel_rank() const;
+    int parallel_world_size() const;
+    int parallel_local_rank() const;
 
     SDVersion version() const {
         return dit_pipeline_ ? dit_pipeline_->version() : VERSION_COUNT;
@@ -46,6 +52,7 @@ public:
 
 private:
     ed_ctx_params_t ctx_params_ = {};
+    std::unique_ptr<parallel::ParallelContext> parallel_context_;
     std::unique_ptr<ModelRuntime> runtime_;
     std::unique_ptr<ModelLoader> model_loader_;
     std::unique_ptr<DiTPipeline> dit_pipeline_;

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -70,6 +71,11 @@ static void print_usage(const char* prog) {
         "  --cache-static-scm        Use static SCM policy for methods that support it\n"
         "  --backend <name>          Backend: auto, cpu, cuda, gpu. Default: auto\n"
         "  --gpu                     Alias for --backend gpu\n"
+        "  --devices <csv>           GPU devices for parallel workers, e.g. 0,1,2,3\n"
+        "  --cfg-parallel-size <n>   Split CFG cond/uncond branches across n GPUs, currently supports 1 or 2\n"
+        "  --cfg-size <n>            Alias for --cfg-parallel-size\n"
+        "  --tp-size <n>             Reserved tensor parallel size, default: 1\n"
+        "  --sp-size <n>             Reserved sequence parallel size, default: 1\n"
         "  --help              Show this help\n",
         prog,
         prog
@@ -118,6 +124,54 @@ static std::string lowercase(std::string value) {
         }
     }
     return value;
+}
+
+static int env_int_value(const char* name, int fallback = 0) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return fallback;
+    }
+    char* end = nullptr;
+    long parsed = std::strtol(value, &end, 10);
+    if (end == value || *end != '\0') {
+        return fallback;
+    }
+    return static_cast<int>(parsed);
+}
+
+static bool is_distributed_process() {
+    int world_size = env_int_value("WORLD_SIZE", 1);
+    world_size = env_int_value("OMPI_COMM_WORLD_SIZE", world_size);
+    world_size = env_int_value("MV2_COMM_WORLD_SIZE", world_size);
+    world_size = env_int_value("SLURM_NTASKS", world_size);
+    world_size = env_int_value("PMI_SIZE", world_size);
+    return world_size > 1;
+}
+
+static int count_csv_values(const char* csv) {
+    if (csv == nullptr || csv[0] == '\0') {
+        return 0;
+    }
+
+    int count = 0;
+    bool in_value = false;
+    for (const char* p = csv; *p != '\0'; ++p) {
+        if (*p == ',') {
+            if (in_value) {
+                ++count;
+                in_value = false;
+            }
+            continue;
+        }
+        if (!std::isspace(static_cast<unsigned char>(*p))) {
+            in_value = true;
+        }
+    }
+    return in_value ? count + 1 : count;
+}
+
+static bool is_cpu_backend_name(const char* backend) {
+    return lowercase(backend != nullptr ? backend : "") == "cpu";
 }
 
 static int parse_int_value(const char* text, int fallback = 0) {
@@ -718,6 +772,10 @@ struct FluxCliArgs {
     const char* output_path = "output.png";
     const char* video_format = nullptr;
     const char* backend = nullptr;
+    const char* devices = nullptr;
+    int cfg_parallel_size = 1;
+    int tp_parallel_size = 1;
+    int sp_parallel_size = 1;
 
     bool video = false;
     int width = 1024;
@@ -916,6 +974,24 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->backend = require_value(key);
         } else if (std::strcmp(key, "--gpu") == 0) {
             args->backend = "gpu";
+        } else if (std::strcmp(key, "--devices") == 0 ||
+                   std::strcmp(key, "--gpus") == 0) {
+            args->devices = require_value(key);
+        } else if (std::strcmp(key, "--cfg-parallel-size") == 0 ||
+                   std::strcmp(key, "--cfg-size") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->cfg_parallel_size = parse_int_value(v, args->cfg_parallel_size);
+        } else if (std::strcmp(key, "--tp-size") == 0 ||
+                   std::strcmp(key, "--tensor-parallel-size") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->tp_parallel_size = parse_int_value(v, args->tp_parallel_size);
+        } else if (std::strcmp(key, "--sp-size") == 0 ||
+                   std::strcmp(key, "--sequence-parallel-size") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->sp_parallel_size = parse_int_value(v, args->sp_parallel_size);
         } else if (std::strcmp(key, "--help") == 0 || std::strcmp(key, "-h") == 0) {
             return false;
         } else {
@@ -1018,6 +1094,21 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         return false;
     }
 
+    if (args->cfg_parallel_size != 1 && args->cfg_parallel_size != 2) {
+        std::fprintf(stderr, "cfg parallel size currently supports 1 or 2\n");
+        return false;
+    }
+
+    if (args->tp_parallel_size != 1) {
+        std::fprintf(stderr, "tensor parallel is not implemented yet; use --tp-size 1\n");
+        return false;
+    }
+
+    if (args->sp_parallel_size != 1) {
+        std::fprintf(stderr, "sequence parallel is not implemented yet; use --sp-size 1\n");
+        return false;
+    }
+
     return true;
 }
 
@@ -1046,6 +1137,47 @@ static void apply_cache_args(const FluxCliArgs& args, ed_sample_params_t* sample
     sample->cache_scm_policy_dynamic = args.cache_scm_policy_dynamic;
 }
 
+static int requested_parallel_size(const FluxCliArgs& args) {
+    return std::max({1, args.cfg_parallel_size, args.tp_parallel_size, args.sp_parallel_size});
+}
+
+static int launch_distributed_cli(int argc, char** argv, const FluxCliArgs& args, int device_count) {
+    const int parallel_size = requested_parallel_size(args);
+    if (parallel_size <= 1 || is_distributed_process()) {
+        return -1;
+    }
+
+    if (args.devices == nullptr || std::strlen(args.devices) == 0) {
+        std::fprintf(stderr, "parallel generation requires --devices with at least %d GPU ids\n", parallel_size);
+        return 1;
+    }
+    if (device_count != parallel_size) {
+        std::fprintf(stderr,
+                     "parallel size (%d) must match --devices count (%d)\n",
+                     parallel_size,
+                     device_count);
+        return 1;
+    }
+
+    std::string cmd = "CUDA_VISIBLE_DEVICES=" + shell_quote(args.devices) +
+                      " ED_CLI_LAUNCHED=1 mpirun -np " + std::to_string(parallel_size);
+    for (int i = 0; i < argc; ++i) {
+        cmd += " ";
+        cmd += shell_quote(argv[i]);
+    }
+
+    std::fprintf(stderr,
+                 "launching %d parallel workers on devices %s\n",
+                 parallel_size,
+                 args.devices);
+    const int status = std::system(cmd.c_str());
+    if (status == -1) {
+        std::fprintf(stderr, "failed to launch distributed workers with mpirun\n");
+        return 127;
+    }
+    return status == 0 ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
@@ -1061,6 +1193,23 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    const int device_count = count_csv_values(args.devices);
+    if (device_count > 0 && is_cpu_backend_name(args.backend)) {
+        std::fprintf(stderr, "--devices requires a GPU backend, but --backend cpu was requested\n");
+        return 1;
+    }
+    if (args.devices != nullptr && std::strlen(args.devices) > 0) {
+        setenv("CUDA_VISIBLE_DEVICES", args.devices, 1);
+        if (args.backend == nullptr || std::strlen(args.backend) == 0) {
+            args.backend = "gpu";
+        }
+    }
+
+    const int launch_status = launch_distributed_cli(argc, argv, args, device_count);
+    if (launch_status >= 0) {
+        return launch_status;
+    }
+
     if (args.backend != nullptr && std::strlen(args.backend) > 0) {
         setenv("ED_BACKEND", args.backend, 1);
     }
@@ -1074,6 +1223,9 @@ int main(int argc, char** argv) {
     ctx_params.clip_l_path = args.clip_l_path;
     ctx_params.clip_g_path = args.clip_g_path;
     ctx_params.t5xxl_path = args.t5xxl_path;
+    ctx_params.cfg_parallel_size = args.cfg_parallel_size;
+    ctx_params.tp_parallel_size = args.tp_parallel_size;
+    ctx_params.sp_parallel_size = args.sp_parallel_size;
 
     if (args.threads > 0) {
         ctx_params.n_threads = args.threads;
@@ -1121,6 +1273,12 @@ int main(int argc, char** argv) {
             }
             ed_free_context(ctx);
             return 3;
+        }
+
+        if (!ed_context_parallel_is_root(ctx)) {
+            ed_free_video(&output);
+            ed_free_context(ctx);
+            return 0;
         }
 
         if (output.frame_count <= 0 || output.frames == nullptr) {
@@ -1180,6 +1338,12 @@ int main(int argc, char** argv) {
 
             ed_free_context(ctx);
             return 3;
+        }
+
+        if (!ed_context_parallel_is_root(ctx)) {
+            ed_free_image_batch(&output);
+            ed_free_context(ctx);
+            return 0;
         }
 
         if (output.count <= 0 || output.images == nullptr) {

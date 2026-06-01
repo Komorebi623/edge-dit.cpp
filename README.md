@@ -35,6 +35,19 @@ bash ./scripts/build_cpu.sh
   -o output.png
 ```
 
+使用 CFG 并行在两张 GPU 上拆分 conditional / unconditional 分支：
+
+```bash
+./build-cuda/bin/ed-cli --backend cuda \
+  --model /path/to/diffusers-model-dir \
+  -p "prompt text" \
+  -W 1024 -H 1024 --steps 50 -s 0 \
+  --cfg-scale 5.0 \
+  --devices 0,1 \
+  --cfg-parallel-size 2 \
+  -o output.png
+```
+
 使用组件式路径加载模型：
 
 ```bash
@@ -124,6 +137,51 @@ bash ./scripts/build_cpu.sh
   -o qwen_image.png
 ```
 
+## CFG 并行推理
+
+`edge-dit.cpp` 支持最轻量的一种多卡并行：CFG parallel。它把 CFG 的 unconditional 和 conditional 两个 diffusion forward 分到两个 GPU worker 上执行，然后通过 NCCL all-gather 收集结果并在 root rank 上完成 CFG 合成：
+
+```text
+rank 0 -> unconditional branch
+rank 1 -> conditional branch
+root  -> uncond + cfg_scale * (cond - uncond)
+```
+
+用户侧只需要指定并行算法规模和 GPU 列表：
+
+```bash
+./build-cuda/bin/ed-cli --backend cuda \
+  --model /path/to/model \
+  -p "prompt text" \
+  -W 1024 -H 1024 --steps 50 -s 0 \
+  --cfg-scale 5.0 \
+  --devices 0,1 \
+  --cfg-size 2 \
+  -o output.png
+```
+
+参数语义：
+
+```text
+--cfg-parallel-size 2   开启 CFG 并行，当前支持 1 或 2
+--cfg-size 2            --cfg-parallel-size 的短别名
+--devices 0,1           选择参与并行的 GPU worker，数量需要和 cfg parallel size 一致
+```
+
+`--devices` 只表示使用哪些 GPU，不单独表示开启哪种并行算法。并行算法由 `--cfg-parallel-size`、未来的 `--tp-size`、`--sp-size` 等参数控制。
+
+CFG parallel 可以和已有 cache 参数一起使用；cond/uncond 仍然按原有 `CacheBranch::Cond` 和 `CacheBranch::Uncond` 分支维护 cache。cache 命中只跳过本地 diffusion forward，每一步仍会参与 all-gather，以保持多卡通信同步。
+
+当前状态：
+
+```text
+CFG parallel: 已支持 SD3 / Flux / Wan / Qwen-Image
+TP parallel: 预留 CLI 参数，尚未实现
+SP parallel: 预留 CLI 参数，尚未实现
+```
+
+更多验证结果见 `result.md`。在已测试的 SD3、Flux、Wan、Qwen-Image 上，CFG parallel 的 sampling / denoise hot path 接近 2x 加速，并且图片模型输出与单卡逐像素对齐。
+
 ## 常用参数
 
 ```text
@@ -142,6 +200,11 @@ bash ./scripts/build_cpu.sh
 --cfg-scale             CFG scale
 --guidance              Flux guidance
 --flow-shift            Flow scheduler shift
+--devices               GPU worker 列表，例如 0,1
+--cfg-parallel-size     CFG 并行规模，当前支持 1 或 2
+--cfg-size              --cfg-parallel-size 的短别名
+--tp-size               Tensor parallel 规模，预留参数，当前必须为 1
+--sp-size               Sequence parallel 规模，预留参数，当前必须为 1
 --video                 生成视频
 --frames                视频帧数
 --fps                   视频帧率

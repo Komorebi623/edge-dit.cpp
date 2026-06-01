@@ -38,6 +38,9 @@ void ed_context_params_init(ed_context_params_t * params) {
     params->weight_type = ED_DTYPE_AUTO;
     params->use_mmap = true;
     params->max_vram_gb = 0.0f;
+    params->cfg_parallel_size = 1;
+    params->tp_parallel_size = 1;
+    params->sp_parallel_size = 1;
 }
 
 void ed_sample_params_init(ed_sample_params_t * params) {
@@ -190,6 +193,12 @@ ed_status_t ed_generate_image(
         return status;
     }
 
+    if (!ctx->engine->parallel_is_root()) {
+        ed_free_image_batch(&tmp);
+        ed_set_error(ctx, "");
+        return ED_STATUS_OK;
+    }
+
     if (tmp.images == nullptr || tmp.count <= 0) {
         ed_free_image_batch(&tmp);
         ed_set_error(ctx, "engine returned empty image batch");
@@ -235,6 +244,12 @@ ed_status_t ed_generate_video(
 
         ed_set_error(ctx, err.c_str());
         return status;
+    }
+
+    if (!ctx->engine->parallel_is_root()) {
+        ed_free_video(&tmp);
+        ed_set_error(ctx, "");
+        return ED_STATUS_OK;
     }
 
     if (tmp.frames == nullptr || tmp.frame_count <= 0) {
@@ -298,4 +313,25 @@ const char * ed_get_last_error(const ed_context_t * ctx) {
     }
 
     return ctx->last_error.c_str();
+}
+
+int ed_context_parallel_rank(const ed_context_t* ctx) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return 0;
+    }
+    return ctx->engine->parallel_rank();
+}
+
+int ed_context_parallel_world_size(const ed_context_t* ctx) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return 1;
+    }
+    return ctx->engine->parallel_world_size();
+}
+
+bool ed_context_parallel_is_root(const ed_context_t* ctx) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return true;
+    }
+    return ctx->engine->parallel_is_root();
 }
