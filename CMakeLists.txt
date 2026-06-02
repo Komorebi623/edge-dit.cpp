@@ -242,6 +242,41 @@ if(ED_BUILD_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     )
     target_compile_features(parallel-collective-test PRIVATE cxx_std_17)
+    
+    add_executable(ggml-comm-test
+        tests/ggml_comm_test.cpp
+    )
+
+    target_link_libraries(ggml-comm-test PRIVATE edgedit)
+
+    target_include_directories(ggml-comm-test
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/include
+    )
+
+    target_compile_features(ggml-comm-test PRIVATE cxx_std_17)
+
+    add_executable(graph-cut-comm-test
+        tests/graph_cut_comm_test.cpp
+    )
+
+    target_link_libraries(graph-cut-comm-test PRIVATE edgedit)
+
+    target_include_directories(graph-cut-comm-test
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/include
+    )
+
+    target_compile_features(graph-cut-comm-test PRIVATE cxx_std_17)
+
     if(ED_ENABLE_NCCL)
         target_include_directories(parallel-collective-test PRIVATE ${ED_NCCL_INCLUDE_DIR})
         target_link_libraries(parallel-collective-test PRIVATE CUDA::cudart ${ED_NCCL_LIBRARY})

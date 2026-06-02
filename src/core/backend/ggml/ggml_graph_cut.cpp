@@ -12,6 +12,7 @@
 #include "ggml-backend.h"
 #include "ggml-impl.h"
 #include "utils/util.h"
+#include "backend/ggml/parallel/ggml_comm.hpp"
 
 namespace sd::ggml_graph_cut {
 
@@ -672,4 +673,252 @@ namespace sd::ggml_graph_cut {
         return resolved_plan;
     }
 
+        const char* comm_kind_name(Segment::CommKind kind) {
+        switch (kind) {
+            case Segment::CommKind::NONE:
+                return "none";
+            case Segment::CommKind::ALL_REDUCE:
+                return "all_reduce";
+            case Segment::CommKind::ALL_GATHER:
+                return "all_gather";
+            case Segment::CommKind::ALL_TO_ALL:
+                return "all_to_all";
+            case Segment::CommKind::BROADCAST:
+                return "broadcast";
+        }
+        return "unknown";
+    }
+
+    ggml_tensor* comm_input_tensor(ggml_cgraph* gf,
+                                   const Segment::CommOp& comm_op) {
+        if (gf == nullptr) {
+            return nullptr;
+        }
+        if (comm_op.input_node_index < 0 || comm_op.input_node_index >= gf->n_nodes) {
+            return nullptr;
+        }
+        return gf->nodes[comm_op.input_node_index];
+    }
+
+    ggml_tensor* comm_output_tensor(ggml_cgraph* gf,
+                                    const Segment::CommOp& comm_op) {
+        if (gf == nullptr) {
+            return nullptr;
+        }
+        if (comm_op.output_node_index < 0 || comm_op.output_node_index >= gf->n_nodes) {
+            return nullptr;
+        }
+        return gf->nodes[comm_op.output_node_index];
+    }
+
+    static void set_comm_error(std::string* error, const std::string& message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+    }
+
+    static std::string comm_op_display_name(const Segment::CommOp& comm_op) {
+        if (!comm_op.name.empty()) {
+            return comm_op.name;
+        }
+        return comm_kind_name(comm_op.kind);
+    }
+
+    static bool check_comm_input(ggml_cgraph* gf,
+                                 const Segment::CommOp& comm_op,
+                                 ggml_tensor** input_out,
+                                 std::string* error) {
+        ggml_tensor* input = comm_input_tensor(gf, comm_op);
+        if (input == nullptr) {
+            set_comm_error(error,
+                           sd_format("graph cut comm op %s has invalid input_node_index=%d",
+                                     comm_op_display_name(comm_op).c_str(),
+                                     comm_op.input_node_index));
+            return false;
+        }
+
+        if (input_out != nullptr) {
+            *input_out = input;
+        }
+        return true;
+    }
+
+    static bool check_comm_output(ggml_cgraph* gf,
+                                  const Segment::CommOp& comm_op,
+                                  ggml_tensor** output_out,
+                                  std::string* error) {
+        ggml_tensor* output = comm_output_tensor(gf, comm_op);
+        if (output == nullptr) {
+            set_comm_error(error,
+                           sd_format("graph cut comm op %s has invalid output_node_index=%d",
+                                     comm_op_display_name(comm_op).c_str(),
+                                     comm_op.output_node_index));
+            return false;
+        }
+
+        if (output_out != nullptr) {
+            *output_out = output;
+        }
+        return true;
+    }
+
+    bool execute_comm_op(edgedit::parallel::ProcessGroup& group,
+                         ggml_cgraph* gf,
+                         const Segment::CommOp& comm_op,
+                         std::string* error) {
+        if (!comm_op.enabled) {
+            return true;
+        }
+
+        if (gf == nullptr) {
+            set_comm_error(error, "execute_comm_op failed: graph is null");
+            return false;
+        }
+
+        if (!group.enabled()) {
+            // world_size == 1 或 parallel disabled 时，通信可以视为 no-op。
+            return true;
+        }
+
+        if (comm_op.kind == Segment::CommKind::NONE) {
+            return true;
+        }
+
+        ggml_tensor* input = nullptr;
+        ggml_tensor* output = nullptr;
+
+        if (!check_comm_input(gf, comm_op, &input, error)) {
+            return false;
+        }
+
+        const char* kind_name = comm_kind_name(comm_op.kind);
+        const std::string op_name = comm_op_display_name(comm_op);
+
+        switch (comm_op.kind) {
+            case Segment::CommKind::NONE:
+                return true;
+
+            case Segment::CommKind::ALL_REDUCE: {
+                if (!check_comm_output(gf, comm_op, &output, error)) {
+                    return false;
+                }
+
+                std::string comm_error;
+                bool ok = edgedit::ggml_comm::all_reduce(group,
+                                                          input,
+                                                          output,
+                                                          comm_op.reduce_op,
+                                                          &comm_error);
+                if (!ok) {
+                    set_comm_error(error,
+                                   sd_format("graph cut comm op %s(%s) failed: %s",
+                                             op_name.c_str(),
+                                             kind_name,
+                                             comm_error.c_str()));
+                    return false;
+                }
+                return true;
+            }
+
+            case Segment::CommKind::ALL_GATHER: {
+                if (!check_comm_output(gf, comm_op, &output, error)) {
+                    return false;
+                }
+
+                std::string comm_error;
+                bool ok = edgedit::ggml_comm::all_gather(group,
+                                                          input,
+                                                          output,
+                                                          &comm_error);
+                if (!ok) {
+                    set_comm_error(error,
+                                   sd_format("graph cut comm op %s(%s) failed: %s",
+                                             op_name.c_str(),
+                                             kind_name,
+                                             comm_error.c_str()));
+                    return false;
+                }
+                return true;
+            }
+
+            case Segment::CommKind::ALL_TO_ALL: {
+                if (!check_comm_output(gf, comm_op, &output, error)) {
+                    return false;
+                }
+
+                if (comm_op.count_per_peer == 0) {
+                    set_comm_error(error,
+                                   sd_format("graph cut comm op %s(%s) failed: count_per_peer is 0",
+                                             op_name.c_str(),
+                                             kind_name));
+                    return false;
+                }
+
+                std::string comm_error;
+                bool ok = edgedit::ggml_comm::all_to_all(group,
+                                                          input,
+                                                          output,
+                                                          comm_op.count_per_peer,
+                                                          &comm_error);
+                if (!ok) {
+                    set_comm_error(error,
+                                   sd_format("graph cut comm op %s(%s) failed: %s",
+                                             op_name.c_str(),
+                                             kind_name,
+                                             comm_error.c_str()));
+                    return false;
+                }
+                return true;
+            }
+
+            case Segment::CommKind::BROADCAST: {
+                std::string comm_error;
+                bool ok = edgedit::ggml_comm::broadcast(group,
+                                                         input,
+                                                         comm_op.root,
+                                                         &comm_error);
+                if (!ok) {
+                    set_comm_error(error,
+                                   sd_format("graph cut comm op %s(%s) failed: %s",
+                                             op_name.c_str(),
+                                             kind_name,
+                                             comm_error.c_str()));
+                    return false;
+                }
+                return true;
+            }
+        }
+
+        set_comm_error(error,
+                       sd_format("graph cut comm op %s has unsupported kind=%d",
+                                 op_name.c_str(),
+                                 static_cast<int>(comm_op.kind)));
+        return false;
+    }
+
+    bool execute_segment_comm_ops(edgedit::parallel::ProcessGroup& group,
+                                  ggml_cgraph* gf,
+                                  const Segment& segment,
+                                  std::string* error) {
+        if (segment.comm_ops.empty()) {
+            return true;
+        }
+
+        for (size_t i = 0; i < segment.comm_ops.size(); ++i) {
+            const Segment::CommOp& comm_op = segment.comm_ops[i];
+
+            std::string comm_error;
+            if (!execute_comm_op(group, gf, comm_op, &comm_error)) {
+                set_comm_error(error,
+                               sd_format("execute segment comm ops failed at index=%zu, group=%s, error=%s",
+                                         i,
+                                         segment.group_name.c_str(),
+                                         comm_error.c_str()));
+                return false;
+            }
+        }
+
+        return true;
+    }
+    
 }  // namespace sd::ggml_graph_cut

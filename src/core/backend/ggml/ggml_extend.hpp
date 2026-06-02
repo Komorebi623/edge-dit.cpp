@@ -37,6 +37,11 @@
 #include "backend/ggml/tensor_ggml.hpp"
 #include "utils/util.h"
 
+#include <utility>
+
+#include "parallel/process_group.hpp"
+
+
 #define EPS 1e-05f
 
 #ifndef __STATIC_INLINE__
@@ -1711,6 +1716,7 @@ struct GGMLRunnerContext {
 struct GGMLRunner {
 protected:
     typedef std::function<ggml_cgraph*()> get_graph_cb_t;
+    typedef std::function<bool(ggml_cgraph*)> post_compute_cb_t;
     using GraphCutSegment = sd::ggml_graph_cut::Segment;
     using GraphCutPlan    = sd::ggml_graph_cut::Plan;
 
@@ -1753,6 +1759,7 @@ protected:
 
     sd::ggml_graph_cut::PlanCache graph_cut_plan_cache_;
     std::unordered_set<const ggml_tensor*> params_tensor_set_;
+    std::shared_ptr<edgedit::parallel::ProcessGroup> process_group_ = nullptr;
 
     template <typename T>
     static sd::Tensor<T> take_or_empty(std::optional<sd::Tensor<T>> tensor) {
@@ -2360,12 +2367,13 @@ protected:
 
     template <typename T>
     std::optional<sd::Tensor<T>> execute_graph(ggml_cgraph* gf,
-                                               int n_threads,
-                                               bool free_compute_buffer_immediately,
-                                               const std::vector<ggml_tensor*>& runtime_param_tensors,
-                                               bool preserve_backend_tensor_data_map,
-                                               bool no_return                                          = false,
-                                               const std::unordered_set<std::string>* cache_keep_names = nullptr) {
+                                            int n_threads,
+                                            bool free_compute_buffer_immediately,
+                                            const std::vector<ggml_tensor*>& runtime_param_tensors,
+                                            bool preserve_backend_tensor_data_map,
+                                            bool no_return                                          = false,
+                                            const std::unordered_set<std::string>* cache_keep_names = nullptr,
+                                            post_compute_cb_t post_compute_cb                      = nullptr) {
         int64_t t_execute_begin              = ggml_time_ms();
         const bool use_partial_param_offload = !runtime_param_tensors.empty();
         int64_t t_offload_begin              = ggml_time_ms();
@@ -2420,6 +2428,23 @@ protected:
                 restore_partial_params();
             }
             return std::nullopt;
+        }
+
+        if (post_compute_cb) {
+            int64_t t_comm_begin = ggml_time_ms();
+            if (!post_compute_cb(gf)) {
+                LOG_ERROR("%s post compute callback failed", get_desc().c_str());
+                if (free_compute_buffer_immediately) {
+                    free_compute_buffer();
+                } else if (use_partial_param_offload) {
+                    restore_partial_params();
+                }
+                return std::nullopt;
+            }
+            int64_t t_comm_end = ggml_time_ms();
+            LOG_DEBUG("%s post compute callback took %lld ms",
+                    get_desc().c_str(),
+                    t_comm_end - t_comm_begin);
         }
 
         int64_t t_cache_begin = ggml_time_ms();
@@ -2499,16 +2524,37 @@ protected:
                     }
                 }
             }
+            
+            post_compute_cb_t segment_post_compute_cb = nullptr;
+            if (process_group_ != nullptr &&
+                process_group_->enabled() &&
+                !segment.comm_ops.empty()) {
+                segment_post_compute_cb = [this, gf, &segment](ggml_cgraph*) -> bool {
+                    std::string comm_error;
+                    if (!sd::ggml_graph_cut::execute_segment_comm_ops(*process_group_,
+                                                                    gf,
+                                                                    segment,
+                                                                    &comm_error)) {
+                        LOG_ERROR("%s graph cut segment communication failed: segment=%s error=%s",
+                                get_desc().c_str(),
+                                segment.group_name.c_str(),
+                                comm_error.c_str());
+                        return false;
+                    }
+                    return true;
+                };
+            }
 
             ggml_context* segment_graph_ctx = nullptr;
             ggml_cgraph* segment_graph      = sd::ggml_graph_cut::build_segment_graph(gf, segment, &segment_graph_ctx);
             auto segment_output             = execute_graph<T>(segment_graph,
-                                                   n_threads,
-                                                   true,
-                                                   sd::ggml_graph_cut::runtime_param_tensors(gf, segment, get_desc().c_str()),
-                                                   true,
-                                                   !is_last_segment || no_return,
-                                                   &future_cut_names);
+                                       n_threads,
+                                       true,
+                                       sd::ggml_graph_cut::runtime_param_tensors(gf, segment, get_desc().c_str()),
+                                       true,
+                                       !is_last_segment || no_return,
+                                       &future_cut_names,
+                                       segment_post_compute_cb);
             ggml_free(segment_graph_ctx);
             if (!segment_output.has_value()) {
                 free_cache_ctx_and_buffer();
@@ -2727,7 +2773,13 @@ public:
     void set_max_graph_vram_bytes(size_t max_vram_bytes) {
         max_graph_vram_bytes = max_vram_bytes;
     }
+    void set_process_group(std::shared_ptr<edgedit::parallel::ProcessGroup> process_group) {
+        process_group_ = std::move(process_group);
+    }
 
+    edgedit::parallel::ProcessGroup* get_process_group() {
+        return process_group_.get();
+    }
     ggml_backend_t get_runtime_backend() {
         return runtime_backend;
     }
