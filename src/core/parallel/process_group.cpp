@@ -11,6 +11,44 @@
 #endif
 
 namespace edgedit::parallel {
+namespace {
+
+class CompletedWork final : public Work {
+public:
+    void wait() override {}
+
+    bool is_completed() const override {
+        return true;
+    }
+};
+
+} // namespace
+
+std::unique_ptr<Work> ProcessGroup::all_reduce_async(const Buffer& input,
+                                                     const Buffer& output,
+                                                     ReduceOp op) {
+    all_reduce(input, output, op);
+    return std::make_unique<CompletedWork>();
+}
+
+std::unique_ptr<Work> ProcessGroup::all_gather_async(const Buffer& input,
+                                                     const Buffer& output) {
+    all_gather(input, output);
+    return std::make_unique<CompletedWork>();
+}
+
+std::unique_ptr<Work> ProcessGroup::all_to_all_async(const Buffer& input,
+                                                     const Buffer& output,
+                                                     size_t count_per_peer) {
+    all_to_all(input, output, count_per_peer);
+    return std::make_unique<CompletedWork>();
+}
+
+std::unique_ptr<Work> ProcessGroup::broadcast_async(const Buffer& buffer,
+                                                    int root) {
+    broadcast(buffer, root);
+    return std::make_unique<CompletedWork>();
+}
 
 const char* backend_name(Backend backend) {
     switch (backend) {
@@ -28,8 +66,16 @@ const char* dtype_name(DataType type) {
     switch (type) {
         case DataType::kFloat32:
             return "float32";
+        case DataType::kFloat16:
+            return "float16";
+        case DataType::kBFloat16:
+            return "bfloat16";
         case DataType::kInt32:
             return "int32";
+        case DataType::kInt64:
+            return "int64";
+        case DataType::kUInt8:
+            return "uint8";
     }
     return "unknown";
 }
@@ -38,8 +84,16 @@ size_t dtype_size(DataType type) {
     switch (type) {
         case DataType::kFloat32:
             return sizeof(float);
+        case DataType::kFloat16:
+            return 2;
+        case DataType::kBFloat16:
+            return 2;
         case DataType::kInt32:
             return sizeof(int32_t);
+        case DataType::kInt64:
+            return sizeof(int64_t);
+        case DataType::kUInt8:
+            return sizeof(uint8_t);
     }
     throw std::invalid_argument("unsupported parallel data type");
 }

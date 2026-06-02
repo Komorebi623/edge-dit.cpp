@@ -233,7 +233,7 @@ if(ED_BUILD_TESTS)
     endif()
 
     add_executable(parallel-collective-test
-        tests/parallel_collective_test.cpp
+        tests/test_process_group.cpp
     )
     target_link_libraries(parallel-collective-test PRIVATE edgedit)
     target_include_directories(parallel-collective-test

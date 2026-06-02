@@ -16,7 +16,11 @@ enum class Backend {
 
 enum class DataType {
     kFloat32,
+    kFloat16,
+    kBFloat16,
     kInt32,
+    kInt64,
+    kUInt8,
 };
 
 enum class ReduceOp {
@@ -44,6 +48,16 @@ struct ParallelConfig {
     int sp_parallel_size  = 1;
 };
 
+// 异步通信句柄：
+// NCCL 后端里 wait() 才真正同步；CPU 后端默认 async 会退化成同步完成。
+class Work {
+public:
+    virtual ~Work() = default;
+
+    virtual void wait() = 0;
+    virtual bool is_completed() const = 0;
+};
+
 class ProcessGroup {
 public:
     virtual ~ProcessGroup() = default;
@@ -55,11 +69,33 @@ public:
     virtual bool enabled() const    = 0;
 
     virtual void barrier() = 0;
+    
+    virtual std::unique_ptr<Work> all_reduce_async(const Buffer& input,
+                                                   const Buffer& output,
+                                                   ReduceOp op);
 
-    virtual void all_reduce(const Buffer& input, const Buffer& output, ReduceOp op) = 0;
-    virtual void all_gather(const Buffer& input, const Buffer& output)              = 0;
-    virtual void all_to_all(const Buffer& input, const Buffer& output, size_t count_per_peer) = 0;
-    virtual void broadcast(const Buffer& buffer, int root)                          = 0;
+    virtual std::unique_ptr<Work> all_gather_async(const Buffer& input,
+                                                   const Buffer& output);
+
+    virtual std::unique_ptr<Work> all_to_all_async(const Buffer& input,
+                                                   const Buffer& output,
+                                                   size_t count_per_peer);
+
+    virtual std::unique_ptr<Work> broadcast_async(const Buffer& buffer,
+                                                  int root);
+    virtual void all_reduce(const Buffer& input,
+                            const Buffer& output,
+                            ReduceOp op) = 0;
+
+    virtual void all_gather(const Buffer& input,
+                            const Buffer& output) = 0;
+
+    virtual void all_to_all(const Buffer& input,
+                            const Buffer& output,
+                            size_t count_per_peer) = 0;
+
+    virtual void broadcast(const Buffer& buffer,
+                           int root) = 0;
 };
 
 const char* backend_name(Backend backend);

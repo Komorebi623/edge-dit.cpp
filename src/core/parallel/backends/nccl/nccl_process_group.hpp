@@ -4,6 +4,7 @@
 #include "parallel/process_group.hpp"
 
 #include <atomic>
+#include <memory>
 #include <string>
 
 #include <cuda_runtime.h>
@@ -27,16 +28,43 @@ public:
 
     void barrier() override;
 
-    void all_reduce(const Buffer& input, const Buffer& output, ReduceOp op) override;
-    void all_gather(const Buffer& input, const Buffer& output) override;
-    void all_to_all(const Buffer& input, const Buffer& output, size_t count_per_peer) override;
-    void broadcast(const Buffer& buffer, int root) override;
+    // async API
+    std::unique_ptr<Work> all_reduce_async(const Buffer& input,
+                                           const Buffer& output,
+                                           ReduceOp op) override;
+
+    std::unique_ptr<Work> all_gather_async(const Buffer& input,
+                                           const Buffer& output) override;
+
+    std::unique_ptr<Work> all_to_all_async(const Buffer& input,
+                                           const Buffer& output,
+                                           size_t count_per_peer) override;
+
+    std::unique_ptr<Work> broadcast_async(const Buffer& buffer,
+                                          int root) override;
+
+    void all_reduce(const Buffer& input,
+                    const Buffer& output,
+                    ReduceOp op) override;
+
+    void all_gather(const Buffer& input,
+                    const Buffer& output) override;
+
+    void all_to_all(const Buffer& input,
+                    const Buffer& output,
+                    size_t count_per_peer) override;
+
+    void broadcast(const Buffer& buffer,
+                   int root) override;
 
 private:
     void set_device() const;
     void init_unique_id();
     void check_buffer(const Buffer& buffer) const;
 
+    std::unique_ptr<Work> record_work();
+
+private:
     ParallelConfig config_;
     ncclComm_t comm_     = nullptr;
     cudaStream_t stream_ = nullptr;
