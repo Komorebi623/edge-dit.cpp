@@ -8,7 +8,9 @@
 #include "ggml-backend.h"
 #include "edge-dit.h"
 #include "parallel/parallel_context.hpp"
+#include "parallel/process_group.hpp"
 #include "utils/rng.hpp"
+
 
 namespace edgedit {
 
@@ -93,7 +95,17 @@ public:
     std::shared_ptr<RNG> rng_ptr() const { return rng_; }
     std::shared_ptr<RNG> sampler_rng_ptr() const { return sampler_rng_; }
     parallel::ParallelContext* parallel_context() const { return parallel_context_; }
+    std::shared_ptr<parallel::ProcessGroup> process_group_ref() const {
+        if (parallel_context_ == nullptr || !parallel_context_->enabled()) {
+            return nullptr;
+        }
 
+        return std::shared_ptr<parallel::ProcessGroup>(
+            &parallel_context_->world_group(),
+            [](parallel::ProcessGroup*) {
+            }
+        );
+    }
 private:
     bool ready_ = false;
 

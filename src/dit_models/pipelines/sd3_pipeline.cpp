@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
-
+#include "parallel/process_group.hpp"
 #include "core/optimization/cache/cache_runtime.hpp"
 #include "dit_models/components/autoencoders/auto_encoder_kl.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
@@ -121,12 +121,24 @@ bool SD3Pipeline::build_components(const ModelLoader& loader, std::string* error
 
 void SD3Pipeline::configure_runtime_flags() {
     const size_t max_graph_vram = runtime_->max_graph_vram_bytes();
+
     conditioner_->set_max_graph_vram_bytes(max_graph_vram);
     conditioner_->set_flash_attention_enabled(runtime_->flash_attention());
 
     diffusion_->set_max_graph_vram_bytes(max_graph_vram);
     diffusion_->set_flash_attention_enabled(runtime_->flash_attention() || runtime_->diffusion_flash_attention());
     diffusion_->set_circular_axes(runtime_->circular_x(), runtime_->circular_y());
+
+    if (runtime_ != nullptr) {
+        auto process_group = runtime_->process_group_ref();
+        if (process_group != nullptr) {
+            diffusion_->set_process_group(process_group);
+            LOG_INFO("sd3 diffusion process group attached: backend=%s rank=%d world_size=%d",
+                     edgedit::parallel::backend_name(process_group->backend()),
+                     process_group->rank(),
+                     process_group->size());
+        }
+    }
 
     vae_->set_max_graph_vram_bytes(max_graph_vram);
     vae_->set_flash_attention_enabled(runtime_->flash_attention());

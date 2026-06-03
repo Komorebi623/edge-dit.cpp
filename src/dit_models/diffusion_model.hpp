@@ -1,7 +1,10 @@
 #ifndef __DIFFUSION_MODEL_H__
 #define __DIFFUSION_MODEL_H__
 
+#include <memory>
 #include <optional>
+#include <utility>
+
 #include "backend/ggml/tensor_ggml.hpp"
 #include "dit_models/models/anima.hpp"
 #include "dit_models/models/ernie_image.hpp"
@@ -11,6 +14,7 @@
 #include "dit_models/models/unet.hpp"
 #include "dit_models/models/wan.hpp"
 #include "dit_models/models/z_image.hpp"
+#include "parallel/process_group.hpp"
 
 struct DiffusionParams {
     const sd::Tensor<float>* x                        = nullptr;
@@ -47,6 +51,7 @@ struct DiffusionModel {
     virtual void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors) = 0;
     virtual size_t get_params_buffer_size()                                      = 0;
     virtual void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter){};
+    virtual void set_process_group(std::shared_ptr<edgedit::parallel::ProcessGroup> process_group) = 0;
     virtual int64_t get_adm_in_channels()                            = 0;
     virtual void set_flash_attention_enabled(bool enabled)           = 0;
     virtual void set_max_graph_vram_bytes(size_t max_vram_bytes)     = 0;
@@ -89,6 +94,10 @@ struct UNetModel : public DiffusionModel {
 
     void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) override {
         unet.set_weight_adapter(adapter);
+    }
+
+    void set_process_group(std::shared_ptr<edgedit::parallel::ProcessGroup> process_group) override {
+        unet.set_process_group(std::move(process_group));
     }
 
     int64_t get_adm_in_channels() override {
@@ -161,6 +170,10 @@ struct MMDiTModel : public DiffusionModel {
         mmdit.set_weight_adapter(adapter);
     }
 
+    void set_process_group(std::shared_ptr<edgedit::parallel::ProcessGroup> process_group) override {
+        mmdit.set_process_group(std::move(process_group));
+    }
+
     int64_t get_adm_in_channels() override {
         return 768 + 1280;
     }
@@ -228,6 +241,10 @@ struct FluxModel : public DiffusionModel {
 
     void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) override {
         flux.set_weight_adapter(adapter);
+    }
+
+    void set_process_group(std::shared_ptr<edgedit::parallel::ProcessGroup> process_group) override {
+        flux.set_process_group(std::move(process_group));
     }
 
     int64_t get_adm_in_channels() override {
@@ -304,6 +321,10 @@ struct AnimaModel : public DiffusionModel {
         anima.set_weight_adapter(adapter);
     }
 
+    void set_process_group(std::shared_ptr<edgedit::parallel::ProcessGroup> process_group) override {
+        anima.set_process_group(std::move(process_group));
+    }
+
     int64_t get_adm_in_channels() override {
         return 768;
     }
@@ -371,6 +392,10 @@ struct WanModel : public DiffusionModel {
 
     void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) override {
         wan.set_weight_adapter(adapter);
+    }
+
+    void set_process_group(std::shared_ptr<edgedit::parallel::ProcessGroup> process_group) override {
+        wan.set_process_group(std::move(process_group));
     }
 
     int64_t get_adm_in_channels() override {
@@ -446,6 +471,10 @@ struct QwenImageModel : public DiffusionModel {
         qwen_image.set_weight_adapter(adapter);
     }
 
+    void set_process_group(std::shared_ptr<edgedit::parallel::ProcessGroup> process_group) override {
+        qwen_image.set_process_group(std::move(process_group));
+    }
+
     int64_t get_adm_in_channels() override {
         return 768;
     }
@@ -516,6 +545,10 @@ struct ZImageModel : public DiffusionModel {
         z_image.set_weight_adapter(adapter);
     }
 
+    void set_process_group(std::shared_ptr<edgedit::parallel::ProcessGroup> process_group) override {
+        z_image.set_process_group(std::move(process_group));
+    }
+
     int64_t get_adm_in_channels() override {
         return 768;
     }
@@ -583,6 +616,10 @@ struct ErnieImageModel : public DiffusionModel {
 
     void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) override {
         ernie_image.set_weight_adapter(adapter);
+    }
+
+    void set_process_group(std::shared_ptr<edgedit::parallel::ProcessGroup> process_group) override {
+        ernie_image.set_process_group(std::move(process_group));
     }
 
     int64_t get_adm_in_channels() override {

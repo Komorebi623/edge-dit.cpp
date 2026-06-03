@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <exception>
 #include <stdexcept>
+#include <string>
 
 #include "utils/util.h"
 
@@ -41,6 +42,24 @@ int inferred_world_size() {
     return world_size;
 }
 
+int inferred_rank() {
+    int rank = env_int("RANK", 0);
+    rank = env_int("OMPI_COMM_WORLD_RANK", rank);
+    rank = env_int("MV2_COMM_WORLD_RANK", rank);
+    rank = env_int("SLURM_PROCID", rank);
+    rank = env_int("PMI_RANK", rank);
+    return rank;
+}
+
+int inferred_local_rank() {
+    int local_rank = env_int("LOCAL_RANK", 0);
+    local_rank = env_int("OMPI_COMM_WORLD_LOCAL_RANK", local_rank);
+    local_rank = env_int("MV2_COMM_WORLD_LOCAL_RANK", local_rank);
+    local_rank = env_int("SLURM_LOCALID", local_rank);
+    local_rank = env_int("PMI_LOCAL_RANK", local_rank);
+    return local_rank;
+}
+
 int requested_parallel_world_size(const ed_ctx_params_t& params) {
     return std::max({1, params.cfg_parallel_size, params.tp_parallel_size, params.sp_parallel_size});
 }
@@ -57,13 +76,28 @@ parallel::ParallelConfig make_parallel_config(const ed_ctx_params_t& params) {
     config.sp_parallel_size  = params.sp_parallel_size > 0 ? params.sp_parallel_size : 1;
 
     const int requested_world_size = requested_parallel_world_size(params);
-    const int world_size = inferred_world_size();
-    if (requested_world_size <= 1 && world_size <= 1) {
+    const int launched_world_size  = inferred_world_size();
+    const int rank                 = inferred_rank();
+    const int local_rank           = inferred_local_rank();
+
+    // These fields must be populated before create_parallel_context().
+    // Otherwise the real engine path would still initialize ProcessGroup
+    // with the default rank=0/world_size=1 even under mpirun.
+    config.world_size = launched_world_size;
+    config.rank       = rank;
+    config.local_rank = local_rank;
+    config.device     = local_rank;
+
+    if (requested_world_size <= 1 && launched_world_size <= 1) {
         config.backend = parallel::Backend::kNone;
         return config;
     }
 
-    if (world_size > 1 && requested_world_size > 1 && world_size != requested_world_size) {
+    if (requested_world_size > 1 && launched_world_size <= 1) {
+        throw std::invalid_argument("parallel execution requested but launched world_size is 1");
+    }
+
+    if (requested_world_size > 1 && launched_world_size != requested_world_size) {
         throw std::invalid_argument("launched worker count must match requested parallel size");
     }
 

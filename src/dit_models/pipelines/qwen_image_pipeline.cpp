@@ -6,7 +6,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
-
+#include "parallel/cfg_parallel.hpp"
+#include "parallel/process_group.hpp"
 #include "core/optimization/cache/cache_runtime.hpp"
 #include "dit_models/components/autoencoders/vae.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
@@ -180,7 +181,16 @@ bool QwenImagePipeline::build_components(const ed_context_params_t& params,
                                                "model.diffusion_model",
                                                version_,
                                                false));
-
+    if (runtime_ != nullptr) {
+        auto process_group = runtime_->process_group_ref();
+        if (process_group != nullptr) {
+            diffusion_->set_process_group(process_group);
+            LOG_INFO("qwen-image diffusion process group attached: backend=%s rank=%d world_size=%d",
+                    edgedit::parallel::backend_name(process_group->backend()),
+                    process_group->rank(),
+                    process_group->size());
+        }
+    }
     vae_ = std::make_shared<WAN::WanVAERunner>(runtime_->vae_backend(),
                                                offload,
                                                storage,

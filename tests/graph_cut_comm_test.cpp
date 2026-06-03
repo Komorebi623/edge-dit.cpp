@@ -1,14 +1,17 @@
 #include "backend/ggml/ggml_graph_cut.h"
+#include "backend/ggml/ggml_extend.hpp"
 #include "parallel/process_group.hpp"
 
 #include "ggml.h"
 #include "ggml-backend.h"
-#include "ggml-cpu.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <initializer_list>
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -479,6 +482,156 @@ void run_broadcast_segment_comm_test(edgedit::parallel::ProcessGroup& group,
     ggml_free(ctx);
 }
 
+std::vector<float> sd_tensor_to_vector(const sd::Tensor<float>& tensor) {
+    if (tensor.empty()) {
+        throw std::runtime_error("sd_tensor_to_vector got empty tensor");
+    }
+
+    std::vector<float> values(static_cast<size_t>(tensor.numel()));
+    std::copy(tensor.data(), tensor.data() + tensor.numel(), values.begin());
+    return values;
+}
+
+std::shared_ptr<edgedit::parallel::ProcessGroup>
+make_non_owning_process_group_ref(edgedit::parallel::ProcessGroup& group) {
+    return std::shared_ptr<edgedit::parallel::ProcessGroup>(
+        &group,
+        [](edgedit::parallel::ProcessGroup*) {
+            // non-owning reference, do not delete
+        }
+    );
+}
+
+class GraphCutHookTestRunner final : public GGMLRunner {
+public:
+    explicit GraphCutHookTestRunner(ggml_backend_t backend)
+        : GGMLRunner(backend, false) {}
+
+    std::string get_desc() override {
+        return "GraphCutHookTestRunner";
+    }
+
+    std::optional<sd::Tensor<float>> run_all_gather_hook_test(
+        edgedit::parallel::ProcessGroup& group
+    ) {
+        set_process_group(make_non_owning_process_group_ref(group));
+
+        reset_compute_ctx();
+
+        const int rank = group.rank();
+        const int world_size = group.size();
+
+        std::vector<float> local_values = {
+            static_cast<float>(rank + 1),
+            static_cast<float>((rank + 1) * 10),
+        };
+
+        std::vector<float> gather_init_values(
+            static_cast<size_t>(2 * world_size),
+            0.0f
+        );
+
+        // leaf: execute_graph() 会通过 set_backend_tensor_data() 把 host 数据拷入 backend tensor
+        ggml_tensor* local_leaf = new_1d_f32(compute_ctx, 2, "runner_hook_local_leaf");
+        set_backend_tensor_data(local_leaf, local_values.data());
+
+        // node: graph compute 后得到本 rank 的 local tensor，作为 all_gather 输入
+        ggml_tensor* local_node = ggml_dup(compute_ctx, local_leaf);
+        ggml_set_name(local_node, "runner_hook_local_node");
+
+        // leaf: 初始化 all_gather 输出 buffer 为 0
+        ggml_tensor* gather_leaf = new_1d_f32(
+            compute_ctx,
+            2 * world_size,
+            "runner_hook_gather_leaf"
+        );
+        set_backend_tensor_data(gather_leaf, gather_init_values.data());
+
+        // node: graph compute 先写入 0，post_compute_cb 再用 all_gather 覆盖
+        ggml_tensor* gather_node = ggml_dup(compute_ctx, gather_leaf);
+
+        // execute_graph() 最后会按 final_result_name 读取返回值
+        ggml_set_name(gather_node, final_result_name.c_str());
+
+        ggml_cgraph* gf = new_graph_custom(16);
+        ggml_build_forward_expand(gf, local_node);
+        ggml_build_forward_expand(gf, gather_node);
+
+        const int local_idx = find_node_index(gf, local_node, "runner_hook_local_node");
+        const int gather_idx = find_node_index(gf, gather_node, "runner_hook_gather_node");
+
+        sd::ggml_graph_cut::Segment segment;
+        segment.group_name = "runner_hook_segment";
+
+        sd::ggml_graph_cut::Segment::CommOp op;
+        op.kind = sd::ggml_graph_cut::Segment::CommKind::ALL_GATHER;
+        op.name = "runner_hook_all_gather";
+        op.input_node_index = local_idx;
+        op.output_node_index = gather_idx;
+        segment.comm_ops.push_back(op);
+
+        post_compute_cb_t post_compute_cb = [this, &group, gf, segment](ggml_cgraph*) -> bool {
+            std::string comm_error;
+            if (!sd::ggml_graph_cut::execute_segment_comm_ops(group, gf, segment, &comm_error)) {
+                std::cerr
+                    << "runner hook execute_segment_comm_ops failed: "
+                    << comm_error
+                    << std::endl;
+                return false;
+            }
+            return true;
+        };
+
+        // 关键：这里直接测试 GGMLRunner::execute_graph() 的 post_compute_cb。
+        //
+        // 执行顺序是：
+        //   ggml_backend_graph_compute()
+        //   post_compute_cb -> execute_segment_comm_ops()
+        //   copy_cache_tensors_to_cache_buffer()
+        //   read final_result_name
+        //
+        // 不走 compute_with_graph_cuts()，避免手工 Plan 不满足 build_segment_graph() 的完整约束。
+        return execute_graph<float>(
+            gf,
+            1,
+            true,
+            {},
+            false,
+            false,
+            nullptr,
+            post_compute_cb
+        );
+    }
+};
+void run_runner_hook_smoke_test(edgedit::parallel::ProcessGroup& group,
+                                ggml_backend_t backend) {
+    if (!group.enabled()) {
+        return;
+    }
+
+    std::cout
+        << "[rank " << group.rank()
+        << "] run GGMLRunner graph-cut hook smoke test\n";
+
+    GraphCutHookTestRunner runner(backend);
+    std::optional<sd::Tensor<float>> output =
+        runner.run_all_gather_hook_test(group);
+
+    if (!output.has_value()) {
+        throw std::runtime_error("runner hook smoke test returned nullopt");
+    }
+
+    std::vector<float> got = sd_tensor_to_vector(*output);
+
+    std::vector<float> expected;
+    for (int r = 0; r < group.size(); ++r) {
+        expected.push_back(static_cast<float>(r + 1));
+        expected.push_back(static_cast<float>((r + 1) * 10));
+    }
+
+    check_close(got, expected, "GGMLRunner graph-cut hook all_gather");
+}
+
 void run_graph_cut_comm_tests(edgedit::parallel::ProcessGroup& group,
                               const Args& args) {
     std::cout
@@ -498,6 +651,10 @@ void run_graph_cut_comm_tests(edgedit::parallel::ProcessGroup& group,
     run_all_gather_segment_comm_test(group, backend);
     run_all_to_all_segment_comm_test(group, backend);
     run_broadcast_segment_comm_test(group, backend);
+
+    // 新增：验证 GGMLRunner::compute_with_graph_cuts()
+    // 是否真的会通过 post_compute_cb 触发 segment.comm_ops。
+    run_runner_hook_smoke_test(group, backend);
 
     ggml_backend_free(backend);
 }

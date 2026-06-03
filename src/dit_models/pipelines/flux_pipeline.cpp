@@ -407,6 +407,16 @@ bool FluxPipeline::initialize_flux_transformer_spec(const ModelLoader& loader,
                                                 "model.diffusion_model",
                                                 version_,
                                                 false));
+        if (runtime_ != nullptr) {
+            auto process_group = runtime_->process_group_ref();
+            if (process_group != nullptr) {
+                flux_runner_->set_process_group(process_group);
+                LOG_INFO("flux transformer process group attached: backend=%s rank=%d world_size=%d",
+                        edgedit::parallel::backend_name(process_group->backend()),
+                        process_group->rank(),
+                        process_group->size());
+            }
+        }
     } catch (const std::exception& e) {
         if (error != nullptr) {
             *error = std::string("failed to initialize Flux parameter spec: ") + e.what();

@@ -8,7 +8,7 @@
 #include <ctime>
 #include <limits>
 #include <utility>
-
+#include "parallel/process_group.hpp"
 #include "backend/ggml/ggml_extend.hpp"
 #include "dit_models/components/scheduler/denoiser.hpp"
 #include "dit_models/components/autoencoders/tae.hpp"
@@ -357,6 +357,25 @@ void WanPipeline::configure_runtime_flags() {
         high_noise_diffusion_->set_max_graph_vram_bytes(max_graph_vram);
         high_noise_diffusion_->set_flash_attention_enabled(diffusion_flash);
         high_noise_diffusion_->set_circular_axes(runtime_->circular_x(), runtime_->circular_y());
+    }
+
+    if (runtime_ != nullptr) {
+        auto process_group = runtime_->process_group_ref();
+        if (process_group != nullptr) {
+            diffusion_->set_process_group(process_group);
+            LOG_INFO("wan diffusion process group attached: backend=%s rank=%d world_size=%d",
+                     edgedit::parallel::backend_name(process_group->backend()),
+                     process_group->rank(),
+                     process_group->size());
+
+            if (high_noise_diffusion_) {
+                high_noise_diffusion_->set_process_group(process_group);
+                LOG_INFO("wan high-noise diffusion process group attached: backend=%s rank=%d world_size=%d",
+                         edgedit::parallel::backend_name(process_group->backend()),
+                         process_group->rank(),
+                         process_group->size());
+            }
+        }
     }
 
     vae_->set_max_graph_vram_bytes(max_graph_vram);
