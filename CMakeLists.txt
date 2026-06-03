@@ -29,6 +29,7 @@ option(ED_BUILD_SHARED_LIBS "Build edge-dit as a shared library" OFF)
 option(ED_ENABLE_PARALLEL "Enable edge-dit lightweight parallel runtime" ON)
 option(ED_ENABLE_NCCL "Enable NCCL communication backend" OFF)
 option(ED_ENABLE_MPI "Enable MPI bootstrap for distributed process groups" OFF)
+option(ED_DEBUG_SP_COMM "Enable debug sequence-parallel communication markers" OFF)
 set(NCCL_ROOT "" CACHE PATH "Path to NCCL installation")
 
 if(ED_BUILD_TESTS)
@@ -193,6 +194,10 @@ if(ED_ENABLE_MPI)
     target_link_libraries(edgedit PUBLIC MPI::MPI_CXX)
 endif()
 
+if(ED_DEBUG_SP_COMM)
+    target_compile_definitions(edgedit PRIVATE ED_DEBUG_SP_COMM=1)
+endif()
+
 target_compile_features(edgedit PUBLIC cxx_std_17)
 
 if(ED_BUILD_EXAMPLES)
@@ -277,6 +282,23 @@ if(ED_BUILD_TESTS)
 
     target_compile_features(graph-cut-comm-test PRIVATE cxx_std_17)
 
+    add_executable(sp-parallel-test
+        tests/sp_parallel_test.cpp
+    )
+
+    target_link_libraries(sp-parallel-test PRIVATE edgedit)
+
+    target_include_directories(sp-parallel-test
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/include
+    )
+
+    target_compile_features(sp-parallel-test PRIVATE cxx_std_17)
+
     if(ED_ENABLE_NCCL)
         target_include_directories(parallel-collective-test PRIVATE ${ED_NCCL_INCLUDE_DIR})
         target_link_libraries(parallel-collective-test PRIVATE CUDA::cudart ${ED_NCCL_LIBRARY})
@@ -290,6 +312,15 @@ if(ED_BUILD_TESTS)
             ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_parallel_collective_test.py
             --binary $<TARGET_FILE:parallel-collective-test>
+            --backend cpu
+            --world-size 2
+    )
+    add_test(
+        NAME sp-parallel-cpu
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_parallel_collective_test.py
+            --binary $<TARGET_FILE:sp-parallel-test>
             --backend cpu
             --world-size 2
     )

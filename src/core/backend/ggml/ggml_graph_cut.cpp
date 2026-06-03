@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <set>
 #include <sstream>
@@ -15,6 +16,12 @@
 #include "backend/ggml/parallel/ggml_comm.hpp"
 
 namespace sd::ggml_graph_cut {
+
+    namespace {
+        thread_local std::vector<CommMark> g_comm_marks;
+    }
+
+    const char* comm_kind_name(Segment::CommKind kind);
 
     static std::string graph_cut_tensor_display_name(const ggml_tensor* tensor) {
         if (tensor == nullptr) {
@@ -75,10 +82,16 @@ namespace sd::ggml_graph_cut {
         const auto& start_segment  = plan.segments[start_segment_index];
         const auto& target_segment = plan.segments[end_segment_index];
         std::unordered_set<int> seen_output_node_indices;
+        std::unordered_set<int> seen_seed_node_indices;
         for (size_t seg_idx = start_segment_index; seg_idx <= end_segment_index; ++seg_idx) {
             for (int output_node_index : plan.segments[seg_idx].output_node_indices) {
                 if (seen_output_node_indices.insert(output_node_index).second) {
                     seed.output_node_indices.push_back(output_node_index);
+                }
+            }
+            for (int seed_node_index : plan.segments[seg_idx].seed_node_indices) {
+                if (seen_seed_node_indices.insert(seed_node_index).second) {
+                    seed.seed_node_indices.push_back(seed_node_index);
                 }
             }
         }
@@ -109,6 +122,15 @@ namespace sd::ggml_graph_cut {
             ggml_tensor* output = ggml_graph_node(gf, output_node_index);
             if (output != nullptr) {
                 work_stack.push(output);
+            }
+        }
+        for (int seed_node_index : segment.seed_node_indices) {
+            if (seed_node_index < 0 || seed_node_index >= ggml_graph_n_nodes(gf)) {
+                continue;
+            }
+            ggml_tensor* seed = ggml_graph_node(gf, seed_node_index);
+            if (seed != nullptr) {
+                work_stack.push(seed);
             }
         }
 
@@ -218,6 +240,151 @@ namespace sd::ggml_graph_cut {
         }
         auto name = make_graph_cut_name(group, output);
         ggml_set_name(tensor, name.c_str());
+    }
+
+    void mark_comm_op(ggml_tensor* input,
+                      ggml_tensor* output,
+                      Segment::CommKind kind,
+                      const std::string& name,
+                      edgedit::parallel::ReduceOp reduce_op,
+                      size_t count_per_peer,
+                      int root) {
+        if (input == nullptr || kind == Segment::CommKind::NONE) {
+            return;
+        }
+        if (kind != Segment::CommKind::BROADCAST && output == nullptr) {
+            return;
+        }
+
+        CommMark mark;
+        mark.kind = kind;
+        mark.input = input;
+        mark.output = output;
+        mark.name = name;
+        mark.reduce_op = reduce_op;
+        mark.count_per_peer = count_per_peer;
+        mark.root = root;
+        g_comm_marks.push_back(std::move(mark));
+    }
+
+    void clear_comm_marks() {
+        g_comm_marks.clear();
+    }
+
+    static int node_index_for_tensor(ggml_cgraph* gf, const ggml_tensor* tensor) {
+        if (gf == nullptr || tensor == nullptr) {
+            return -1;
+        }
+
+        const int n_nodes = ggml_graph_n_nodes(gf);
+        for (int i = 0; i < n_nodes; ++i) {
+            if (ggml_graph_node(gf, i) == tensor) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    static bool segment_contains_node(const Segment& segment, int node_index) {
+        if (node_index < 0) {
+            return false;
+        }
+
+        return std::find(segment.internal_node_indices.begin(),
+                         segment.internal_node_indices.end(),
+                         node_index) != segment.internal_node_indices.end();
+    }
+
+    Plan attach_comm_ops_to_plan(ggml_cgraph* gf,
+                                 const Plan& base_plan,
+                                 const char* log_desc) {
+        Plan plan = base_plan;
+        for (Segment& segment : plan.segments) {
+            segment.comm_ops.clear();
+        }
+
+        if (gf == nullptr || g_comm_marks.empty() || plan.segments.empty()) {
+            return plan;
+        }
+
+        size_t attached_count = 0;
+        for (const CommMark& mark : g_comm_marks) {
+            const int input_idx = node_index_for_tensor(gf, mark.input);
+            const int output_idx = mark.kind == Segment::CommKind::BROADCAST
+                                       ? -1
+                                       : node_index_for_tensor(gf, mark.output);
+
+            if (input_idx < 0 || (mark.kind != Segment::CommKind::BROADCAST && output_idx < 0)) {
+                if (log_desc != nullptr) {
+                    LOG_WARN("%s graph cut comm mark skipped: name=%s kind=%s input_idx=%d output_idx=%d",
+                             log_desc,
+                             mark.name.c_str(),
+                             comm_kind_name(mark.kind),
+                             input_idx,
+                             output_idx);
+                }
+                continue;
+            }
+
+            Segment* output_segment = nullptr;
+            if (output_idx >= 0) {
+                for (Segment& segment : plan.segments) {
+                    if (std::find(segment.output_node_indices.begin(),
+                                  segment.output_node_indices.end(),
+                                  output_idx) != segment.output_node_indices.end()) {
+                        output_segment = &segment;
+                        break;
+                    }
+                }
+            }
+
+            Segment* target_segment = output_segment;
+            if (target_segment != nullptr) {
+                if (std::find(target_segment->seed_node_indices.begin(),
+                              target_segment->seed_node_indices.end(),
+                              input_idx) == target_segment->seed_node_indices.end()) {
+                    target_segment->seed_node_indices.push_back(input_idx);
+                }
+            }
+
+            for (Segment& segment : plan.segments) {
+                if (target_segment == nullptr && segment_contains_node(segment, input_idx)) {
+                    target_segment = &segment;
+                    break;
+                }
+            }
+
+            if (target_segment == nullptr) {
+                if (log_desc != nullptr) {
+                    LOG_WARN("%s graph cut comm mark skipped: name=%s kind=%s input node %d is not internal to any segment",
+                             log_desc,
+                             mark.name.c_str(),
+                             comm_kind_name(mark.kind),
+                             input_idx);
+                }
+                continue;
+            }
+
+            Segment::CommOp op;
+            op.kind = mark.kind;
+            op.name = mark.name;
+            op.input_node_index = input_idx;
+            op.output_node_index = output_idx;
+            op.count_per_peer = mark.count_per_peer;
+            op.reduce_op = mark.reduce_op;
+            op.root = mark.root;
+            target_segment->comm_ops.push_back(std::move(op));
+            ++attached_count;
+        }
+
+        if (attached_count > 0 && log_desc != nullptr) {
+            LOG_DEBUG("%s graph cut attached %zu comm op(s) from %zu mark(s)",
+                      log_desc,
+                      attached_count,
+                      g_comm_marks.size());
+        }
+
+        return plan;
     }
 
     int leaf_count(ggml_cgraph* gf) {
@@ -367,7 +534,14 @@ namespace sd::ggml_graph_cut {
         GGML_ASSERT(gf != nullptr);
         GGML_ASSERT(graph_ctx_out != nullptr);
 
-        const size_t graph_size = segment.internal_node_indices.size() + segment.input_refs.size() + 8;
+        // Segment nodes can still reference auxiliary tensors that are neither
+        // segment outputs nor explicit input refs (for example receive
+        // placeholder source/dependency tensors used by SP communication). Keep the
+        // segment graph hash table large enough for every tensor reachable from
+        // the original graph instead of sizing it only from the compact segment
+        // metadata.
+        const size_t graph_size = std::max(segment.internal_node_indices.size() + segment.input_refs.size() + 8,
+                                           static_cast<size_t>(ggml_graph_n_nodes(gf) + gf->n_leafs + 16));
         ggml_init_params params = {
             /*.mem_size   =*/ggml_graph_overhead_custom(graph_size, false) + 1024,
             /*.mem_buffer =*/nullptr,
@@ -378,13 +552,49 @@ namespace sd::ggml_graph_cut {
         ggml_cgraph* segment_graph = ggml_new_graph_custom(graph_ctx, graph_size, false);
         GGML_ASSERT(segment_graph != nullptr);
 
+        std::unordered_set<ggml_tensor*> segment_internal_tensors;
+        segment_internal_tensors.reserve(segment.internal_node_indices.size());
+        for (int node_idx : segment.internal_node_indices) {
+            ggml_tensor* node = ggml_graph_node(gf, node_idx);
+            if (node != nullptr) {
+                segment_internal_tensors.insert(node);
+            }
+        }
+
+        std::unordered_set<ggml_tensor*> segment_leaf_tensors;
+        std::function<void(ggml_tensor*)> add_segment_leaf = [&](ggml_tensor* tensor) {
+            if (tensor == nullptr || segment_internal_tensors.find(tensor) != segment_internal_tensors.end()) {
+                return;
+            }
+            const bool inserted = segment_leaf_tensors.insert(tensor).second;
+            if (inserted) {
+                GGML_ASSERT(segment_graph->n_leafs < segment_graph->size);
+                segment_graph->leafs[segment_graph->n_leafs++] = tensor;
+            }
+            add_segment_leaf(tensor->view_src);
+            for (int src_idx = 0; src_idx < GGML_MAX_SRC; ++src_idx) {
+                add_segment_leaf(tensor->src[src_idx]);
+            }
+        };
+
         for (const auto& input : segment.input_refs) {
-            ggml_tensor* current_input = input_tensor(gf, input);
-            if (current_input == nullptr) {
+            add_segment_leaf(input_tensor(gf, input));
+        }
+        for (int node_idx : segment.internal_node_indices) {
+            ggml_tensor* node = ggml_graph_node(gf, node_idx);
+            if (node == nullptr) {
                 continue;
             }
-            GGML_ASSERT(segment_graph->n_leafs < segment_graph->size);
-            segment_graph->leafs[segment_graph->n_leafs++] = current_input;
+            if (node->view_src != nullptr) {
+                add_segment_leaf(node->view_src);
+            }
+            for (int src_idx = 0; src_idx < GGML_MAX_SRC; ++src_idx) {
+                ggml_tensor* src = node->src[src_idx];
+                add_segment_leaf(src);
+                if (src != nullptr && src->view_src != nullptr) {
+                    add_segment_leaf(src->view_src);
+                }
+            }
         }
 
         for (int output_node_index : segment.output_node_indices) {
@@ -393,6 +603,19 @@ namespace sd::ggml_graph_cut {
                 continue;
             }
             ggml_set_output(output);
+        }
+        for (const auto& comm_op : segment.comm_ops) {
+            ggml_tensor* input = comm_input_tensor(gf, comm_op);
+            if (input != nullptr) {
+                // Communication runs from the post-compute callback. Keep the
+                // send tensor alive after graph compute instead of letting the
+                // allocator recycle its buffer as an internal temporary.
+                ggml_set_output(input);
+            }
+            ggml_tensor* output = comm_output_tensor(gf, comm_op);
+            if (output != nullptr) {
+                ggml_set_output(output);
+            }
         }
         for (int node_idx : segment.internal_node_indices) {
             ggml_graph_add_node(segment_graph, ggml_graph_node(gf, node_idx));
@@ -488,6 +711,30 @@ namespace sd::ggml_graph_cut {
 
         if (!plan.has_cuts) {
             return plan;
+        }
+
+        for (const CommMark& mark : g_comm_marks) {
+            if (mark.kind == Segment::CommKind::BROADCAST || mark.input == nullptr || mark.output == nullptr) {
+                continue;
+            }
+            const int input_idx = node_index_for_tensor(gf, mark.input);
+            const int output_idx = node_index_for_tensor(gf, mark.output);
+            if (input_idx < 0 || output_idx < 0) {
+                continue;
+            }
+            for (Segment& segment : grouped_segments) {
+                if (std::find(segment.output_node_indices.begin(),
+                              segment.output_node_indices.end(),
+                              output_idx) == segment.output_node_indices.end()) {
+                    continue;
+                }
+                if (std::find(segment.seed_node_indices.begin(),
+                              segment.seed_node_indices.end(),
+                              input_idx) == segment.seed_node_indices.end()) {
+                    segment.seed_node_indices.push_back(input_idx);
+                }
+                break;
+            }
         }
 
         std::unordered_set<int> available_cut_output_node_indices;
@@ -670,10 +917,10 @@ namespace sd::ggml_graph_cut {
                 cache->budgeted_graph_cut_plan_max_vram_bytes = max_graph_vram_bytes;
             }
         }
-        return resolved_plan;
+        return attach_comm_ops_to_plan(gf, resolved_plan, log_desc);
     }
 
-        const char* comm_kind_name(Segment::CommKind kind) {
+    const char* comm_kind_name(Segment::CommKind kind) {
         switch (kind) {
             case Segment::CommKind::NONE:
                 return "none";
@@ -793,6 +1040,11 @@ namespace sd::ggml_graph_cut {
 
         const char* kind_name = comm_kind_name(comm_op.kind);
         const std::string op_name = comm_op_display_name(comm_op);
+        LOG_DEBUG("graph cut execute comm op: name=%s kind=%s input=%d output=%d",
+                  op_name.c_str(),
+                  kind_name,
+                  comm_op.input_node_index,
+                  comm_op.output_node_index);
 
         switch (comm_op.kind) {
             case Segment::CommKind::NONE:

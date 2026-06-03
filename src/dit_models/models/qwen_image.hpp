@@ -1,15 +1,110 @@
 #ifndef __QWEN_IMAGE_HPP__
 #define __QWEN_IMAGE_HPP__
 
+#include <inttypes.h>
 #include <memory>
 
 #include "dit_models/components/common/common_block.hpp"
 #include "dit_models/components/common/common_dit.hpp"
 #include "dit_models/components/common/modulation.hpp"
 #include "dit_models/components/common/rope.hpp"
+#ifdef ED_DEBUG_SP_COMM
+#include "parallel/sp_parallel.hpp"
+#endif
 
 namespace Qwen {
     constexpr int QWEN_IMAGE_GRAPH_SIZE = 20480;
+
+#ifdef ED_DEBUG_SP_COMM
+    static inline void mark_debug_sp_comm(GGMLRunnerContext* ctx,
+                                          ggml_tensor* img,
+                                          ggml_tensor* txt) {
+        if (ctx == nullptr ||
+            ctx->process_group == nullptr ||
+            !ctx->process_group->enabled()) {
+            return;
+        }
+
+        const int world_size = ctx->process_group->size();
+        if (world_size <= 1) {
+            return;
+        }
+
+        auto img_split = edgedit::parallel::sp_split_sequence(ctx->ggml_ctx,
+                                                              img,
+                                                              ctx->process_group->rank(),
+                                                              world_size,
+                                                              1,
+                                                              "debug_sp_sequence_split");
+        auto img_gather = edgedit::parallel::sp_mark_gather_sequence(ctx->ggml_ctx,
+                                                                     img_split.local,
+                                                                     world_size,
+                                                                     1,
+                                                                     img_split.pad,
+                                                                     "debug_sp_sequence_all_gather");
+        if (img_gather.recv != nullptr) {
+            sd::ggml_graph_cut::mark_graph_cut(img_split.local,
+                                                "qwen_image.prelude",
+                                                "debug_sp_sequence_local");
+            sd::ggml_graph_cut::mark_graph_cut(img_gather.recv,
+                                                "qwen_image.prelude",
+                                                "debug_sp_sequence_all_gather_output");
+            LOG_DEBUG("qwen_image debug SP all_gather marker: img_full=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] img_local=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] img_gathered=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] pad=%" PRId64,
+                      img->ne[0],
+                      img->ne[1],
+                      img->ne[2],
+                      img->ne[3],
+                      img_split.local->ne[0],
+                      img_split.local->ne[1],
+                      img_split.local->ne[2],
+                      img_split.local->ne[3],
+                      img_gather.recv->ne[0],
+                      img_gather.recv->ne[1],
+                      img_gather.recv->ne[2],
+                      img_gather.recv->ne[3],
+                      img_split.pad);
+        }
+
+        const size_t txt_nelements = static_cast<size_t>(ggml_nelements(txt));
+        if (txt_nelements % static_cast<size_t>(world_size) != 0) {
+            LOG_WARN("qwen_image debug SP all_to_all marker skipped: txt elements=%zu world_size=%d",
+                     txt_nelements,
+                     world_size);
+            return;
+        }
+
+        int64_t ne[GGML_MAX_DIMS] = {
+            txt->ne[0],
+            txt->ne[1],
+            txt->ne[2],
+            txt->ne[3],
+        };
+        ggml_tensor* all_to_all_leaf = ggml_new_tensor(ctx->ggml_ctx,
+                                                       txt->type,
+                                                       GGML_MAX_DIMS,
+                                                       ne);
+        ggml_set_name(all_to_all_leaf, "debug_sp_sequence_all_to_all_leaf");
+        ggml_tensor* all_to_all_output = ggml_dup(ctx->ggml_ctx, all_to_all_leaf);
+        ggml_set_name(all_to_all_output, "debug_sp_sequence_all_to_all_output");
+        if (all_to_all_output != nullptr) {
+            sd::ggml_graph_cut::mark_comm_op(txt,
+                                             all_to_all_output,
+                                             sd::ggml_graph_cut::Segment::CommKind::ALL_TO_ALL,
+                                             "debug_sp_sequence_all_to_all",
+                                             edgedit::parallel::ReduceOp::kSum,
+                                             txt_nelements / static_cast<size_t>(world_size));
+            sd::ggml_graph_cut::mark_graph_cut(all_to_all_output,
+                                                "qwen_image.prelude",
+                                                "debug_sp_sequence_all_to_all_output");
+            LOG_DEBUG("qwen_image debug SP all_to_all marker: txt=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] count_per_peer=%zu",
+                      txt->ne[0],
+                      txt->ne[1],
+                      txt->ne[2],
+                      txt->ne[3],
+                      txt_nelements / static_cast<size_t>(world_size));
+        }
+    }
+#endif
 
     struct TimestepEmbedding : public GGMLBlock {
     public:
@@ -417,6 +512,9 @@ namespace Qwen {
             sd::ggml_graph_cut::mark_graph_cut(img, "qwen_image.prelude", "img");
             sd::ggml_graph_cut::mark_graph_cut(txt, "qwen_image.prelude", "txt");
             // sd::ggml_graph_cut::mark_graph_cut(t_emb, "qwen_image.prelude", "t_emb");
+#ifdef ED_DEBUG_SP_COMM
+            mark_debug_sp_comm(ctx, img, txt);
+#endif
 
             for (int i = 0; i < params.num_layers; i++) {
                 auto block = std::dynamic_pointer_cast<QwenImageTransformerBlock>(blocks["transformer_blocks." + std::to_string(i)]);
@@ -605,6 +703,26 @@ namespace Qwen {
                                                   ref_latents,
                                                   modulate_index);
 
+#ifdef ED_DEBUG_SP_COMM
+            const std::string debug_local_name =
+                sd::ggml_graph_cut::make_graph_cut_name("qwen_image.prelude",
+                                                        "debug_sp_sequence_local");
+            if (ggml_tensor* debug_local = ggml_get_tensor(compute_ctx, debug_local_name.c_str())) {
+                ggml_build_forward_expand(gf, debug_local);
+            }
+            const std::string debug_gather_name =
+                sd::ggml_graph_cut::make_graph_cut_name("qwen_image.prelude",
+                                                        "debug_sp_sequence_all_gather_output");
+            if (ggml_tensor* debug_gather = ggml_get_tensor(compute_ctx, debug_gather_name.c_str())) {
+                ggml_build_forward_expand(gf, debug_gather);
+            }
+            const std::string debug_all_to_all_name =
+                sd::ggml_graph_cut::make_graph_cut_name("qwen_image.prelude",
+                                                        "debug_sp_sequence_all_to_all_output");
+            if (ggml_tensor* debug_all_to_all = ggml_get_tensor(compute_ctx, debug_all_to_all_name.c_str())) {
+                ggml_build_forward_expand(gf, debug_all_to_all);
+            }
+#endif
             ggml_build_forward_expand(gf, out);
 
             return gf;

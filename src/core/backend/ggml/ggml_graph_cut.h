@@ -61,6 +61,11 @@ namespace sd::ggml_graph_cut {
         size_t input_param_bytes        = 0;
 
         std::string group_name;
+        // Extra graph nodes that must be computed inside the segment even
+        // though they are not segment outputs. SP communication uses this to
+        // keep the send-side layout in the pre-communication segment while the
+        // receive tensor remains the actual graph-cut output.
+        std::vector<int> seed_node_indices;
         std::vector<int> internal_node_indices;
         std::vector<int> output_node_indices;
         std::vector<InputRef> input_refs;
@@ -90,6 +95,21 @@ namespace sd::ggml_graph_cut {
         size_t budgeted_graph_cut_plan_max_vram_bytes = 0;
     };
 
+    struct CommMark {
+        Segment::CommKind kind = Segment::CommKind::NONE;
+
+        ggml_tensor* input = nullptr;
+        ggml_tensor* output = nullptr;
+
+        std::string name;
+
+        size_t count_per_peer = 0;
+
+        edgedit::parallel::ReduceOp reduce_op = edgedit::parallel::ReduceOp::kSum;
+
+        int root = 0;
+    };
+
     static constexpr const char* GGML_RUNNER_CUT_PREFIX = "ggml_runner_cut:";
 
     bool is_graph_cut_tensor(const ggml_tensor* tensor);
@@ -100,6 +120,20 @@ namespace sd::ggml_graph_cut {
     void mark_graph_cut(ggml_tensor* tensor,
                         const std::string& group,
                         const std::string& output);
+
+    void mark_comm_op(ggml_tensor* input,
+                      ggml_tensor* output,
+                      Segment::CommKind kind,
+                      const std::string& name,
+                      edgedit::parallel::ReduceOp reduce_op = edgedit::parallel::ReduceOp::kSum,
+                      size_t count_per_peer = 0,
+                      int root = 0);
+
+    void clear_comm_marks();
+
+    Plan attach_comm_ops_to_plan(ggml_cgraph* gf,
+                                 const Plan& base_plan,
+                                 const char* log_desc = nullptr);
 
     int leaf_count(ggml_cgraph* gf);
 

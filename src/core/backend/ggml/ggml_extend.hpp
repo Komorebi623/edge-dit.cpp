@@ -1706,6 +1706,7 @@ struct WeightAdapter {
 struct GGMLRunnerContext {
     ggml_backend_t backend                        = nullptr;
     ggml_context* ggml_ctx                        = nullptr;
+    edgedit::parallel::ProcessGroup* process_group = nullptr;
     bool flash_attn_enabled                       = false;
     bool conv2d_direct_enabled                    = false;
     bool circular_x_enabled                       = false;
@@ -1716,6 +1717,7 @@ struct GGMLRunnerContext {
 struct GGMLRunner {
 protected:
     typedef std::function<ggml_cgraph*()> get_graph_cb_t;
+    typedef std::function<bool(ggml_cgraph*)> pre_compute_cb_t;
     typedef std::function<bool(ggml_cgraph*)> post_compute_cb_t;
     using GraphCutSegment = sd::ggml_graph_cut::Segment;
     using GraphCutPlan    = sd::ggml_graph_cut::Plan;
@@ -1903,6 +1905,7 @@ protected:
         reset_compute_ctx();
         ggml_cgraph* gf = get_compute_graph(get_graph);
         if (gf == nullptr) {
+            sd::ggml_graph_cut::clear_comm_marks();
             free_compute_ctx();
             return false;
         }
@@ -2263,19 +2266,38 @@ protected:
         }
     }
 
+    bool plan_has_comm_ops(const GraphCutPlan& plan) const {
+        for (const auto& segment : plan.segments) {
+            if (!segment.comm_ops.empty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool should_use_graph_cut_segmented_compute(const GraphCutPlan& plan) {
-        return plan.has_cuts &&
-               plan.valid &&
-               max_graph_vram_bytes > 0 &&
+        if (!plan.has_cuts || !plan.valid || plan.segments.empty()) {
+            return false;
+        }
+
+        const bool has_graph_comm = process_group_ != nullptr &&
+                                    process_group_->enabled() &&
+                                    plan_has_comm_ops(plan);
+        if (has_graph_comm) {
+            return true;
+        }
+
+        return max_graph_vram_bytes > 0 &&
                plan.segments.size() > 1 &&
                params_backend != runtime_backend &&
                !ggml_backend_is_cpu(runtime_backend);
     }
 
     bool can_attempt_graph_cut_segmented_compute() const {
-        return max_graph_vram_bytes > 0 &&
-               params_backend != runtime_backend &&
-               !ggml_backend_is_cpu(runtime_backend);
+        return (max_graph_vram_bytes > 0 &&
+                params_backend != runtime_backend &&
+                !ggml_backend_is_cpu(runtime_backend)) ||
+               (process_group_ != nullptr && process_group_->enabled());
     }
 
     bool resolve_graph_cut_plan(ggml_cgraph* gf,
@@ -2362,6 +2384,15 @@ protected:
                     break;
             }
         }
+        for (int node_idx : segment.internal_node_indices) {
+            ggml_tensor* node = ggml_graph_node(gf, node_idx);
+            if (node == nullptr || node->view_src == nullptr || node->view_src->data == nullptr) {
+                continue;
+            }
+            node->buffer = nullptr;
+            node->data   = static_cast<void*>(static_cast<char*>(node->view_src->data) + node->view_offs);
+            node->extra  = node->view_src->extra;
+        }
         return true;
     }
 
@@ -2373,7 +2404,8 @@ protected:
                                             bool preserve_backend_tensor_data_map,
                                             bool no_return                                          = false,
                                             const std::unordered_set<std::string>* cache_keep_names = nullptr,
-                                            post_compute_cb_t post_compute_cb                      = nullptr) {
+                                            post_compute_cb_t post_compute_cb                      = nullptr,
+                                            pre_compute_cb_t pre_compute_cb                        = nullptr) {
         int64_t t_execute_begin              = ggml_time_ms();
         const bool use_partial_param_offload = !runtime_param_tensors.empty();
         int64_t t_offload_begin              = ggml_time_ms();
@@ -2412,6 +2444,17 @@ protected:
 
         int64_t t_copy_begin = ggml_time_ms();
         copy_data_to_backend_tensor(gf, !preserve_backend_tensor_data_map);
+        if (pre_compute_cb) {
+            if (!pre_compute_cb(gf)) {
+                LOG_ERROR("%s pre compute callback failed", get_desc().c_str());
+                if (free_compute_buffer_immediately) {
+                    free_compute_buffer();
+                } else if (use_partial_param_offload) {
+                    restore_partial_params();
+                }
+                return std::nullopt;
+            }
+        }
         int64_t t_copy_end = ggml_time_ms();
         if (ggml_backend_is_cpu(runtime_backend)) {
             ggml_backend_cpu_set_n_threads(runtime_backend, n_threads);
@@ -2447,6 +2490,14 @@ protected:
                     t_comm_end - t_comm_begin);
         }
 
+        auto result = ggml_get_tensor(compute_ctx, final_result_name.c_str());
+        std::optional<sd::Tensor<T>> output;
+        if (!no_return) {
+            output = sd::make_sd_tensor_from_ggml<T>(result);
+        } else {
+            output = sd::Tensor<T>();
+        }
+
         int64_t t_cache_begin = ggml_time_ms();
         if (!copy_cache_tensors_to_cache_buffer(cache_keep_names)) {
             if (free_compute_buffer_immediately) {
@@ -2457,13 +2508,6 @@ protected:
             return std::nullopt;
         }
         int64_t t_cache_end = ggml_time_ms();
-        auto result         = ggml_get_tensor(compute_ctx, final_result_name.c_str());
-        std::optional<sd::Tensor<T>> output;
-        if (!no_return) {
-            output = sd::make_sd_tensor_from_ggml<T>(result);
-        } else {
-            output = sd::Tensor<T>();
-        }
 
         if (free_compute_buffer_immediately) {
             free_compute_buffer();
@@ -2544,6 +2588,19 @@ protected:
                     return true;
                 };
             }
+            pre_compute_cb_t segment_pre_compute_cb = nullptr;
+            bool has_previous_cut_input = false;
+            for (const auto& input_ref : segment.input_refs) {
+                if (input_ref.type == GraphCutSegment::INPUT_PREVIOUS_CUT) {
+                    has_previous_cut_input = true;
+                    break;
+                }
+            }
+            if (has_previous_cut_input) {
+                segment_pre_compute_cb = [this, gf, &segment](ggml_cgraph*) -> bool {
+                    return bind_segment_cached_inputs(gf, segment);
+                };
+            }
 
             ggml_context* segment_graph_ctx = nullptr;
             ggml_cgraph* segment_graph      = sd::ggml_graph_cut::build_segment_graph(gf, segment, &segment_graph_ctx);
@@ -2554,7 +2611,8 @@ protected:
                                        true,
                                        !is_last_segment || no_return,
                                        &future_cut_names,
-                                       segment_post_compute_cb);
+                                       segment_post_compute_cb,
+                                       segment_pre_compute_cb);
             ggml_free(segment_graph_ctx);
             if (!segment_output.has_value()) {
                 free_cache_ctx_and_buffer();
@@ -2599,6 +2657,7 @@ public:
         GGMLRunnerContext runner_ctx;
         runner_ctx.ggml_ctx              = compute_ctx;
         runner_ctx.backend               = runtime_backend;
+        runner_ctx.process_group         = process_group_.get();
         runner_ctx.flash_attn_enabled    = flash_attn_enabled;
         runner_ctx.conv2d_direct_enabled = conv2d_direct_enabled;
         runner_ctx.circular_x_enabled    = circular_x_enabled;
@@ -2609,6 +2668,7 @@ public:
 
     void reset_compute_ctx() {
         free_compute_ctx();
+        sd::ggml_graph_cut::clear_comm_marks();
         alloc_compute_ctx();
     }
 
@@ -2730,9 +2790,11 @@ public:
         if (can_attempt_graph_cut_segmented_compute()) {
             GraphCutPlan plan;
             if (!resolve_graph_cut_plan(gf, &plan)) {
+                sd::ggml_graph_cut::clear_comm_marks();
                 free_compute_ctx();
                 return std::nullopt;
             }
+            sd::ggml_graph_cut::clear_comm_marks();
             if (should_use_graph_cut_segmented_compute(plan)) {
                 return compute_with_graph_cuts<T>(gf,
                                                   plan,
@@ -2741,6 +2803,7 @@ public:
                                                   no_return);
             }
         }
+        sd::ggml_graph_cut::clear_comm_marks();
         if (!alloc_compute_buffer(gf)) {
             LOG_ERROR("%s alloc compute buffer failed", get_desc().c_str());
             return std::nullopt;

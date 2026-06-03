@@ -54,7 +54,8 @@ namespace sd {
             GGML_ABORT("ggml tensor type does not match sd::Tensor type");
         }
         Tensor<T> result(shape_from_ggml(tensor));
-        if (tensor->buffer != nullptr) {
+        auto buffer = tensor->view_src != nullptr ? tensor->view_src->buffer : tensor->buffer;
+        if (buffer != nullptr) {
             ggml_backend_tensor_get(tensor, result.data(), 0, ggml_nbytes(tensor));
         } else {
             std::memcpy(result.data(), tensor->data, ggml_nbytes(tensor));

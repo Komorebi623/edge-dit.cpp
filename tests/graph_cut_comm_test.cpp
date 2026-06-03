@@ -364,6 +364,100 @@ void run_all_gather_segment_comm_test(edgedit::parallel::ProcessGroup& group,
     ggml_free(ctx);
 }
 
+void run_comm_annotation_to_plan_test(edgedit::parallel::ProcessGroup& group,
+                                      ggml_backend_t backend) {
+    const int rank = group.rank();
+    const int world_size = group.size();
+
+    ggml_context* ctx = new_test_context();
+
+    ggml_tensor* input_leaf = new_1d_f32(ctx, 2, "annotation_input_leaf");
+    ggml_tensor* output_leaf = new_1d_f32(ctx, 2 * world_size, "annotation_output_leaf");
+
+    ggml_tensor* input_node = ggml_dup(ctx, input_leaf);
+    ggml_set_name(input_node, "annotation_input_node");
+
+    ggml_tensor* output_node = ggml_dup(ctx, output_leaf);
+    ggml_set_name(output_node, "annotation_output_node");
+
+    ggml_cgraph* gf = ggml_new_graph(ctx);
+    ggml_build_forward_expand(gf, input_node);
+    ggml_build_forward_expand(gf, output_node);
+
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buffer == nullptr) {
+        ggml_free(ctx);
+        throw std::runtime_error("alloc ctx tensors failed in comm annotation test");
+    }
+
+    tensor_set_f32(input_leaf, {
+        static_cast<float>(rank + 1),
+        static_cast<float>((rank + 1) * 10),
+    });
+    tensor_set_f32(output_leaf, std::vector<float>(static_cast<size_t>(2 * world_size), 0.0f));
+
+    run_graph(backend, gf);
+
+    const int input_idx = find_node_index(gf, input_node, "annotation_input_node");
+    const int output_idx = find_node_index(gf, output_node, "annotation_output_node");
+
+    sd::ggml_graph_cut::Plan base_plan;
+    base_plan.available = true;
+    base_plan.valid = true;
+    base_plan.has_cuts = true;
+    base_plan.n_nodes = ggml_graph_n_nodes(gf);
+    base_plan.n_leafs = sd::ggml_graph_cut::leaf_count(gf);
+
+    sd::ggml_graph_cut::Segment segment;
+    segment.group_name = "annotation_segment";
+    segment.internal_node_indices.push_back(input_idx);
+    segment.internal_node_indices.push_back(output_idx);
+    segment.output_node_indices.push_back(output_idx);
+    base_plan.segments.push_back(segment);
+
+    sd::ggml_graph_cut::clear_comm_marks();
+    sd::ggml_graph_cut::mark_comm_op(input_node,
+                                     output_node,
+                                     sd::ggml_graph_cut::Segment::CommKind::ALL_GATHER,
+                                     "annotation_all_gather");
+
+    sd::ggml_graph_cut::Plan annotated_plan =
+        sd::ggml_graph_cut::attach_comm_ops_to_plan(gf,
+                                                    base_plan,
+                                                    "graph_cut_comm_test");
+    sd::ggml_graph_cut::clear_comm_marks();
+
+    if (annotated_plan.segments.size() != 1) {
+        throw std::runtime_error("comm annotation test expected one segment");
+    }
+    const auto& annotated_segment = annotated_plan.segments.front();
+    if (annotated_segment.comm_ops.size() != 1) {
+        throw std::runtime_error("comm annotation test expected one generated comm op");
+    }
+    const auto& op = annotated_segment.comm_ops.front();
+    if (op.kind != sd::ggml_graph_cut::Segment::CommKind::ALL_GATHER ||
+        op.input_node_index != input_idx ||
+        op.output_node_index != output_idx ||
+        op.name != "annotation_all_gather") {
+        throw std::runtime_error("comm annotation test generated wrong comm op");
+    }
+
+    execute_segment_comm_or_throw(group, gf, annotated_segment, "comm_annotation_to_plan");
+
+    std::vector<float> expected;
+    for (int r = 0; r < world_size; ++r) {
+        expected.push_back(static_cast<float>(r + 1));
+        expected.push_back(static_cast<float>((r + 1) * 10));
+    }
+
+    check_close(tensor_get_f32(output_node),
+                expected,
+                "graph_cut comm annotation all_gather");
+
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+}
+
 void run_all_to_all_segment_comm_test(edgedit::parallel::ProcessGroup& group,
                                       ggml_backend_t backend) {
     const int rank = group.rank();
@@ -651,6 +745,7 @@ void run_graph_cut_comm_tests(edgedit::parallel::ProcessGroup& group,
     run_all_gather_segment_comm_test(group, backend);
     run_all_to_all_segment_comm_test(group, backend);
     run_broadcast_segment_comm_test(group, backend);
+    run_comm_annotation_to_plan_test(group, backend);
 
     // 新增：验证 GGMLRunner::compute_with_graph_cuts()
     // 是否真的会通过 post_compute_cb 触发 segment.comm_ops。

@@ -75,7 +75,7 @@ static void print_usage(const char* prog) {
         "  --cfg-parallel-size <n>   Split CFG cond/uncond branches across n GPUs, currently supports 1 or 2\n"
         "  --cfg-size <n>            Alias for --cfg-parallel-size\n"
         "  --tp-size <n>             Reserved tensor parallel size, default: 1\n"
-        "  --sp-size <n>             Reserved sequence parallel size, default: 1\n"
+        "  --sp-size <n>             Sequence parallel size, default: 1\n"
         "  --help              Show this help\n",
         prog,
         prog
@@ -1104,8 +1104,8 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         return false;
     }
 
-    if (args->sp_parallel_size != 1) {
-        std::fprintf(stderr, "sequence parallel is not implemented yet; use --sp-size 1\n");
+    if (args->sp_parallel_size <= 0) {
+        std::fprintf(stderr, "--sp-size must be positive\n");
         return false;
     }
 
