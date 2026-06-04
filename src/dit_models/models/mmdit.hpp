@@ -1,11 +1,18 @@
 #ifndef __MMDIT_HPP__
 #define __MMDIT_HPP__
 
+#include <algorithm>
 #include <memory>
+#include <string>
+#include <tuple>
+#include <vector>
 
 #include "backend/ggml/ggml_extend.hpp"
+#ifdef ED_DEBUG_SP_COMM
+#include "parallel/sp_parallel.hpp"
+#endif
 
-#define MMDIT_GRAPH_SIZE 10240
+#define MMDIT_GRAPH_SIZE 32768
 
 struct Mlp : public GGMLBlock {
 public:
@@ -147,6 +154,137 @@ public:
     }
 };
 
+#ifdef ED_DEBUG_SP_COMM
+static inline bool mmdit_sp_enabled(GGMLRunnerContext* ctx) {
+    return ctx != nullptr &&
+           ctx->process_group != nullptr &&
+           ctx->process_group->enabled() &&
+           ctx->process_group->size() > 1;
+}
+
+static inline int mmdit_sp_rank(GGMLRunnerContext* ctx) {
+    return ctx->process_group->rank();
+}
+
+static inline int mmdit_sp_world_size(GGMLRunnerContext* ctx) {
+    return ctx->process_group->size();
+}
+
+static inline ggml_tensor* mmdit_sp_view_head_sequence(ggml_context* ctx,
+                                                       ggml_tensor* x,
+                                                       int64_t start,
+                                                       int64_t length) {
+    GGML_ASSERT(x != nullptr);
+    GGML_ASSERT(start >= 0);
+    GGML_ASSERT(length > 0);
+    GGML_ASSERT(start + length <= x->ne[2]);
+
+    return ggml_view_4d(ctx,
+                        x,
+                        x->ne[0],
+                        x->ne[1],
+                        length,
+                        x->ne[3],
+                        x->nb[1],
+                        x->nb[2],
+                        x->nb[3],
+                        static_cast<size_t>(start) * x->nb[2]);
+}
+
+static inline ggml_tensor* mmdit_sp_pad_head_sequence(ggml_context* ctx,
+                                                      ggml_tensor* x,
+                                                      int64_t pad) {
+    GGML_ASSERT(x != nullptr);
+    GGML_ASSERT(pad >= 0);
+    if (pad <= 0) {
+        return x;
+    }
+
+    ggml_tensor* pad_tensor = ggml_ext_zeros(ctx, x->ne[0], x->ne[1], pad, x->ne[3]);
+    return ggml_concat(ctx, x, pad_tensor, 2);
+}
+
+static inline ggml_tensor* mmdit_sp_concat_real_attention_sequence(ggml_context* ctx,
+                                                                   ggml_tensor* context,
+                                                                   ggml_tensor* x,
+                                                                   int64_t context_pad,
+                                                                   int64_t x_pad) {
+    GGML_ASSERT(context != nullptr);
+    GGML_ASSERT(x != nullptr);
+    GGML_ASSERT(context_pad >= 0 && context_pad <= context->ne[2]);
+    GGML_ASSERT(x_pad >= 0 && x_pad <= x->ne[2]);
+
+    const int64_t context_real_seq = context->ne[2] - context_pad;
+    const int64_t x_real_seq       = x->ne[2] - x_pad;
+    GGML_ASSERT(context_real_seq > 0);
+    GGML_ASSERT(x_real_seq > 0);
+
+    ggml_tensor* context_real = mmdit_sp_view_head_sequence(ctx,
+                                                            context,
+                                                            0,
+                                                            context_real_seq);
+    ggml_tensor* x_real       = mmdit_sp_view_head_sequence(ctx,
+                                                            x,
+                                                            0,
+                                                            x_real_seq);
+    return ggml_concat(ctx, context_real, x_real, 2);
+}
+
+static inline ggml_tensor* mmdit_sp_extract_stream_attention(ggml_context* ctx,
+                                                            ggml_tensor* combined,
+                                                            int64_t real_start,
+                                                            int64_t real_seq,
+                                                            int64_t pad) {
+    ggml_tensor* out = mmdit_sp_view_head_sequence(ctx,
+                                                   combined,
+                                                   real_start,
+                                                   real_seq);
+    out              = mmdit_sp_pad_head_sequence(ctx, out, pad);
+    return ggml_cont(ctx, out);
+}
+
+static inline ggml_tensor* mmdit_sp_qk_to_attention_layout(ggml_context* ctx,
+                                                          ggml_tensor* x) {
+    GGML_ASSERT(x != nullptr);
+    ggml_tensor* out = ggml_cont(ctx, ggml_permute(ctx, x, 0, 2, 1, 3));
+    return ggml_reshape_3d(ctx, out, out->ne[0], out->ne[1], out->ne[2] * out->ne[3]);
+}
+
+static inline ggml_tensor* mmdit_sp_attention(GGMLRunnerContext* ctx,
+                                              ggml_tensor* q,
+                                              ggml_tensor* k,
+                                              ggml_tensor* v) {
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(q != nullptr);
+    GGML_ASSERT(k != nullptr);
+    GGML_ASSERT(v != nullptr);
+
+    q = mmdit_sp_qk_to_attention_layout(ctx->ggml_ctx, q);
+    k = mmdit_sp_qk_to_attention_layout(ctx->ggml_ctx, k);
+    v = ggml_cont(ctx->ggml_ctx, v);
+
+    const int64_t n_head = v->ne[1];
+    GGML_ASSERT(q->ne[0] == k->ne[0]);
+    GGML_ASSERT(q->ne[1] == k->ne[1]);
+    GGML_ASSERT(q->ne[2] == k->ne[2]);
+    GGML_ASSERT(v->ne[0] == q->ne[0]);
+    GGML_ASSERT(v->ne[1] == n_head);
+    GGML_ASSERT(v->ne[2] == q->ne[1]);
+    GGML_ASSERT(v->ne[3] == 1);
+
+    ggml_tensor* attn = ggml_ext_attention_ext(ctx->ggml_ctx,
+                                               ctx->backend,
+                                               q,
+                                               k,
+                                               v,
+                                               n_head,
+                                               nullptr,
+                                               true,
+                                               ctx->flash_attn_enabled);
+    return attn;
+}
+#endif
+
 class SelfAttention : public GGMLBlock {
 public:
     int64_t num_heads;
@@ -196,6 +334,52 @@ public:
 
         return {q, k, v};
     }
+
+#ifdef ED_DEBUG_SP_COMM
+    std::vector<ggml_tensor*> pre_attention_sp(GGMLRunnerContext* ctx,
+                                               ggml_tensor* x,
+                                               const std::string& name_prefix) {
+        auto qkv_proj = std::dynamic_pointer_cast<Linear>(blocks["qkv"]);
+
+        auto qkv         = qkv_proj->forward(ctx, x);
+        auto qkv_vec     = split_qkv(ctx->ggml_ctx, qkv);
+        int64_t head_dim = qkv_vec[0]->ne[0] / num_heads;
+        int64_t seq      = qkv_vec[0]->ne[1];
+        int64_t N        = qkv_vec[0]->ne[2];
+        GGML_ASSERT(N == 1);
+
+        auto q = ggml_reshape_4d(ctx->ggml_ctx, qkv_vec[0], head_dim, num_heads, seq, N);
+        auto k = ggml_reshape_4d(ctx->ggml_ctx, qkv_vec[1], head_dim, num_heads, seq, N);
+        auto v = ggml_reshape_4d(ctx->ggml_ctx, qkv_vec[2], head_dim, num_heads, seq, N);
+
+        if (qk_norm == "rms" || qk_norm == "ln") {
+            auto ln_q = std::dynamic_pointer_cast<UnaryBlock>(blocks["ln_q"]);
+            auto ln_k = std::dynamic_pointer_cast<UnaryBlock>(blocks["ln_k"]);
+            q         = ln_q->forward(ctx, q);
+            k         = ln_k->forward(ctx, k);
+        }
+
+        q = ggml_cont(ctx->ggml_ctx, q);
+        k = ggml_cont(ctx->ggml_ctx, k);
+        v = ggml_cont(ctx->ggml_ctx, v);
+
+        const int world_size = mmdit_sp_world_size(ctx);
+        auto q_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                      q,
+                                                                      world_size,
+                                                                      name_prefix + "_q_seq_to_head");
+        auto k_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                      k,
+                                                                      world_size,
+                                                                      name_prefix + "_k_seq_to_head");
+        auto v_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                      v,
+                                                                      world_size,
+                                                                      name_prefix + "_v_seq_to_head");
+
+        return {q_head.output, k_head.output, v_head.output};
+    }
+#endif
 
     ggml_tensor* post_attention(GGMLRunnerContext* ctx, ggml_tensor* x) {
         GGML_ASSERT(!pre_only);
@@ -308,6 +492,43 @@ public:
         return {qkv, qkv2, {x, gate_msa, shift_mlp, scale_mlp, gate_mlp, gate_msa2}};
     }
 
+#ifdef ED_DEBUG_SP_COMM
+    std::tuple<std::vector<ggml_tensor*>, std::vector<ggml_tensor*>, std::vector<ggml_tensor*>> pre_attention_x_sp(GGMLRunnerContext* ctx,
+                                                                                                                   ggml_tensor* x,
+                                                                                                                   ggml_tensor* c,
+                                                                                                                   const std::string& name_prefix) {
+        GGML_ASSERT(self_attn);
+        auto norm1              = std::dynamic_pointer_cast<LayerNorm>(blocks["norm1"]);
+        auto attn               = std::dynamic_pointer_cast<SelfAttention>(blocks["attn"]);
+        auto attn2              = std::dynamic_pointer_cast<SelfAttention>(blocks["attn2"]);
+        auto adaLN_modulation_1 = std::dynamic_pointer_cast<Linear>(blocks["adaLN_modulation.1"]);
+
+        int n_mods = 9;
+        auto m     = adaLN_modulation_1->forward(ctx, ggml_silu(ctx->ggml_ctx, c));
+        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, n_mods, 0);
+
+        auto shift_msa  = m_vec[0];
+        auto scale_msa  = m_vec[1];
+        auto gate_msa   = m_vec[2];
+        auto shift_mlp  = m_vec[3];
+        auto scale_mlp  = m_vec[4];
+        auto gate_mlp   = m_vec[5];
+        auto shift_msa2 = m_vec[6];
+        auto scale_msa2 = m_vec[7];
+        auto gate_msa2  = m_vec[8];
+
+        auto x_norm = norm1->forward(ctx, x);
+
+        auto attn_in = modulate(ctx->ggml_ctx, x_norm, shift_msa, scale_msa);
+        auto qkv     = attn->pre_attention_sp(ctx, attn_in, name_prefix + "_joint");
+
+        auto attn2_in = modulate(ctx->ggml_ctx, x_norm, shift_msa2, scale_msa2);
+        auto qkv2     = attn2->pre_attention_sp(ctx, attn2_in, name_prefix + "_self");
+
+        return {qkv, qkv2, {x, gate_msa, shift_mlp, scale_mlp, gate_mlp, gate_msa2}};
+    }
+#endif
+
     std::pair<std::vector<ggml_tensor*>, std::vector<ggml_tensor*>> pre_attention(GGMLRunnerContext* ctx,
                                                                                   ggml_tensor* x,
                                                                                   ggml_tensor* c) {
@@ -346,6 +567,45 @@ public:
             return {qkv, {nullptr, nullptr, nullptr, nullptr, nullptr}};
         }
     }
+
+#ifdef ED_DEBUG_SP_COMM
+    std::pair<std::vector<ggml_tensor*>, std::vector<ggml_tensor*>> pre_attention_sp(GGMLRunnerContext* ctx,
+                                                                                     ggml_tensor* x,
+                                                                                     ggml_tensor* c,
+                                                                                     const std::string& name_prefix) {
+        auto norm1              = std::dynamic_pointer_cast<LayerNorm>(blocks["norm1"]);
+        auto attn               = std::dynamic_pointer_cast<SelfAttention>(blocks["attn"]);
+        auto adaLN_modulation_1 = std::dynamic_pointer_cast<Linear>(blocks["adaLN_modulation.1"]);
+
+        int n_mods = 6;
+        if (pre_only) {
+            n_mods = 2;
+        }
+        auto m     = adaLN_modulation_1->forward(ctx, ggml_silu(ctx->ggml_ctx, c));
+        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, n_mods, 0);
+
+        if (!pre_only) {
+            auto shift_msa = m_vec[0];
+            auto scale_msa = m_vec[1];
+            auto gate_msa  = m_vec[2];
+            auto shift_mlp = m_vec[3];
+            auto scale_mlp = m_vec[4];
+            auto gate_mlp  = m_vec[5];
+
+            auto attn_in = modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
+            auto qkv     = attn->pre_attention_sp(ctx, attn_in, name_prefix + "_attn");
+
+            return {qkv, {x, gate_msa, shift_mlp, scale_mlp, gate_mlp}};
+        } else {
+            auto scale_msa = m_vec[0];
+            auto shift_msa = m_vec[1];
+            auto attn_in   = modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
+            auto qkv       = attn->pre_attention_sp(ctx, attn_in, name_prefix + "_attn");
+
+            return {qkv, {nullptr, nullptr, nullptr, nullptr, nullptr}};
+        }
+    }
+#endif
 
     ggml_tensor* post_attention_x(GGMLRunnerContext* ctx,
                                   ggml_tensor* attn_out,
@@ -551,6 +811,194 @@ block_mixing(GGMLRunnerContext* ctx,
     return {context, x};
 }
 
+#ifdef ED_DEBUG_SP_COMM
+__STATIC_INLINE__ std::pair<ggml_tensor*, ggml_tensor*>
+block_mixing_sp(GGMLRunnerContext* ctx,
+                ggml_tensor* context,
+                ggml_tensor* x,
+                ggml_tensor* c,
+                std::shared_ptr<DismantledBlock> context_block,
+                std::shared_ptr<DismantledBlock> x_block,
+                int64_t context_pad,
+                int64_t x_pad,
+                const std::string& name_prefix) {
+    GGML_ASSERT(context != nullptr);
+    GGML_ASSERT(x != nullptr);
+    GGML_ASSERT(context->ne[2] == 1);
+    GGML_ASSERT(x->ne[2] == 1);
+
+    const int world_size = mmdit_sp_world_size(ctx);
+    const int64_t N      = x->ne[2];
+
+    auto context_qkv_intermediates = context_block->pre_attention_sp(ctx,
+                                                                     context,
+                                                                     c,
+                                                                     name_prefix + "_context");
+    auto context_qkv               = context_qkv_intermediates.first;
+    auto context_intermediates     = context_qkv_intermediates.second;
+
+    std::vector<ggml_tensor*> x_qkv, x_qkv2, x_intermediates;
+    if (x_block->self_attn) {
+        auto x_qkv_intermediates = x_block->pre_attention_x_sp(ctx,
+                                                               x,
+                                                               c,
+                                                               name_prefix + "_x");
+        x_qkv                    = std::get<0>(x_qkv_intermediates);
+        x_qkv2                   = std::get<1>(x_qkv_intermediates);
+        x_intermediates          = std::get<2>(x_qkv_intermediates);
+    } else {
+        auto x_qkv_intermediates = x_block->pre_attention_sp(ctx,
+                                                             x,
+                                                             c,
+                                                             name_prefix + "_x");
+        x_qkv                    = x_qkv_intermediates.first;
+        x_intermediates          = x_qkv_intermediates.second;
+    }
+
+    std::vector<ggml_tensor*> qkv;
+    qkv.reserve(3);
+    for (int i = 0; i < 3; i++) {
+        ggml_tensor* combined = mmdit_sp_concat_real_attention_sequence(ctx->ggml_ctx,
+                                                                        context_qkv[i],
+                                                                        x_qkv[i],
+                                                                        context_pad,
+                                                                        x_pad);
+        combined              = ggml_cont(ctx->ggml_ctx, combined);
+        qkv.push_back(combined);
+    }
+
+    ggml_tensor* attn = mmdit_sp_attention(ctx,
+                                           qkv[0],
+                                           qkv[1],
+                                           qkv[2]);
+    sd::ggml_graph_cut::mark_graph_cut(attn, name_prefix + ".sp_attention", "attn");
+
+    const int64_t head_dim         = qkv[2]->ne[0];
+    const int64_t shard_heads      = qkv[2]->ne[1];
+    const int64_t context_real_seq = context_qkv[2]->ne[2] - context_pad;
+    const int64_t x_real_seq       = x_qkv[2]->ne[2] - x_pad;
+    const int64_t total_seq        = context_real_seq + x_real_seq;
+
+    ggml_tensor* attn_4d = ggml_reshape_4d(ctx->ggml_ctx,
+                                           attn,
+                                           head_dim,
+                                           shard_heads,
+                                           total_seq,
+                                           N);
+
+    ggml_tensor* context_attn_out = nullptr;
+    if (!context_block->pre_only) {
+        ggml_tensor* context_attn_head = mmdit_sp_extract_stream_attention(ctx->ggml_ctx,
+                                                                           attn_4d,
+                                                                           0,
+                                                                           context_real_seq,
+                                                                           context_pad);
+        auto context_attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
+                                                                                  context_attn_head,
+                                                                                  world_size,
+                                                                                  name_prefix + "_context_attn_head_to_seq");
+        context_attn_out        = ggml_reshape_3d(ctx->ggml_ctx,
+                                                  context_attn_local.output,
+                                                  context_attn_local.output->ne[0] * context_attn_local.output->ne[1],
+                                                  context_attn_local.output->ne[2],
+                                                  N);
+    }
+
+    ggml_tensor* x_attn_head = mmdit_sp_extract_stream_attention(ctx->ggml_ctx,
+                                                                 attn_4d,
+                                                                 context_real_seq,
+                                                                 x_real_seq,
+                                                                 x_pad);
+    auto x_attn_local       = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
+                                                                              x_attn_head,
+                                                                              world_size,
+                                                                              name_prefix + "_x_attn_head_to_seq");
+    ggml_tensor* x_attn_out = ggml_reshape_3d(ctx->ggml_ctx,
+                                              x_attn_local.output,
+                                              x_attn_local.output->ne[0] * x_attn_local.output->ne[1],
+                                              x_attn_local.output->ne[2],
+                                              N);
+
+    if (!context_block->pre_only) {
+        context = context_block->post_attention(ctx,
+                                                context_attn_out,
+                                                context_intermediates[0],
+                                                context_intermediates[1],
+                                                context_intermediates[2],
+                                                context_intermediates[3],
+                                                context_intermediates[4]);
+    } else {
+        context = nullptr;
+    }
+
+    if (x_block->self_attn) {
+        ggml_tensor* q2 = mmdit_sp_view_head_sequence(ctx->ggml_ctx,
+                                                      x_qkv2[0],
+                                                      0,
+                                                      x_real_seq);
+        ggml_tensor* k2 = mmdit_sp_view_head_sequence(ctx->ggml_ctx,
+                                                      x_qkv2[1],
+                                                      0,
+                                                      x_real_seq);
+        ggml_tensor* v2 = mmdit_sp_view_head_sequence(ctx->ggml_ctx,
+                                                      x_qkv2[2],
+                                                      0,
+                                                      x_real_seq);
+        q2              = ggml_cont(ctx->ggml_ctx, q2);
+        k2 = ggml_cont(ctx->ggml_ctx, k2);
+        v2 = ggml_cont(ctx->ggml_ctx, v2);
+
+        ggml_tensor* attn2 = mmdit_sp_attention(ctx,
+                                                q2,
+                                                k2,
+                                                v2);
+        sd::ggml_graph_cut::mark_graph_cut(attn2, name_prefix + ".sp_attention2", "attn");
+
+        ggml_tensor* attn2_4d = ggml_reshape_4d(ctx->ggml_ctx,
+                                                attn2,
+                                                head_dim,
+                                                shard_heads,
+                                                x_real_seq,
+                                                N);
+
+        ggml_tensor* x_attn2_head = mmdit_sp_extract_stream_attention(ctx->ggml_ctx,
+                                                                      attn2_4d,
+                                                                      0,
+                                                                      x_real_seq,
+                                                                      x_pad);
+        auto x_attn2_local        = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
+                                                                                    x_attn2_head,
+                                                                                    world_size,
+                                                                                    name_prefix + "_x_self_attn_head_to_seq");
+        ggml_tensor* attn2_out    = ggml_reshape_3d(ctx->ggml_ctx,
+                                                    x_attn2_local.output,
+                                                    x_attn2_local.output->ne[0] * x_attn2_local.output->ne[1],
+                                                    x_attn2_local.output->ne[2],
+                                                    N);
+
+        x = x_block->post_attention_x(ctx,
+                                      x_attn_out,
+                                      attn2_out,
+                                      x_intermediates[0],
+                                      x_intermediates[1],
+                                      x_intermediates[2],
+                                      x_intermediates[3],
+                                      x_intermediates[4],
+                                      x_intermediates[5]);
+    } else {
+        x = x_block->post_attention(ctx,
+                                    x_attn_out,
+                                    x_intermediates[0],
+                                    x_intermediates[1],
+                                    x_intermediates[2],
+                                    x_intermediates[3],
+                                    x_intermediates[4]);
+    }
+
+    return {context, x};
+}
+#endif
+
 struct JointBlock : public GGMLBlock {
 public:
     JointBlock(int64_t hidden_size,
@@ -573,6 +1021,21 @@ public:
 
         return block_mixing(ctx, context, x, c, context_block, x_block);
     }
+
+#ifdef ED_DEBUG_SP_COMM
+    std::pair<ggml_tensor*, ggml_tensor*> forward_sp(GGMLRunnerContext* ctx,
+                                                     ggml_tensor* context,
+                                                     ggml_tensor* x,
+                                                     ggml_tensor* c,
+                                                     int64_t context_pad,
+                                                     int64_t x_pad,
+                                                     const std::string& name_prefix) {
+        auto context_block = std::dynamic_pointer_cast<DismantledBlock>(blocks["context_block"]);
+        auto x_block       = std::dynamic_pointer_cast<DismantledBlock>(blocks["x_block"]);
+
+        return block_mixing_sp(ctx, context, x, c, context_block, x_block, context_pad, x_pad, name_prefix);
+    }
+#endif
 };
 
 struct FinalLayer : public GGMLBlock {
@@ -750,7 +1213,14 @@ public:
                                           ggml_tensor* x,
                                           ggml_tensor* c_mod,
                                           ggml_tensor* context,
-                                          std::vector<int> skip_layers = std::vector<int>()) {
+                                          std::vector<int> skip_layers = std::vector<int>()
+#ifdef ED_DEBUG_SP_COMM
+                                              ,
+                                          bool use_sp_mainline = false,
+                                          int64_t context_pad  = 0,
+                                          int64_t x_pad        = 0
+#endif
+    ) {
         // x: [N, H*W, hidden_size]
         // context: [N, n_context, d_context]
         // c: [N, hidden_size]
@@ -765,12 +1235,38 @@ public:
 
             auto block = std::dynamic_pointer_cast<JointBlock>(blocks["joint_blocks." + std::to_string(i)]);
 
-            auto context_x = block->forward(ctx, context, x, c_mod);
+#ifdef ED_DEBUG_SP_COMM
+            std::pair<ggml_tensor*, ggml_tensor*> context_x;
+            if (use_sp_mainline) {
+                context_x = block->forward_sp(ctx,
+                                              context,
+                                              x,
+                                              c_mod,
+                                              context_pad,
+                                              x_pad,
+                                              "mmdit_block" + std::to_string(i));
+            } else
+#endif
+            {
+                context_x = block->forward(ctx, context, x, c_mod);
+            }
             context        = context_x.first;
             x              = context_x.second;
             sd::ggml_graph_cut::mark_graph_cut(context, "mmdit.joint_blocks." + std::to_string(i), "context");
             sd::ggml_graph_cut::mark_graph_cut(x, "mmdit.joint_blocks." + std::to_string(i), "x");
         }
+
+#ifdef ED_DEBUG_SP_COMM
+        if (use_sp_mainline) {
+            auto x_gather = edgedit::parallel::sp_mark_gather_sequence(ctx->ggml_ctx,
+                                                                       x,
+                                                                       mmdit_sp_world_size(ctx),
+                                                                       1,
+                                                                       x_pad,
+                                                                       "mmdit_sp_final_x_gather");
+            x             = x_gather.gathered;
+        }
+#endif
 
         x = final_layer->forward(ctx, x, c_mod);  // (N, T, patch_size ** 2 * out_channels)
 
@@ -812,13 +1308,56 @@ public:
 
             context = context_embedder->forward(ctx, context);  // [N, L, D] aka [N, L, 1536]
         }
+
+#ifdef ED_DEBUG_SP_COMM
+        bool use_sp_mainline = mmdit_sp_enabled(ctx);
+        edgedit::parallel::SPSequenceSplit x_sp_split;
+        edgedit::parallel::SPSequenceSplit context_sp_split;
+        if (use_sp_mainline) {
+            const int rank       = mmdit_sp_rank(ctx);
+            const int world_size = mmdit_sp_world_size(ctx);
+            if (context == nullptr ||
+                x->ne[2] != 1 ||
+                context->ne[2] != 1 ||
+                depth % world_size != 0) {
+                use_sp_mainline = false;
+            } else {
+                x_sp_split = edgedit::parallel::sp_split_sequence(ctx->ggml_ctx,
+                                                                  x,
+                                                                  rank,
+                                                                  world_size,
+                                                                  1,
+                                                                  "mmdit_sp_x_split");
+                context_sp_split = edgedit::parallel::sp_split_sequence(ctx->ggml_ctx,
+                                                                        context,
+                                                                        rank,
+                                                                        world_size,
+                                                                        1,
+                                                                        "mmdit_sp_context_split");
+                x       = x_sp_split.local;
+                context = context_sp_split.local;
+            }
+        }
+#endif
+
         sd::ggml_graph_cut::mark_graph_cut(x, "mmdit.prelude", "x");
         sd::ggml_graph_cut::mark_graph_cut(c, "mmdit.prelude", "c");
         if (context != nullptr) {
             sd::ggml_graph_cut::mark_graph_cut(context, "mmdit.prelude", "context");
         }
 
-        x = forward_core_with_concat(ctx, x, c, context, skip_layers);  // (N, H*W, patch_size ** 2 * out_channels)
+        x = forward_core_with_concat(ctx,
+                                     x,
+                                     c,
+                                     context,
+                                     skip_layers
+#ifdef ED_DEBUG_SP_COMM
+                                     ,
+                                     use_sp_mainline,
+                                     context_sp_split.pad,
+                                     x_sp_split.pad
+#endif
+        );  // (N, H*W, patch_size ** 2 * out_channels)
 
         x = DiT::unpatchify_and_crop(ctx->ggml_ctx, x, H, W, patch_size, patch_size, /*patch_last*/ false);  // [N, C, H, W]
 
@@ -916,18 +1455,15 @@ struct MMDiTRunner : public GGMLRunner {
 
             sd::Tensor<float> out;
 
-            int64_t t0   = ggml_time_ms();
             auto out_opt = compute(8,
                                    x,
                                    timesteps,
                                    context,
                                    y);
-            int64_t t1   = ggml_time_ms();
 
             GGML_ASSERT(!out_opt.empty());
             out = std::move(out_opt);
             print_sd_tensor(out);
-            LOG_DEBUG("mmdit test done in %lldms", t1 - t0);
         }
     }
 
