@@ -171,6 +171,9 @@ namespace sd::ggml_graph_cut {
             }
 
             ggml_tensor* node = ggml_graph_node(gf, node_idx);
+            if (node->view_src != nullptr) {
+                work_stack.push(node->view_src);
+            }
             for (int src_idx = 0; src_idx < GGML_MAX_SRC; ++src_idx) {
                 if (node->src[src_idx] != nullptr) {
                     work_stack.push(node->src[src_idx]);
@@ -221,6 +224,115 @@ namespace sd::ggml_graph_cut {
             available_cut_output_node_indices.insert(output_node_index);
         }
         plan.segments.push_back(std::move(segment));
+    }
+
+    static std::vector<Segment> topo_sort_segments(ggml_cgraph* gf,
+                                                   const std::vector<Segment>& segments,
+                                                   const std::unordered_map<const ggml_tensor*, int>& producer_index,
+                                                   const char* log_desc) {
+        if (segments.size() <= 1) {
+            return segments;
+        }
+
+        std::unordered_map<int, size_t> output_node_to_segment;
+        output_node_to_segment.reserve(segments.size());
+        for (size_t seg_idx = 0; seg_idx < segments.size(); ++seg_idx) {
+            for (int output_node_index : segments[seg_idx].output_node_indices) {
+                output_node_to_segment[output_node_index] = seg_idx;
+            }
+        }
+
+        std::vector<std::unordered_set<size_t>> dependencies(segments.size());
+        std::vector<std::vector<size_t>> dependents(segments.size());
+        for (size_t seg_idx = 0; seg_idx < segments.size(); ++seg_idx) {
+            std::stack<int> work_stack;
+            std::unordered_set<int> visited_node_indices;
+            for (int output_node_index : segments[seg_idx].output_node_indices) {
+                work_stack.push(output_node_index);
+            }
+            for (int seed_node_index : segments[seg_idx].seed_node_indices) {
+                work_stack.push(seed_node_index);
+            }
+
+            while (!work_stack.empty()) {
+                const int node_idx = work_stack.top();
+                work_stack.pop();
+                if (node_idx < 0 || node_idx >= ggml_graph_n_nodes(gf)) {
+                    continue;
+                }
+                if (!visited_node_indices.insert(node_idx).second) {
+                    continue;
+                }
+
+                auto cut_segment_it = output_node_to_segment.find(node_idx);
+                if (cut_segment_it != output_node_to_segment.end() &&
+                    cut_segment_it->second != seg_idx) {
+                    dependencies[seg_idx].insert(cut_segment_it->second);
+                    continue;
+                }
+
+                ggml_tensor* node = ggml_graph_node(gf, node_idx);
+                if (node == nullptr) {
+                    continue;
+                }
+                auto push_producer = [&](ggml_tensor* tensor) {
+                    if (tensor == nullptr) {
+                        return;
+                    }
+                    auto producer_it = producer_index.find(tensor);
+                    if (producer_it != producer_index.end()) {
+                        work_stack.push(producer_it->second);
+                    }
+                };
+                push_producer(node->view_src);
+                for (int src_idx = 0; src_idx < GGML_MAX_SRC; ++src_idx) {
+                    push_producer(node->src[src_idx]);
+                }
+            }
+        }
+
+        std::vector<size_t> indegree(segments.size(), 0);
+        for (size_t seg_idx = 0; seg_idx < segments.size(); ++seg_idx) {
+            indegree[seg_idx] = dependencies[seg_idx].size();
+            for (size_t dependency : dependencies[seg_idx]) {
+                dependents[dependency].push_back(seg_idx);
+            }
+        }
+
+        std::vector<Segment> sorted_segments;
+        sorted_segments.reserve(segments.size());
+        std::vector<bool> emitted(segments.size(), false);
+        for (size_t emitted_count = 0; emitted_count < segments.size(); ++emitted_count) {
+            size_t ready = segments.size();
+            for (size_t seg_idx = 0; seg_idx < segments.size(); ++seg_idx) {
+                if (!emitted[seg_idx] && indegree[seg_idx] == 0) {
+                    ready = seg_idx;
+                    break;
+                }
+            }
+
+            if (ready == segments.size()) {
+                if (log_desc != nullptr) {
+                    LOG_WARN("%s graph cut segment dependency cycle detected; keeping remaining segment order",
+                             log_desc);
+                }
+                for (size_t seg_idx = 0; seg_idx < segments.size(); ++seg_idx) {
+                    if (!emitted[seg_idx]) {
+                        sorted_segments.push_back(segments[seg_idx]);
+                    }
+                }
+                return sorted_segments;
+            }
+
+            emitted[ready] = true;
+            sorted_segments.push_back(segments[ready]);
+            for (size_t dependent : dependents[ready]) {
+                GGML_ASSERT(indegree[dependent] > 0);
+                --indegree[dependent];
+            }
+        }
+
+        return sorted_segments;
     }
 
     bool is_graph_cut_tensor(const ggml_tensor* tensor) {
@@ -567,10 +679,11 @@ namespace sd::ggml_graph_cut {
                 return;
             }
             const bool inserted = segment_leaf_tensors.insert(tensor).second;
-            if (inserted) {
-                GGML_ASSERT(segment_graph->n_leafs < segment_graph->size);
-                segment_graph->leafs[segment_graph->n_leafs++] = tensor;
+            if (!inserted) {
+                return;
             }
+            GGML_ASSERT(segment_graph->n_leafs < segment_graph->size);
+            segment_graph->leafs[segment_graph->n_leafs++] = tensor;
             add_segment_leaf(tensor->view_src);
             for (int src_idx = 0; src_idx < GGML_MAX_SRC; ++src_idx) {
                 add_segment_leaf(tensor->src[src_idx]);
@@ -736,6 +849,11 @@ namespace sd::ggml_graph_cut {
                 break;
             }
         }
+
+        grouped_segments = topo_sort_segments(gf,
+                                              grouped_segments,
+                                              producer_index,
+                                              log_desc);
 
         std::unordered_set<int> available_cut_output_node_indices;
         available_cut_output_node_indices.reserve(static_cast<size_t>(n_nodes));

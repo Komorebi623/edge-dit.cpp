@@ -2363,7 +2363,7 @@ protected:
                     }
                     if (input_tensor->view_src != nullptr) {
                         input_tensor->view_src = cache_tensor;
-                        input_tensor->buffer   = nullptr;
+                        input_tensor->buffer   = cache_tensor->buffer;
                         input_tensor->data     = cache_tensor->data == nullptr
                                                      ? nullptr
                                                      : static_cast<void*>(static_cast<char*>(cache_tensor->data) + input_tensor->view_offs);
@@ -2389,7 +2389,7 @@ protected:
             if (node == nullptr || node->view_src == nullptr || node->view_src->data == nullptr) {
                 continue;
             }
-            node->buffer = nullptr;
+            node->buffer = node->view_src->buffer;
             node->data   = static_cast<void*>(static_cast<char*>(node->view_src->data) + node->view_offs);
             node->extra  = node->view_src->extra;
         }

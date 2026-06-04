@@ -1,7 +1,10 @@
 #ifndef __FLUX_HPP__
 #define __FLUX_HPP__
 
+#include <cstdlib>
+#include <inttypes.h>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "dit_models/components/common/common_dit.hpp"
@@ -10,6 +13,9 @@
 #include "dit_models/components/common/rope.hpp"
 #include "edge-dit.h"
 #include "core/runtime/model_loader.h"
+#ifdef ED_DEBUG_SP_COMM
+#include "parallel/sp_parallel.hpp"
+#endif
 
 #define FLUX_GRAPH_SIZE 10240
 
@@ -17,6 +23,500 @@ namespace Flux {
 
     using RMSNorm = dit::RMSNorm;
     using QKNorm  = dit::QKNorm;
+
+#ifdef ED_DEBUG_SP_COMM
+    static inline std::vector<std::string>& debug_sp_output_names() {
+        static thread_local std::vector<std::string> names;
+        return names;
+    }
+
+    static inline void clear_debug_sp_output_names() {
+        debug_sp_output_names().clear();
+    }
+
+    static inline bool flux_sp_enabled(GGMLRunnerContext* ctx) {
+        return ctx != nullptr &&
+               ctx->process_group != nullptr &&
+               ctx->process_group->enabled() &&
+               ctx->process_group->size() > 1;
+    }
+
+    static inline int flux_sp_rank(GGMLRunnerContext* ctx) {
+        return ctx->process_group->rank();
+    }
+
+    static inline int flux_sp_world_size(GGMLRunnerContext* ctx) {
+        return ctx->process_group->size();
+    }
+
+    static inline bool flux_sp_strict_barrier_enabled() {
+        const char* env = std::getenv("ED_FLUX_SP_STRICT_BARRIER");
+        return env != nullptr && env[0] != '\0' && std::string(env) != "0";
+    }
+
+    static inline ggml_tensor*& debug_sp_total_error() {
+        static thread_local ggml_tensor* total = nullptr;
+        return total;
+    }
+
+    static inline std::vector<ggml_tensor*>& debug_sp_error_tensors() {
+        static thread_local std::vector<ggml_tensor*> tensors;
+        return tensors;
+    }
+
+    static inline std::vector<std::string>& debug_sp_error_names() {
+        static thread_local std::vector<std::string> names;
+        return names;
+    }
+
+    static inline void clear_debug_sp_total_error() {
+        debug_sp_total_error() = nullptr;
+        debug_sp_error_tensors().clear();
+        debug_sp_error_names().clear();
+    }
+
+    static inline std::string& debug_sp_mainline_compare_stage() {
+        static thread_local std::string stage;
+        return stage;
+    }
+
+    static inline bool debug_sp_mainline_compare_enabled() {
+        return !debug_sp_mainline_compare_stage().empty();
+    }
+
+    static inline bool& debug_sp_capture_enabled() {
+        static thread_local bool enabled = false;
+        return enabled;
+    }
+
+    class DebugSPCaptureScope {
+    public:
+        DebugSPCaptureScope()
+            : previous_(debug_sp_capture_enabled()) {
+            clear_debug_sp_output_names();
+            clear_debug_sp_total_error();
+            debug_sp_capture_enabled() = true;
+        }
+
+        ~DebugSPCaptureScope() {
+            debug_sp_capture_enabled() = previous_;
+        }
+
+        DebugSPCaptureScope(const DebugSPCaptureScope&)            = delete;
+        DebugSPCaptureScope& operator=(const DebugSPCaptureScope&) = delete;
+
+    private:
+        bool previous_;
+    };
+
+    class DebugSPMainlineCompareScope {
+    public:
+        explicit DebugSPMainlineCompareScope(const std::string& stage)
+            : previous_stage_(debug_sp_mainline_compare_stage()) {
+            clear_debug_sp_output_names();
+            clear_debug_sp_total_error();
+            debug_sp_mainline_compare_stage() = stage;
+        }
+
+        ~DebugSPMainlineCompareScope() {
+            debug_sp_mainline_compare_stage() = previous_stage_;
+        }
+
+        DebugSPMainlineCompareScope(const DebugSPMainlineCompareScope&)            = delete;
+        DebugSPMainlineCompareScope& operator=(const DebugSPMainlineCompareScope&) = delete;
+
+    private:
+        std::string previous_stage_;
+    };
+
+    static inline void register_debug_sp_output(ggml_tensor* tensor) {
+        if (tensor != nullptr && tensor->name[0] != '\0') {
+            debug_sp_output_names().push_back(tensor->name);
+        }
+    }
+
+    static inline void expand_debug_sp_outputs(ggml_context* compute_ctx, ggml_cgraph* gf) {
+        auto& names = debug_sp_output_names();
+        for (const auto& name : names) {
+            if (name.empty()) {
+                continue;
+            }
+            ggml_tensor* tensor = ggml_get_tensor(compute_ctx, name.c_str());
+            if (tensor == nullptr) {
+                LOG_WARN("flux debug SP output not found in graph context: %s", name.c_str());
+                continue;
+            }
+            ggml_build_forward_expand(gf, tensor);
+        }
+        names.clear();
+    }
+
+    static inline ggml_cgraph* build_debug_sp_graph(ggml_context* compute_ctx, size_t graph_size) {
+        ggml_cgraph* gf = ggml_new_graph_custom(compute_ctx, graph_size, false);
+        if (debug_sp_total_error() != nullptr) {
+            ggml_tensor* output = ggml_reshape_1d(compute_ctx, debug_sp_total_error(), 1);
+            ggml_set_name(output, "flux_debug_sp_total_sse");
+            auto& tensors = debug_sp_error_tensors();
+            for (size_t i = 0; i < tensors.size(); ++i) {
+                if (tensors[i] == nullptr) {
+                    continue;
+                }
+                ggml_tensor* err = ggml_reshape_1d(compute_ctx, tensors[i], 1);
+                ggml_set_name(err, ("flux_debug_sp_component_" + std::to_string(i)).c_str());
+                output = ggml_concat(compute_ctx, output, err, 0);
+                ggml_set_name(output, ("flux_debug_sp_sse_vector_" + std::to_string(i)).c_str());
+            }
+            ggml_build_forward_expand(gf, output);
+            debug_sp_total_error() = nullptr;
+            debug_sp_error_tensors().clear();
+        } else {
+            expand_debug_sp_outputs(compute_ctx, gf);
+        }
+        return gf;
+    }
+
+    static inline void accumulate_debug_sp_error(ggml_context* ctx,
+                                                 ggml_tensor* err,
+                                                 const std::string& name) {
+        if (err == nullptr) {
+            return;
+        }
+        debug_sp_error_tensors().push_back(err);
+        debug_sp_error_names().push_back(name);
+        if (debug_sp_total_error() == nullptr) {
+            debug_sp_total_error() = err;
+        } else {
+            debug_sp_total_error() = ggml_add(ctx, debug_sp_total_error(), err);
+        }
+        ggml_set_name(debug_sp_total_error(), (name + "_total").c_str());
+    }
+
+    static inline ggml_tensor* flux_debug_sequence_shard_reference(GGMLRunnerContext* ctx,
+                                                                   ggml_tensor* full,
+                                                                   const std::string& name) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(full != nullptr);
+        auto split = edgedit::parallel::sp_split_sequence(ctx->ggml_ctx,
+                                                          full,
+                                                          flux_sp_rank(ctx),
+                                                          flux_sp_world_size(ctx),
+                                                          1,
+                                                          name + "_seq_ref_split");
+        return split.local;
+    }
+
+    static inline void log_flux_debug_reshape_4d(ggml_tensor* tensor,
+                                                 int64_t ne0,
+                                                 int64_t ne1,
+                                                 int64_t ne2,
+                                                 int64_t ne3,
+                                                 const std::string& name) {
+        if (tensor == nullptr) {
+            LOG_INFO("flux debug reshape_4d %s input=null target=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]",
+                     name.c_str(),
+                     ne0,
+                     ne1,
+                     ne2,
+                     ne3);
+            return;
+        }
+        const int64_t actual = ggml_nelements(tensor);
+        const int64_t target = ne0 * ne1 * ne2 * ne3;
+        LOG_INFO("flux debug reshape_4d %s input=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] actual=%" PRId64 " target=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] expected=%" PRId64,
+                 name.c_str(),
+                 tensor->ne[0],
+                 tensor->ne[1],
+                 tensor->ne[2],
+                 tensor->ne[3],
+                 actual,
+                 ne0,
+                 ne1,
+                 ne2,
+                 ne3,
+                 target);
+    }
+
+    static inline ggml_tensor* flux_debug_head_shard_reference(ggml_context* ctx,
+                                                               ggml_tensor* full,
+                                                               int rank,
+                                                               int world_size,
+                                                               const std::string& name) {
+        const int64_t shard_heads = full->ne[1] / world_size;
+        const size_t offset       = static_cast<size_t>(rank) *
+                              static_cast<size_t>(shard_heads) *
+                              full->nb[1];
+
+        ggml_tensor* ref_view = ggml_view_4d(ctx,
+                                             full,
+                                             full->ne[0],
+                                             shard_heads,
+                                             full->ne[2],
+                                             full->ne[3],
+                                             full->nb[1],
+                                             full->nb[2],
+                                             full->nb[3],
+                                             offset);
+        ggml_set_name(ref_view, (name + "_ref_view").c_str());
+
+        ggml_tensor* ref = ggml_cont(ctx, ref_view);
+        ggml_set_name(ref, (name + "_ref").c_str());
+        return ref;
+    }
+
+    static inline ggml_tensor* flux_debug_sse(ggml_context* ctx,
+                                              ggml_tensor* a,
+                                              ggml_tensor* b,
+                                              const std::string& name) {
+        ggml_tensor* diff = ggml_sub(ctx, a, b);
+        ggml_set_name(diff, (name + "_diff").c_str());
+
+        ggml_tensor* sq = ggml_mul(ctx, diff, diff);
+        ggml_set_name(sq, (name + "_sq").c_str());
+
+        ggml_tensor* err = ggml_sum(ctx, sq);
+        ggml_set_name(err, (name + "_sse").c_str());
+        return err;
+    }
+
+    static inline void mark_flux_debug_compare_tensor(ggml_context* ctx,
+                                                      ggml_tensor* a,
+                                                      ggml_tensor* b,
+                                                      const std::string& name) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(a != nullptr);
+        GGML_ASSERT(b != nullptr);
+        for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+            GGML_ASSERT(a->ne[i] == b->ne[i]);
+        }
+        ggml_tensor* err = flux_debug_sse(ctx, a, b, name);
+        accumulate_debug_sp_error(ctx, err, name);
+    }
+
+    static inline ggml_tensor* flux_sp_materialize_cut(GGMLRunnerContext* ctx,
+                                                       ggml_tensor* x,
+                                                       const std::string& group,
+                                                       const std::string& name) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(x != nullptr);
+
+        x = ggml_cont(ctx->ggml_ctx, x);
+        ggml_set_name(x, (group + "_" + name + "_cont").c_str());
+
+        if (flux_sp_strict_barrier_enabled()) {
+            sd::ggml_graph_cut::mark_graph_cut(x, group, name);
+        }
+        return x;
+    }
+
+    static inline ggml_tensor* flux_sp_attention(GGMLRunnerContext* ctx,
+                                                 ggml_tensor* q,
+                                                 ggml_tensor* k,
+                                                 ggml_tensor* v,
+                                                 ggml_tensor* pe,
+                                                 ggml_tensor* mask,
+                                                 const std::string& name_prefix) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(q != nullptr);
+        GGML_ASSERT(k != nullptr);
+        GGML_ASSERT(v != nullptr);
+        GGML_ASSERT(pe != nullptr);
+
+        // q/k input layout before rope:
+        //   [head_dim, shard_heads, full_seq, batch]
+        // after Rope::apply_rope:
+        //   [head_dim, full_seq, shard_heads, batch]
+        q = Rope::apply_rope(ctx->ggml_ctx, q, pe);
+        k = Rope::apply_rope(ctx->ggml_ctx, k, pe);
+
+        q = flux_sp_materialize_cut(ctx,
+                                    q,
+                                    name_prefix + ".sp_attn_q",
+                                    "q");
+
+        k = flux_sp_materialize_cut(ctx,
+                                    k,
+                                    name_prefix + ".sp_attn_k",
+                                    "k");
+
+        v = flux_sp_materialize_cut(ctx,
+                                    v,
+                                    name_prefix + ".sp_attn_v",
+                                    "v");
+
+        const int64_t n_head = v->ne[1];
+
+        GGML_ASSERT(q->ne[0] == k->ne[0]);
+        GGML_ASSERT(q->ne[1] == k->ne[1]);
+        GGML_ASSERT(q->ne[2] == k->ne[2]);
+        GGML_ASSERT(q->ne[3] == k->ne[3]);
+
+        GGML_ASSERT(v->ne[0] == q->ne[0]);
+        GGML_ASSERT(v->ne[1] == q->ne[2]);
+        GGML_ASSERT(v->ne[2] == q->ne[1]);
+        GGML_ASSERT(v->ne[3] == q->ne[3]);
+        GGML_ASSERT(pe->ne[3] == q->ne[1]);
+
+        if (std::getenv("ED_LOG_SP_ATTENTION_SHAPES") != nullptr) {
+            LOG_DEBUG("flux SP attention %s "
+                      "q=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] "
+                      "k=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] "
+                      "v=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] "
+                      "pe=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] "
+                      "mask=%s n_head=%" PRId64,
+                      name_prefix.c_str(),
+                      q->ne[0],
+                      q->ne[1],
+                      q->ne[2],
+                      q->ne[3],
+                      k->ne[0],
+                      k->ne[1],
+                      k->ne[2],
+                      k->ne[3],
+                      v->ne[0],
+                      v->ne[1],
+                      v->ne[2],
+                      v->ne[3],
+                      pe == nullptr ? 0 : pe->ne[0],
+                      pe == nullptr ? 0 : pe->ne[1],
+                      pe == nullptr ? 0 : pe->ne[2],
+                      pe == nullptr ? 0 : pe->ne[3],
+                      mask == nullptr ? "null" : "set",
+                      n_head);
+        }
+
+        ggml_tensor* attn = ggml_ext_attention_ext(ctx->ggml_ctx,
+                                                   ctx->backend,
+                                                   q,
+                                                   k,
+                                                   v,
+                                                   n_head,
+                                                   mask,
+                                                   true,
+                                                   false);
+        ggml_set_name(attn, (name_prefix + "_attn").c_str());
+        return attn;
+    }
+
+    static inline void mark_flux_debug_seq_to_head_compare(GGMLRunnerContext* ctx,
+                                                           ggml_tensor* tensor,
+                                                           const std::string& name) {
+        if (!debug_sp_capture_enabled()) {
+            return;
+        }
+        if (ctx == nullptr ||
+            tensor == nullptr ||
+            ctx->process_group == nullptr ||
+            !ctx->process_group->enabled()) {
+            return;
+        }
+
+        const int world_size = ctx->process_group->size();
+        if (world_size <= 1) {
+            return;
+        }
+
+        const int rank = ctx->process_group->rank();
+
+        if (rank < 0 || rank >= world_size) {
+            LOG_WARN("flux debug seq_to_head compare skipped: name=%s rank=%d world_size=%d",
+                     name.c_str(),
+                     rank,
+                     world_size);
+            return;
+        }
+        if (tensor->ne[3] != 1) {
+            LOG_WARN("flux debug seq_to_head compare skipped: name=%s batch=%" PRId64,
+                     name.c_str(),
+                     tensor->ne[3]);
+            return;
+        }
+        if (tensor->ne[1] % world_size != 0) {
+            LOG_WARN("flux debug seq_to_head compare skipped: name=%s heads=%" PRId64 " world_size=%d",
+                     name.c_str(),
+                     tensor->ne[1],
+                     world_size);
+            return;
+        }
+
+        const int64_t pad = edgedit::parallel::sp_sequence_padding(tensor->ne[2],
+                                                                   world_size);
+        ggml_tensor* padded = tensor;
+        if (pad > 0) {
+            padded = ggml_pad(ctx->ggml_ctx, tensor, 0, 0, static_cast<int>(pad), 0);
+            ggml_set_name(padded, (name + "_padded").c_str());
+        }
+
+        const int64_t padded_seq = padded->ne[2];
+        const int64_t local_seq  = padded_seq / world_size;
+        ggml_tensor* local_view = ggml_view_4d(ctx->ggml_ctx,
+                                               padded,
+                                               padded->ne[0],
+                                               padded->ne[1],
+                                               local_seq,
+                                               padded->ne[3],
+                                               padded->nb[1],
+                                               padded->nb[2],
+                                               padded->nb[3],
+                                               static_cast<size_t>(rank) *
+                                                   static_cast<size_t>(local_seq) *
+                                                   padded->nb[2]);
+        ggml_set_name(local_view, (name + "_local_view").c_str());
+        ggml_tensor* local = ggml_cont(ctx->ggml_ctx, local_view);
+        ggml_set_name(local, (name + "_local").c_str());
+
+        auto layout = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                      local,
+                                                                      world_size,
+                                                                      name + "_a2a");
+
+        ggml_tensor* ref = flux_debug_head_shard_reference(ctx->ggml_ctx,
+                                                           padded,
+                                                           rank,
+                                                           world_size,
+                                                           name);
+        ggml_tensor* seq_err = flux_debug_sse(ctx->ggml_ctx,
+                                              layout.output,
+                                              ref,
+                                              name + "_cmp");
+        accumulate_debug_sp_error(ctx->ggml_ctx, seq_err, name + "_cmp");
+
+        auto roundtrip = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
+                                                                         layout.output,
+                                                                         world_size,
+                                                                         name + "_back");
+        ggml_tensor* roundtrip_err = flux_debug_sse(ctx->ggml_ctx,
+                                                    roundtrip.output,
+                                                    local,
+                                                    name + "_rt");
+        accumulate_debug_sp_error(ctx->ggml_ctx, roundtrip_err, name + "_rt");
+
+        LOG_DEBUG("flux debug seq_to_head compare marker: name=%s rank=%d world_size=%d full=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] local=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] a2a=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] ref=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] back=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] pad=%" PRId64,
+                  name.c_str(),
+                  rank,
+                  world_size,
+                  tensor->ne[0],
+                  tensor->ne[1],
+                  tensor->ne[2],
+                  tensor->ne[3],
+                  local->ne[0],
+                  local->ne[1],
+                  local->ne[2],
+                  local->ne[3],
+                  layout.output->ne[0],
+                  layout.output->ne[1],
+                  layout.output->ne[2],
+                  layout.output->ne[3],
+                  ref->ne[0],
+                  ref->ne[1],
+                  ref->ne[2],
+                  ref->ne[3],
+                  roundtrip.output->ne[0],
+                  roundtrip.output->ne[1],
+                  roundtrip.output->ne[2],
+                  roundtrip.output->ne[3],
+                  pad);
+    }
+#endif
 
     struct MLPEmbedder : public UnaryBlock {
     public:
@@ -42,6 +542,14 @@ namespace Flux {
     public:
         int64_t num_heads;
 
+#ifdef ED_DEBUG_SP_COMM
+        struct SPQKV {
+            ggml_tensor* q = nullptr;
+            ggml_tensor* k = nullptr;
+            ggml_tensor* v = nullptr;
+        };
+#endif
+
     public:
         SelfAttention(int64_t dim,
                       int64_t num_heads = 8,
@@ -54,7 +562,13 @@ namespace Flux {
             blocks["proj"]   = std::shared_ptr<GGMLBlock>(new Linear(dim, dim, proj_bias));
         }
 
-        std::vector<ggml_tensor*> pre_attention(GGMLRunnerContext* ctx, ggml_tensor* x) {
+        std::vector<ggml_tensor*> pre_attention(GGMLRunnerContext* ctx,
+                                                ggml_tensor* x
+#ifdef ED_DEBUG_SP_COMM
+                                                ,
+                                                const char* debug_seq_to_head_prefix = nullptr
+#endif
+        ) {
             auto qkv_proj = std::dynamic_pointer_cast<Linear>(blocks["qkv"]);
             auto norm     = std::dynamic_pointer_cast<QKNorm>(blocks["norm"]);
 
@@ -66,10 +580,88 @@ namespace Flux {
                                             qkv->nb[0] * head_dim, qkv->nb[1], qkv->nb[2], (qkv->nb[0]) * qkv->ne[0] / 3);
             auto v           = ggml_view_4d(ctx->ggml_ctx, qkv, head_dim, num_heads, qkv->ne[1], qkv->ne[2],
                                             qkv->nb[0] * head_dim, qkv->nb[1], qkv->nb[2], (qkv->nb[0]) * 2 * qkv->ne[0] / 3);
+#ifdef ED_DEBUG_SP_COMM
+            if (debug_seq_to_head_prefix != nullptr && debug_seq_to_head_prefix[0] != '\0') {
+                const std::string prefix(debug_seq_to_head_prefix);
+                mark_flux_debug_seq_to_head_compare(ctx, q, prefix + "_q_seq_to_head");
+                mark_flux_debug_seq_to_head_compare(ctx, k, prefix + "_k_seq_to_head");
+                mark_flux_debug_seq_to_head_compare(ctx, v, prefix + "_v_seq_to_head");
+            }
+#endif
             q                = norm->query_norm(ctx, q);
             k                = norm->key_norm(ctx, k);
             return {q, k, v};
         }
+
+#ifdef ED_DEBUG_SP_COMM
+        SPQKV pre_attention_sp(GGMLRunnerContext* ctx,
+                               ggml_tensor* x_local,
+                               const std::string& name_prefix) {
+            auto qkv_proj = std::dynamic_pointer_cast<Linear>(blocks["qkv"]);
+            auto norm     = std::dynamic_pointer_cast<QKNorm>(blocks["norm"]);
+
+            const int world_size = flux_sp_world_size(ctx);
+
+            ggml_tensor* qkv = qkv_proj->forward(ctx, x_local);
+            int64_t head_dim = qkv->ne[0] / 3 / num_heads;
+
+            ggml_tensor* q = ggml_view_4d(ctx->ggml_ctx,
+                                          qkv,
+                                          head_dim,
+                                          num_heads,
+                                          qkv->ne[1],
+                                          qkv->ne[2],
+                                          qkv->nb[0] * head_dim,
+                                          qkv->nb[1],
+                                          qkv->nb[2],
+                                          0);
+            ggml_tensor* k = ggml_view_4d(ctx->ggml_ctx,
+                                          qkv,
+                                          head_dim,
+                                          num_heads,
+                                          qkv->ne[1],
+                                          qkv->ne[2],
+                                          qkv->nb[0] * head_dim,
+                                          qkv->nb[1],
+                                          qkv->nb[2],
+                                          qkv->nb[0] * qkv->ne[0] / 3);
+            ggml_tensor* v = ggml_view_4d(ctx->ggml_ctx,
+                                          qkv,
+                                          head_dim,
+                                          num_heads,
+                                          qkv->ne[1],
+                                          qkv->ne[2],
+                                          qkv->nb[0] * head_dim,
+                                          qkv->nb[1],
+                                          qkv->nb[2],
+                                          qkv->nb[0] * 2 * qkv->ne[0] / 3);
+
+            q = ggml_cont(ctx->ggml_ctx, q);
+            ggml_set_name(q, (name_prefix + "_q_local").c_str());
+            k = ggml_cont(ctx->ggml_ctx, k);
+            ggml_set_name(k, (name_prefix + "_k_local").c_str());
+            v = ggml_cont(ctx->ggml_ctx, v);
+            ggml_set_name(v, (name_prefix + "_v_local").c_str());
+
+            auto q_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                          q,
+                                                                          world_size,
+                                                                          name_prefix + "_q_seq_to_head");
+            auto k_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                          k,
+                                                                          world_size,
+                                                                          name_prefix + "_k_seq_to_head");
+            auto v_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                          v,
+                                                                          world_size,
+                                                                          name_prefix + "_v_seq_to_head");
+
+            q = norm->query_norm(ctx, q_head.output);
+            k = norm->key_norm(ctx, k_head.output);
+            v = v_head.output;
+            return {q, k, v};
+        }
+#endif
 
         ggml_tensor* post_attention(GGMLRunnerContext* ctx, ggml_tensor* x) {
             auto proj = std::dynamic_pointer_cast<Linear>(blocks["proj"]);
@@ -299,7 +891,12 @@ namespace Flux {
             // prepare image for attention
             auto img_modulated = img_norm1->forward(ctx, img);
             img_modulated      = dit::modulate(ctx->ggml_ctx, img_modulated, img_mod1.shift, img_mod1.scale);
-            auto img_qkv       = img_attn->pre_attention(ctx, img_modulated);  // q,k,v: [N, n_img_token, n_head, d_head]
+#ifdef ED_DEBUG_SP_COMM
+            const char* img_debug_prefix = idx == 0 ? "flux_debug_double0_img" : nullptr;
+            auto img_qkv                 = img_attn->pre_attention(ctx, img_modulated, img_debug_prefix);  // q,k,v: [N, n_img_token, n_head, d_head]
+#else
+            auto img_qkv = img_attn->pre_attention(ctx, img_modulated);  // q,k,v: [N, n_img_token, n_head, d_head]
+#endif
             auto img_q         = img_qkv[0];
             auto img_k         = img_qkv[1];
             auto img_v         = img_qkv[2];
@@ -307,7 +904,12 @@ namespace Flux {
             // prepare txt for attention
             auto txt_modulated = txt_norm1->forward(ctx, txt);
             txt_modulated      = dit::modulate(ctx->ggml_ctx, txt_modulated, txt_mod1.shift, txt_mod1.scale);
-            auto txt_qkv       = txt_attn->pre_attention(ctx, txt_modulated);  // q,k,v: [N, n_txt_token, n_head, d_head]
+#ifdef ED_DEBUG_SP_COMM
+            const char* txt_debug_prefix = idx == 0 ? "flux_debug_double0_txt" : nullptr;
+            auto txt_qkv                 = txt_attn->pre_attention(ctx, txt_modulated, txt_debug_prefix);  // q,k,v: [N, n_txt_token, n_head, d_head]
+#else
+            auto txt_qkv = txt_attn->pre_attention(ctx, txt_modulated);  // q,k,v: [N, n_txt_token, n_head, d_head]
+#endif
             auto txt_q         = txt_qkv[0];
             auto txt_k         = txt_qkv[1];
             auto txt_v         = txt_qkv[2];
@@ -350,6 +952,538 @@ namespace Flux {
 
             return {img, txt};
         }
+
+#ifdef ED_DEBUG_SP_COMM
+        std::pair<ggml_tensor*, ggml_tensor*> forward_sp(GGMLRunnerContext* ctx,
+                                                         ggml_tensor* img,
+                                                         ggml_tensor* txt,
+                                                         ggml_tensor* vec,
+                                                         ggml_tensor* pe,
+                                                         ggml_tensor* mask                   = nullptr,
+                                                         std::vector<ModulationOut> img_mods = {},
+                                                         std::vector<ModulationOut> txt_mods = {},
+                                                         ggml_tensor* debug_img_ref          = nullptr,
+                                                         ggml_tensor* debug_txt_ref          = nullptr) {
+            auto img_norm1 = std::dynamic_pointer_cast<LayerNorm>(blocks["img_norm1"]);
+            auto img_attn  = std::dynamic_pointer_cast<SelfAttention>(blocks["img_attn"]);
+
+            auto img_norm2 = std::dynamic_pointer_cast<LayerNorm>(blocks["img_norm2"]);
+            auto img_mlp   = std::dynamic_pointer_cast<UnaryBlock>(blocks["img_mlp"]);
+
+            auto txt_norm1 = std::dynamic_pointer_cast<LayerNorm>(blocks["txt_norm1"]);
+            auto txt_attn  = std::dynamic_pointer_cast<SelfAttention>(blocks["txt_attn"]);
+
+            auto txt_norm2 = std::dynamic_pointer_cast<LayerNorm>(blocks["txt_norm2"]);
+            auto txt_mlp   = std::dynamic_pointer_cast<UnaryBlock>(blocks["txt_mlp"]);
+
+            if (img_mods.empty()) {
+                if (prune_mod) {
+                    img_mods = get_distil_img_mod(ctx, vec);
+                } else {
+                    auto img_mod = std::dynamic_pointer_cast<Modulation>(blocks["img_mod"]);
+                    img_mods     = img_mod->forward(ctx, vec);
+                }
+            }
+            ModulationOut img_mod1 = img_mods[0];
+            ModulationOut img_mod2 = img_mods[1];
+            if (txt_mods.empty()) {
+                if (prune_mod) {
+                    txt_mods = get_distil_txt_mod(ctx, vec);
+                } else {
+                    auto txt_mod = std::dynamic_pointer_cast<Modulation>(blocks["txt_mod"]);
+                    txt_mods     = txt_mod->forward(ctx, vec);
+                }
+            }
+            ModulationOut txt_mod1 = txt_mods[0];
+            ModulationOut txt_mod2 = txt_mods[1];
+
+            const std::string prefix = "flux_double" + std::to_string(idx);
+            const int world_size     = flux_sp_world_size(ctx);
+            const std::string debug_stage = debug_sp_mainline_compare_stage();
+            const std::string debug_inner_prefix = "double_inner";
+            const bool debug_inner    = debug_img_ref != nullptr &&
+                                     debug_txt_ref != nullptr &&
+                                     (debug_stage == debug_inner_prefix ||
+                                      debug_stage.rfind(debug_inner_prefix + "_", 0) == 0);
+            std::string debug_inner_stop;
+            if (debug_inner) {
+                if (debug_stage.size() > debug_inner_prefix.size() + 1) {
+                    debug_inner_stop = debug_stage.substr(debug_inner_prefix.size() + 1);
+                } else {
+                    const char* stop_env = std::getenv("ED_FLUX_SP_COMPARE_INNER_STOP");
+                    if (stop_env != nullptr && stop_env[0] != '\0') {
+                        debug_inner_stop = stop_env;
+                    }
+                }
+            }
+            auto debug_inner_should_stop = [&](const char* phase) {
+                return debug_inner && debug_inner_stop == phase;
+            };
+
+            auto debug_compare_sequence = [&](ggml_tensor* local,
+                                              ggml_tensor* full,
+                                              const std::string& name) {
+                if (!debug_inner) {
+                    return;
+                }
+                ggml_tensor* ref = flux_debug_sequence_shard_reference(ctx, full, name);
+                mark_flux_debug_compare_tensor(ctx->ggml_ctx, local, ref, name);
+            };
+
+            auto debug_compare_head = [&](ggml_tensor* head_local,
+                                          ggml_tensor* full,
+                                          const std::string& name) {
+                if (!debug_inner) {
+                    return;
+                }
+                ggml_tensor* ref = flux_debug_head_shard_reference(ctx->ggml_ctx,
+                                                                   full,
+                                                                   flux_sp_rank(ctx),
+                                                                   world_size,
+                                                                   name);
+                mark_flux_debug_compare_tensor(ctx->ggml_ctx, head_local, ref, name);
+            };
+
+            if (debug_inner) {
+                LOG_INFO("flux debug double_inner enter block=%d stop=%s img=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] txt=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] img_ref=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] txt_ref=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]",
+                         idx,
+                         debug_inner_stop.c_str(),
+                         img->ne[0],
+                         img->ne[1],
+                         img->ne[2],
+                         img->ne[3],
+                         txt->ne[0],
+                         txt->ne[1],
+                         txt->ne[2],
+                         txt->ne[3],
+                         debug_img_ref->ne[0],
+                         debug_img_ref->ne[1],
+                         debug_img_ref->ne[2],
+                         debug_img_ref->ne[3],
+                         debug_txt_ref->ne[0],
+                         debug_txt_ref->ne[1],
+                         debug_txt_ref->ne[2],
+                         debug_txt_ref->ne[3]);
+                debug_compare_sequence(img, debug_img_ref, prefix + "_inner_img_input");
+                debug_compare_sequence(txt, debug_txt_ref, prefix + "_inner_txt_input");
+                if (debug_inner_should_stop("input")) {
+                    LOG_INFO("flux debug double_inner stop block=%d phase=input", idx);
+                    return {img, txt};
+                }
+            }
+
+            ggml_tensor* img_modulated = img_norm1->forward(ctx, img);
+            img_modulated              = dit::modulate(ctx->ggml_ctx, img_modulated, img_mod1.shift, img_mod1.scale);
+            ggml_tensor* debug_img_modulated_ref = nullptr;
+            if (debug_inner) {
+                debug_img_modulated_ref = img_norm1->forward(ctx, debug_img_ref);
+                debug_img_modulated_ref = dit::modulate(ctx->ggml_ctx,
+                                                        debug_img_modulated_ref,
+                                                        img_mod1.shift,
+                                                        img_mod1.scale);
+                ggml_set_name(debug_img_modulated_ref, (prefix + "_debug_img_modulated_ref").c_str());
+                debug_compare_sequence(img_modulated,
+                                       debug_img_modulated_ref,
+                                       prefix + "_inner_img_modulated");
+                if (debug_inner_should_stop("img_mod")) {
+                    return {img, txt};
+                }
+            }
+            auto img_qkv               = img_attn->pre_attention_sp(ctx, img_modulated, prefix + "_img");
+            std::vector<ggml_tensor*> debug_img_qkv_ref;
+            if (debug_inner) {
+                debug_img_qkv_ref = img_attn->pre_attention(ctx, debug_img_modulated_ref);
+                debug_compare_head(img_qkv.q, debug_img_qkv_ref[0], prefix + "_inner_img_q");
+                debug_compare_head(img_qkv.k, debug_img_qkv_ref[1], prefix + "_inner_img_k");
+                debug_compare_head(img_qkv.v, debug_img_qkv_ref[2], prefix + "_inner_img_v");
+            }
+
+            ggml_tensor* txt_modulated = txt_norm1->forward(ctx, txt);
+            txt_modulated              = dit::modulate(ctx->ggml_ctx, txt_modulated, txt_mod1.shift, txt_mod1.scale);
+            ggml_tensor* debug_txt_modulated_ref = nullptr;
+            if (debug_inner) {
+                debug_txt_modulated_ref = txt_norm1->forward(ctx, debug_txt_ref);
+                debug_txt_modulated_ref = dit::modulate(ctx->ggml_ctx,
+                                                        debug_txt_modulated_ref,
+                                                        txt_mod1.shift,
+                                                        txt_mod1.scale);
+                ggml_set_name(debug_txt_modulated_ref, (prefix + "_debug_txt_modulated_ref").c_str());
+                debug_compare_sequence(txt_modulated,
+                                       debug_txt_modulated_ref,
+                                       prefix + "_inner_txt_modulated");
+                if (debug_inner_should_stop("txt_mod") ||
+                    debug_inner_should_stop("mod")) {
+                    return {img, txt};
+                }
+            }
+            auto txt_qkv               = txt_attn->pre_attention_sp(ctx, txt_modulated, prefix + "_txt");
+            std::vector<ggml_tensor*> debug_txt_qkv_ref;
+            if (debug_inner) {
+                debug_txt_qkv_ref = txt_attn->pre_attention(ctx, debug_txt_modulated_ref);
+                debug_compare_head(txt_qkv.q, debug_txt_qkv_ref[0], prefix + "_inner_txt_q");
+                debug_compare_head(txt_qkv.k, debug_txt_qkv_ref[1], prefix + "_inner_txt_k");
+                debug_compare_head(txt_qkv.v, debug_txt_qkv_ref[2], prefix + "_inner_txt_v");
+            }
+
+            ggml_tensor* q = ggml_concat(ctx->ggml_ctx, txt_qkv.q, img_qkv.q, 2);
+            ggml_tensor* k = ggml_concat(ctx->ggml_ctx, txt_qkv.k, img_qkv.k, 2);
+            ggml_tensor* v = ggml_concat(ctx->ggml_ctx, txt_qkv.v, img_qkv.v, 2);
+            q              = ggml_cont(ctx->ggml_ctx, q);
+            ggml_set_name(q, (prefix + "_q_attn").c_str());
+            k = ggml_cont(ctx->ggml_ctx, k);
+            ggml_set_name(k, (prefix + "_k_attn").c_str());
+            v = ggml_cont(ctx->ggml_ctx, v);
+            ggml_set_name(v, (prefix + "_v_attn").c_str());
+
+            ggml_tensor* debug_q_ref    = nullptr;
+            ggml_tensor* debug_k_ref    = nullptr;
+            ggml_tensor* debug_v_ref    = nullptr;
+            ggml_tensor* debug_attn_ref = nullptr;
+            if (debug_inner) {
+                debug_q_ref = ggml_concat(ctx->ggml_ctx, debug_txt_qkv_ref[0], debug_img_qkv_ref[0], 2);
+                ggml_set_name(debug_q_ref, (prefix + "_debug_q_ref").c_str());
+                debug_k_ref = ggml_concat(ctx->ggml_ctx, debug_txt_qkv_ref[1], debug_img_qkv_ref[1], 2);
+                ggml_set_name(debug_k_ref, (prefix + "_debug_k_ref").c_str());
+                debug_v_ref = ggml_concat(ctx->ggml_ctx, debug_txt_qkv_ref[2], debug_img_qkv_ref[2], 2);
+                ggml_set_name(debug_v_ref, (prefix + "_debug_v_ref").c_str());
+
+                debug_compare_head(q, debug_q_ref, prefix + "_inner_q_attn");
+                debug_compare_head(k, debug_k_ref, prefix + "_inner_k_attn");
+                debug_compare_head(v, debug_v_ref, prefix + "_inner_v_attn");
+                if (debug_inner_should_stop("qkv")) {
+                    return std::pair<ggml_tensor*, ggml_tensor*>{img, txt};
+                }
+
+                debug_attn_ref = Rope::attention(ctx, debug_q_ref, debug_k_ref, debug_v_ref, pe, mask);
+                debug_attn_ref = ggml_cont(ctx->ggml_ctx, debug_attn_ref);
+                ggml_set_name(debug_attn_ref, (prefix + "_debug_attn_ref").c_str());
+            }
+
+            ggml_tensor* attn = flux_sp_attention(ctx, q, k, v, pe, mask, prefix);
+            sd::ggml_graph_cut::mark_graph_cut(attn, prefix + ".sp_attention", "attn");
+
+            const int64_t head_dim     = q->ne[0];
+            const int64_t shard_heads  = q->ne[1];
+            const int64_t txt_full_seq = txt_qkv.q->ne[2];
+            const int64_t img_full_seq = img_qkv.q->ne[2];
+            const int64_t total_seq    = txt_full_seq + img_full_seq;
+
+            if (debug_inner) {
+                log_flux_debug_reshape_4d(debug_attn_ref,
+                                          head_dim,
+                                          img_attn->num_heads,
+                                          total_seq,
+                                          debug_attn_ref->ne[2],
+                                          prefix + "_debug_attn_ref_4d");
+                ggml_tensor* debug_attn_ref_4d = ggml_reshape_4d(ctx->ggml_ctx,
+                                                                  debug_attn_ref,
+                                                                  head_dim,
+                                                                  img_attn->num_heads,
+                                                                  total_seq,
+                                                                  debug_attn_ref->ne[2]);
+                ggml_set_name(debug_attn_ref_4d, (prefix + "_debug_attn_ref_4d").c_str());
+                ggml_tensor* debug_attn_ref_head = flux_debug_head_shard_reference(ctx->ggml_ctx,
+                                                                                   debug_attn_ref_4d,
+                                                                                   flux_sp_rank(ctx),
+                                                                                   world_size,
+                                                                                   prefix + "_inner_attn");
+                ggml_tensor* debug_attn_ref_flat = ggml_reshape_3d(ctx->ggml_ctx,
+                                                                    debug_attn_ref_head,
+                                                                    head_dim * shard_heads,
+                                                                    total_seq,
+                                                                    debug_attn_ref_head->ne[3]);
+                ggml_set_name(debug_attn_ref_flat, (prefix + "_debug_attn_ref_flat").c_str());
+                mark_flux_debug_compare_tensor(ctx->ggml_ctx,
+                                               attn,
+                                               debug_attn_ref_flat,
+                                               prefix + "_inner_attn");
+                if (debug_inner_should_stop("attn")) {
+                    return std::pair<ggml_tensor*, ggml_tensor*>{img, txt};
+                }
+            }
+
+            if (debug_inner) {
+                log_flux_debug_reshape_4d(attn,
+                                          head_dim,
+                                          shard_heads,
+                                          total_seq,
+                                          attn->ne[2],
+                                          prefix + "_attn_4d");
+            }
+            ggml_tensor* attn_4d = ggml_reshape_4d(ctx->ggml_ctx,
+                                                   attn,
+                                                   head_dim,
+                                                   shard_heads,
+                                                   total_seq,
+                                                   attn->ne[2]);
+            ggml_set_name(attn_4d, (prefix + "_attn_4d").c_str());
+
+            ggml_tensor* debug_txt_attn_out_ref = nullptr;
+            ggml_tensor* debug_img_attn_out_ref = nullptr;
+            if (debug_inner) {
+                debug_txt_attn_out_ref = ggml_view_3d(ctx->ggml_ctx,
+                                                       debug_attn_ref,
+                                                       debug_attn_ref->ne[0],
+                                                       txt_full_seq,
+                                                       debug_attn_ref->ne[2],
+                                                       debug_attn_ref->nb[1],
+                                                       debug_attn_ref->nb[2],
+                                                       0);
+                debug_txt_attn_out_ref = ggml_cont(ctx->ggml_ctx, debug_txt_attn_out_ref);
+                ggml_set_name(debug_txt_attn_out_ref, (prefix + "_debug_txt_attn_out_ref").c_str());
+
+                debug_img_attn_out_ref = ggml_view_3d(ctx->ggml_ctx,
+                                                       debug_attn_ref,
+                                                       debug_attn_ref->ne[0],
+                                                       img_full_seq,
+                                                       debug_attn_ref->ne[2],
+                                                       debug_attn_ref->nb[1],
+                                                       debug_attn_ref->nb[2],
+                                                       static_cast<size_t>(txt_full_seq) * debug_attn_ref->nb[1]);
+                debug_img_attn_out_ref = ggml_cont(ctx->ggml_ctx, debug_img_attn_out_ref);
+                ggml_set_name(debug_img_attn_out_ref, (prefix + "_debug_img_attn_out_ref").c_str());
+            }
+
+            ggml_tensor* txt_attn_head = ggml_view_4d(ctx->ggml_ctx,
+                                                      attn_4d,
+                                                      head_dim,
+                                                      shard_heads,
+                                                      txt_full_seq,
+                                                      attn_4d->ne[3],
+                                                      attn_4d->nb[1],
+                                                      attn_4d->nb[2],
+                                                      attn_4d->nb[3],
+                                                      0);
+            txt_attn_head = ggml_cont(ctx->ggml_ctx, txt_attn_head);
+            ggml_set_name(txt_attn_head, (prefix + "_txt_attn_head").c_str());
+            if (debug_inner) {
+                log_flux_debug_reshape_4d(debug_txt_attn_out_ref,
+                                          head_dim,
+                                          txt_attn->num_heads,
+                                          txt_full_seq,
+                                          debug_txt_attn_out_ref->ne[2],
+                                          prefix + "_debug_txt_attn_ref_4d");
+                ggml_tensor* debug_txt_attn_ref_4d = ggml_reshape_4d(ctx->ggml_ctx,
+                                                                     debug_txt_attn_out_ref,
+                                                                     head_dim,
+                                                                     txt_attn->num_heads,
+                                                                     txt_full_seq,
+                                                                     debug_txt_attn_out_ref->ne[2]);
+                ggml_set_name(debug_txt_attn_ref_4d, (prefix + "_debug_txt_attn_ref_4d").c_str());
+                debug_compare_head(txt_attn_head,
+                                   debug_txt_attn_ref_4d,
+                                   prefix + "_inner_txt_attn_head");
+            }
+
+            ggml_tensor* img_attn_head = ggml_view_4d(ctx->ggml_ctx,
+                                                      attn_4d,
+                                                      head_dim,
+                                                      shard_heads,
+                                                      img_full_seq,
+                                                      attn_4d->ne[3],
+                                                      attn_4d->nb[1],
+                                                      attn_4d->nb[2],
+                                                      attn_4d->nb[3],
+                                                      static_cast<size_t>(txt_full_seq) * attn_4d->nb[2]);
+            img_attn_head = ggml_cont(ctx->ggml_ctx, img_attn_head);
+            ggml_set_name(img_attn_head, (prefix + "_img_attn_head").c_str());
+            if (debug_inner) {
+                log_flux_debug_reshape_4d(debug_img_attn_out_ref,
+                                          head_dim,
+                                          img_attn->num_heads,
+                                          img_full_seq,
+                                          debug_img_attn_out_ref->ne[2],
+                                          prefix + "_debug_img_attn_ref_4d");
+                ggml_tensor* debug_img_attn_ref_4d = ggml_reshape_4d(ctx->ggml_ctx,
+                                                                     debug_img_attn_out_ref,
+                                                                     head_dim,
+                                                                     img_attn->num_heads,
+                                                                     img_full_seq,
+                                                                     debug_img_attn_out_ref->ne[2]);
+                ggml_set_name(debug_img_attn_ref_4d, (prefix + "_debug_img_attn_ref_4d").c_str());
+                debug_compare_head(img_attn_head,
+                                   debug_img_attn_ref_4d,
+                                   prefix + "_inner_img_attn_head");
+                if (debug_inner_should_stop("attn_head")) {
+                    return std::pair<ggml_tensor*, ggml_tensor*>{img, txt};
+                }
+            }
+
+            auto txt_attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
+                                                                                  txt_attn_head,
+                                                                                  world_size,
+                                                                                  prefix + "_txt_attn_head_to_seq");
+            auto img_attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
+                                                                                  img_attn_head,
+                                                                                  world_size,
+                                                                                  prefix + "_img_attn_head_to_seq");
+
+            ggml_tensor* txt_attn_out = ggml_reshape_3d(ctx->ggml_ctx,
+                                                        txt_attn_local.output,
+                                                        head_dim * shard_heads * world_size,
+                                                        txt_attn_local.output->ne[2],
+                                                        txt_attn_local.output->ne[3]);
+            ggml_set_name(txt_attn_out, (prefix + "_txt_attn_out").c_str());
+            if (debug_inner) {
+                debug_compare_sequence(txt_attn_out,
+                                       debug_txt_attn_out_ref,
+                                       prefix + "_inner_txt_attn_out");
+            }
+
+            ggml_tensor* img_attn_out = ggml_reshape_3d(ctx->ggml_ctx,
+                                                        img_attn_local.output,
+                                                        head_dim * shard_heads * world_size,
+                                                        img_attn_local.output->ne[2],
+                                                        img_attn_local.output->ne[3]);
+            ggml_set_name(img_attn_out, (prefix + "_img_attn_out").c_str());
+            if (debug_inner) {
+                debug_compare_sequence(img_attn_out,
+                                       debug_img_attn_out_ref,
+                                       prefix + "_inner_img_attn_out");
+                if (debug_inner_should_stop("attn_out")) {
+                    return std::pair<ggml_tensor*, ggml_tensor*>{img, txt};
+                }
+            }
+
+            ggml_tensor* img_post_attn = img_attn->post_attention(ctx, img_attn_out);
+            ggml_set_name(img_post_attn, (prefix + "_img_post_attn").c_str());
+            ggml_tensor* debug_img_post_attn_ref = nullptr;
+            if (debug_inner) {
+                debug_img_post_attn_ref = img_attn->post_attention(ctx, debug_img_attn_out_ref);
+                ggml_set_name(debug_img_post_attn_ref, (prefix + "_debug_img_post_attn_ref").c_str());
+                debug_compare_sequence(img_post_attn,
+                                       debug_img_post_attn_ref,
+                                       prefix + "_inner_img_post_attn");
+            }
+
+            img = ggml_add(ctx->ggml_ctx, img, ggml_mul(ctx->ggml_ctx, img_post_attn, img_mod1.gate));
+            ggml_set_name(img, (prefix + "_img_after_attn").c_str());
+            ggml_tensor* debug_img_after_attn_ref = nullptr;
+            if (debug_inner) {
+                debug_img_after_attn_ref = ggml_add(ctx->ggml_ctx,
+                                                    debug_img_ref,
+                                                    ggml_mul(ctx->ggml_ctx,
+                                                             debug_img_post_attn_ref,
+                                                             img_mod1.gate));
+                ggml_set_name(debug_img_after_attn_ref, (prefix + "_debug_img_after_attn_ref").c_str());
+                debug_compare_sequence(img,
+                                       debug_img_after_attn_ref,
+                                       prefix + "_inner_img_after_attn");
+            }
+
+            ggml_tensor* img_mlp_in = dit::modulate(ctx->ggml_ctx,
+                                                    img_norm2->forward(ctx, img),
+                                                    img_mod2.shift,
+                                                    img_mod2.scale);
+            ggml_set_name(img_mlp_in, (prefix + "_img_mlp_in").c_str());
+            ggml_tensor* debug_img_mlp_in_ref = nullptr;
+            if (debug_inner) {
+                debug_img_mlp_in_ref = dit::modulate(ctx->ggml_ctx,
+                                                     img_norm2->forward(ctx, debug_img_after_attn_ref),
+                                                     img_mod2.shift,
+                                                     img_mod2.scale);
+                ggml_set_name(debug_img_mlp_in_ref, (prefix + "_debug_img_mlp_in_ref").c_str());
+                debug_compare_sequence(img_mlp_in,
+                                       debug_img_mlp_in_ref,
+                                       prefix + "_inner_img_mlp_in");
+            }
+
+            auto img_mlp_out = img_mlp->forward(ctx, img_mlp_in);
+            ggml_set_name(img_mlp_out, (prefix + "_img_mlp_out").c_str());
+            ggml_tensor* debug_img_mlp_out_ref = nullptr;
+            if (debug_inner) {
+                debug_img_mlp_out_ref = img_mlp->forward(ctx, debug_img_mlp_in_ref);
+                ggml_set_name(debug_img_mlp_out_ref, (prefix + "_debug_img_mlp_out_ref").c_str());
+                debug_compare_sequence(img_mlp_out,
+                                       debug_img_mlp_out_ref,
+                                       prefix + "_inner_img_mlp_out");
+            }
+
+            img = ggml_add(ctx->ggml_ctx, img, ggml_mul(ctx->ggml_ctx, img_mlp_out, img_mod2.gate));
+            ggml_set_name(img, (prefix + "_img_after_mlp").c_str());
+            if (debug_inner) {
+                ggml_tensor* debug_img_after_mlp_ref = ggml_add(ctx->ggml_ctx,
+                                                                debug_img_after_attn_ref,
+                                                                ggml_mul(ctx->ggml_ctx,
+                                                                         debug_img_mlp_out_ref,
+                                                                         img_mod2.gate));
+                ggml_set_name(debug_img_after_mlp_ref, (prefix + "_debug_img_after_mlp_ref").c_str());
+                debug_compare_sequence(img,
+                                       debug_img_after_mlp_ref,
+                                       prefix + "_inner_img_after_mlp");
+            }
+
+            ggml_tensor* txt_post_attn = txt_attn->post_attention(ctx, txt_attn_out);
+            ggml_set_name(txt_post_attn, (prefix + "_txt_post_attn").c_str());
+            ggml_tensor* debug_txt_post_attn_ref = nullptr;
+            if (debug_inner) {
+                debug_txt_post_attn_ref = txt_attn->post_attention(ctx, debug_txt_attn_out_ref);
+                ggml_set_name(debug_txt_post_attn_ref, (prefix + "_debug_txt_post_attn_ref").c_str());
+                debug_compare_sequence(txt_post_attn,
+                                       debug_txt_post_attn_ref,
+                                       prefix + "_inner_txt_post_attn");
+            }
+
+            txt = ggml_add(ctx->ggml_ctx, txt, ggml_mul(ctx->ggml_ctx, txt_post_attn, txt_mod1.gate));
+            ggml_set_name(txt, (prefix + "_txt_after_attn").c_str());
+            ggml_tensor* debug_txt_after_attn_ref = nullptr;
+            if (debug_inner) {
+                debug_txt_after_attn_ref = ggml_add(ctx->ggml_ctx,
+                                                    debug_txt_ref,
+                                                    ggml_mul(ctx->ggml_ctx,
+                                                             debug_txt_post_attn_ref,
+                                                             txt_mod1.gate));
+                ggml_set_name(debug_txt_after_attn_ref, (prefix + "_debug_txt_after_attn_ref").c_str());
+                debug_compare_sequence(txt,
+                                       debug_txt_after_attn_ref,
+                                       prefix + "_inner_txt_after_attn");
+            }
+
+            ggml_tensor* txt_mlp_in = dit::modulate(ctx->ggml_ctx,
+                                                    txt_norm2->forward(ctx, txt),
+                                                    txt_mod2.shift,
+                                                    txt_mod2.scale);
+            ggml_set_name(txt_mlp_in, (prefix + "_txt_mlp_in").c_str());
+            ggml_tensor* debug_txt_mlp_in_ref = nullptr;
+            if (debug_inner) {
+                debug_txt_mlp_in_ref = dit::modulate(ctx->ggml_ctx,
+                                                     txt_norm2->forward(ctx, debug_txt_after_attn_ref),
+                                                     txt_mod2.shift,
+                                                     txt_mod2.scale);
+                ggml_set_name(debug_txt_mlp_in_ref, (prefix + "_debug_txt_mlp_in_ref").c_str());
+                debug_compare_sequence(txt_mlp_in,
+                                       debug_txt_mlp_in_ref,
+                                       prefix + "_inner_txt_mlp_in");
+            }
+
+            auto txt_mlp_out = txt_mlp->forward(ctx, txt_mlp_in);
+            ggml_set_name(txt_mlp_out, (prefix + "_txt_mlp_out").c_str());
+            ggml_tensor* debug_txt_mlp_out_ref = nullptr;
+            if (debug_inner) {
+                debug_txt_mlp_out_ref = txt_mlp->forward(ctx, debug_txt_mlp_in_ref);
+                ggml_set_name(debug_txt_mlp_out_ref, (prefix + "_debug_txt_mlp_out_ref").c_str());
+                debug_compare_sequence(txt_mlp_out,
+                                       debug_txt_mlp_out_ref,
+                                       prefix + "_inner_txt_mlp_out");
+            }
+
+            txt = ggml_add(ctx->ggml_ctx, txt, ggml_mul(ctx->ggml_ctx, txt_mlp_out, txt_mod2.gate));
+            ggml_set_name(txt, (prefix + "_txt_after_mlp").c_str());
+            if (debug_inner) {
+                ggml_tensor* debug_txt_after_mlp_ref = ggml_add(ctx->ggml_ctx,
+                                                                debug_txt_after_attn_ref,
+                                                                ggml_mul(ctx->ggml_ctx,
+                                                                         debug_txt_mlp_out_ref,
+                                                                         txt_mod2.gate));
+                ggml_set_name(debug_txt_after_mlp_ref, (prefix + "_debug_txt_after_mlp_ref").c_str());
+                debug_compare_sequence(txt,
+                                       debug_txt_after_mlp_ref,
+                                       prefix + "_inner_txt_after_mlp");
+            }
+
+            return {img, txt};
+        }
+#endif
     };
 
     struct SingleStreamBlock : public GGMLBlock {
@@ -459,6 +1593,113 @@ namespace Flux {
             output = ggml_add(ctx->ggml_ctx, x, ggml_mul(ctx->ggml_ctx, output, mod.gate));
             return output;
         }
+
+#ifdef ED_DEBUG_SP_COMM
+        ggml_tensor* forward_sp(GGMLRunnerContext* ctx,
+                                ggml_tensor* x,
+                                ggml_tensor* vec,
+                                ggml_tensor* pe,
+                                ggml_tensor* mask               = nullptr,
+                                std::vector<ModulationOut> mods = {}) {
+            auto linear1  = std::dynamic_pointer_cast<Linear>(blocks["linear1"]);
+            auto linear2  = std::dynamic_pointer_cast<Linear>(blocks["linear2"]);
+            auto norm     = std::dynamic_pointer_cast<QKNorm>(blocks["norm"]);
+            auto pre_norm = std::dynamic_pointer_cast<LayerNorm>(blocks["pre_norm"]);
+
+            ModulationOut mod;
+            if (!mods.empty()) {
+                mod = mods[0];
+            } else {
+                if (prune_mod) {
+                    mod = get_distil_mod(ctx, vec);
+                } else {
+                    auto modulation = std::dynamic_pointer_cast<Modulation>(blocks["modulation"]);
+
+                    mod = modulation->forward(ctx, vec)[0];
+                }
+            }
+
+            const int world_size   = flux_sp_world_size(ctx);
+            const int64_t head_dim = hidden_size / num_heads;
+            const std::string prefix = "flux_single" + std::to_string(idx);
+
+            auto x_mod   = dit::modulate(ctx->ggml_ctx, pre_norm->forward(ctx, x), mod.shift, mod.scale);
+            auto qkv_mlp = linear1->forward(ctx, x_mod);
+
+            auto q = ggml_view_4d(ctx->ggml_ctx, qkv_mlp, head_dim, num_heads, qkv_mlp->ne[1], qkv_mlp->ne[2],
+                                  qkv_mlp->nb[0] * head_dim, qkv_mlp->nb[1], qkv_mlp->nb[2], 0);
+            auto k = ggml_view_4d(ctx->ggml_ctx, qkv_mlp, head_dim, num_heads, qkv_mlp->ne[1], qkv_mlp->ne[2],
+                                  qkv_mlp->nb[0] * head_dim, qkv_mlp->nb[1], qkv_mlp->nb[2], qkv_mlp->nb[0] * hidden_size);
+            auto v = ggml_view_4d(ctx->ggml_ctx, qkv_mlp, head_dim, num_heads, qkv_mlp->ne[1], qkv_mlp->ne[2],
+                                  qkv_mlp->nb[0] * head_dim, qkv_mlp->nb[1], qkv_mlp->nb[2], qkv_mlp->nb[0] * 2 * hidden_size);
+
+            q = ggml_cont(ctx->ggml_ctx, q);
+            ggml_set_name(q, (prefix + "_q_local").c_str());
+            k = ggml_cont(ctx->ggml_ctx, k);
+            ggml_set_name(k, (prefix + "_k_local").c_str());
+            v = ggml_cont(ctx->ggml_ctx, v);
+            ggml_set_name(v, (prefix + "_v_local").c_str());
+
+            auto q_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                          q,
+                                                                          world_size,
+                                                                          prefix + "_q_seq_to_head");
+            auto k_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                          k,
+                                                                          world_size,
+                                                                          prefix + "_k_seq_to_head");
+            auto v_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                          v,
+                                                                          world_size,
+                                                                          prefix + "_v_seq_to_head");
+
+            q         = norm->query_norm(ctx, q_head.output);
+            k         = norm->key_norm(ctx, k_head.output);
+            v         = v_head.output;
+            q         = ggml_cont(ctx->ggml_ctx, q);
+            ggml_set_name(q, (prefix + "_q_attn").c_str());
+            k = ggml_cont(ctx->ggml_ctx, k);
+            ggml_set_name(k, (prefix + "_k_attn").c_str());
+            v = ggml_cont(ctx->ggml_ctx, v);
+            ggml_set_name(v, (prefix + "_v_attn").c_str());
+            auto attn = flux_sp_attention(ctx, q, k, v, pe, mask, prefix);
+            sd::ggml_graph_cut::mark_graph_cut(attn, prefix + ".sp_attention", "attn");
+
+            auto attn_4d = ggml_reshape_4d(ctx->ggml_ctx,
+                                           attn,
+                                           head_dim,
+                                           num_heads / world_size,
+                                           attn->ne[1],
+                                           attn->ne[2]);
+            ggml_set_name(attn_4d, (prefix + "_attn_4d").c_str());
+
+            auto attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
+                                                                              attn_4d,
+                                                                              world_size,
+                                                                              prefix + "_attn_head_to_seq");
+
+            auto attn_flat = ggml_reshape_3d(ctx->ggml_ctx,
+                                             attn_local.output,
+                                             hidden_size,
+                                             attn_local.output->ne[2],
+                                             attn_local.output->ne[3]);
+            ggml_set_name(attn_flat, (prefix + "_attn_flat").c_str());
+
+            auto mlp = ggml_view_3d(ctx->ggml_ctx, qkv_mlp, mlp_hidden_dim * mlp_mult_factor, qkv_mlp->ne[1], qkv_mlp->ne[2], qkv_mlp->nb[1], qkv_mlp->nb[2], hidden_size * 3 * qkv_mlp->nb[0]);
+            if (use_yak_mlp) {
+                mlp = ggml_ext_silu_act(ctx->ggml_ctx, mlp, false);
+            } else if (use_mlp_silu_act) {
+                mlp = ggml_ext_silu_act(ctx->ggml_ctx, mlp);
+            } else {
+                mlp = ggml_ext_gelu(ctx->ggml_ctx, mlp, true);
+            }
+            auto attn_mlp = ggml_concat(ctx->ggml_ctx, attn_flat, mlp, 0);
+            auto output   = linear2->forward(ctx, attn_mlp);
+
+            output = ggml_add(ctx->ggml_ctx, x, ggml_mul(ctx->ggml_ctx, output, mod.gate));
+            return output;
+        }
+#endif
     };
 
     struct LastLayer : public GGMLBlock {
@@ -867,6 +2108,205 @@ namespace Flux {
             }
 
             txt = txt_in->forward(ctx, txt);
+            const int64_t flux_full_img_seq = img->ne[1];
+            const int64_t flux_full_txt_seq = txt->ne[1];
+#ifdef ED_DEBUG_SP_COMM
+            bool use_sp_mainline = flux_sp_enabled(ctx) && !debug_sp_capture_enabled();
+            const std::string debug_compare_stage = debug_sp_mainline_compare_stage();
+            const bool debug_compare_double_block = debug_compare_stage == "double_block" ||
+                                                    debug_compare_stage == "double_block_end";
+            const bool debug_compare_double_inner = debug_compare_stage == "double_inner" ||
+                                                    debug_compare_stage.rfind("double_inner_", 0) == 0;
+            const bool debug_compare_double_end   = debug_compare_stage == "double_end" ||
+                                                    debug_compare_stage == "double";
+            const bool debug_compare_single_entry = debug_compare_stage == "single_entry";
+            const bool debug_compare_single_end   = debug_compare_stage == "single_end";
+            const bool debug_compare_final_img    = debug_compare_stage == "final_img" ||
+                                                    debug_compare_stage == "final_img_before_layer";
+            int debug_compare_double_block_idx = 0;
+            if (debug_compare_double_block || debug_compare_double_inner) {
+                const char* compare_double_block_env = std::getenv("ED_FLUX_SP_COMPARE_DOUBLE_BLOCK");
+                if (compare_double_block_env != nullptr && compare_double_block_env[0] != '\0') {
+                    debug_compare_double_block_idx = std::atoi(compare_double_block_env);
+                }
+                if (debug_compare_double_block_idx < 0 ||
+                    debug_compare_double_block_idx >= params.depth) {
+                    LOG_WARN("flux SP mainline compare double block index out of range: idx=%d depth=%d; clamping",
+                             debug_compare_double_block_idx,
+                             params.depth);
+                    debug_compare_double_block_idx = std::max(0,
+                                                              std::min(debug_compare_double_block_idx,
+                                                                       params.depth - 1));
+                }
+            }
+            const bool debug_compare_mainline     = use_sp_mainline &&
+                                                    (debug_compare_double_block ||
+                                                     debug_compare_double_inner ||
+                                                     debug_compare_double_end ||
+                                                     debug_compare_single_entry ||
+                                                     debug_compare_single_end ||
+                                                     debug_compare_final_img);
+            if (use_sp_mainline &&
+                !debug_compare_stage.empty() &&
+                !debug_compare_mainline) {
+                LOG_WARN("flux SP mainline compare unknown stage: %s",
+                         debug_compare_stage.c_str());
+            }
+
+            ggml_tensor* debug_img_after_double_ref        = nullptr;
+            ggml_tensor* debug_txt_after_double_ref        = nullptr;
+            ggml_tensor* debug_img_double_inner_ref        = nullptr;
+            ggml_tensor* debug_txt_double_inner_ref        = nullptr;
+            ggml_tensor* debug_txt_img_before_single_ref   = nullptr;
+            ggml_tensor* debug_txt_img_after_single_ref    = nullptr;
+            ggml_tensor* debug_img_before_final_layer_ref  = nullptr;
+
+            auto debug_run_double_no_sp = [&](ggml_tensor* img_ref,
+	                                              ggml_tensor* txt_ref,
+	                                              int stop_block) -> std::pair<ggml_tensor*, ggml_tensor*> {
+                if (stop_block < 0) {
+                    return {img_ref, txt_ref};
+                }
+                for (int i = 0; i < params.depth; i++) {
+                    if (skip_layers.size() > 0 &&
+                        std::find(skip_layers.begin(), skip_layers.end(), i) != skip_layers.end()) {
+                        if (i >= stop_block) {
+                            break;
+                        }
+                        continue;
+                    }
+
+                    auto block = std::dynamic_pointer_cast<DoubleStreamBlock>(blocks["double_blocks." + std::to_string(i)]);
+                    auto img_txt_ref = block->forward(ctx,
+                                                      img_ref,
+                                                      txt_ref,
+                                                      vec,
+                                                      pe,
+                                                      txt_img_mask,
+                                                      ds_img_mods,
+                                                      ds_txt_mods);
+                    img_ref = img_txt_ref.first;
+                    txt_ref = img_txt_ref.second;
+                    if (i >= stop_block) {
+                        break;
+                    }
+                }
+                return {img_ref, txt_ref};
+            };
+
+            auto debug_run_single_no_sp = [&](ggml_tensor* txt_img_ref) -> ggml_tensor* {
+                for (int i = 0; i < params.depth_single_blocks; i++) {
+                    if (skip_layers.size() > 0 &&
+                        std::find(skip_layers.begin(), skip_layers.end(), i + params.depth) != skip_layers.end()) {
+                        continue;
+                    }
+
+                    auto block = std::dynamic_pointer_cast<SingleStreamBlock>(blocks["single_blocks." + std::to_string(i)]);
+                    txt_img_ref = block->forward(ctx,
+                                                 txt_img_ref,
+                                                 vec,
+                                                 pe,
+                                                 txt_img_mask,
+                                                 ss_mods);
+                }
+                return txt_img_ref;
+            };
+
+            if (debug_compare_mainline) {
+                const int debug_double_ref_stop_block = (debug_compare_double_block ||
+                                                         debug_compare_double_inner) ?
+                                                            debug_compare_double_block_idx :
+                                                            params.depth - 1;
+                if (debug_compare_double_inner) {
+                    auto double_inner_ref = debug_run_double_no_sp(img,
+                                                                   txt,
+                                                                   debug_compare_double_block_idx - 1);
+                    debug_img_double_inner_ref = double_inner_ref.first;
+                    debug_txt_double_inner_ref = double_inner_ref.second;
+                }
+
+                if (!debug_compare_double_inner) {
+                    auto double_ref = debug_run_double_no_sp(img, txt, debug_double_ref_stop_block);
+                    debug_img_after_double_ref = double_ref.first;
+                    debug_txt_after_double_ref = double_ref.second;
+                } else {
+                    debug_img_after_double_ref = debug_img_double_inner_ref;
+                    debug_txt_after_double_ref = debug_txt_double_inner_ref;
+                }
+
+                if (debug_compare_single_entry ||
+                    debug_compare_single_end ||
+                    debug_compare_final_img) {
+                    debug_txt_img_before_single_ref = ggml_concat(ctx->ggml_ctx,
+                                                                  debug_txt_after_double_ref,
+                                                                  debug_img_after_double_ref,
+                                                                  1);
+                }
+                if (debug_compare_single_end ||
+                    debug_compare_final_img) {
+                    debug_txt_img_after_single_ref = debug_run_single_no_sp(debug_txt_img_before_single_ref);
+                }
+                if (debug_compare_final_img) {
+                    debug_img_before_final_layer_ref = ggml_view_3d(ctx->ggml_ctx,
+                                                                    debug_txt_img_after_single_ref,
+                                                                    debug_txt_img_after_single_ref->ne[0],
+                                                                    debug_img_after_double_ref->ne[1],
+                                                                    debug_txt_img_after_single_ref->ne[2],
+                                                                    debug_txt_img_after_single_ref->nb[1],
+                                                                    debug_txt_img_after_single_ref->nb[2],
+                                                                    debug_txt_after_double_ref->ne[1] *
+                                                                        debug_txt_img_after_single_ref->nb[1]);
+                    ggml_set_name(debug_img_before_final_layer_ref,
+                                  "flux_debug_ref_img_before_final_layer");
+                }
+            }
+
+            edgedit::parallel::SPSequenceSplit img_sp_split;
+            edgedit::parallel::SPSequenceSplit txt_sp_split;
+            edgedit::parallel::SPSequenceSplit txt_img_sp_split;
+            if (use_sp_mainline) {
+                const int rank       = flux_sp_rank(ctx);
+                const int world_size = flux_sp_world_size(ctx);
+                const int64_t img_pad = edgedit::parallel::sp_sequence_padding(img->ne[1],
+                                                                                world_size);
+                const int64_t txt_pad = edgedit::parallel::sp_sequence_padding(txt->ne[1],
+                                                                                world_size);
+                if (img_pad != 0 || txt_pad != 0) {
+                    LOG_WARN("flux SP mainline disabled for padded double-stream sequence: rank=%d world_size=%d img_seq=%" PRId64 " img_pad=%" PRId64 " txt_seq=%" PRId64 " txt_pad=%" PRId64,
+                             rank,
+                             world_size,
+                             img->ne[1],
+                             img_pad,
+                             txt->ne[1],
+                             txt_pad);
+                    use_sp_mainline = false;
+                } else {
+                    img_sp_split = edgedit::parallel::sp_split_sequence(ctx->ggml_ctx,
+                                                                        img,
+                                                                        rank,
+                                                                        world_size,
+                                                                        1,
+                                                                        "flux_sp_img_split");
+                    txt_sp_split = edgedit::parallel::sp_split_sequence(ctx->ggml_ctx,
+                                                                        txt,
+                                                                        rank,
+                                                                        world_size,
+                                                                        1,
+                                                                        "flux_sp_txt_split");
+
+                    img = img_sp_split.local;
+                    txt = txt_sp_split.local;
+
+                    LOG_DEBUG("flux SP mainline enabled: rank=%d world_size=%d img_seq=%" PRId64 "->%" PRId64 " txt_seq=%" PRId64 "->%" PRId64,
+                              rank,
+                              world_size,
+                              img_sp_split.original_seq_len,
+                              img_sp_split.local_seq_len,
+                              txt_sp_split.original_seq_len,
+                              txt_sp_split.local_seq_len);
+                }
+            }
+#endif
             sd::ggml_graph_cut::mark_graph_cut(img, "flux.prelude", "img");
             sd::ggml_graph_cut::mark_graph_cut(txt, "flux.prelude", "txt");
             sd::ggml_graph_cut::mark_graph_cut(vec, "flux.prelude", "vec");
@@ -878,32 +2318,224 @@ namespace Flux {
 
                 auto block = std::dynamic_pointer_cast<DoubleStreamBlock>(blocks["double_blocks." + std::to_string(i)]);
 
-                auto img_txt = block->forward(ctx, img, txt, vec, pe, txt_img_mask, ds_img_mods, ds_txt_mods);
-                img          = img_txt.first;   // [N, n_img_token, hidden_size]
-                txt          = img_txt.second;  // [N, n_txt_token, hidden_size]
+#ifdef ED_DEBUG_SP_COMM
+                if (use_sp_mainline) {
+                    ggml_tensor* debug_block_img_ref = debug_compare_double_inner &&
+                                                       i == debug_compare_double_block_idx ?
+                                                           debug_img_double_inner_ref :
+                                                           nullptr;
+                    ggml_tensor* debug_block_txt_ref = debug_compare_double_inner &&
+                                                       i == debug_compare_double_block_idx ?
+                                                           debug_txt_double_inner_ref :
+                                                           nullptr;
+                    auto img_txt = block->forward_sp(ctx,
+                                                     img,
+                                                     txt,
+                                                     vec,
+                                                     pe,
+                                                     txt_img_mask,
+                                                     ds_img_mods,
+                                                     ds_txt_mods,
+                                                     debug_block_img_ref,
+                                                     debug_block_txt_ref);
+                    img          = img_txt.first;   // [N, local_img_token, hidden_size]
+                    txt          = img_txt.second;  // [N, local_txt_token, hidden_size]
+                } else
+#endif
+                {
+                    auto img_txt = block->forward(ctx, img, txt, vec, pe, txt_img_mask, ds_img_mods, ds_txt_mods);
+                    img          = img_txt.first;   // [N, n_img_token, hidden_size]
+                    txt          = img_txt.second;  // [N, n_txt_token, hidden_size]
+                }
                 sd::ggml_graph_cut::mark_graph_cut(img, "flux.double_blocks." + std::to_string(i), "img");
                 sd::ggml_graph_cut::mark_graph_cut(txt, "flux.double_blocks." + std::to_string(i), "txt");
+#ifdef ED_DEBUG_SP_COMM
+                if (debug_compare_double_inner &&
+                    i >= debug_compare_double_block_idx) {
+                    // build_debug_sp_graph() expands debug_sp_total_error(); this return only lets build_graph() finish.
+                    return img;
+                }
+                if (debug_compare_double_block &&
+                    i >= debug_compare_double_block_idx) {
+                    break;
+                }
+#endif
             }
 
+#ifdef ED_DEBUG_SP_COMM
+            auto debug_compare_sequence_shard = [&](ggml_tensor* local,
+                                                    ggml_tensor* full,
+                                                    const std::string& name) {
+                if (local == nullptr || full == nullptr) {
+                    return;
+                }
+                ggml_tensor* ref = flux_debug_sequence_shard_reference(ctx, full, name);
+                mark_flux_debug_compare_tensor(ctx->ggml_ctx, local, ref, name);
+            };
+
+            auto debug_double_compare_label = [&]() -> std::string {
+                if (debug_compare_double_block) {
+                    return "flux_mainline_double_block" +
+                           std::to_string(debug_compare_double_block_idx);
+                }
+                return "flux_mainline_double_end";
+            };
+
+            if (use_sp_mainline && (debug_compare_double_end || debug_compare_double_block)) {
+                const std::string name = debug_double_compare_label();
+                debug_compare_sequence_shard(img,
+                                             debug_img_after_double_ref,
+                                             name + "_img_local");
+                debug_compare_sequence_shard(txt,
+                                             debug_txt_after_double_ref,
+                                             name + "_txt_local");
+            }
+
+            if (use_sp_mainline) {
+                const int world_size = flux_sp_world_size(ctx);
+                auto txt_gather = edgedit::parallel::sp_mark_gather_sequence(ctx->ggml_ctx,
+                                                                             txt,
+                                                                             world_size,
+                                                                             1,
+                                                                             txt_sp_split.pad,
+                                                                             "flux_sp_double_txt_gather");
+                auto img_gather = edgedit::parallel::sp_mark_gather_sequence(ctx->ggml_ctx,
+                                                                             img,
+                                                                             world_size,
+                                                                             1,
+                                                                             img_sp_split.pad,
+                                                                             "flux_sp_double_img_gather");
+                txt = txt_gather.gathered;
+                img = img_gather.gathered;
+                if (debug_compare_double_end || debug_compare_double_block) {
+                    const std::string name = debug_double_compare_label();
+                    if (txt_sp_split.pad == 0) {
+                        mark_flux_debug_compare_tensor(ctx->ggml_ctx,
+                                                       txt_gather.recv,
+                                                       debug_txt_after_double_ref,
+                                                       name + "_txt_gather_recv");
+                    }
+                    if (img_sp_split.pad == 0) {
+                        mark_flux_debug_compare_tensor(ctx->ggml_ctx,
+                                                       img_gather.recv,
+                                                       debug_img_after_double_ref,
+                                                       name + "_img_gather_recv");
+                    }
+                }
+            }
+#endif
+
+#ifdef ED_DEBUG_SP_COMM
+            if (use_sp_mainline && (debug_compare_double_end || debug_compare_double_block)) {
+                const std::string debug_double_compare_name = debug_double_compare_label();
+                mark_flux_debug_compare_tensor(ctx->ggml_ctx,
+                                               img,
+                                               debug_img_after_double_ref,
+                                               debug_double_compare_name + "_img");
+                mark_flux_debug_compare_tensor(ctx->ggml_ctx,
+                                               txt,
+                                               debug_txt_after_double_ref,
+                                               debug_double_compare_name + "_txt");
+                if (debug_compare_double_block) {
+                    // build_debug_sp_graph() expands debug_sp_total_error(); this return only lets build_graph() finish.
+                    return img;
+                }
+            }
+#endif
+
             auto txt_img = ggml_concat(ctx->ggml_ctx, txt, img, 1);  // [N, n_txt_token + n_img_token, hidden_size]
+#ifdef ED_DEBUG_SP_COMM
+            if (use_sp_mainline && debug_compare_single_entry) {
+                mark_flux_debug_compare_tensor(ctx->ggml_ctx,
+                                               txt_img,
+                                               debug_txt_img_before_single_ref,
+                                               "flux_mainline_single_entry_txt_img");
+            }
+#endif
+#ifdef ED_DEBUG_SP_COMM
+            if (use_sp_mainline) {
+                const int rank       = flux_sp_rank(ctx);
+                const int world_size = flux_sp_world_size(ctx);
+                const int64_t txt_img_pad = edgedit::parallel::sp_sequence_padding(txt_img->ne[1],
+                                                                                    world_size);
+                if (txt_img_pad != 0) {
+                    LOG_WARN("flux SP mainline disabled before single blocks because combined sequence needs padding: rank=%d world_size=%d seq=%" PRId64 " pad=%" PRId64,
+                             rank,
+                             world_size,
+                             txt_img->ne[1],
+                             txt_img_pad);
+                    use_sp_mainline = false;
+                } else {
+                    txt_img_sp_split = edgedit::parallel::sp_split_sequence(ctx->ggml_ctx,
+                                                                            txt_img,
+                                                                            rank,
+                                                                            world_size,
+                                                                            1,
+                                                                            "flux_sp_txt_img_split");
+                    txt_img = txt_img_sp_split.local;
+                    LOG_DEBUG("flux SP single stream split: rank=%d world_size=%d txt_img_seq=%" PRId64 "->%" PRId64,
+                              rank,
+                              world_size,
+                              txt_img_sp_split.original_seq_len,
+                              txt_img_sp_split.local_seq_len);
+                }
+            }
+#endif
             for (int i = 0; i < params.depth_single_blocks; i++) {
                 if (skip_layers.size() > 0 && std::find(skip_layers.begin(), skip_layers.end(), i + params.depth) != skip_layers.end()) {
                     continue;
                 }
                 auto block = std::dynamic_pointer_cast<SingleStreamBlock>(blocks["single_blocks." + std::to_string(i)]);
 
-                txt_img = block->forward(ctx, txt_img, vec, pe, txt_img_mask, ss_mods);
+#ifdef ED_DEBUG_SP_COMM
+                if (use_sp_mainline) {
+                    txt_img = block->forward_sp(ctx, txt_img, vec, pe, txt_img_mask, ss_mods);
+                } else
+#endif
+                {
+                    txt_img = block->forward(ctx, txt_img, vec, pe, txt_img_mask, ss_mods);
+                }
                 sd::ggml_graph_cut::mark_graph_cut(txt_img, "flux.single_blocks." + std::to_string(i), "txt_img");
             }
+
+#ifdef ED_DEBUG_SP_COMM
+            if (use_sp_mainline) {
+                auto txt_img_gather = edgedit::parallel::sp_mark_gather_sequence(ctx->ggml_ctx,
+                                                                                 txt_img,
+                                                                                 flux_sp_world_size(ctx),
+                                                                                 1,
+                                                                                 txt_img_sp_split.pad,
+                                                                                 "flux_sp_final_txt_img_gather");
+                txt_img = txt_img_gather.gathered;
+            }
+#endif
+
+#ifdef ED_DEBUG_SP_COMM
+            if (use_sp_mainline && debug_compare_single_end) {
+                mark_flux_debug_compare_tensor(ctx->ggml_ctx,
+                                               txt_img,
+                                               debug_txt_img_after_single_ref,
+                                               "flux_mainline_single_end_txt_img");
+            }
+#endif
 
             img = ggml_view_3d(ctx->ggml_ctx,
                                txt_img,
                                txt_img->ne[0],
-                               img->ne[1],
+                               flux_full_img_seq,
                                txt_img->ne[2],
                                txt_img->nb[1],
                                txt_img->nb[2],
-                               txt->ne[1] * txt_img->nb[1]);  // [N, n_img_token, hidden_size]
+                               flux_full_txt_seq * txt_img->nb[1]);  // [N, n_img_token, hidden_size]
+
+#ifdef ED_DEBUG_SP_COMM
+            if (use_sp_mainline && debug_compare_final_img) {
+                mark_flux_debug_compare_tensor(ctx->ggml_ctx,
+                                               img,
+                                               debug_img_before_final_layer_ref,
+                                               "flux_mainline_final_img_before_layer");
+            }
+#endif
 
             if (final_layer) {
                 img = final_layer->forward(ctx, img, vec);  // (N, T, patch_size ** 2 * out_channels)
@@ -1054,6 +2686,12 @@ namespace Flux {
             }
 
             auto out = forward_orig(ctx, img, context, timestep, y, guidance, pe, mod_index_arange, skip_layers);  // [N, num_tokens, C * patch_size * patch_size]
+
+#ifdef ED_DEBUG_SP_COMM
+            if (debug_sp_mainline_compare_enabled()) {
+                return out;
+            }
+#endif
 
             if (out->ne[1] > img_tokens) {
                 out = ggml_view_3d(ctx->ggml_ctx, out, out->ne[0], img_tokens, out->ne[2], out->nb[1], out->nb[2], 0);
@@ -1330,6 +2968,9 @@ namespace Flux {
 
             GGML_ASSERT(x->ne[3] == 1);
             ggml_cgraph* gf = new_graph_custom(FLUX_GRAPH_SIZE);
+#ifdef ED_DEBUG_SP_COMM
+            clear_debug_sp_output_names();
+#endif
 
             ggml_tensor* mod_index_arange = nullptr;
             ggml_tensor* dct              = nullptr;  // for chroma radiance
@@ -1419,6 +3060,66 @@ namespace Flux {
             // context: [N, max_position, hidden_size]
             // y: [N, adm_in_channels] or [1, adm_in_channels]
             // guidance: [N, ]
+#ifdef ED_DEBUG_SP_COMM
+            const char* run_sp_compare_env = std::getenv("ED_RUN_SP_COMPARE");
+            const bool run_sp_layout_compare = run_sp_compare_env != nullptr &&
+                                               std::string(run_sp_compare_env) == "1";
+            if (run_sp_layout_compare &&
+                get_process_group() != nullptr &&
+                get_process_group()->enabled() &&
+                get_process_group()->size() > 1) {
+                auto get_debug_graph = [&]() -> ggml_cgraph* {
+                    DebugSPCaptureScope debug_capture_scope;
+                    (void)debug_capture_scope;
+                    (void)build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, skip_layers);
+                    return build_debug_sp_graph(compute_ctx, FLUX_GRAPH_SIZE);
+                };
+                auto debug_result = GGMLRunner::compute<float>(get_debug_graph, n_threads, true);
+                if (debug_result.has_value() && !debug_result->empty()) {
+                    LOG_INFO("flux debug SP compare total_sse = %.9g", debug_result->data()[0]);
+                }
+            }
+            const char* run_sp_mainline_compare_env = std::getenv("ED_FLUX_SP_COMPARE_STAGE");
+            if (run_sp_mainline_compare_env != nullptr &&
+                run_sp_mainline_compare_env[0] != '\0' &&
+                get_process_group() != nullptr &&
+                get_process_group()->enabled() &&
+                get_process_group()->size() > 1) {
+                const std::string compare_stage(run_sp_mainline_compare_env);
+                auto get_debug_graph = [&]() -> ggml_cgraph* {
+                    DebugSPMainlineCompareScope debug_compare_scope(compare_stage);
+                    (void)debug_compare_scope;
+                    (void)build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, skip_layers);
+                    const size_t debug_graph_size = compare_stage.rfind("double_inner", 0) == 0 ?
+                                                        FLUX_GRAPH_SIZE * 8 :
+                                                        FLUX_GRAPH_SIZE * 4;
+                    return build_debug_sp_graph(compute_ctx, debug_graph_size);
+                };
+                auto debug_result = GGMLRunner::compute<float>(get_debug_graph, n_threads, true);
+                if (debug_result.has_value() && !debug_result->empty()) {
+                    LOG_INFO("flux debug SP mainline compare stage=%s total_sse = %.9g",
+                             compare_stage.c_str(),
+                             debug_result->data()[0]);
+                    const auto& names = debug_sp_error_names();
+                    const int64_t n_debug_values = debug_result->numel();
+                    for (int64_t i = 1; i < n_debug_values; ++i) {
+                        const size_t name_idx = static_cast<size_t>(i - 1);
+                        const char* name = name_idx < names.size() ?
+                                               names[name_idx].c_str() :
+                                               "<unnamed>";
+                        LOG_INFO("flux debug SP mainline compare stage=%s component=%s sse = %.9g",
+                                 compare_stage.c_str(),
+                                 name,
+                                 debug_result->data()[i]);
+                    }
+                    debug_sp_error_names().clear();
+                } else {
+                    LOG_WARN("flux debug SP mainline compare stage=%s produced no debug result",
+                             compare_stage.c_str());
+                    debug_sp_error_names().clear();
+                }
+            }
+#endif
             auto get_graph = [&]() -> ggml_cgraph* {
                 return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, skip_layers);
             };
