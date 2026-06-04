@@ -3,6 +3,8 @@
 
 #include <inttypes.h>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "dit_models/components/common/common_block.hpp"
 #include "dit_models/components/common/common_dit.hpp"
@@ -16,93 +18,155 @@ namespace Qwen {
     constexpr int QWEN_IMAGE_GRAPH_SIZE = 20480;
 
 #ifdef ED_DEBUG_SP_COMM
-    static inline void mark_debug_sp_comm(GGMLRunnerContext* ctx,
-                                          ggml_tensor* img,
-                                          ggml_tensor* txt) {
-        if (ctx == nullptr ||
-            ctx->process_group == nullptr ||
-            !ctx->process_group->enabled()) {
-            return;
+    static inline bool qwen_sp_enabled(GGMLRunnerContext* ctx) {
+        return ctx != nullptr &&
+               ctx->process_group != nullptr &&
+               ctx->process_group->enabled() &&
+               ctx->process_group->size() > 1;
+    }
+
+    static inline int qwen_sp_rank(GGMLRunnerContext* ctx) {
+        return ctx->process_group->rank();
+    }
+
+    static inline int qwen_sp_world_size(GGMLRunnerContext* ctx) {
+        return ctx->process_group->size();
+    }
+
+    static inline ggml_tensor* qwen_sp_attention(GGMLRunnerContext* ctx,
+                                                 ggml_tensor* q,
+                                                 ggml_tensor* k,
+                                                 ggml_tensor* v,
+                                                 ggml_tensor* pe,
+                                                 const std::string& name_prefix,
+                                                 float kv_scale) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(q != nullptr);
+        GGML_ASSERT(k != nullptr);
+        GGML_ASSERT(v != nullptr);
+        GGML_ASSERT(pe != nullptr);
+
+        q = Rope::apply_rope(ctx->ggml_ctx, q, pe);
+        k = Rope::apply_rope(ctx->ggml_ctx, k, pe);
+
+        q = ggml_cont(ctx->ggml_ctx, q);
+        ggml_set_name(q, (name_prefix + "_q_rope").c_str());
+        k = ggml_cont(ctx->ggml_ctx, k);
+        ggml_set_name(k, (name_prefix + "_k_rope").c_str());
+        v = ggml_cont(ctx->ggml_ctx, v);
+        ggml_set_name(v, (name_prefix + "_v_attn").c_str());
+
+        const int64_t n_head = v->ne[1];
+        GGML_ASSERT(q->ne[0] == k->ne[0]);
+        GGML_ASSERT(q->ne[1] == k->ne[1]);
+        GGML_ASSERT(q->ne[2] == k->ne[2]);
+        GGML_ASSERT(v->ne[0] == q->ne[0]);
+        GGML_ASSERT(v->ne[1] == n_head);
+        GGML_ASSERT(v->ne[2] == q->ne[1]);
+        GGML_ASSERT(v->ne[3] == 1);
+
+        ggml_tensor* attn = ggml_ext_attention_ext(ctx->ggml_ctx,
+                                                   ctx->backend,
+                                                   q,
+                                                   k,
+                                                   v,
+                                                   n_head,
+                                                   nullptr,
+                                                   true,
+                                                   false,
+                                                   kv_scale);
+        ggml_set_name(attn, (name_prefix + "_attn").c_str());
+        return attn;
+    }
+
+    static inline ggml_tensor* qwen_sp_view_head_sequence(ggml_context* ctx,
+                                                          ggml_tensor* x,
+                                                          int64_t start,
+                                                          int64_t length,
+                                                          const std::string& name) {
+        GGML_ASSERT(x != nullptr);
+        GGML_ASSERT(start >= 0);
+        GGML_ASSERT(length > 0);
+        GGML_ASSERT(start + length <= x->ne[2]);
+
+        ggml_tensor* view = ggml_view_4d(ctx,
+                                         x,
+                                         x->ne[0],
+                                         x->ne[1],
+                                         length,
+                                         x->ne[3],
+                                         x->nb[1],
+                                         x->nb[2],
+                                         x->nb[3],
+                                         static_cast<size_t>(start) * x->nb[2]);
+        ggml_set_name(view, (name + "_view").c_str());
+        return view;
+    }
+
+    static inline ggml_tensor* qwen_sp_concat_real_attention_sequence(ggml_context* ctx,
+                                                                     ggml_tensor* txt,
+                                                                     ggml_tensor* img,
+                                                                     int64_t txt_pad,
+                                                                     int64_t img_pad,
+                                                                     const std::string& name) {
+        GGML_ASSERT(txt != nullptr);
+        GGML_ASSERT(img != nullptr);
+        GGML_ASSERT(txt_pad >= 0 && txt_pad <= txt->ne[2]);
+        GGML_ASSERT(img_pad >= 0 && img_pad <= img->ne[2]);
+
+        const int64_t txt_real_seq = txt->ne[2] - txt_pad;
+        const int64_t img_real_seq = img->ne[2] - img_pad;
+        GGML_ASSERT(txt_real_seq > 0);
+        GGML_ASSERT(img_real_seq > 0);
+
+        ggml_tensor* txt_real = qwen_sp_view_head_sequence(ctx,
+                                                           txt,
+                                                           0,
+                                                           txt_real_seq,
+                                                           name + "_txt_real");
+        ggml_tensor* img_real = qwen_sp_view_head_sequence(ctx,
+                                                           img,
+                                                           0,
+                                                           img_real_seq,
+                                                           name + "_img_real");
+        ggml_tensor* out = ggml_concat(ctx, txt_real, img_real, 2);
+        ggml_set_name(out, name.c_str());
+        return out;
+    }
+
+    static inline ggml_tensor* qwen_sp_pad_head_sequence(ggml_context* ctx,
+                                                        ggml_tensor* x,
+                                                        int64_t pad,
+                                                        const std::string& name) {
+        GGML_ASSERT(x != nullptr);
+        GGML_ASSERT(pad >= 0);
+        if (pad <= 0) {
+            ggml_set_name(x, name.c_str());
+            return x;
         }
 
-        const int world_size = ctx->process_group->size();
-        if (world_size <= 1) {
-            return;
-        }
+        ggml_tensor* pad_tensor = ggml_ext_zeros(ctx, x->ne[0], x->ne[1], pad, x->ne[3]);
+        ggml_set_name(pad_tensor, (name + "_pad").c_str());
+        x = ggml_concat(ctx, x, pad_tensor, 2);
+        ggml_set_name(x, name.c_str());
+        return x;
+    }
 
-        auto img_split = edgedit::parallel::sp_split_sequence(ctx->ggml_ctx,
-                                                              img,
-                                                              ctx->process_group->rank(),
-                                                              world_size,
-                                                              1,
-                                                              "debug_sp_sequence_split");
-        auto img_gather = edgedit::parallel::sp_mark_gather_sequence(ctx->ggml_ctx,
-                                                                     img_split.local,
-                                                                     world_size,
-                                                                     1,
-                                                                     img_split.pad,
-                                                                     "debug_sp_sequence_all_gather");
-        if (img_gather.recv != nullptr) {
-            sd::ggml_graph_cut::mark_graph_cut(img_split.local,
-                                                "qwen_image.prelude",
-                                                "debug_sp_sequence_local");
-            sd::ggml_graph_cut::mark_graph_cut(img_gather.recv,
-                                                "qwen_image.prelude",
-                                                "debug_sp_sequence_all_gather_output");
-            LOG_DEBUG("qwen_image debug SP all_gather marker: img_full=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] img_local=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] img_gathered=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] pad=%" PRId64,
-                      img->ne[0],
-                      img->ne[1],
-                      img->ne[2],
-                      img->ne[3],
-                      img_split.local->ne[0],
-                      img_split.local->ne[1],
-                      img_split.local->ne[2],
-                      img_split.local->ne[3],
-                      img_gather.recv->ne[0],
-                      img_gather.recv->ne[1],
-                      img_gather.recv->ne[2],
-                      img_gather.recv->ne[3],
-                      img_split.pad);
-        }
-
-        const size_t txt_nelements = static_cast<size_t>(ggml_nelements(txt));
-        if (txt_nelements % static_cast<size_t>(world_size) != 0) {
-            LOG_WARN("qwen_image debug SP all_to_all marker skipped: txt elements=%zu world_size=%d",
-                     txt_nelements,
-                     world_size);
-            return;
-        }
-
-        int64_t ne[GGML_MAX_DIMS] = {
-            txt->ne[0],
-            txt->ne[1],
-            txt->ne[2],
-            txt->ne[3],
-        };
-        ggml_tensor* all_to_all_leaf = ggml_new_tensor(ctx->ggml_ctx,
-                                                       txt->type,
-                                                       GGML_MAX_DIMS,
-                                                       ne);
-        ggml_set_name(all_to_all_leaf, "debug_sp_sequence_all_to_all_leaf");
-        ggml_tensor* all_to_all_output = ggml_dup(ctx->ggml_ctx, all_to_all_leaf);
-        ggml_set_name(all_to_all_output, "debug_sp_sequence_all_to_all_output");
-        if (all_to_all_output != nullptr) {
-            sd::ggml_graph_cut::mark_comm_op(txt,
-                                             all_to_all_output,
-                                             sd::ggml_graph_cut::Segment::CommKind::ALL_TO_ALL,
-                                             "debug_sp_sequence_all_to_all",
-                                             edgedit::parallel::ReduceOp::kSum,
-                                             txt_nelements / static_cast<size_t>(world_size));
-            sd::ggml_graph_cut::mark_graph_cut(all_to_all_output,
-                                                "qwen_image.prelude",
-                                                "debug_sp_sequence_all_to_all_output");
-            LOG_DEBUG("qwen_image debug SP all_to_all marker: txt=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] count_per_peer=%zu",
-                      txt->ne[0],
-                      txt->ne[1],
-                      txt->ne[2],
-                      txt->ne[3],
-                      txt_nelements / static_cast<size_t>(world_size));
-        }
+    static inline ggml_tensor* qwen_sp_extract_stream_attention(ggml_context* ctx,
+                                                               ggml_tensor* combined,
+                                                               int64_t real_start,
+                                                               int64_t real_seq,
+                                                               int64_t pad,
+                                                               const std::string& name) {
+        ggml_tensor* out = qwen_sp_view_head_sequence(ctx,
+                                                      combined,
+                                                      real_start,
+                                                      real_seq,
+                                                      name + "_real");
+        out = qwen_sp_pad_head_sequence(ctx, out, pad, name + "_padded");
+        out = ggml_cont(ctx, out);
+        ggml_set_name(out, name.c_str());
+        return out;
     }
 #endif
 
@@ -285,6 +349,191 @@ namespace Qwen {
 
             return {img_attn_out, txt_attn_out};
         }
+
+#ifdef ED_DEBUG_SP_COMM
+        std::pair<ggml_tensor*, ggml_tensor*> forward_sp(GGMLRunnerContext* ctx,
+                                                         ggml_tensor* img,
+                                                         ggml_tensor* txt,
+                                                         ggml_tensor* pe,
+                                                         int64_t txt_pad,
+                                                         int64_t img_pad,
+                                                         const std::string& name_prefix) {
+            auto norm_q = std::dynamic_pointer_cast<UnaryBlock>(blocks["norm_q"]);
+            auto norm_k = std::dynamic_pointer_cast<UnaryBlock>(blocks["norm_k"]);
+
+            auto to_q     = std::dynamic_pointer_cast<Linear>(blocks["to_q"]);
+            auto to_k     = std::dynamic_pointer_cast<Linear>(blocks["to_k"]);
+            auto to_v     = std::dynamic_pointer_cast<Linear>(blocks["to_v"]);
+            auto to_out_0 = std::dynamic_pointer_cast<Linear>(blocks["to_out.0"]);
+
+            if (sd_backend_is(ctx->backend, "Vulkan")) {
+                to_out_0->set_force_prec_f32(true);
+            }
+
+            auto norm_added_q = std::dynamic_pointer_cast<UnaryBlock>(blocks["norm_added_q"]);
+            auto norm_added_k = std::dynamic_pointer_cast<UnaryBlock>(blocks["norm_added_k"]);
+
+            auto add_q_proj = std::dynamic_pointer_cast<Linear>(blocks["add_q_proj"]);
+            auto add_k_proj = std::dynamic_pointer_cast<Linear>(blocks["add_k_proj"]);
+            auto add_v_proj = std::dynamic_pointer_cast<Linear>(blocks["add_v_proj"]);
+            auto to_add_out = std::dynamic_pointer_cast<Linear>(blocks["to_add_out"]);
+
+            const int world_size       = qwen_sp_world_size(ctx);
+            const int64_t N            = img->ne[2];
+            const int64_t img_local_seq = img->ne[1];
+            const int64_t txt_local_seq = txt->ne[1];
+
+            GGML_ASSERT(N == 1);
+            GGML_ASSERT(txt->ne[2] == N);
+
+            auto img_q        = to_q->forward(ctx, img);
+            const int64_t num_heads = img_q->ne[0] / dim_head;
+            img_q             = ggml_reshape_4d(ctx->ggml_ctx, img_q, dim_head, num_heads, img_local_seq, N);
+            auto img_k        = to_k->forward(ctx, img);
+            img_k             = ggml_reshape_4d(ctx->ggml_ctx, img_k, dim_head, num_heads, img_local_seq, N);
+            auto img_v        = to_v->forward(ctx, img);
+            img_v             = ggml_reshape_4d(ctx->ggml_ctx, img_v, dim_head, num_heads, img_local_seq, N);
+
+            img_q = norm_q->forward(ctx, img_q);
+            img_k = norm_k->forward(ctx, img_k);
+
+            auto txt_q = add_q_proj->forward(ctx, txt);
+            txt_q      = ggml_reshape_4d(ctx->ggml_ctx, txt_q, dim_head, num_heads, txt_local_seq, N);
+            auto txt_k = add_k_proj->forward(ctx, txt);
+            txt_k      = ggml_reshape_4d(ctx->ggml_ctx, txt_k, dim_head, num_heads, txt_local_seq, N);
+            auto txt_v = add_v_proj->forward(ctx, txt);
+            txt_v      = ggml_reshape_4d(ctx->ggml_ctx, txt_v, dim_head, num_heads, txt_local_seq, N);
+
+            txt_q = norm_added_q->forward(ctx, txt_q);
+            txt_k = norm_added_k->forward(ctx, txt_k);
+
+            img_q = ggml_cont(ctx->ggml_ctx, img_q);
+            ggml_set_name(img_q, (name_prefix + "_img_q_local").c_str());
+            img_k = ggml_cont(ctx->ggml_ctx, img_k);
+            ggml_set_name(img_k, (name_prefix + "_img_k_local").c_str());
+            img_v = ggml_cont(ctx->ggml_ctx, img_v);
+            ggml_set_name(img_v, (name_prefix + "_img_v_local").c_str());
+            txt_q = ggml_cont(ctx->ggml_ctx, txt_q);
+            ggml_set_name(txt_q, (name_prefix + "_txt_q_local").c_str());
+            txt_k = ggml_cont(ctx->ggml_ctx, txt_k);
+            ggml_set_name(txt_k, (name_prefix + "_txt_k_local").c_str());
+            txt_v = ggml_cont(ctx->ggml_ctx, txt_v);
+            ggml_set_name(txt_v, (name_prefix + "_txt_v_local").c_str());
+
+            auto img_q_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                              img_q,
+                                                                              world_size,
+                                                                              name_prefix + "_img_q_seq_to_head");
+            auto img_k_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                              img_k,
+                                                                              world_size,
+                                                                              name_prefix + "_img_k_seq_to_head");
+            auto img_v_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                              img_v,
+                                                                              world_size,
+                                                                              name_prefix + "_img_v_seq_to_head");
+            auto txt_q_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                              txt_q,
+                                                                              world_size,
+                                                                              name_prefix + "_txt_q_seq_to_head");
+            auto txt_k_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                              txt_k,
+                                                                              world_size,
+                                                                              name_prefix + "_txt_k_seq_to_head");
+            auto txt_v_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                              txt_v,
+                                                                              world_size,
+                                                                              name_prefix + "_txt_v_seq_to_head");
+
+            ggml_tensor* q = qwen_sp_concat_real_attention_sequence(ctx->ggml_ctx,
+                                                                    txt_q_head.output,
+                                                                    img_q_head.output,
+                                                                    txt_pad,
+                                                                    img_pad,
+                                                                    name_prefix + "_q_head");
+            ggml_set_name(q, (name_prefix + "_q_head").c_str());
+            ggml_tensor* k = qwen_sp_concat_real_attention_sequence(ctx->ggml_ctx,
+                                                                    txt_k_head.output,
+                                                                    img_k_head.output,
+                                                                    txt_pad,
+                                                                    img_pad,
+                                                                    name_prefix + "_k_head");
+            ggml_set_name(k, (name_prefix + "_k_head").c_str());
+            ggml_tensor* v = qwen_sp_concat_real_attention_sequence(ctx->ggml_ctx,
+                                                                    txt_v_head.output,
+                                                                    img_v_head.output,
+                                                                    txt_pad,
+                                                                    img_pad,
+                                                                    name_prefix + "_v_head");
+            ggml_set_name(v, (name_prefix + "_v_head").c_str());
+
+            q = ggml_cont(ctx->ggml_ctx, q);
+            ggml_set_name(q, (name_prefix + "_q_attn").c_str());
+            k = ggml_cont(ctx->ggml_ctx, k);
+            ggml_set_name(k, (name_prefix + "_k_attn").c_str());
+            v = ggml_cont(ctx->ggml_ctx, v);
+            ggml_set_name(v, (name_prefix + "_v_attn_in").c_str());
+
+            ggml_tensor* attn = qwen_sp_attention(ctx, q, k, v, pe, name_prefix, 1.0f / 128.f);
+            sd::ggml_graph_cut::mark_graph_cut(attn, name_prefix + ".sp_attention", "attn");
+
+            const int64_t shard_heads = num_heads / world_size;
+            const int64_t txt_full_seq = txt_local_seq * world_size;
+            const int64_t img_full_seq = img_local_seq * world_size;
+            const int64_t txt_real_seq = txt_full_seq - txt_pad;
+            const int64_t img_real_seq = img_full_seq - img_pad;
+            const int64_t total_seq    = txt_real_seq + img_real_seq;
+
+            ggml_tensor* attn_4d = ggml_reshape_4d(ctx->ggml_ctx,
+                                                   attn,
+                                                   dim_head,
+                                                   shard_heads,
+                                                   total_seq,
+                                                   N);
+            ggml_set_name(attn_4d, (name_prefix + "_attn_4d").c_str());
+
+            ggml_tensor* txt_attn_head = qwen_sp_extract_stream_attention(ctx->ggml_ctx,
+                                                                          attn_4d,
+                                                                          0,
+                                                                          txt_real_seq,
+                                                                          txt_pad,
+                                                                          name_prefix + "_txt_attn_head");
+
+            ggml_tensor* img_attn_head = qwen_sp_extract_stream_attention(ctx->ggml_ctx,
+                                                                          attn_4d,
+                                                                          txt_real_seq,
+                                                                          img_real_seq,
+                                                                          img_pad,
+                                                                          name_prefix + "_img_attn_head");
+
+            auto txt_attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
+                                                                                  txt_attn_head,
+                                                                                  world_size,
+                                                                                  name_prefix + "_txt_attn_head_to_seq");
+            auto img_attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
+                                                                                  img_attn_head,
+                                                                                  world_size,
+                                                                                  name_prefix + "_img_attn_head_to_seq");
+
+            ggml_tensor* txt_attn_out = ggml_reshape_3d(ctx->ggml_ctx,
+                                                        txt_attn_local.output,
+                                                        dim_head * num_heads,
+                                                        txt_attn_local.output->ne[2],
+                                                        N);
+            ggml_set_name(txt_attn_out, (name_prefix + "_txt_attn_out").c_str());
+            ggml_tensor* img_attn_out = ggml_reshape_3d(ctx->ggml_ctx,
+                                                        img_attn_local.output,
+                                                        dim_head * num_heads,
+                                                        img_attn_local.output->ne[2],
+                                                        N);
+            ggml_set_name(img_attn_out, (name_prefix + "_img_attn_out").c_str());
+
+            img_attn_out = to_out_0->forward(ctx, img_attn_out);
+            txt_attn_out = to_add_out->forward(ctx, txt_attn_out);
+
+            return {img_attn_out, txt_attn_out};
+        }
+#endif
     };
 
     class QwenImageTransformerBlock : public GGMLBlock {
@@ -411,6 +660,77 @@ namespace Qwen {
 
             return {img, txt};
         }
+
+#ifdef ED_DEBUG_SP_COMM
+        std::pair<ggml_tensor*, ggml_tensor*> forward_sp(GGMLRunnerContext* ctx,
+                                                         ggml_tensor* img,
+                                                         ggml_tensor* txt,
+                                                         ggml_tensor* t_emb,
+                                                         ggml_tensor* pe,
+                                                         ggml_tensor* modulate_index,
+                                                         int64_t txt_pad,
+                                                         int64_t img_pad,
+                                                         const std::string& name_prefix) {
+            auto img_mod_1 = std::dynamic_pointer_cast<Linear>(blocks["img_mod.1"]);
+            auto img_norm1 = std::dynamic_pointer_cast<LayerNorm>(blocks["img_norm1"]);
+            auto img_norm2 = std::dynamic_pointer_cast<LayerNorm>(blocks["img_norm2"]);
+            auto img_mlp   = std::dynamic_pointer_cast<FeedForward>(blocks["img_mlp"]);
+
+            auto txt_mod_1 = std::dynamic_pointer_cast<Linear>(blocks["txt_mod.1"]);
+            auto txt_norm1 = std::dynamic_pointer_cast<LayerNorm>(blocks["txt_norm1"]);
+            auto txt_norm2 = std::dynamic_pointer_cast<LayerNorm>(blocks["txt_norm2"]);
+            auto txt_mlp   = std::dynamic_pointer_cast<FeedForward>(blocks["txt_mlp"]);
+
+            auto attn = std::dynamic_pointer_cast<QwenImageAttention>(blocks["attn"]);
+
+            auto img_mod_params    = ggml_silu(ctx->ggml_ctx, t_emb);
+            img_mod_params         = img_mod_1->forward(ctx, img_mod_params);
+            auto img_mod_param_vec = get_mod_params_vec(ctx->ggml_ctx, img_mod_params, modulate_index);
+
+            if (zero_cond_t) {
+                t_emb = ggml_ext_chunk(ctx->ggml_ctx, t_emb, 2, 1)[0];
+            }
+
+            auto txt_mod_params    = ggml_silu(ctx->ggml_ctx, t_emb);
+            txt_mod_params         = txt_mod_1->forward(ctx, txt_mod_params);
+            auto txt_mod_param_vec = get_mod_params_vec(ctx->ggml_ctx, txt_mod_params);
+
+            auto img_normed    = img_norm1->forward(ctx, img);
+            auto img_modulated = dit::modulate(ctx->ggml_ctx, img_normed, img_mod_param_vec[0], img_mod_param_vec[1], modulate_index != nullptr);
+            auto img_gate1     = img_mod_param_vec[2];
+
+            auto txt_normed    = txt_norm1->forward(ctx, txt);
+            auto txt_modulated = dit::modulate(ctx->ggml_ctx, txt_normed, txt_mod_param_vec[0], txt_mod_param_vec[1]);
+            auto txt_gate1     = txt_mod_param_vec[2];
+
+            auto [img_attn_output, txt_attn_output] = attn->forward_sp(ctx,
+                                                                       img_modulated,
+                                                                       txt_modulated,
+                                                                       pe,
+                                                                       txt_pad,
+                                                                       img_pad,
+                                                                       name_prefix);
+
+            img = ggml_add(ctx->ggml_ctx, img, ggml_mul(ctx->ggml_ctx, img_attn_output, img_gate1));
+            txt = ggml_add(ctx->ggml_ctx, txt, ggml_mul(ctx->ggml_ctx, txt_attn_output, txt_gate1));
+
+            auto img_normed2    = img_norm2->forward(ctx, img);
+            auto img_modulated2 = dit::modulate(ctx->ggml_ctx, img_normed2, img_mod_param_vec[3], img_mod_param_vec[4], modulate_index != nullptr);
+            auto img_gate2      = img_mod_param_vec[5];
+
+            auto txt_normed2    = txt_norm2->forward(ctx, txt);
+            auto txt_modulated2 = dit::modulate(ctx->ggml_ctx, txt_normed2, txt_mod_param_vec[3], txt_mod_param_vec[4]);
+            auto txt_gate2      = txt_mod_param_vec[5];
+
+            auto img_mlp_out = img_mlp->forward(ctx, img_modulated2);
+            auto txt_mlp_out = txt_mlp->forward(ctx, txt_modulated2);
+
+            img = ggml_add(ctx->ggml_ctx, img, ggml_mul(ctx->ggml_ctx, img_mlp_out, img_gate2));
+            txt = ggml_add(ctx->ggml_ctx, txt, ggml_mul(ctx->ggml_ctx, txt_mlp_out, txt_gate2));
+
+            return {img, txt};
+        }
+#endif
     };
 
     struct AdaLayerNormContinuous : public GGMLBlock {
@@ -509,22 +829,121 @@ namespace Qwen {
             auto img = img_in->forward(ctx, x);
             auto txt = txt_norm->forward(ctx, context);
             txt      = txt_in->forward(ctx, txt);
+
+#ifdef ED_DEBUG_SP_COMM
+            bool use_sp_mainline = qwen_sp_enabled(ctx);
+            edgedit::parallel::SPSequenceSplit img_sp_split;
+            edgedit::parallel::SPSequenceSplit txt_sp_split;
+            edgedit::parallel::SPSequenceSplit modulate_index_sp_split;
+            ggml_tensor* sp_pe = pe;
+            if (use_sp_mainline) {
+                const int rank       = qwen_sp_rank(ctx);
+                const int world_size = qwen_sp_world_size(ctx);
+                const int64_t img_pad = edgedit::parallel::sp_sequence_padding(img->ne[1],
+                                                                                world_size);
+                const int64_t txt_pad = edgedit::parallel::sp_sequence_padding(txt->ne[1],
+                                                                                world_size);
+                const int64_t heads_pad = params.num_attention_heads % world_size;
+                if (heads_pad != 0 || img->ne[2] != 1 || txt->ne[2] != 1) {
+                    LOG_WARN("qwen_image SP mainline disabled: rank=%d world_size=%d img_seq=%" PRId64 " img_pad=%" PRId64 " txt_seq=%" PRId64 " txt_pad=%" PRId64 " heads=%" PRId64 " batch=[%" PRId64 ",%" PRId64 "]",
+                             rank,
+                             world_size,
+                             img->ne[1],
+                             img_pad,
+                             txt->ne[1],
+                             txt_pad,
+                             params.num_attention_heads,
+                             img->ne[2],
+                             txt->ne[2]);
+                    use_sp_mainline = false;
+                } else {
+                    img_sp_split = edgedit::parallel::sp_split_sequence(ctx->ggml_ctx,
+                                                                        img,
+                                                                        rank,
+                                                                        world_size,
+                                                                        1,
+                                                                        "qwen_image_sp_img_split");
+                    txt_sp_split = edgedit::parallel::sp_split_sequence(ctx->ggml_ctx,
+                                                                        txt,
+                                                                        rank,
+                                                                        world_size,
+                                                                        1,
+                                                                        "qwen_image_sp_txt_split");
+                    img = img_sp_split.local;
+                    txt = txt_sp_split.local;
+
+                    if (modulate_index != nullptr) {
+                        ggml_tensor* modulate_index_4d = ggml_reshape_4d(ctx->ggml_ctx,
+                                                                          modulate_index,
+                                                                          1,
+                                                                          modulate_index->ne[0],
+                                                                          1,
+                                                                          1);
+                        ggml_set_name(modulate_index_4d, "qwen_image_sp_modulate_index_4d");
+                        modulate_index_sp_split = edgedit::parallel::sp_split_sequence(ctx->ggml_ctx,
+                                                                                       modulate_index_4d,
+                                                                                       rank,
+                                                                                       world_size,
+                                                                                       1,
+                                                                                       "qwen_image_sp_modulate_index_split");
+                        modulate_index = ggml_reshape_2d(ctx->ggml_ctx,
+                                                         modulate_index_sp_split.local,
+                                                         modulate_index_sp_split.local->ne[1],
+                                                         modulate_index_sp_split.local->ne[2]);
+                        ggml_set_name(modulate_index, "qwen_image_sp_modulate_index_local");
+                    }
+
+                    LOG_DEBUG("qwen_image SP mainline enabled: rank=%d world_size=%d img_seq=%" PRId64 "->%" PRId64 " txt_seq=%" PRId64 "->%" PRId64,
+                              rank,
+                              world_size,
+                              img_sp_split.original_seq_len,
+                              img_sp_split.local_seq_len,
+                              txt_sp_split.original_seq_len,
+                              txt_sp_split.local_seq_len);
+                }
+            }
+#endif
             sd::ggml_graph_cut::mark_graph_cut(img, "qwen_image.prelude", "img");
             sd::ggml_graph_cut::mark_graph_cut(txt, "qwen_image.prelude", "txt");
             // sd::ggml_graph_cut::mark_graph_cut(t_emb, "qwen_image.prelude", "t_emb");
-#ifdef ED_DEBUG_SP_COMM
-            mark_debug_sp_comm(ctx, img, txt);
-#endif
 
             for (int i = 0; i < params.num_layers; i++) {
                 auto block = std::dynamic_pointer_cast<QwenImageTransformerBlock>(blocks["transformer_blocks." + std::to_string(i)]);
 
-                auto result = block->forward(ctx, img, txt, t_emb, pe, modulate_index);
+#ifdef ED_DEBUG_SP_COMM
+                std::pair<ggml_tensor*, ggml_tensor*> result;
+                if (use_sp_mainline) {
+                    result = block->forward_sp(ctx,
+                                               img,
+                                               txt,
+                                               t_emb,
+                                               sp_pe,
+                                               modulate_index,
+                                               txt_sp_split.pad,
+                                               img_sp_split.pad,
+                                               "qwen_image_block" + std::to_string(i));
+                } else
+#endif
+                {
+                    result = block->forward(ctx, img, txt, t_emb, pe, modulate_index);
+                }
                 img         = result.first;
                 txt         = result.second;
                 sd::ggml_graph_cut::mark_graph_cut(img, "qwen_image.transformer_blocks." + std::to_string(i), "img");
                 sd::ggml_graph_cut::mark_graph_cut(txt, "qwen_image.transformer_blocks." + std::to_string(i), "txt");
             }
+
+#ifdef ED_DEBUG_SP_COMM
+            if (use_sp_mainline) {
+                auto img_gather = edgedit::parallel::sp_mark_gather_sequence(ctx->ggml_ctx,
+                                                                             img,
+                                                                             qwen_sp_world_size(ctx),
+                                                                             1,
+                                                                             img_sp_split.pad,
+                                                                             "qwen_image_sp_final_img_gather");
+                img = img_gather.gathered;
+            }
+#endif
 
             if (params.zero_cond_t) {
                 t_emb = ggml_ext_chunk(ctx->ggml_ctx, t_emb, 2, 1)[0];
@@ -703,26 +1122,6 @@ namespace Qwen {
                                                   ref_latents,
                                                   modulate_index);
 
-#ifdef ED_DEBUG_SP_COMM
-            const std::string debug_local_name =
-                sd::ggml_graph_cut::make_graph_cut_name("qwen_image.prelude",
-                                                        "debug_sp_sequence_local");
-            if (ggml_tensor* debug_local = ggml_get_tensor(compute_ctx, debug_local_name.c_str())) {
-                ggml_build_forward_expand(gf, debug_local);
-            }
-            const std::string debug_gather_name =
-                sd::ggml_graph_cut::make_graph_cut_name("qwen_image.prelude",
-                                                        "debug_sp_sequence_all_gather_output");
-            if (ggml_tensor* debug_gather = ggml_get_tensor(compute_ctx, debug_gather_name.c_str())) {
-                ggml_build_forward_expand(gf, debug_gather);
-            }
-            const std::string debug_all_to_all_name =
-                sd::ggml_graph_cut::make_graph_cut_name("qwen_image.prelude",
-                                                        "debug_sp_sequence_all_to_all_output");
-            if (ggml_tensor* debug_all_to_all = ggml_get_tensor(compute_ctx, debug_all_to_all_name.c_str())) {
-                ggml_build_forward_expand(gf, debug_all_to_all);
-            }
-#endif
             ggml_build_forward_expand(gf, out);
 
             return gf;
