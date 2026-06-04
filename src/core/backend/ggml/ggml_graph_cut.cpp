@@ -1012,9 +1012,6 @@ namespace sd::ggml_graph_cut {
             cache->graph_cut_plan                    = base_plan;
             cache->graph_cut_plan.available          = true;
             cache->budgeted_graph_cut_plan.available = false;
-            if (log_desc != nullptr) {
-                LOG_INFO("%s build cached graph cut plan done (taking %lld ms)", log_desc, ggml_time_ms() - t_plan_begin);
-            }
         }
 
         Plan resolved_plan = base_plan;
@@ -1158,11 +1155,6 @@ namespace sd::ggml_graph_cut {
 
         const char* kind_name = comm_kind_name(comm_op.kind);
         const std::string op_name = comm_op_display_name(comm_op);
-        LOG_DEBUG("graph cut execute comm op: name=%s kind=%s input=%d output=%d",
-                  op_name.c_str(),
-                  kind_name,
-                  comm_op.input_node_index,
-                  comm_op.output_node_index);
 
         switch (comm_op.kind) {
             case Segment::CommKind::NONE:

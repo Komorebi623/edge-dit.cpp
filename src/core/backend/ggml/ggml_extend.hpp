@@ -1929,10 +1929,6 @@ protected:
 
         // compute the required memory
         size_t compute_buffer_size = ggml_gallocr_get_buffer_size(compute_allocr, 0);
-        LOG_DEBUG("%s compute buffer size: %.2f MB(%s)",
-                  get_desc().c_str(),
-                  compute_buffer_size / 1024.0 / 1024.0,
-                  ggml_backend_is_cpu(runtime_backend) ? "RAM" : "VRAM");
         return true;
     }
 
@@ -2012,11 +2008,6 @@ protected:
         }
         ggml_backend_synchronize(runtime_backend);
         size_t cache_buffer_size = ggml_backend_buffer_get_size(cache_buffer);
-        LOG_DEBUG("%s cache backend buffer size = % 6.2f MB(%s) (%i tensors)",
-                  get_desc().c_str(),
-                  cache_buffer_size / (1024.f * 1024.f),
-                  ggml_backend_is_cpu(runtime_backend) ? "RAM" : "VRAM",
-                  num_tensors);
         if (old_cache_buffer != nullptr) {
             ggml_backend_buffer_free(old_cache_buffer);
         }
@@ -2485,9 +2476,6 @@ protected:
                 return std::nullopt;
             }
             int64_t t_comm_end = ggml_time_ms();
-            LOG_DEBUG("%s post compute callback took %lld ms",
-                    get_desc().c_str(),
-                    t_comm_end - t_comm_begin);
         }
 
         auto result = ggml_get_tensor(compute_ctx, final_result_name.c_str());
@@ -2514,16 +2502,6 @@ protected:
         } else if (use_partial_param_offload) {
             restore_partial_params();
         }
-        if (use_partial_param_offload) {
-            LOG_DEBUG("%s execute_graph timing: offload=%lld ms alloc=%lld ms copy_in=%lld ms compute=%lld ms cache=%lld ms total=%lld ms",
-                      get_desc().c_str(),
-                      t_offload_end - t_offload_begin,
-                      t_alloc_end - t_alloc_begin,
-                      t_copy_end - t_copy_begin,
-                      t_compute_end - t_compute_begin,
-                      t_cache_end - t_cache_begin,
-                      ggml_time_ms() - t_execute_begin);
-        }
         return output;
     }
 
@@ -2543,11 +2521,6 @@ protected:
             int64_t t_segment_begin = ggml_time_ms();
             const auto& segment     = plan.segments[seg_idx];
             auto future_cut_names   = sd::ggml_graph_cut::collect_future_input_names(gf, plan, seg_idx);
-            LOG_DEBUG("%s graph cut executing segment %zu/%zu: %s",
-                      get_desc().c_str(),
-                      seg_idx + 1,
-                      plan.segments.size(),
-                      segment.group_name.c_str());
 
             reset_segment_runtime_tensors(segment, gf);
             if (!bind_segment_cached_inputs(gf, segment)) {

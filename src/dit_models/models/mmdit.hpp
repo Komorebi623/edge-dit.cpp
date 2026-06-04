@@ -8,9 +8,7 @@
 #include <vector>
 
 #include "backend/ggml/ggml_extend.hpp"
-#ifdef ED_DEBUG_SP_COMM
 #include "parallel/sp_parallel.hpp"
-#endif
 
 #define MMDIT_GRAPH_SIZE 32768
 
@@ -154,7 +152,6 @@ public:
     }
 };
 
-#ifdef ED_DEBUG_SP_COMM
 static inline bool mmdit_sp_enabled(GGMLRunnerContext* ctx) {
     return ctx != nullptr &&
            ctx->process_group != nullptr &&
@@ -283,7 +280,6 @@ static inline ggml_tensor* mmdit_sp_attention(GGMLRunnerContext* ctx,
                                                ctx->flash_attn_enabled);
     return attn;
 }
-#endif
 
 class SelfAttention : public GGMLBlock {
 public:
@@ -335,7 +331,6 @@ public:
         return {q, k, v};
     }
 
-#ifdef ED_DEBUG_SP_COMM
     std::vector<ggml_tensor*> pre_attention_sp(GGMLRunnerContext* ctx,
                                                ggml_tensor* x,
                                                const std::string& name_prefix) {
@@ -379,7 +374,6 @@ public:
 
         return {q_head.output, k_head.output, v_head.output};
     }
-#endif
 
     ggml_tensor* post_attention(GGMLRunnerContext* ctx, ggml_tensor* x) {
         GGML_ASSERT(!pre_only);
@@ -492,7 +486,6 @@ public:
         return {qkv, qkv2, {x, gate_msa, shift_mlp, scale_mlp, gate_mlp, gate_msa2}};
     }
 
-#ifdef ED_DEBUG_SP_COMM
     std::tuple<std::vector<ggml_tensor*>, std::vector<ggml_tensor*>, std::vector<ggml_tensor*>> pre_attention_x_sp(GGMLRunnerContext* ctx,
                                                                                                                    ggml_tensor* x,
                                                                                                                    ggml_tensor* c,
@@ -527,7 +520,6 @@ public:
 
         return {qkv, qkv2, {x, gate_msa, shift_mlp, scale_mlp, gate_mlp, gate_msa2}};
     }
-#endif
 
     std::pair<std::vector<ggml_tensor*>, std::vector<ggml_tensor*>> pre_attention(GGMLRunnerContext* ctx,
                                                                                   ggml_tensor* x,
@@ -568,7 +560,6 @@ public:
         }
     }
 
-#ifdef ED_DEBUG_SP_COMM
     std::pair<std::vector<ggml_tensor*>, std::vector<ggml_tensor*>> pre_attention_sp(GGMLRunnerContext* ctx,
                                                                                      ggml_tensor* x,
                                                                                      ggml_tensor* c,
@@ -605,7 +596,6 @@ public:
             return {qkv, {nullptr, nullptr, nullptr, nullptr, nullptr}};
         }
     }
-#endif
 
     ggml_tensor* post_attention_x(GGMLRunnerContext* ctx,
                                   ggml_tensor* attn_out,
@@ -811,7 +801,6 @@ block_mixing(GGMLRunnerContext* ctx,
     return {context, x};
 }
 
-#ifdef ED_DEBUG_SP_COMM
 __STATIC_INLINE__ std::pair<ggml_tensor*, ggml_tensor*>
 block_mixing_sp(GGMLRunnerContext* ctx,
                 ggml_tensor* context,
@@ -997,7 +986,6 @@ block_mixing_sp(GGMLRunnerContext* ctx,
 
     return {context, x};
 }
-#endif
 
 struct JointBlock : public GGMLBlock {
 public:
@@ -1022,7 +1010,6 @@ public:
         return block_mixing(ctx, context, x, c, context_block, x_block);
     }
 
-#ifdef ED_DEBUG_SP_COMM
     std::pair<ggml_tensor*, ggml_tensor*> forward_sp(GGMLRunnerContext* ctx,
                                                      ggml_tensor* context,
                                                      ggml_tensor* x,
@@ -1035,7 +1022,6 @@ public:
 
         return block_mixing_sp(ctx, context, x, c, context_block, x_block, context_pad, x_pad, name_prefix);
     }
-#endif
 };
 
 struct FinalLayer : public GGMLBlock {
@@ -1213,13 +1199,10 @@ public:
                                           ggml_tensor* x,
                                           ggml_tensor* c_mod,
                                           ggml_tensor* context,
-                                          std::vector<int> skip_layers = std::vector<int>()
-#ifdef ED_DEBUG_SP_COMM
-                                              ,
+                                          std::vector<int> skip_layers = std::vector<int>(),
                                           bool use_sp_mainline = false,
                                           int64_t context_pad  = 0,
                                           int64_t x_pad        = 0
-#endif
     ) {
         // x: [N, H*W, hidden_size]
         // context: [N, n_context, d_context]
@@ -1235,7 +1218,6 @@ public:
 
             auto block = std::dynamic_pointer_cast<JointBlock>(blocks["joint_blocks." + std::to_string(i)]);
 
-#ifdef ED_DEBUG_SP_COMM
             std::pair<ggml_tensor*, ggml_tensor*> context_x;
             if (use_sp_mainline) {
                 context_x = block->forward_sp(ctx,
@@ -1246,7 +1228,6 @@ public:
                                               x_pad,
                                               "mmdit_block" + std::to_string(i));
             } else
-#endif
             {
                 context_x = block->forward(ctx, context, x, c_mod);
             }
@@ -1256,7 +1237,6 @@ public:
             sd::ggml_graph_cut::mark_graph_cut(x, "mmdit.joint_blocks." + std::to_string(i), "x");
         }
 
-#ifdef ED_DEBUG_SP_COMM
         if (use_sp_mainline) {
             auto x_gather = edgedit::parallel::sp_mark_gather_sequence(ctx->ggml_ctx,
                                                                        x,
@@ -1266,7 +1246,6 @@ public:
                                                                        "mmdit_sp_final_x_gather");
             x             = x_gather.gathered;
         }
-#endif
 
         x = final_layer->forward(ctx, x, c_mod);  // (N, T, patch_size ** 2 * out_channels)
 
@@ -1309,7 +1288,6 @@ public:
             context = context_embedder->forward(ctx, context);  // [N, L, D] aka [N, L, 1536]
         }
 
-#ifdef ED_DEBUG_SP_COMM
         bool use_sp_mainline = mmdit_sp_enabled(ctx);
         edgedit::parallel::SPSequenceSplit x_sp_split;
         edgedit::parallel::SPSequenceSplit context_sp_split;
@@ -1338,7 +1316,6 @@ public:
                 context = context_sp_split.local;
             }
         }
-#endif
 
         sd::ggml_graph_cut::mark_graph_cut(x, "mmdit.prelude", "x");
         sd::ggml_graph_cut::mark_graph_cut(c, "mmdit.prelude", "c");
@@ -1350,13 +1327,10 @@ public:
                                      x,
                                      c,
                                      context,
-                                     skip_layers
-#ifdef ED_DEBUG_SP_COMM
-                                     ,
+                                     skip_layers,
                                      use_sp_mainline,
                                      context_sp_split.pad,
                                      x_sp_split.pad
-#endif
         );  // (N, H*W, patch_size ** 2 * out_channels)
 
         x = DiT::unpatchify_and_crop(ctx->ggml_ctx, x, H, W, patch_size, patch_size, /*patch_last*/ false);  // [N, C, H, W]

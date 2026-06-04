@@ -1,18 +1,143 @@
 #ifndef __WAN_HPP__
 #define __WAN_HPP__
 
+#include <cstdlib>
+#include <inttypes.h>
 #include <map>
 #include <memory>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "dit_models/components/common/common_block.hpp"
 #include "dit_models/components/autoencoders/vae.hpp"
 #include "dit_models/components/common/rope.hpp"
+#ifdef ED_DEBUG_SP_COMM
+#include "parallel/sp_parallel.hpp"
+#endif
 
 namespace WAN {
 
     constexpr int CACHE_T        = 2;
-    constexpr int WAN_GRAPH_SIZE = 10240;
+    constexpr int WAN_GRAPH_SIZE = 32768;
+
+#ifdef ED_DEBUG_SP_COMM
+    static inline bool wan_sp_enabled(GGMLRunnerContext* ctx) {
+        return ctx != nullptr &&
+               ctx->process_group != nullptr &&
+               ctx->process_group->enabled() &&
+               ctx->process_group->size() > 1;
+    }
+
+    static inline int wan_sp_rank(GGMLRunnerContext* ctx) {
+        return ctx->process_group->rank();
+    }
+
+    static inline int wan_sp_world_size(GGMLRunnerContext* ctx) {
+        return ctx->process_group->size();
+    }
+
+    static inline ggml_tensor* wan_sp_view_head_sequence(ggml_context* ctx,
+                                                         ggml_tensor* x,
+                                                         int64_t start,
+                                                         int64_t length,
+                                                         const std::string& name) {
+        GGML_ASSERT(x != nullptr);
+        GGML_ASSERT(start >= 0);
+        GGML_ASSERT(length > 0);
+        GGML_ASSERT(start + length <= x->ne[2]);
+
+        ggml_tensor* view = ggml_view_4d(ctx,
+                                         x,
+                                         x->ne[0],
+                                         x->ne[1],
+                                         length,
+                                         x->ne[3],
+                                         x->nb[1],
+                                         x->nb[2],
+                                         x->nb[3],
+                                         static_cast<size_t>(start) * x->nb[2]);
+        ggml_set_name(view, (name + "_view").c_str());
+        return view;
+    }
+
+    static inline ggml_tensor* wan_sp_real_head_sequence(ggml_context* ctx,
+                                                         ggml_tensor* x,
+                                                         int64_t pad,
+                                                         const std::string& name) {
+        GGML_ASSERT(x != nullptr);
+        GGML_ASSERT(pad >= 0 && pad <= x->ne[2]);
+        const int64_t real_seq = x->ne[2] - pad;
+        GGML_ASSERT(real_seq > 0);
+
+        ggml_tensor* out = wan_sp_view_head_sequence(ctx, x, 0, real_seq, name + "_real");
+        out              = ggml_cont(ctx, out);
+        ggml_set_name(out, name.c_str());
+        return out;
+    }
+
+    static inline ggml_tensor* wan_sp_pad_head_sequence(ggml_context* ctx,
+                                                        ggml_tensor* x,
+                                                        int64_t pad,
+                                                        const std::string& name) {
+        GGML_ASSERT(x != nullptr);
+        GGML_ASSERT(pad >= 0);
+        if (pad <= 0) {
+            ggml_set_name(x, name.c_str());
+            return x;
+        }
+
+        ggml_tensor* pad_tensor = ggml_ext_zeros(ctx, x->ne[0], x->ne[1], pad, x->ne[3]);
+        ggml_set_name(pad_tensor, (name + "_pad").c_str());
+        x = ggml_concat(ctx, x, pad_tensor, 2);
+        ggml_set_name(x, name.c_str());
+        return x;
+    }
+
+    static inline ggml_tensor* wan_sp_attention(GGMLRunnerContext* ctx,
+                                                ggml_tensor* q,
+                                                ggml_tensor* k,
+                                                ggml_tensor* v,
+                                                ggml_tensor* pe,
+                                                const std::string& name_prefix) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(q != nullptr);
+        GGML_ASSERT(k != nullptr);
+        GGML_ASSERT(v != nullptr);
+        GGML_ASSERT(pe != nullptr);
+
+        q = Rope::apply_rope(ctx->ggml_ctx, q, pe);
+        k = Rope::apply_rope(ctx->ggml_ctx, k, pe);
+
+        q = ggml_cont(ctx->ggml_ctx, q);
+        ggml_set_name(q, (name_prefix + "_q_rope").c_str());
+        k = ggml_cont(ctx->ggml_ctx, k);
+        ggml_set_name(k, (name_prefix + "_k_rope").c_str());
+        v = ggml_cont(ctx->ggml_ctx, v);
+        ggml_set_name(v, (name_prefix + "_v_attn").c_str());
+
+        const int64_t n_head = v->ne[1];
+        GGML_ASSERT(q->ne[0] == k->ne[0]);
+        GGML_ASSERT(q->ne[1] == k->ne[1]);
+        GGML_ASSERT(q->ne[2] == k->ne[2]);
+        GGML_ASSERT(v->ne[0] == q->ne[0]);
+        GGML_ASSERT(v->ne[1] == n_head);
+        GGML_ASSERT(v->ne[2] == q->ne[1]);
+        GGML_ASSERT(v->ne[3] == 1);
+
+        ggml_tensor* attn = ggml_ext_attention_ext(ctx->ggml_ctx,
+                                                   ctx->backend,
+                                                   q,
+                                                   k,
+                                                   v,
+                                                   n_head,
+                                                   nullptr,
+                                                   true,
+                                                   ctx->flash_attn_enabled);
+        ggml_set_name(attn, (name_prefix + "_attn").c_str());
+        return attn;
+    }
+#endif
 
     class CausalConv3d : public GGMLBlock {
     protected:
@@ -1413,6 +1538,110 @@ namespace WAN {
             x = o_proj->forward(ctx, x);  // [N, n_token, dim]
             return x;
         }
+
+#ifdef ED_DEBUG_SP_COMM
+        ggml_tensor* forward_sp(GGMLRunnerContext* ctx,
+                                ggml_tensor* x,
+                                ggml_tensor* pe,
+                                int64_t x_pad,
+                                const std::string& name_prefix) {
+            int64_t N             = x->ne[2];
+            int64_t local_n_token = x->ne[1];
+            const int world_size  = wan_sp_world_size(ctx);
+
+            GGML_ASSERT(N == 1);
+            GGML_ASSERT(num_heads % world_size == 0);
+
+            auto q_proj = std::dynamic_pointer_cast<Linear>(blocks["q"]);
+            auto k_proj = std::dynamic_pointer_cast<Linear>(blocks["k"]);
+            auto v_proj = std::dynamic_pointer_cast<Linear>(blocks["v"]);
+            auto o_proj = std::dynamic_pointer_cast<Linear>(blocks["o"]);
+            auto norm_q = std::dynamic_pointer_cast<UnaryBlock>(blocks["norm_q"]);
+            auto norm_k = std::dynamic_pointer_cast<UnaryBlock>(blocks["norm_k"]);
+
+            auto q = q_proj->forward(ctx, x);
+            q      = norm_q->forward(ctx, q);
+            auto k = k_proj->forward(ctx, x);
+            k      = norm_k->forward(ctx, k);
+            auto v = v_proj->forward(ctx, x);
+
+            q = ggml_reshape_4d(ctx->ggml_ctx, q, head_dim, num_heads, local_n_token, N);
+            k = ggml_reshape_4d(ctx->ggml_ctx, k, head_dim, num_heads, local_n_token, N);
+            v = ggml_reshape_4d(ctx->ggml_ctx, v, head_dim, num_heads, local_n_token, N);
+
+            q = ggml_cont(ctx->ggml_ctx, q);
+            ggml_set_name(q, (name_prefix + "_q_local").c_str());
+            k = ggml_cont(ctx->ggml_ctx, k);
+            ggml_set_name(k, (name_prefix + "_k_local").c_str());
+            v = ggml_cont(ctx->ggml_ctx, v);
+            ggml_set_name(v, (name_prefix + "_v_local").c_str());
+
+            auto q_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                          q,
+                                                                          world_size,
+                                                                          name_prefix + "_q_seq_to_head");
+            auto k_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                          k,
+                                                                          world_size,
+                                                                          name_prefix + "_k_seq_to_head");
+            auto v_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
+                                                                          v,
+                                                                          world_size,
+                                                                          name_prefix + "_v_seq_to_head");
+
+            ggml_tensor* q_attn = wan_sp_real_head_sequence(ctx->ggml_ctx,
+                                                            q_head.output,
+                                                            x_pad,
+                                                            name_prefix + "_q_attn_in");
+            ggml_tensor* k_attn = wan_sp_real_head_sequence(ctx->ggml_ctx,
+                                                            k_head.output,
+                                                            x_pad,
+                                                            name_prefix + "_k_attn_in");
+            ggml_tensor* v_attn = wan_sp_real_head_sequence(ctx->ggml_ctx,
+                                                            v_head.output,
+                                                            x_pad,
+                                                            name_prefix + "_v_attn_in");
+
+            ggml_tensor* attn = wan_sp_attention(ctx,
+                                                 q_attn,
+                                                 k_attn,
+                                                 v_attn,
+                                                 pe,
+                                                 name_prefix);
+            sd::ggml_graph_cut::mark_graph_cut(attn, name_prefix + ".sp_attention", "attn");
+
+            const int64_t real_seq = q_attn->ne[2];
+            const int64_t shard_heads = num_heads / world_size;
+            ggml_tensor* attn_4d = ggml_reshape_4d(ctx->ggml_ctx,
+                                                   attn,
+                                                   head_dim,
+                                                   shard_heads,
+                                                   real_seq,
+                                                   N);
+            ggml_set_name(attn_4d, (name_prefix + "_attn_4d").c_str());
+
+            ggml_tensor* attn_head = wan_sp_pad_head_sequence(ctx->ggml_ctx,
+                                                              attn_4d,
+                                                              x_pad,
+                                                              name_prefix + "_attn_head_padded");
+            attn_head              = ggml_cont(ctx->ggml_ctx, attn_head);
+            ggml_set_name(attn_head, (name_prefix + "_attn_head").c_str());
+
+            auto attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
+                                                                              attn_head,
+                                                                              world_size,
+                                                                              name_prefix + "_attn_head_to_seq");
+            ggml_tensor* out = ggml_reshape_3d(ctx->ggml_ctx,
+                                               attn_local.output,
+                                               head_dim * num_heads,
+                                               attn_local.output->ne[2],
+                                               N);
+            ggml_set_name(out, (name_prefix + "_attn_out").c_str());
+
+            out = o_proj->forward(ctx, out);
+            return out;
+        }
+#endif
     };
 
     class WanCrossAttention : public WanSelfAttention {
@@ -1426,6 +1655,17 @@ namespace WAN {
                                      ggml_tensor* x,
                                      ggml_tensor* context,
                                      int64_t context_img_len) = 0;
+
+#ifdef ED_DEBUG_SP_COMM
+        virtual ggml_tensor* forward_sp(GGMLRunnerContext* ctx,
+                                        ggml_tensor* x,
+                                        ggml_tensor* context,
+                                        int64_t context_img_len,
+                                        const std::string& name_prefix) {
+            (void)name_prefix;
+            return forward(ctx, x, context, context_img_len);
+        }
+#endif
     };
 
     class WanT2VCrossAttention : public WanCrossAttention {
@@ -1646,6 +1886,56 @@ namespace WAN {
 
             return x;
         }
+
+#ifdef ED_DEBUG_SP_COMM
+        virtual ggml_tensor* forward_sp(GGMLRunnerContext* ctx,
+                                        ggml_tensor* x,
+                                        ggml_tensor* e,
+                                        ggml_tensor* pe,
+                                        ggml_tensor* context,
+                                        int64_t x_pad,
+                                        const std::string& name_prefix,
+                                        int64_t context_img_len = 257) {
+            auto modulation = params["modulation"];
+            e               = ggml_add(ctx->ggml_ctx, e, modulation);
+            auto es         = ggml_ext_chunk(ctx->ggml_ctx, e, 6, 1);
+
+            auto norm1      = std::dynamic_pointer_cast<LayerNorm>(blocks["norm1"]);
+            auto self_attn  = std::dynamic_pointer_cast<WanSelfAttention>(blocks["self_attn"]);
+            auto norm3      = std::dynamic_pointer_cast<UnaryBlock>(blocks["norm3"]);
+            auto cross_attn = std::dynamic_pointer_cast<WanCrossAttention>(blocks["cross_attn"]);
+            auto norm2      = std::dynamic_pointer_cast<LayerNorm>(blocks["norm2"]);
+            auto ffn_0      = std::dynamic_pointer_cast<Linear>(blocks["ffn.0"]);
+            auto ffn_2      = std::dynamic_pointer_cast<Linear>(blocks["ffn.2"]);
+
+            auto y = norm1->forward(ctx, x);
+            y      = ggml_add(ctx->ggml_ctx, y, modulate_mul(ctx->ggml_ctx, y, es[1]));
+            y      = modulate_add(ctx->ggml_ctx, y, es[0]);
+            y      = self_attn->forward_sp(ctx, y, pe, x_pad, name_prefix + "_self");
+
+            x = ggml_add(ctx->ggml_ctx, x, modulate_mul(ctx->ggml_ctx, y, es[2]));
+
+            x = ggml_add(ctx->ggml_ctx,
+                         x,
+                         cross_attn->forward_sp(ctx,
+                                                norm3->forward(ctx, x),
+                                                context,
+                                                context_img_len,
+                                                name_prefix + "_cross"));
+
+            y = norm2->forward(ctx, x);
+            y = ggml_add(ctx->ggml_ctx, y, modulate_mul(ctx->ggml_ctx, y, es[4]));
+            y = modulate_add(ctx->ggml_ctx, y, es[3]);
+
+            y = ffn_0->forward(ctx, y);
+            y = ggml_ext_gelu(ctx->ggml_ctx, y, true);
+            y = ffn_2->forward(ctx, y);
+
+            x = ggml_add(ctx->ggml_ctx, x, modulate_mul(ctx->ggml_ctx, y, es[5]));
+
+            return x;
+        }
+#endif
     };
 
     class VaceWanAttentionBlock : public WanAttentionBlock {
@@ -1995,6 +2285,57 @@ namespace WAN {
                 c = ggml_reshape_3d(ctx->ggml_ctx, c, c->ne[0] * c->ne[1] * c->ne[2], c->ne[3] / N, N);  // [N, dim, t_len*h_len*w_len]
                 c = ggml_ext_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, c, 1, 0, 2, 3));  // [N, t_len*h_len*w_len, dim]
             }
+
+#ifdef ED_DEBUG_SP_COMM
+            bool use_sp_mainline = wan_sp_enabled(ctx) && std::getenv("ED_WAN_SP_DISABLE") == nullptr;
+            const bool sp_strict_blocks = std::getenv("ED_WAN_SP_STRICT_BLOCKS") != nullptr;
+            edgedit::parallel::SPSequenceSplit x_sp_split;
+            if (use_sp_mainline) {
+                const int rank       = wan_sp_rank(ctx);
+                const int world_size = wan_sp_world_size(ctx);
+                const int64_t x_pad  = edgedit::parallel::sp_sequence_padding(x->ne[1],
+                                                                              world_size);
+                if (params.model_type != "t2v" ||
+                    params.vace_layers > 0 ||
+                    clip_fea != nullptr ||
+                    vace_context != nullptr ||
+                    timestep->ne[0] != 1 ||
+                    x->ne[2] != 1 ||
+                    context == nullptr ||
+                    context->ne[2] != 1 ||
+                    params.num_heads % world_size != 0) {
+                    LOG_WARN("wan SP mainline disabled: rank=%d world_size=%d model_type=%s x_seq=%" PRId64 " x_pad=%" PRId64 " heads=%" PRId64 " timestep_len=%" PRId64 " batch=[%" PRId64 ",%" PRId64 "] vace_layers=%d clip=%s vace=%s",
+                             rank,
+                             world_size,
+                             params.model_type.c_str(),
+                             x->ne[1],
+                             x_pad,
+                             params.num_heads,
+                             timestep->ne[0],
+                             x->ne[2],
+                             context == nullptr ? 0 : context->ne[2],
+                             params.vace_layers,
+                             clip_fea == nullptr ? "null" : "set",
+                             vace_context == nullptr ? "null" : "set");
+                    use_sp_mainline = false;
+                } else {
+                    x_sp_split = edgedit::parallel::sp_split_sequence(ctx->ggml_ctx,
+                                                                      x,
+                                                                      rank,
+                                                                      world_size,
+                                                                      1,
+                                                                      "wan_sp_x_split");
+                    x = x_sp_split.local;
+                    LOG_DEBUG("wan SP mainline enabled: rank=%d world_size=%d x_seq=%" PRId64 "->%" PRId64 " strict_blocks=%s",
+                              rank,
+                              world_size,
+                              x_sp_split.original_seq_len,
+                              x_sp_split.local_seq_len,
+                              sp_strict_blocks ? "true" : "false");
+                }
+            }
+#endif
+
             sd::ggml_graph_cut::mark_graph_cut(x, "wan.prelude", "x");
             // sd::ggml_graph_cut::mark_graph_cut(e, "wan.prelude", "e");
             // sd::ggml_graph_cut::mark_graph_cut(e0, "wan.prelude", "e0");
@@ -2008,7 +2349,39 @@ namespace WAN {
             for (int i = 0; i < params.num_layers; i++) {
                 auto block = std::dynamic_pointer_cast<WanAttentionBlock>(blocks["blocks." + std::to_string(i)]);
 
-                x = block->forward(ctx, x, e0, pe, context, context_img_len);
+#ifdef ED_DEBUG_SP_COMM
+                if (use_sp_mainline) {
+                    if (sp_strict_blocks) {
+                        const std::string block_name = "wan_block" + std::to_string(i);
+                        auto x_gather = edgedit::parallel::sp_mark_gather_sequence(ctx->ggml_ctx,
+                                                                                   x,
+                                                                                   x_sp_split.world_size,
+                                                                                   1,
+                                                                                   x_sp_split.pad,
+                                                                                   block_name + "_strict_gather");
+                        x = block->forward(ctx, x_gather.gathered, e0, pe, context, context_img_len);
+                        x_sp_split = edgedit::parallel::sp_split_sequence(ctx->ggml_ctx,
+                                                                          x,
+                                                                          x_sp_split.rank,
+                                                                          x_sp_split.world_size,
+                                                                          1,
+                                                                          block_name + "_strict_split");
+                        x = x_sp_split.local;
+                    } else {
+                        x = block->forward_sp(ctx,
+                                              x,
+                                              e0,
+                                              pe,
+                                              context,
+                                              x_sp_split.pad,
+                                              "wan_block" + std::to_string(i),
+                                              context_img_len);
+                    }
+                } else
+#endif
+                {
+                    x = block->forward(ctx, x, e0, pe, context, context_img_len);
+                }
 
                 auto iter = params.vace_layers_mapping.find(i);
                 if (iter != params.vace_layers_mapping.end()) {
@@ -2027,6 +2400,18 @@ namespace WAN {
                     sd::ggml_graph_cut::mark_graph_cut(c, "wan.blocks." + std::to_string(i), "c");
                 }
             }
+
+#ifdef ED_DEBUG_SP_COMM
+            if (use_sp_mainline) {
+                auto x_gather = edgedit::parallel::sp_mark_gather_sequence(ctx->ggml_ctx,
+                                                                           x,
+                                                                           wan_sp_world_size(ctx),
+                                                                           1,
+                                                                           x_sp_split.pad,
+                                                                           "wan_sp_final_x_gather");
+                x             = x_gather.gathered;
+            }
+#endif
 
             x = head->forward(ctx, x, e);  // [N, t_len*h_len*w_len, pt*ph*pw*out_dim]
 

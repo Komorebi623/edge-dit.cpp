@@ -1,7 +1,6 @@
 #ifndef __QWEN_IMAGE_HPP__
 #define __QWEN_IMAGE_HPP__
 
-#include <inttypes.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -10,14 +9,11 @@
 #include "dit_models/components/common/common_dit.hpp"
 #include "dit_models/components/common/modulation.hpp"
 #include "dit_models/components/common/rope.hpp"
-#ifdef ED_DEBUG_SP_COMM
 #include "parallel/sp_parallel.hpp"
-#endif
 
 namespace Qwen {
     constexpr int QWEN_IMAGE_GRAPH_SIZE = 20480;
 
-#ifdef ED_DEBUG_SP_COMM
     static inline bool qwen_sp_enabled(GGMLRunnerContext* ctx) {
         return ctx != nullptr &&
                ctx->process_group != nullptr &&
@@ -38,7 +34,6 @@ namespace Qwen {
                                                  ggml_tensor* k,
                                                  ggml_tensor* v,
                                                  ggml_tensor* pe,
-                                                 const std::string& name_prefix,
                                                  float kv_scale) {
         GGML_ASSERT(ctx != nullptr);
         GGML_ASSERT(q != nullptr);
@@ -50,11 +45,8 @@ namespace Qwen {
         k = Rope::apply_rope(ctx->ggml_ctx, k, pe);
 
         q = ggml_cont(ctx->ggml_ctx, q);
-        ggml_set_name(q, (name_prefix + "_q_rope").c_str());
         k = ggml_cont(ctx->ggml_ctx, k);
-        ggml_set_name(k, (name_prefix + "_k_rope").c_str());
         v = ggml_cont(ctx->ggml_ctx, v);
-        ggml_set_name(v, (name_prefix + "_v_attn").c_str());
 
         const int64_t n_head = v->ne[1];
         GGML_ASSERT(q->ne[0] == k->ne[0]);
@@ -75,40 +67,35 @@ namespace Qwen {
                                                    true,
                                                    false,
                                                    kv_scale);
-        ggml_set_name(attn, (name_prefix + "_attn").c_str());
         return attn;
     }
 
     static inline ggml_tensor* qwen_sp_view_head_sequence(ggml_context* ctx,
                                                           ggml_tensor* x,
                                                           int64_t start,
-                                                          int64_t length,
-                                                          const std::string& name) {
+                                                          int64_t length) {
         GGML_ASSERT(x != nullptr);
         GGML_ASSERT(start >= 0);
         GGML_ASSERT(length > 0);
         GGML_ASSERT(start + length <= x->ne[2]);
 
-        ggml_tensor* view = ggml_view_4d(ctx,
-                                         x,
-                                         x->ne[0],
-                                         x->ne[1],
-                                         length,
-                                         x->ne[3],
-                                         x->nb[1],
-                                         x->nb[2],
-                                         x->nb[3],
-                                         static_cast<size_t>(start) * x->nb[2]);
-        ggml_set_name(view, (name + "_view").c_str());
-        return view;
+        return ggml_view_4d(ctx,
+                            x,
+                            x->ne[0],
+                            x->ne[1],
+                            length,
+                            x->ne[3],
+                            x->nb[1],
+                            x->nb[2],
+                            x->nb[3],
+                            static_cast<size_t>(start) * x->nb[2]);
     }
 
     static inline ggml_tensor* qwen_sp_concat_real_attention_sequence(ggml_context* ctx,
                                                                      ggml_tensor* txt,
                                                                      ggml_tensor* img,
                                                                      int64_t txt_pad,
-                                                                     int64_t img_pad,
-                                                                     const std::string& name) {
+                                                                     int64_t img_pad) {
         GGML_ASSERT(txt != nullptr);
         GGML_ASSERT(img != nullptr);
         GGML_ASSERT(txt_pad >= 0 && txt_pad <= txt->ne[2]);
@@ -122,53 +109,39 @@ namespace Qwen {
         ggml_tensor* txt_real = qwen_sp_view_head_sequence(ctx,
                                                            txt,
                                                            0,
-                                                           txt_real_seq,
-                                                           name + "_txt_real");
+                                                           txt_real_seq);
         ggml_tensor* img_real = qwen_sp_view_head_sequence(ctx,
                                                            img,
                                                            0,
-                                                           img_real_seq,
-                                                           name + "_img_real");
-        ggml_tensor* out = ggml_concat(ctx, txt_real, img_real, 2);
-        ggml_set_name(out, name.c_str());
-        return out;
+                                                           img_real_seq);
+        return ggml_concat(ctx, txt_real, img_real, 2);
     }
 
     static inline ggml_tensor* qwen_sp_pad_head_sequence(ggml_context* ctx,
                                                         ggml_tensor* x,
-                                                        int64_t pad,
-                                                        const std::string& name) {
+                                                        int64_t pad) {
         GGML_ASSERT(x != nullptr);
         GGML_ASSERT(pad >= 0);
         if (pad <= 0) {
-            ggml_set_name(x, name.c_str());
             return x;
         }
 
         ggml_tensor* pad_tensor = ggml_ext_zeros(ctx, x->ne[0], x->ne[1], pad, x->ne[3]);
-        ggml_set_name(pad_tensor, (name + "_pad").c_str());
-        x = ggml_concat(ctx, x, pad_tensor, 2);
-        ggml_set_name(x, name.c_str());
-        return x;
+        return ggml_concat(ctx, x, pad_tensor, 2);
     }
 
     static inline ggml_tensor* qwen_sp_extract_stream_attention(ggml_context* ctx,
                                                                ggml_tensor* combined,
                                                                int64_t real_start,
                                                                int64_t real_seq,
-                                                               int64_t pad,
-                                                               const std::string& name) {
+                                                               int64_t pad) {
         ggml_tensor* out = qwen_sp_view_head_sequence(ctx,
                                                       combined,
                                                       real_start,
-                                                      real_seq,
-                                                      name + "_real");
-        out = qwen_sp_pad_head_sequence(ctx, out, pad, name + "_padded");
-        out = ggml_cont(ctx, out);
-        ggml_set_name(out, name.c_str());
-        return out;
+                                                      real_seq);
+        out              = qwen_sp_pad_head_sequence(ctx, out, pad);
+        return ggml_cont(ctx, out);
     }
-#endif
 
     struct TimestepEmbedding : public GGMLBlock {
     public:
@@ -350,7 +323,6 @@ namespace Qwen {
             return {img_attn_out, txt_attn_out};
         }
 
-#ifdef ED_DEBUG_SP_COMM
         std::pair<ggml_tensor*, ggml_tensor*> forward_sp(GGMLRunnerContext* ctx,
                                                          ggml_tensor* img,
                                                          ggml_tensor* txt,
@@ -408,17 +380,11 @@ namespace Qwen {
             txt_k = norm_added_k->forward(ctx, txt_k);
 
             img_q = ggml_cont(ctx->ggml_ctx, img_q);
-            ggml_set_name(img_q, (name_prefix + "_img_q_local").c_str());
             img_k = ggml_cont(ctx->ggml_ctx, img_k);
-            ggml_set_name(img_k, (name_prefix + "_img_k_local").c_str());
             img_v = ggml_cont(ctx->ggml_ctx, img_v);
-            ggml_set_name(img_v, (name_prefix + "_img_v_local").c_str());
             txt_q = ggml_cont(ctx->ggml_ctx, txt_q);
-            ggml_set_name(txt_q, (name_prefix + "_txt_q_local").c_str());
             txt_k = ggml_cont(ctx->ggml_ctx, txt_k);
-            ggml_set_name(txt_k, (name_prefix + "_txt_k_local").c_str());
             txt_v = ggml_cont(ctx->ggml_ctx, txt_v);
-            ggml_set_name(txt_v, (name_prefix + "_txt_v_local").c_str());
 
             auto img_q_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
                                                                               img_q,
@@ -449,32 +415,23 @@ namespace Qwen {
                                                                     txt_q_head.output,
                                                                     img_q_head.output,
                                                                     txt_pad,
-                                                                    img_pad,
-                                                                    name_prefix + "_q_head");
-            ggml_set_name(q, (name_prefix + "_q_head").c_str());
+                                                                    img_pad);
             ggml_tensor* k = qwen_sp_concat_real_attention_sequence(ctx->ggml_ctx,
                                                                     txt_k_head.output,
                                                                     img_k_head.output,
                                                                     txt_pad,
-                                                                    img_pad,
-                                                                    name_prefix + "_k_head");
-            ggml_set_name(k, (name_prefix + "_k_head").c_str());
+                                                                    img_pad);
             ggml_tensor* v = qwen_sp_concat_real_attention_sequence(ctx->ggml_ctx,
                                                                     txt_v_head.output,
                                                                     img_v_head.output,
                                                                     txt_pad,
-                                                                    img_pad,
-                                                                    name_prefix + "_v_head");
-            ggml_set_name(v, (name_prefix + "_v_head").c_str());
+                                                                    img_pad);
 
             q = ggml_cont(ctx->ggml_ctx, q);
-            ggml_set_name(q, (name_prefix + "_q_attn").c_str());
             k = ggml_cont(ctx->ggml_ctx, k);
-            ggml_set_name(k, (name_prefix + "_k_attn").c_str());
             v = ggml_cont(ctx->ggml_ctx, v);
-            ggml_set_name(v, (name_prefix + "_v_attn_in").c_str());
 
-            ggml_tensor* attn = qwen_sp_attention(ctx, q, k, v, pe, name_prefix, 1.0f / 128.f);
+            ggml_tensor* attn = qwen_sp_attention(ctx, q, k, v, pe, 1.0f / 128.f);
             sd::ggml_graph_cut::mark_graph_cut(attn, name_prefix + ".sp_attention", "attn");
 
             const int64_t shard_heads = num_heads / world_size;
@@ -490,21 +447,18 @@ namespace Qwen {
                                                    shard_heads,
                                                    total_seq,
                                                    N);
-            ggml_set_name(attn_4d, (name_prefix + "_attn_4d").c_str());
 
             ggml_tensor* txt_attn_head = qwen_sp_extract_stream_attention(ctx->ggml_ctx,
                                                                           attn_4d,
                                                                           0,
                                                                           txt_real_seq,
-                                                                          txt_pad,
-                                                                          name_prefix + "_txt_attn_head");
+                                                                          txt_pad);
 
             ggml_tensor* img_attn_head = qwen_sp_extract_stream_attention(ctx->ggml_ctx,
                                                                           attn_4d,
                                                                           txt_real_seq,
                                                                           img_real_seq,
-                                                                          img_pad,
-                                                                          name_prefix + "_img_attn_head");
+                                                                          img_pad);
 
             auto txt_attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
                                                                                   txt_attn_head,
@@ -520,20 +474,17 @@ namespace Qwen {
                                                         dim_head * num_heads,
                                                         txt_attn_local.output->ne[2],
                                                         N);
-            ggml_set_name(txt_attn_out, (name_prefix + "_txt_attn_out").c_str());
             ggml_tensor* img_attn_out = ggml_reshape_3d(ctx->ggml_ctx,
                                                         img_attn_local.output,
                                                         dim_head * num_heads,
                                                         img_attn_local.output->ne[2],
                                                         N);
-            ggml_set_name(img_attn_out, (name_prefix + "_img_attn_out").c_str());
 
             img_attn_out = to_out_0->forward(ctx, img_attn_out);
             txt_attn_out = to_add_out->forward(ctx, txt_attn_out);
 
             return {img_attn_out, txt_attn_out};
         }
-#endif
     };
 
     class QwenImageTransformerBlock : public GGMLBlock {
@@ -661,7 +612,6 @@ namespace Qwen {
             return {img, txt};
         }
 
-#ifdef ED_DEBUG_SP_COMM
         std::pair<ggml_tensor*, ggml_tensor*> forward_sp(GGMLRunnerContext* ctx,
                                                          ggml_tensor* img,
                                                          ggml_tensor* txt,
@@ -730,7 +680,6 @@ namespace Qwen {
 
             return {img, txt};
         }
-#endif
     };
 
     struct AdaLayerNormContinuous : public GGMLBlock {
@@ -830,7 +779,6 @@ namespace Qwen {
             auto txt = txt_norm->forward(ctx, context);
             txt      = txt_in->forward(ctx, txt);
 
-#ifdef ED_DEBUG_SP_COMM
             bool use_sp_mainline = qwen_sp_enabled(ctx);
             edgedit::parallel::SPSequenceSplit img_sp_split;
             edgedit::parallel::SPSequenceSplit txt_sp_split;
@@ -845,16 +793,6 @@ namespace Qwen {
                                                                                 world_size);
                 const int64_t heads_pad = params.num_attention_heads % world_size;
                 if (heads_pad != 0 || img->ne[2] != 1 || txt->ne[2] != 1) {
-                    LOG_WARN("qwen_image SP mainline disabled: rank=%d world_size=%d img_seq=%" PRId64 " img_pad=%" PRId64 " txt_seq=%" PRId64 " txt_pad=%" PRId64 " heads=%" PRId64 " batch=[%" PRId64 ",%" PRId64 "]",
-                             rank,
-                             world_size,
-                             img->ne[1],
-                             img_pad,
-                             txt->ne[1],
-                             txt_pad,
-                             params.num_attention_heads,
-                             img->ne[2],
-                             txt->ne[2]);
                     use_sp_mainline = false;
                 } else {
                     img_sp_split = edgedit::parallel::sp_split_sequence(ctx->ggml_ctx,
@@ -879,7 +817,6 @@ namespace Qwen {
                                                                           modulate_index->ne[0],
                                                                           1,
                                                                           1);
-                        ggml_set_name(modulate_index_4d, "qwen_image_sp_modulate_index_4d");
                         modulate_index_sp_split = edgedit::parallel::sp_split_sequence(ctx->ggml_ctx,
                                                                                        modulate_index_4d,
                                                                                        rank,
@@ -890,19 +827,9 @@ namespace Qwen {
                                                          modulate_index_sp_split.local,
                                                          modulate_index_sp_split.local->ne[1],
                                                          modulate_index_sp_split.local->ne[2]);
-                        ggml_set_name(modulate_index, "qwen_image_sp_modulate_index_local");
                     }
-
-                    LOG_DEBUG("qwen_image SP mainline enabled: rank=%d world_size=%d img_seq=%" PRId64 "->%" PRId64 " txt_seq=%" PRId64 "->%" PRId64,
-                              rank,
-                              world_size,
-                              img_sp_split.original_seq_len,
-                              img_sp_split.local_seq_len,
-                              txt_sp_split.original_seq_len,
-                              txt_sp_split.local_seq_len);
                 }
             }
-#endif
             sd::ggml_graph_cut::mark_graph_cut(img, "qwen_image.prelude", "img");
             sd::ggml_graph_cut::mark_graph_cut(txt, "qwen_image.prelude", "txt");
             // sd::ggml_graph_cut::mark_graph_cut(t_emb, "qwen_image.prelude", "t_emb");
@@ -910,7 +837,6 @@ namespace Qwen {
             for (int i = 0; i < params.num_layers; i++) {
                 auto block = std::dynamic_pointer_cast<QwenImageTransformerBlock>(blocks["transformer_blocks." + std::to_string(i)]);
 
-#ifdef ED_DEBUG_SP_COMM
                 std::pair<ggml_tensor*, ggml_tensor*> result;
                 if (use_sp_mainline) {
                     result = block->forward_sp(ctx,
@@ -923,7 +849,6 @@ namespace Qwen {
                                                img_sp_split.pad,
                                                "qwen_image_block" + std::to_string(i));
                 } else
-#endif
                 {
                     result = block->forward(ctx, img, txt, t_emb, pe, modulate_index);
                 }
@@ -933,7 +858,6 @@ namespace Qwen {
                 sd::ggml_graph_cut::mark_graph_cut(txt, "qwen_image.transformer_blocks." + std::to_string(i), "txt");
             }
 
-#ifdef ED_DEBUG_SP_COMM
             if (use_sp_mainline) {
                 auto img_gather = edgedit::parallel::sp_mark_gather_sequence(ctx->ggml_ctx,
                                                                              img,
@@ -943,7 +867,6 @@ namespace Qwen {
                                                                              "qwen_image_sp_final_img_gather");
                 img = img_gather.gathered;
             }
-#endif
 
             if (params.zero_cond_t) {
                 t_emb = ggml_ext_chunk(ctx->ggml_ctx, t_emb, 2, 1)[0];
@@ -1080,7 +1003,6 @@ namespace Qwen {
                                                   circular_x_enabled,
                                                   qwen_image_params.axes_dim);
             int pos_len = static_cast<int>(pe_vec.size() / qwen_image_params.axes_dim_sum / 2);
-            // LOG_DEBUG("pos_len %d", pos_len);
             auto pe = ggml_new_tensor_4d(compute_ctx, GGML_TYPE_F32, 2, 2, qwen_image_params.axes_dim_sum / 2, pos_len);
             // pe->data = pe_vec.data();
             // print_ggml_tensor(pe, true, "pe");
@@ -1168,19 +1090,16 @@ namespace Qwen {
 
                 sd::Tensor<float> out;
 
-                int64_t t0   = ggml_time_ms();
                 auto out_opt = compute(8,
                                        x,
                                        timesteps,
                                        context,
                                        {},
                                        false);
-                int64_t t1   = ggml_time_ms();
 
                 GGML_ASSERT(!out_opt.empty());
                 out = std::move(out_opt);
                 print_sd_tensor(out);
-                LOG_DEBUG("qwen_image test done in %lldms", t1 - t0);
             }
         }
 
