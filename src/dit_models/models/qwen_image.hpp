@@ -1,7 +1,9 @@
 #ifndef __QWEN_IMAGE_HPP__
 #define __QWEN_IMAGE_HPP__
 
+#include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -12,6 +14,861 @@
 #include "parallel/sp_parallel.hpp"
 
 namespace Qwen {
+// Qwen SP custom ops: the CUDA backend intercepts these ggml custom nodes and
+// runs the fused pack kernels in ggml-cuda. The CPU callbacks keep the graph
+// valid on non-CUDA backends and define the exact layout contract.
+struct QwenFusedQKVPackParams {
+    uint64_t magic;
+    int64_t txt_real_seq;
+    int64_t img_real_seq;
+    int64_t mode;
+    int64_t txt_padded_seq;
+    int64_t img_padded_seq;
+    int64_t world_size;
+    int64_t stream_index;
+};
+
+constexpr uint64_t QWEN_FUSED_QKV_PACK_MAGIC = 0x5157454e46514b56ULL; // "QWENFQKV"
+
+static const QwenFusedQKVPackParams QWEN_FUSED_QKV_PACK_USERDATA = {
+    QWEN_FUSED_QKV_PACK_MAGIC,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+};
+
+static std::mutex& qwen_fused_qkv_pack_params_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+static std::vector<std::unique_ptr<QwenFusedQKVPackParams>>& qwen_fused_qkv_pack_params_store() {
+    static std::vector<std::unique_ptr<QwenFusedQKVPackParams>> store;
+    return store;
+}
+
+static QwenFusedQKVPackParams* qwen_fused_qkv_pack_make_params(int64_t txt_real_seq,
+                                                               int64_t img_real_seq,
+                                                               int64_t mode) {
+    auto params = std::make_unique<QwenFusedQKVPackParams>();
+    params->magic = QWEN_FUSED_QKV_PACK_MAGIC;
+    params->txt_real_seq = txt_real_seq;
+    params->img_real_seq = img_real_seq;
+    params->mode = mode;
+    params->txt_padded_seq = 0;
+    params->img_padded_seq = 0;
+    params->world_size = 0;
+    params->stream_index = 0;
+    QwenFusedQKVPackParams* raw = params.get();
+    std::lock_guard<std::mutex> lock(qwen_fused_qkv_pack_params_mutex());
+    qwen_fused_qkv_pack_params_store().push_back(std::move(params));
+    return raw;
+}
+
+static QwenFusedQKVPackParams* qwen_fused_qkv_pack_make_params(int64_t txt_real_seq,
+                                                               int64_t img_real_seq,
+                                                               int64_t mode,
+                                                               int64_t txt_padded_seq,
+                                                               int64_t img_padded_seq,
+                                                               int64_t world_size,
+                                                               int64_t stream_index = 0) {
+    auto params = std::make_unique<QwenFusedQKVPackParams>();
+    params->magic = QWEN_FUSED_QKV_PACK_MAGIC;
+    params->txt_real_seq = txt_real_seq;
+    params->img_real_seq = img_real_seq;
+    params->mode = mode;
+    params->txt_padded_seq = txt_padded_seq;
+    params->img_padded_seq = img_padded_seq;
+    params->world_size = world_size;
+    params->stream_index = stream_index;
+    QwenFusedQKVPackParams* raw = params.get();
+    std::lock_guard<std::mutex> lock(qwen_fused_qkv_pack_params_mutex());
+    qwen_fused_qkv_pack_params_store().push_back(std::move(params));
+    return raw;
+}
+
+static inline float qwen_fused_qkv_pack_get_f32(const ggml_tensor* src,
+                                                int64_t i0,
+                                                int64_t i1,
+                                                int64_t i2,
+                                                int64_t i3) {
+    const char* data = static_cast<const char*>(src->data);
+    return *reinterpret_cast<const float*>(data +
+                                           i0 * src->nb[0] +
+                                           i1 * src->nb[1] +
+                                           i2 * src->nb[2] +
+                                           i3 * src->nb[3]);
+}
+
+static inline void qwen_fused_qkv_pack_set_f32(ggml_tensor* dst,
+                                               int64_t i0,
+                                               int64_t i1,
+                                               int64_t i2,
+                                               int64_t i3,
+                                               float value) {
+    char* data = static_cast<char*>(dst->data);
+    *reinterpret_cast<float*>(data +
+                              i0 * dst->nb[0] +
+                              i1 * dst->nb[1] +
+                              i2 * dst->nb[2] +
+                              i3 * dst->nb[3]) = value;
+}
+
+static inline void qwen_fused_qkv_pack_cpu(ggml_tensor* dst, int ith, int nth, void* userdata) {
+    auto* params = static_cast<const QwenFusedQKVPackParams*>(userdata);
+    GGML_ASSERT(params != nullptr);
+    GGML_ASSERT(params->magic == QWEN_FUSED_QKV_PACK_MAGIC);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ith >= 0 && nth > 0);
+
+    const ggml_tensor* txt_q = dst->src[0];
+    const ggml_tensor* img_q = dst->src[1];
+    const ggml_tensor* txt_k = dst->src[2];
+    const ggml_tensor* img_k = dst->src[3];
+    const ggml_tensor* txt_v = dst->src[4];
+    const ggml_tensor* img_v = dst->src[5];
+    const ggml_tensor* srcs[3][2] = {{txt_q, img_q}, {txt_k, img_k}, {txt_v, img_v}};
+
+    const int64_t txt_seq     = dst->src[0]->ne[1];
+    const int64_t img_seq     = dst->src[1]->ne[1];
+    const int64_t seq_total   = txt_seq + img_seq;
+    const int64_t qk_half_dim = dst->ne[0];
+    const int64_t head_dim    = qk_half_dim * 2;
+    const int64_t n_heads     = dst->ne[2];
+    const int64_t plane_elems = qk_half_dim * seq_total * n_heads;
+
+    for (int64_t linear = ith; linear < 6 * plane_elems; linear += nth) {
+        const int64_t plane = linear / plane_elems;
+        int64_t rem         = linear - plane * plane_elems;
+        const int64_t half  = rem % qk_half_dim;
+        rem /= qk_half_dim;
+        const int64_t tok   = rem % seq_total;
+        const int64_t head  = rem / seq_total;
+        const bool is_txt   = tok < txt_seq;
+        const int64_t src_t = is_txt ? tok : tok - txt_seq;
+        const int64_t qkv_plane = plane / 2;
+        const int64_t part      = plane % 2;
+        const ggml_tensor* src  = srcs[qkv_plane][is_txt ? 0 : 1];
+
+        float value = 0.0f;
+        if (qkv_plane < 2) {
+            value = qwen_fused_qkv_pack_get_f32(src, half, src_t, head, part);
+        } else {
+            const int64_t d = half + part * qk_half_dim;
+            GGML_ASSERT(d < head_dim);
+            value = qwen_fused_qkv_pack_get_f32(src, d, src_t, head, 0);
+        }
+        qwen_fused_qkv_pack_set_f32(dst, half, tok, head, plane, value);
+    }
+}
+
+static inline void qwen_fused_qk_pack_cpu(ggml_tensor* dst, int ith, int nth, void* userdata) {
+    auto* params = static_cast<const QwenFusedQKVPackParams*>(userdata);
+    GGML_ASSERT(params != nullptr);
+    GGML_ASSERT(params->magic == QWEN_FUSED_QKV_PACK_MAGIC);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ith >= 0 && nth > 0);
+
+    const ggml_tensor* txt_q = dst->src[0];
+    const ggml_tensor* img_q = dst->src[1];
+    const ggml_tensor* txt_k = dst->src[2];
+    const ggml_tensor* img_k = dst->src[3];
+    const ggml_tensor* srcs[2][2] = {{txt_q, img_q}, {txt_k, img_k}};
+
+    const int64_t txt_seq     = dst->src[0]->ne[1];
+    const int64_t img_seq     = dst->src[1]->ne[1];
+    const int64_t seq_total   = txt_seq + img_seq;
+    const int64_t qk_half_dim = dst->ne[0];
+    const int64_t n_heads     = dst->ne[2];
+    const int64_t plane_elems = qk_half_dim * seq_total * n_heads;
+    GGML_ASSERT(dst->ne[3] == 4);
+
+    for (int64_t linear = ith; linear < 4 * plane_elems; linear += nth) {
+        const int64_t plane = linear / plane_elems;
+        int64_t rem         = linear - plane * plane_elems;
+        const int64_t half  = rem % qk_half_dim;
+        rem /= qk_half_dim;
+        const int64_t tok   = rem % seq_total;
+        const int64_t head  = rem / seq_total;
+        const bool is_txt   = tok < txt_seq;
+        const int64_t src_t = is_txt ? tok : tok - txt_seq;
+        const int64_t qk_plane = plane / 2;
+        const int64_t part     = plane % 2;
+        const ggml_tensor* src = srcs[qk_plane][is_txt ? 0 : 1];
+
+        const float value = qwen_fused_qkv_pack_get_f32(src, half, src_t, head, part);
+        qwen_fused_qkv_pack_set_f32(dst, half, tok, head, plane, value);
+    }
+}
+
+static inline void qwen_fused_v_pack_cpu(ggml_tensor* dst, int ith, int nth, void* userdata) {
+    auto* params = static_cast<const QwenFusedQKVPackParams*>(userdata);
+    GGML_ASSERT(params != nullptr);
+    GGML_ASSERT(params->magic == QWEN_FUSED_QKV_PACK_MAGIC);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ith >= 0 && nth > 0);
+
+    const ggml_tensor* txt_v = dst->src[0];
+    const ggml_tensor* img_v = dst->src[1];
+    const int64_t txt_seq    = txt_v->ne[1];
+    const int64_t img_seq    = img_v->ne[1];
+    const int64_t seq_total  = txt_seq + img_seq;
+    const int64_t head_dim   = dst->ne[0];
+    const int64_t n_heads    = dst->ne[2];
+    const int64_t total      = head_dim * seq_total * n_heads;
+    GGML_ASSERT(dst->ne[3] == 1);
+
+    for (int64_t linear = ith; linear < total; linear += nth) {
+        int64_t rem        = linear;
+        const int64_t d    = rem % head_dim;
+        rem /= head_dim;
+        const int64_t tok  = rem % seq_total;
+        const int64_t head = rem / seq_total;
+        const bool is_txt  = tok < txt_seq;
+        const int64_t src_t = is_txt ? tok : tok - txt_seq;
+        const ggml_tensor* src = is_txt ? txt_v : img_v;
+        const float value = qwen_fused_qkv_pack_get_f32(src, d, src_t, head, 0);
+        qwen_fused_qkv_pack_set_f32(dst, d, tok, head, 0, value);
+    }
+}
+
+static inline void qwen_fused_qkv_send_pack_cpu(ggml_tensor* dst, int ith, int nth, void* userdata) {
+    auto* params = static_cast<const QwenFusedQKVPackParams*>(userdata);
+    GGML_ASSERT(params != nullptr);
+    GGML_ASSERT(params->magic == QWEN_FUSED_QKV_PACK_MAGIC);
+    GGML_ASSERT(params->mode == 6);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ith >= 0 && nth > 0);
+
+    const ggml_tensor* q = dst->src[0];
+    const ggml_tensor* k = dst->src[1];
+    const ggml_tensor* v = dst->src[2];
+    GGML_ASSERT(q != nullptr && k != nullptr && v != nullptr);
+    const int64_t world_size     = params->txt_real_seq;
+    const int64_t head_dim       = q->ne[0];
+    const int64_t heads          = q->ne[1];
+    const int64_t shard_sequence = q->ne[2];
+    const int64_t shard_heads    = heads / world_size;
+    const int64_t total_head_dim = head_dim * 3;
+    GGML_ASSERT(world_size > 0);
+    GGML_ASSERT(heads % world_size == 0);
+    GGML_ASSERT(k->ne[0] == head_dim && v->ne[0] == head_dim);
+    GGML_ASSERT(k->ne[1] == heads && v->ne[1] == heads);
+    GGML_ASSERT(k->ne[2] == shard_sequence && v->ne[2] == shard_sequence);
+    GGML_ASSERT(q->ne[3] == 1 && k->ne[3] == 1 && v->ne[3] == 1);
+    GGML_ASSERT(dst->ne[0] == total_head_dim * shard_heads * shard_sequence * world_size);
+
+    const int64_t total = dst->ne[0];
+    for (int64_t linear = ith; linear < total; linear += nth) {
+        int64_t rem         = linear;
+        const int64_t d_all = rem % total_head_dim;
+        rem /= total_head_dim;
+        const int64_t head_local = rem % shard_heads;
+        rem /= shard_heads;
+        const int64_t seq = rem % shard_sequence;
+        rem /= shard_sequence;
+        const int64_t peer = rem;
+        const int64_t head = head_local + peer * shard_heads;
+        const int64_t qkv_plane = d_all / head_dim;
+        const int64_t d = d_all - qkv_plane * head_dim;
+        const ggml_tensor* src = qkv_plane == 0 ? q : (qkv_plane == 1 ? k : v);
+        const float value = qwen_fused_qkv_pack_get_f32(src, d, head, seq, 0);
+        qwen_fused_qkv_pack_set_f32(dst, linear, 0, 0, 0, value);
+    }
+}
+
+static inline void qwen_fused_attn_head_to_seq_send_pack_cpu(ggml_tensor* dst, int ith, int nth, void* userdata) {
+    auto* params = static_cast<const QwenFusedQKVPackParams*>(userdata);
+    GGML_ASSERT(params != nullptr);
+    GGML_ASSERT(params->magic == QWEN_FUSED_QKV_PACK_MAGIC);
+    GGML_ASSERT(params->mode == 7);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ith >= 0 && nth > 0);
+
+    const ggml_tensor* attn = dst->src[0];
+    GGML_ASSERT(attn != nullptr);
+    GGML_ASSERT(attn->type == GGML_TYPE_F32);
+    const int64_t world_size = params->world_size;
+    const int64_t txt_real_seq = params->txt_real_seq;
+    const int64_t img_real_seq = params->img_real_seq;
+    const int64_t txt_padded_seq = params->txt_padded_seq > 0 ? params->txt_padded_seq : txt_real_seq;
+    const int64_t img_padded_seq = params->img_padded_seq > 0 ? params->img_padded_seq : img_real_seq;
+    GGML_ASSERT(world_size > 0);
+    GGML_ASSERT(txt_real_seq > 0 && img_real_seq > 0);
+    GGML_ASSERT(txt_padded_seq >= txt_real_seq);
+    GGML_ASSERT(img_padded_seq >= img_real_seq);
+    GGML_ASSERT(txt_padded_seq % world_size == 0);
+    GGML_ASSERT(img_padded_seq % world_size == 0);
+
+    const int64_t head_dim = attn->ne[0];
+    const int64_t shard_heads = attn->ne[1];
+    const int64_t total_real_seq = txt_real_seq + img_real_seq;
+    GGML_ASSERT(attn->ne[2] == total_real_seq);
+    GGML_ASSERT(attn->ne[3] == 1);
+
+    const int64_t txt_shard_seq = txt_padded_seq / world_size;
+    const int64_t img_shard_seq = img_padded_seq / world_size;
+    const int64_t txt_chunk = head_dim * shard_heads * txt_shard_seq;
+    const int64_t img_chunk = head_dim * shard_heads * img_shard_seq;
+    const int64_t count_per_peer = txt_chunk + img_chunk;
+    GGML_ASSERT(dst->ne[0] == count_per_peer * world_size);
+
+    for (int64_t linear = ith; linear < dst->ne[0]; linear += nth) {
+        int64_t rem = linear;
+        const int64_t peer = rem / count_per_peer;
+        rem -= peer * count_per_peer;
+        const bool is_img = rem >= txt_chunk;
+        if (is_img) {
+            rem -= txt_chunk;
+        }
+        const int64_t shard_seq = is_img ? img_shard_seq : txt_shard_seq;
+        const int64_t stream_real_seq = is_img ? img_real_seq : txt_real_seq;
+        int64_t d = rem % head_dim;
+        rem /= head_dim;
+        int64_t head = rem % shard_heads;
+        rem /= shard_heads;
+        const int64_t local_tok = rem;
+        GGML_ASSERT(local_tok < shard_seq);
+        const int64_t stream_tok = peer * shard_seq + local_tok;
+        float value = 0.0f;
+        if (stream_tok < stream_real_seq) {
+            const int64_t total_tok = is_img ? txt_real_seq + stream_tok : stream_tok;
+            value = qwen_fused_qkv_pack_get_f32(attn, d, head, total_tok, 0);
+        }
+        qwen_fused_qkv_pack_set_f32(dst, linear, 0, 0, 0, value);
+    }
+}
+
+static inline void qwen_fused_attn_head_to_seq_recv_unpack_cpu(ggml_tensor* dst, int ith, int nth, void* userdata) {
+    auto* params = static_cast<const QwenFusedQKVPackParams*>(userdata);
+    GGML_ASSERT(params != nullptr);
+    GGML_ASSERT(params->magic == QWEN_FUSED_QKV_PACK_MAGIC);
+    GGML_ASSERT(params->mode == 8);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ith >= 0 && nth > 0);
+
+    const ggml_tensor* recv_flat = dst->src[0];
+    GGML_ASSERT(recv_flat != nullptr);
+    GGML_ASSERT(recv_flat->type == GGML_TYPE_F32);
+    const int64_t world_size = params->world_size;
+    const int64_t stream_index = params->stream_index;
+    const int64_t txt_padded_seq = params->txt_padded_seq;
+    const int64_t img_padded_seq = params->img_padded_seq;
+    GGML_ASSERT(world_size > 0);
+    GGML_ASSERT(stream_index == 0 || stream_index == 1);
+    GGML_ASSERT(txt_padded_seq > 0 && img_padded_seq > 0);
+    GGML_ASSERT(txt_padded_seq % world_size == 0);
+    GGML_ASSERT(img_padded_seq % world_size == 0);
+
+    const int64_t head_dim = dst->ne[0];
+    const int64_t heads = dst->ne[1];
+    const int64_t shard_heads = heads / world_size;
+    const int64_t txt_shard_seq = txt_padded_seq / world_size;
+    const int64_t img_shard_seq = img_padded_seq / world_size;
+    const int64_t out_shard_seq = stream_index == 0 ? txt_shard_seq : img_shard_seq;
+    const int64_t txt_chunk = head_dim * shard_heads * txt_shard_seq;
+    const int64_t img_chunk = head_dim * shard_heads * img_shard_seq;
+    const int64_t count_per_peer = txt_chunk + img_chunk;
+    const int64_t stream_offset = stream_index == 0 ? 0 : txt_chunk;
+    GGML_ASSERT(heads % world_size == 0);
+    GGML_ASSERT(dst->ne[2] == out_shard_seq);
+    GGML_ASSERT(dst->ne[3] == 1);
+    GGML_ASSERT(recv_flat->ne[0] == count_per_peer * world_size);
+
+    for (int64_t linear = ith; linear < ggml_nelements(dst); linear += nth) {
+        int64_t rem = linear;
+        const int64_t d = rem % head_dim;
+        rem /= head_dim;
+        const int64_t head = rem % heads;
+        rem /= heads;
+        const int64_t local_tok = rem;
+        const int64_t src_peer = head / shard_heads;
+        const int64_t local_head = head - src_peer * shard_heads;
+        const int64_t src_idx =
+            src_peer * count_per_peer +
+            stream_offset +
+            d +
+            local_head * head_dim +
+            local_tok * head_dim * shard_heads;
+        const char* data = static_cast<const char*>(recv_flat->data);
+        const float value = *reinterpret_cast<const float*>(data + src_idx * recv_flat->nb[0]);
+        qwen_fused_qkv_pack_set_f32(dst, d, head, local_tok, 0, value);
+    }
+}
+
+static inline float qwen_fused_qkv_recv_get_f32(const ggml_tensor* recv_flat,
+                                                int64_t d,
+                                                int64_t seq,
+                                                int64_t head,
+                                                int64_t head_dim,
+                                                int64_t n_heads) {
+    const int64_t idx = d + head * (3 * head_dim) + seq * (3 * head_dim) * n_heads;
+    const char* data = static_cast<const char*>(recv_flat->data);
+    return *reinterpret_cast<const float*>(data + idx * recv_flat->nb[0]);
+}
+
+static inline void qwen_fused_qkv_pack_from_recv_cpu(ggml_tensor* dst, int ith, int nth, void* userdata) {
+    auto* params = static_cast<const QwenFusedQKVPackParams*>(userdata);
+    GGML_ASSERT(params != nullptr);
+    GGML_ASSERT(params->magic == QWEN_FUSED_QKV_PACK_MAGIC);
+    GGML_ASSERT(params->txt_real_seq > 0);
+    GGML_ASSERT(params->img_real_seq > 0);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ith >= 0 && nth > 0);
+
+    const ggml_tensor* txt_recv = dst->src[0];
+    const ggml_tensor* img_recv = dst->src[1];
+    GGML_ASSERT(txt_recv != nullptr && img_recv != nullptr);
+
+    const int64_t qk_half_dim = dst->ne[0];
+    const int64_t head_dim    = qk_half_dim * 2;
+    const int64_t total_seq   = dst->ne[1];
+    const int64_t n_heads     = dst->ne[2];
+    const int64_t plane_elems = qk_half_dim * total_seq * n_heads;
+    const int64_t txt_padded_seq = txt_recv->ne[0] / (3 * head_dim * n_heads);
+    const int64_t img_padded_seq = img_recv->ne[0] / (3 * head_dim * n_heads);
+    GGML_ASSERT(txt_recv->ne[0] == 3 * head_dim * n_heads * txt_padded_seq);
+    GGML_ASSERT(img_recv->ne[0] == 3 * head_dim * n_heads * img_padded_seq);
+    GGML_ASSERT(params->txt_real_seq <= txt_padded_seq);
+    GGML_ASSERT(params->img_real_seq <= img_padded_seq);
+    GGML_ASSERT(total_seq == params->txt_real_seq + params->img_real_seq);
+
+    for (int64_t linear = ith; linear < 6 * plane_elems; linear += nth) {
+        const int64_t plane = linear / plane_elems;
+        int64_t rem         = linear - plane * plane_elems;
+        const int64_t half  = rem % qk_half_dim;
+        rem /= qk_half_dim;
+        const int64_t tok   = rem % total_seq;
+        const int64_t head  = rem / total_seq;
+        const bool is_txt   = tok < params->txt_real_seq;
+        const int64_t src_t = is_txt ? tok : tok - params->txt_real_seq;
+        const int64_t qkv_plane = plane / 2;
+        const int64_t part      = plane % 2;
+        const ggml_tensor* src  = is_txt ? txt_recv : img_recv;
+
+        int64_t src_d = qkv_plane * head_dim;
+        if (qkv_plane < 2) {
+            src_d += part + 2 * half;
+        } else {
+            src_d += half + part * qk_half_dim;
+        }
+        const float value = qwen_fused_qkv_recv_get_f32(src, src_d, src_t, head, head_dim, n_heads);
+        qwen_fused_qkv_pack_set_f32(dst, half, tok, head, plane, value);
+    }
+}
+
+static inline void qwen_fused_qk_pack_from_recv_cpu(ggml_tensor* dst, int ith, int nth, void* userdata) {
+    auto* params = static_cast<const QwenFusedQKVPackParams*>(userdata);
+    GGML_ASSERT(params != nullptr);
+    GGML_ASSERT(params->magic == QWEN_FUSED_QKV_PACK_MAGIC);
+    GGML_ASSERT(params->txt_real_seq > 0 && params->img_real_seq > 0);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    const ggml_tensor* txt_recv = dst->src[0];
+    const ggml_tensor* img_recv = dst->src[1];
+    const int64_t qk_half_dim = dst->ne[0];
+    const int64_t head_dim    = qk_half_dim * 2;
+    const int64_t total_seq   = dst->ne[1];
+    const int64_t n_heads     = dst->ne[2];
+    const int64_t plane_elems = qk_half_dim * total_seq * n_heads;
+    GGML_ASSERT(dst->ne[3] == 4);
+    GGML_ASSERT(total_seq == params->txt_real_seq + params->img_real_seq);
+
+    for (int64_t linear = ith; linear < 4 * plane_elems; linear += nth) {
+        const int64_t plane = linear / plane_elems;
+        int64_t rem         = linear - plane * plane_elems;
+        const int64_t half  = rem % qk_half_dim;
+        rem /= qk_half_dim;
+        const int64_t tok   = rem % total_seq;
+        const int64_t head  = rem / total_seq;
+        const bool is_txt   = tok < params->txt_real_seq;
+        const int64_t src_t = is_txt ? tok : tok - params->txt_real_seq;
+        const int64_t qkv_plane = plane / 2;
+        const int64_t part      = plane % 2;
+        const ggml_tensor* src  = is_txt ? txt_recv : img_recv;
+        const int64_t src_d     = qkv_plane * head_dim + part + 2 * half;
+        const float value = qwen_fused_qkv_recv_get_f32(src, src_d, src_t, head, head_dim, n_heads);
+        qwen_fused_qkv_pack_set_f32(dst, half, tok, head, plane, value);
+    }
+}
+
+static inline void qwen_fused_v_pack_from_recv_cpu(ggml_tensor* dst, int ith, int nth, void* userdata) {
+    auto* params = static_cast<const QwenFusedQKVPackParams*>(userdata);
+    GGML_ASSERT(params != nullptr);
+    GGML_ASSERT(params->magic == QWEN_FUSED_QKV_PACK_MAGIC);
+    GGML_ASSERT(params->txt_real_seq > 0 && params->img_real_seq > 0);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    const ggml_tensor* txt_recv = dst->src[0];
+    const ggml_tensor* img_recv = dst->src[1];
+    const int64_t head_dim  = dst->ne[0];
+    const int64_t total_seq = dst->ne[1];
+    const int64_t n_heads   = dst->ne[2];
+    const int64_t total     = head_dim * total_seq * n_heads;
+    GGML_ASSERT(dst->ne[3] == 1);
+    GGML_ASSERT(total_seq == params->txt_real_seq + params->img_real_seq);
+
+    for (int64_t linear = ith; linear < total; linear += nth) {
+        int64_t rem        = linear;
+        const int64_t d    = rem % head_dim;
+        rem /= head_dim;
+        const int64_t tok  = rem % total_seq;
+        const int64_t head = rem / total_seq;
+        const bool is_txt  = tok < params->txt_real_seq;
+        const int64_t src_t = is_txt ? tok : tok - params->txt_real_seq;
+        const ggml_tensor* src = is_txt ? txt_recv : img_recv;
+        const int64_t src_d = 2 * head_dim + d;
+        const float value = qwen_fused_qkv_recv_get_f32(src, src_d, src_t, head, head_dim, n_heads);
+        qwen_fused_qkv_pack_set_f32(dst, d, tok, head, 0, value);
+    }
+}
+
+static inline ggml_tensor* qwen_fused_qkv_pack(ggml_context* ctx,
+                                 ggml_tensor* txt_q,
+                                 ggml_tensor* img_q,
+                                 ggml_tensor* txt_k,
+                                 ggml_tensor* img_k,
+                                 ggml_tensor* txt_v,
+                                 ggml_tensor* img_v,
+                                 int64_t txt_seq,
+                                 int64_t img_seq,
+                                 int64_t head_dim,
+                                 int64_t n_heads) {
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(txt_q != nullptr && img_q != nullptr && txt_k != nullptr && img_k != nullptr && txt_v != nullptr && img_v != nullptr);
+    GGML_ASSERT(txt_seq > 0 && img_seq > 0);
+    GGML_ASSERT(head_dim > 0 && head_dim % 2 == 0);
+    GGML_ASSERT(n_heads > 0);
+    GGML_ASSERT(txt_q->type == GGML_TYPE_F32 && img_q->type == GGML_TYPE_F32);
+    GGML_ASSERT(txt_k->type == GGML_TYPE_F32 && img_k->type == GGML_TYPE_F32);
+    GGML_ASSERT(txt_v->type == GGML_TYPE_F32 && img_v->type == GGML_TYPE_F32);
+    GGML_ASSERT(txt_q->ne[0] * 2 == head_dim && img_q->ne[0] * 2 == head_dim);
+    GGML_ASSERT(txt_k->ne[0] * 2 == head_dim && img_k->ne[0] * 2 == head_dim);
+    GGML_ASSERT(txt_v->ne[0] == head_dim && img_v->ne[0] == head_dim);
+    GGML_ASSERT(txt_q->ne[1] == txt_seq && txt_k->ne[1] == txt_seq && txt_v->ne[1] == txt_seq);
+    GGML_ASSERT(img_q->ne[1] == img_seq && img_k->ne[1] == img_seq && img_v->ne[1] == img_seq);
+    GGML_ASSERT(txt_q->ne[2] == n_heads && txt_k->ne[2] == n_heads && txt_v->ne[2] == n_heads);
+    GGML_ASSERT(img_q->ne[2] == n_heads && img_k->ne[2] == n_heads && img_v->ne[2] == n_heads);
+    GGML_ASSERT(txt_q->ne[3] == 2 && img_q->ne[3] == 2 && txt_k->ne[3] == 2 && img_k->ne[3] == 2);
+    GGML_ASSERT(txt_v->ne[3] == 1 && img_v->ne[3] == 1);
+
+    ggml_tensor* args[] = {txt_q, img_q, txt_k, img_k, txt_v, img_v};
+    ggml_tensor* out = ggml_custom_4d(ctx,
+                                      GGML_TYPE_F32,
+                                      head_dim / 2,
+                                      txt_seq + img_seq,
+                                      n_heads,
+                                      6,
+                                      args,
+                                      6,
+                                      qwen_fused_qkv_pack_cpu,
+                                      GGML_N_TASKS_MAX,
+                                      const_cast<QwenFusedQKVPackParams*>(&QWEN_FUSED_QKV_PACK_USERDATA));
+    ggml_set_name(out, "qwen.fused_qkv_pack.out");
+    return out;
+}
+
+static inline ggml_tensor* qwen_fused_qk_pack(ggml_context* ctx,
+                                ggml_tensor* txt_q,
+                                ggml_tensor* img_q,
+                                ggml_tensor* txt_k,
+                                ggml_tensor* img_k,
+                                int64_t txt_seq,
+                                int64_t img_seq,
+                                int64_t head_dim,
+                                int64_t n_heads) {
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(txt_q != nullptr && img_q != nullptr && txt_k != nullptr && img_k != nullptr);
+    GGML_ASSERT(txt_seq > 0 && img_seq > 0);
+    GGML_ASSERT(head_dim > 0 && head_dim % 2 == 0);
+    GGML_ASSERT(n_heads > 0);
+    GGML_ASSERT(txt_q->type == GGML_TYPE_F32 && img_q->type == GGML_TYPE_F32);
+    GGML_ASSERT(txt_k->type == GGML_TYPE_F32 && img_k->type == GGML_TYPE_F32);
+    GGML_ASSERT(txt_q->ne[0] * 2 == head_dim && img_q->ne[0] * 2 == head_dim);
+    GGML_ASSERT(txt_k->ne[0] * 2 == head_dim && img_k->ne[0] * 2 == head_dim);
+    GGML_ASSERT(txt_q->ne[1] == txt_seq && txt_k->ne[1] == txt_seq);
+    GGML_ASSERT(img_q->ne[1] == img_seq && img_k->ne[1] == img_seq);
+    GGML_ASSERT(txt_q->ne[2] == n_heads && txt_k->ne[2] == n_heads);
+    GGML_ASSERT(img_q->ne[2] == n_heads && img_k->ne[2] == n_heads);
+    GGML_ASSERT(txt_q->ne[3] == 2 && img_q->ne[3] == 2 && txt_k->ne[3] == 2 && img_k->ne[3] == 2);
+
+    ggml_tensor* args[] = {txt_q, img_q, txt_k, img_k};
+    ggml_tensor* out = ggml_custom_4d(ctx,
+                                      GGML_TYPE_F32,
+                                      head_dim / 2,
+                                      txt_seq + img_seq,
+                                      n_heads,
+                                      4,
+                                      args,
+                                      4,
+                                      qwen_fused_qk_pack_cpu,
+                                      GGML_N_TASKS_MAX,
+                                      qwen_fused_qkv_pack_make_params(txt_seq, img_seq, 1));
+    ggml_set_name(out, "qwen.fused_qk_pack.out");
+    return out;
+}
+
+static inline ggml_tensor* qwen_fused_v_pack(ggml_context* ctx,
+                               ggml_tensor* txt_v,
+                               ggml_tensor* img_v,
+                               int64_t txt_seq,
+                               int64_t img_seq,
+                               int64_t head_dim,
+                               int64_t n_heads) {
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(txt_v != nullptr && img_v != nullptr);
+    GGML_ASSERT(txt_seq > 0 && img_seq > 0);
+    GGML_ASSERT(head_dim > 0);
+    GGML_ASSERT(n_heads > 0);
+    GGML_ASSERT(txt_v->type == GGML_TYPE_F32 && img_v->type == GGML_TYPE_F32);
+    GGML_ASSERT(txt_v->ne[0] == head_dim && img_v->ne[0] == head_dim);
+    GGML_ASSERT(txt_v->ne[1] == txt_seq && img_v->ne[1] == img_seq);
+    GGML_ASSERT(txt_v->ne[2] == n_heads && img_v->ne[2] == n_heads);
+    GGML_ASSERT(txt_v->ne[3] == 1 && img_v->ne[3] == 1);
+
+    ggml_tensor* args[] = {txt_v, img_v};
+    ggml_tensor* out = ggml_custom_4d(ctx,
+                                      GGML_TYPE_F32,
+                                      head_dim,
+                                      txt_seq + img_seq,
+                                      n_heads,
+                                      1,
+                                      args,
+                                      2,
+                                      qwen_fused_v_pack_cpu,
+                                      GGML_N_TASKS_MAX,
+                                      qwen_fused_qkv_pack_make_params(txt_seq, img_seq, 2));
+    ggml_set_name(out, "qwen.fused_v_pack.out");
+    return out;
+}
+
+static inline ggml_tensor* qwen_fused_qkv_send_pack(ggml_context* ctx,
+                                      ggml_tensor* q,
+                                      ggml_tensor* k,
+                                      ggml_tensor* v,
+                                      int world_size) {
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(q != nullptr && k != nullptr && v != nullptr);
+    GGML_ASSERT(world_size > 0);
+    GGML_ASSERT(q->type == GGML_TYPE_F32 && k->type == GGML_TYPE_F32 && v->type == GGML_TYPE_F32);
+    GGML_ASSERT(q->ne[0] > 0 && q->ne[1] > 0 && q->ne[2] > 0);
+    GGML_ASSERT(q->ne[1] % world_size == 0);
+    GGML_ASSERT(k->ne[0] == q->ne[0] && v->ne[0] == q->ne[0]);
+    GGML_ASSERT(k->ne[1] == q->ne[1] && v->ne[1] == q->ne[1]);
+    GGML_ASSERT(k->ne[2] == q->ne[2] && v->ne[2] == q->ne[2]);
+    GGML_ASSERT(q->ne[3] == 1 && k->ne[3] == 1 && v->ne[3] == 1);
+
+    const int64_t total_head_dim = q->ne[0] * 3;
+    const int64_t shard_heads    = q->ne[1] / world_size;
+    const int64_t flat_elems     = total_head_dim * shard_heads * q->ne[2] * world_size;
+    ggml_tensor* args[] = {q, k, v};
+    ggml_tensor* out = ggml_custom_4d(ctx,
+                                      GGML_TYPE_F32,
+                                      flat_elems,
+                                      1,
+                                      1,
+                                      1,
+                                      args,
+                                      3,
+                                      qwen_fused_qkv_send_pack_cpu,
+                                      GGML_N_TASKS_MAX,
+                                      qwen_fused_qkv_pack_make_params(world_size, 0, 6));
+    ggml_set_name(out, "qwen.fused_qkv_send_pack.out");
+    return out;
+}
+
+static inline ggml_tensor* qwen_fused_qkv_pack_from_recv(ggml_context* ctx,
+                                           ggml_tensor* txt_recv_flat,
+                                           ggml_tensor* img_recv_flat,
+                                           int64_t txt_real_seq,
+                                           int64_t img_real_seq,
+                                           int64_t head_dim,
+                                           int64_t n_heads) {
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(txt_recv_flat != nullptr && img_recv_flat != nullptr);
+    GGML_ASSERT(txt_recv_flat->type == GGML_TYPE_F32 && img_recv_flat->type == GGML_TYPE_F32);
+    GGML_ASSERT(txt_real_seq > 0 && img_real_seq > 0);
+    GGML_ASSERT(head_dim > 0 && head_dim % 2 == 0);
+    GGML_ASSERT(n_heads > 0);
+    GGML_ASSERT(txt_recv_flat->ne[0] % (3 * head_dim * n_heads) == 0);
+    GGML_ASSERT(img_recv_flat->ne[0] % (3 * head_dim * n_heads) == 0);
+    GGML_ASSERT(txt_real_seq <= txt_recv_flat->ne[0] / (3 * head_dim * n_heads));
+    GGML_ASSERT(img_real_seq <= img_recv_flat->ne[0] / (3 * head_dim * n_heads));
+
+    ggml_tensor* args[] = {txt_recv_flat, img_recv_flat};
+    ggml_tensor* out = ggml_custom_4d(ctx,
+                                      GGML_TYPE_F32,
+                                      head_dim / 2,
+                                      txt_real_seq + img_real_seq,
+                                      n_heads,
+                                      6,
+                                      args,
+                                      2,
+                                      qwen_fused_qkv_pack_from_recv_cpu,
+                                      GGML_N_TASKS_MAX,
+                                      qwen_fused_qkv_pack_make_params(txt_real_seq, img_real_seq, 3));
+    ggml_set_name(out, "qwen.fused_qkv_pack.from_recv.out");
+    return out;
+}
+
+static inline ggml_tensor* qwen_fused_qk_pack_from_recv(ggml_context* ctx,
+                                          ggml_tensor* txt_recv_flat,
+                                          ggml_tensor* img_recv_flat,
+                                          int64_t txt_real_seq,
+                                          int64_t img_real_seq,
+                                          int64_t head_dim,
+                                          int64_t n_heads) {
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(txt_recv_flat != nullptr && img_recv_flat != nullptr);
+    GGML_ASSERT(txt_recv_flat->type == GGML_TYPE_F32 && img_recv_flat->type == GGML_TYPE_F32);
+    GGML_ASSERT(txt_real_seq > 0 && img_real_seq > 0);
+    GGML_ASSERT(head_dim > 0 && head_dim % 2 == 0);
+    GGML_ASSERT(n_heads > 0);
+    GGML_ASSERT(txt_recv_flat->ne[0] % (3 * head_dim * n_heads) == 0);
+    GGML_ASSERT(img_recv_flat->ne[0] % (3 * head_dim * n_heads) == 0);
+
+    ggml_tensor* args[] = {txt_recv_flat, img_recv_flat};
+    ggml_tensor* out = ggml_custom_4d(ctx,
+                                      GGML_TYPE_F32,
+                                      head_dim / 2,
+                                      txt_real_seq + img_real_seq,
+                                      n_heads,
+                                      4,
+                                      args,
+                                      2,
+                                      qwen_fused_qk_pack_from_recv_cpu,
+                                      GGML_N_TASKS_MAX,
+                                      qwen_fused_qkv_pack_make_params(txt_real_seq, img_real_seq, 4));
+    ggml_set_name(out, "qwen.fused_qk_pack.from_recv.out");
+    return out;
+}
+
+static inline ggml_tensor* qwen_fused_v_pack_from_recv(ggml_context* ctx,
+                                         ggml_tensor* txt_recv_flat,
+                                         ggml_tensor* img_recv_flat,
+                                         int64_t txt_real_seq,
+                                         int64_t img_real_seq,
+                                         int64_t head_dim,
+                                         int64_t n_heads) {
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(txt_recv_flat != nullptr && img_recv_flat != nullptr);
+    GGML_ASSERT(txt_recv_flat->type == GGML_TYPE_F32 && img_recv_flat->type == GGML_TYPE_F32);
+    GGML_ASSERT(txt_real_seq > 0 && img_real_seq > 0);
+    GGML_ASSERT(head_dim > 0);
+    GGML_ASSERT(n_heads > 0);
+    GGML_ASSERT(txt_recv_flat->ne[0] % (3 * head_dim * n_heads) == 0);
+    GGML_ASSERT(img_recv_flat->ne[0] % (3 * head_dim * n_heads) == 0);
+
+    ggml_tensor* args[] = {txt_recv_flat, img_recv_flat};
+    ggml_tensor* out = ggml_custom_4d(ctx,
+                                      GGML_TYPE_F32,
+                                      head_dim,
+                                      txt_real_seq + img_real_seq,
+                                      n_heads,
+                                      1,
+                                      args,
+                                      2,
+                                      qwen_fused_v_pack_from_recv_cpu,
+                                      GGML_N_TASKS_MAX,
+                                      qwen_fused_qkv_pack_make_params(txt_real_seq, img_real_seq, 5));
+    ggml_set_name(out, "qwen.fused_v_pack.from_recv.out");
+    return out;
+}
+
+static inline ggml_tensor* qwen_fused_attn_head_to_seq_send_pack(ggml_context* ctx,
+                                                   ggml_tensor* attn_4d,
+                                                   int64_t txt_real_seq,
+                                                   int64_t img_real_seq,
+                                                   int64_t txt_padded_seq,
+                                                   int64_t img_padded_seq,
+                                                   int world_size) {
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(attn_4d != nullptr);
+    GGML_ASSERT(attn_4d->type == GGML_TYPE_F32);
+    GGML_ASSERT(world_size > 0);
+    GGML_ASSERT(txt_real_seq > 0 && img_real_seq > 0);
+    GGML_ASSERT(txt_padded_seq >= txt_real_seq);
+    GGML_ASSERT(img_padded_seq >= img_real_seq);
+    GGML_ASSERT(txt_padded_seq % world_size == 0);
+    GGML_ASSERT(img_padded_seq % world_size == 0);
+    GGML_ASSERT(attn_4d->ne[2] == txt_real_seq + img_real_seq);
+    GGML_ASSERT(attn_4d->ne[3] == 1);
+
+    const int64_t count_per_peer =
+        attn_4d->ne[0] * attn_4d->ne[1] * (txt_padded_seq + img_padded_seq) / world_size;
+    ggml_tensor* args[] = {attn_4d};
+    ggml_tensor* out = ggml_custom_4d(ctx,
+                                      GGML_TYPE_F32,
+                                      count_per_peer * world_size,
+                                      1,
+                                      1,
+                                      1,
+                                      args,
+                                      1,
+                                      qwen_fused_attn_head_to_seq_send_pack_cpu,
+                                      GGML_N_TASKS_MAX,
+                                      qwen_fused_qkv_pack_make_params(txt_real_seq,
+                                                                      img_real_seq,
+                                                                      7,
+                                                                      txt_padded_seq,
+                                                                      img_padded_seq,
+                                                                      world_size));
+    ggml_set_name(out, "qwen.fused_attn_head_to_seq_send_pack.out");
+    return out;
+}
+
+static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context* ctx,
+                                                     ggml_tensor* recv_flat,
+                                                     int64_t stream_index,
+                                                     int64_t txt_padded_seq,
+                                                     int64_t img_padded_seq,
+                                                     int64_t head_dim,
+                                                     int64_t heads,
+                                                     int world_size) {
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(recv_flat != nullptr);
+    GGML_ASSERT(recv_flat->type == GGML_TYPE_F32);
+    GGML_ASSERT(stream_index == 0 || stream_index == 1);
+    GGML_ASSERT(world_size > 0);
+    GGML_ASSERT(head_dim > 0 && heads > 0);
+    GGML_ASSERT(heads % world_size == 0);
+    GGML_ASSERT(txt_padded_seq > 0 && img_padded_seq > 0);
+    GGML_ASSERT(txt_padded_seq % world_size == 0);
+    GGML_ASSERT(img_padded_seq % world_size == 0);
+    const int64_t out_seq = (stream_index == 0 ? txt_padded_seq : img_padded_seq) / world_size;
+    const int64_t count_per_peer = head_dim * (heads / world_size) *
+                                   ((txt_padded_seq + img_padded_seq) / world_size);
+    GGML_ASSERT(recv_flat->ne[0] == count_per_peer * world_size);
+
+    ggml_tensor* args[] = {recv_flat};
+    ggml_tensor* out = ggml_custom_4d(ctx,
+                                      GGML_TYPE_F32,
+                                      head_dim,
+                                      heads,
+                                      out_seq,
+                                      1,
+                                      args,
+                                      1,
+                                      qwen_fused_attn_head_to_seq_recv_unpack_cpu,
+                                      GGML_N_TASKS_MAX,
+                                      qwen_fused_qkv_pack_make_params(0,
+                                                                      0,
+                                                                      8,
+                                                                      txt_padded_seq,
+                                                                      img_padded_seq,
+                                                                      world_size,
+                                                                      stream_index));
+    ggml_set_name(out, stream_index == 0 ?
+                           "qwen.fused_attn_head_to_seq_recv_unpack.txt" :
+                           "qwen.fused_attn_head_to_seq_recv_unpack.img");
+    return out;
+}
+
+
     constexpr int QWEN_IMAGE_GRAPH_SIZE = 20480;
 
     static inline bool qwen_sp_enabled(GGMLRunnerContext* ctx) {
@@ -29,6 +886,151 @@ namespace Qwen {
         return ctx->process_group->size();
     }
 
+    static inline ggml_tensor* qwen_sp_prepare_rope_pe_seq_major(ggml_context* ctx,
+                                                                 ggml_tensor* pe) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(pe != nullptr);
+        return ggml_cont(ctx, ggml_permute(ctx, pe, 3, 0, 1, 2));
+    }
+
+    static inline ggml_tensor* qwen_sp_apply_rope_seq_major(ggml_context* ctx,
+                                                            ggml_tensor* x,
+                                                            ggml_tensor* pe,
+                                                            ggml_tensor* prepared_pe = nullptr) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(x != nullptr);
+        GGML_ASSERT(pe != nullptr);
+
+        const int64_t d_head = x->ne[0];
+        const int64_t L      = x->ne[1];
+        const int64_t n_head = x->ne[2];
+        const int64_t N      = x->ne[3];
+
+        x = ggml_reshape_4d(ctx, x, 2, d_head / 2, L, n_head * N);
+        x = ggml_cont(ctx, ggml_permute(ctx, x, 3, 0, 1, 2));
+
+        int64_t offset = x->nb[2] * x->ne[2];
+        auto x_0       = ggml_view_3d(ctx, x, x->ne[0], x->ne[1], x->ne[2], x->nb[1], x->nb[2], offset * 0);
+        auto x_1       = ggml_view_3d(ctx, x, x->ne[0], x->ne[1], x->ne[2], x->nb[1], x->nb[2], offset * 1);
+        x_0            = ggml_reshape_4d(ctx, x_0, 1, x_0->ne[0], x_0->ne[1], x_0->ne[2]);
+        x_1            = ggml_reshape_4d(ctx, x_1, 1, x_1->ne[0], x_1->ne[1], x_1->ne[2]);
+        auto temp_x    = ggml_new_tensor_4d(ctx, x_0->type, 2, x_0->ne[1], x_0->ne[2], x_0->ne[3]);
+        x_0            = ggml_repeat(ctx, x_0, temp_x);
+        x_1            = ggml_repeat(ctx, x_1, temp_x);
+
+        pe        = prepared_pe != nullptr ? prepared_pe :
+                    qwen_sp_prepare_rope_pe_seq_major(ctx, pe);
+        offset    = pe->nb[2] * pe->ne[2];
+        auto pe_0 = ggml_view_3d(ctx, pe, pe->ne[0], pe->ne[1], pe->ne[2], pe->nb[1], pe->nb[2], offset * 0);
+        auto pe_1 = ggml_view_3d(ctx, pe, pe->ne[0], pe->ne[1], pe->ne[2], pe->nb[1], pe->nb[2], offset * 1);
+
+        auto x_out = ggml_add_inplace(ctx, ggml_mul(ctx, x_0, pe_0), ggml_mul(ctx, x_1, pe_1));
+        return ggml_reshape_3d(ctx, x_out, d_head, L, n_head * N);
+    }
+
+    static inline ggml_tensor* qwen_sp_apply_rope_seq_major_work_layout(ggml_context* ctx,
+                                                                        ggml_tensor* x,
+                                                                        ggml_tensor* pe,
+                                                                        int64_t d_head,
+                                                                        ggml_tensor* prepared_pe = nullptr) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(x != nullptr);
+        GGML_ASSERT(pe != nullptr);
+        GGML_ASSERT(x->ne[0] * 2 == d_head);
+        GGML_ASSERT(x->ne[3] == 2);
+
+        const int64_t L      = x->ne[1];
+        const int64_t n_head = x->ne[2];
+        const int64_t offset = x->nb[2] * x->ne[2];
+        auto x_0             = ggml_view_3d(ctx, x, x->ne[0], x->ne[1], x->ne[2], x->nb[1], x->nb[2], offset * 0);
+        auto x_1             = ggml_view_3d(ctx, x, x->ne[0], x->ne[1], x->ne[2], x->nb[1], x->nb[2], offset * 1);
+        x_0                  = ggml_reshape_4d(ctx, x_0, 1, x_0->ne[0], x_0->ne[1], x_0->ne[2]);
+        x_1                  = ggml_reshape_4d(ctx, x_1, 1, x_1->ne[0], x_1->ne[1], x_1->ne[2]);
+        auto temp_x          = ggml_new_tensor_4d(ctx, x_0->type, 2, x_0->ne[1], x_0->ne[2], x_0->ne[3]);
+        x_0                  = ggml_repeat(ctx, x_0, temp_x);
+        x_1                  = ggml_repeat(ctx, x_1, temp_x);
+
+        pe        = prepared_pe != nullptr ? prepared_pe :
+                    qwen_sp_prepare_rope_pe_seq_major(ctx, pe);
+        auto pe_offset = pe->nb[2] * pe->ne[2];
+        auto pe_0      = ggml_view_3d(ctx, pe, pe->ne[0], pe->ne[1], pe->ne[2], pe->nb[1], pe->nb[2], pe_offset * 0);
+        auto pe_1      = ggml_view_3d(ctx, pe, pe->ne[0], pe->ne[1], pe->ne[2], pe->nb[1], pe->nb[2], pe_offset * 1);
+
+        auto x_out = ggml_add_inplace(ctx, ggml_mul(ctx, x_0, pe_0), ggml_mul(ctx, x_1, pe_1));
+        return ggml_reshape_3d(ctx, x_out, d_head, L, n_head);
+    }
+
+    static inline ggml_tensor* qwen_sp_flash_attention_seq_major(GGMLRunnerContext* ctx,
+                                                                 ggml_tensor* q,
+                                                                 ggml_tensor* k,
+                                                                 ggml_tensor* v,
+                                                                 int64_t n_head,
+                                                                 float kv_scale) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(q != nullptr);
+        GGML_ASSERT(k != nullptr);
+        GGML_ASSERT(v != nullptr);
+        GGML_ASSERT(ctx->backend != nullptr);
+
+        const int64_t d_head    = q->ne[0];
+        const int64_t L_q       = q->ne[1];
+        const int64_t L_k       = k->ne[1];
+        const int64_t N         = v->ne[3];
+        const int64_t n_kv_head = v->ne[2];
+
+        GGML_ASSERT(k->ne[0] == d_head);
+        GGML_ASSERT(v->ne[0] == d_head);
+        GGML_ASSERT(v->ne[1] == L_k);
+        GGML_ASSERT(q->ne[2] == n_head * N);
+        GGML_ASSERT(k->ne[2] == n_kv_head * N);
+
+        int kv_pad = 0;
+        if (L_k % 256 != 0) {
+            kv_pad = GGML_PAD(L_k, 256) - static_cast<int>(L_k);
+        }
+
+        float scale = 1.0f / sqrtf(static_cast<float>(d_head));
+
+        ggml_tensor* k_in = k;
+        if (kv_pad != 0) {
+            k_in = ggml_pad(ctx->ggml_ctx, k_in, 0, kv_pad, 0, 0);
+        }
+        if (kv_scale != 1.0f) {
+            k_in = ggml_ext_scale(ctx->ggml_ctx, k_in, kv_scale);
+        }
+        k_in = ggml_cast(ctx->ggml_ctx, k_in, GGML_TYPE_F16);
+
+        ggml_tensor* v_in = ggml_reshape_3d(ctx->ggml_ctx, v, d_head, L_k, n_kv_head * N);
+        if (kv_pad != 0) {
+            v_in = ggml_pad(ctx->ggml_ctx, v_in, 0, kv_pad, 0, 0);
+        }
+        if (kv_scale != 1.0f) {
+            v_in = ggml_ext_scale(ctx->ggml_ctx, v_in, kv_scale);
+        }
+        v_in = ggml_cast(ctx->ggml_ctx, v_in, GGML_TYPE_F16);
+
+        ggml_tensor* mask_in = nullptr;
+        if (kv_pad > 0) {
+            mask_in         = ggml_ext_zeros(ctx->ggml_ctx, L_k, L_q, 1, 1);
+            auto pad_tensor = ggml_ext_full(ctx->ggml_ctx, -INFINITY, kv_pad, L_q, 1, 1);
+            mask_in         = ggml_concat(ctx->ggml_ctx, mask_in, pad_tensor, 0);
+            mask_in         = ggml_cast(ctx->ggml_ctx, mask_in, GGML_TYPE_F16);
+        }
+
+        ggml_tensor* out = ggml_flash_attn_ext(ctx->ggml_ctx, q, k_in, v_in, mask_in, scale / kv_scale, 0, 0);
+        ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);
+        if (!ggml_backend_supports_op(ctx->backend, out)) {
+            return nullptr;
+        }
+        if (kv_scale != 1.0f) {
+            out = ggml_ext_scale(ctx->ggml_ctx, out, 1.0f / kv_scale);
+        }
+
+        out = ggml_view_3d(ctx->ggml_ctx, out, d_head, n_head, L_q, out->nb[1], out->nb[2], 0);
+        out = ggml_cont(ctx->ggml_ctx, out);
+        return ggml_reshape_3d(ctx->ggml_ctx, out, d_head * n_head, L_q, N);
+    }
+
     static inline ggml_tensor* qwen_sp_attention(GGMLRunnerContext* ctx,
                                                  ggml_tensor* q,
                                                  ggml_tensor* k,
@@ -43,10 +1045,6 @@ namespace Qwen {
 
         q = Rope::apply_rope(ctx->ggml_ctx, q, pe);
         k = Rope::apply_rope(ctx->ggml_ctx, k, pe);
-
-        q = ggml_cont(ctx->ggml_ctx, q);
-        k = ggml_cont(ctx->ggml_ctx, k);
-        v = ggml_cont(ctx->ggml_ctx, v);
 
         const int64_t n_head = v->ne[1];
         GGML_ASSERT(q->ne[0] == k->ne[0]);
@@ -68,6 +1066,83 @@ namespace Qwen {
                                                    ctx->flash_attn_enabled,
                                                    kv_scale);
         return attn;
+    }
+
+    static inline ggml_tensor* qwen_sp_attention_seq_major(GGMLRunnerContext* ctx,
+                                                           ggml_tensor* q,
+                                                           ggml_tensor* k,
+                                                           ggml_tensor* v,
+                                                           ggml_tensor* pe,
+                                                           float kv_scale) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(q != nullptr);
+        GGML_ASSERT(k != nullptr);
+        GGML_ASSERT(v != nullptr);
+        GGML_ASSERT(pe != nullptr);
+
+        const int64_t n_head = v->ne[2];
+        ggml_tensor* prepared_pe = qwen_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx, pe);
+        q = qwen_sp_apply_rope_seq_major(ctx->ggml_ctx, q, pe, prepared_pe);
+        k = qwen_sp_apply_rope_seq_major(ctx->ggml_ctx, k, pe, prepared_pe);
+
+        ggml_tensor* attn = nullptr;
+        if (ctx->flash_attn_enabled) {
+            attn = qwen_sp_flash_attention_seq_major(ctx, q, k, v, n_head, kv_scale);
+        }
+        if (attn != nullptr) {
+            return attn;
+        }
+
+        ggml_tensor* v_head_major = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, v, 0, 2, 1, 3));
+        return ggml_ext_attention_ext(ctx->ggml_ctx,
+                                      ctx->backend,
+                                      q,
+                                      k,
+                                      v_head_major,
+                                      n_head,
+                                      nullptr,
+                                      true,
+                                      false,
+                                      kv_scale);
+    }
+
+    static inline ggml_tensor* qwen_sp_attention_from_rope_work_layout(GGMLRunnerContext* ctx,
+                                                                       ggml_tensor* q,
+                                                                       ggml_tensor* k,
+                                                                       ggml_tensor* v,
+                                                                       ggml_tensor* pe,
+                                                                       int64_t d_head,
+                                                                       float kv_scale) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(q != nullptr);
+        GGML_ASSERT(k != nullptr);
+        GGML_ASSERT(v != nullptr);
+        GGML_ASSERT(pe != nullptr);
+
+        const int64_t n_head = v->ne[2];
+        ggml_tensor* prepared_pe = qwen_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx, pe);
+        q = qwen_sp_apply_rope_seq_major_work_layout(ctx->ggml_ctx, q, pe, d_head, prepared_pe);
+        k = qwen_sp_apply_rope_seq_major_work_layout(ctx->ggml_ctx, k, pe, d_head, prepared_pe);
+
+        ggml_tensor* attn = nullptr;
+        if (ctx->flash_attn_enabled) {
+            attn = qwen_sp_flash_attention_seq_major(ctx, q, k, v, n_head, kv_scale);
+        }
+        if (attn != nullptr) {
+            return attn;
+        }
+
+        ggml_tensor* v_head_major = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, v, 0, 2, 1, 3));
+        return ggml_ext_attention_ext(ctx->ggml_ctx,
+                                      ctx->backend,
+                                      q,
+                                      k,
+                                      v_head_major,
+                                      n_head,
+                                      nullptr,
+                                      true,
+                                      false,
+                                      kv_scale);
     }
 
     static inline ggml_tensor* qwen_sp_view_head_sequence(ggml_context* ctx,
@@ -115,6 +1190,212 @@ namespace Qwen {
                                                            0,
                                                            img_real_seq);
         return ggml_concat(ctx, txt_real, img_real, 2);
+    }
+
+    static inline ggml_tensor* qwen_sp_view_seq_major_sequence(ggml_context* ctx,
+                                                              ggml_tensor* x,
+                                                              int64_t start,
+                                                              int64_t length) {
+        GGML_ASSERT(x != nullptr);
+        GGML_ASSERT(start >= 0);
+        GGML_ASSERT(length > 0);
+        GGML_ASSERT(start + length <= x->ne[1]);
+
+        return ggml_view_4d(ctx,
+                            x,
+                            x->ne[0],
+                            length,
+                            x->ne[2],
+                            x->ne[3],
+                            x->nb[1],
+                            x->nb[2],
+                            x->nb[3],
+                            static_cast<size_t>(start) * x->nb[1]);
+    }
+
+    static inline ggml_tensor* qwen_sp_concat_real_attention_sequence_seq_major(ggml_context* ctx,
+                                                                               ggml_tensor* txt,
+                                                                               ggml_tensor* img,
+                                                                               int64_t txt_pad,
+                                                                               int64_t img_pad) {
+        GGML_ASSERT(txt != nullptr);
+        GGML_ASSERT(img != nullptr);
+        GGML_ASSERT(txt_pad >= 0 && txt_pad <= txt->ne[1]);
+        GGML_ASSERT(img_pad >= 0 && img_pad <= img->ne[1]);
+
+        const int64_t txt_real_seq = txt->ne[1] - txt_pad;
+        const int64_t img_real_seq = img->ne[1] - img_pad;
+        GGML_ASSERT(txt_real_seq > 0);
+        GGML_ASSERT(img_real_seq > 0);
+
+        ggml_tensor* txt_real = qwen_sp_view_seq_major_sequence(ctx, txt, 0, txt_real_seq);
+        ggml_tensor* img_real = qwen_sp_view_seq_major_sequence(ctx, img, 0, img_real_seq);
+        return ggml_concat(ctx, txt_real, img_real, 1);
+    }
+
+    struct QwenSPFlashQKVViews {
+        ggml_tensor* q = nullptr;
+        ggml_tensor* k = nullptr;
+        ggml_tensor* v = nullptr;
+    };
+
+    static inline QwenSPFlashQKVViews qwen_sp_fused_pack_flash_qkv_from_outputs(ggml_context* ctx,
+                                                                                ggml_tensor* txt_q,
+                                                                                ggml_tensor* img_q,
+                                                                                ggml_tensor* txt_k,
+                                                                                ggml_tensor* img_k,
+                                                                                ggml_tensor* txt_v,
+                                                                                ggml_tensor* img_v,
+                                                                                int64_t head_dim,
+                                                                                int64_t n_heads,
+                                                                                const std::string& name_prefix) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(txt_q != nullptr && img_q != nullptr && txt_k != nullptr && img_k != nullptr);
+        GGML_ASSERT(txt_v != nullptr && img_v != nullptr);
+        GGML_ASSERT(head_dim > 0 && head_dim % 2 == 0);
+        GGML_ASSERT(n_heads > 0);
+        GGML_ASSERT(txt_q->ne[1] > 0 && img_q->ne[1] > 0);
+        GGML_ASSERT(txt_q->ne[1] == txt_k->ne[1] && txt_q->ne[1] == txt_v->ne[1]);
+        GGML_ASSERT(img_q->ne[1] == img_k->ne[1] && img_q->ne[1] == img_v->ne[1]);
+
+        const int64_t txt_seq   = txt_q->ne[1];
+        const int64_t img_seq   = img_q->ne[1];
+        const int64_t total_seq = txt_seq + img_seq;
+
+        ggml_tensor* qk = qwen_fused_qk_pack(ctx,
+                                             txt_q,
+                                             img_q,
+                                             txt_k,
+                                             img_k,
+                                             txt_seq,
+                                             img_seq,
+                                             head_dim,
+                                             n_heads);
+        ggml_tensor* v = qwen_fused_v_pack(ctx,
+                                           txt_v,
+                                           img_v,
+                                           txt_seq,
+                                           img_seq,
+                                           head_dim,
+                                           n_heads);
+        ggml_set_name(qk, (name_prefix + "_qwen.fused_qk_pack.out").c_str());
+        ggml_set_name(v, (name_prefix + "_qwen.fused_v_pack.out").c_str());
+
+        GGML_ASSERT(qk->ne[0] == head_dim / 2);
+        GGML_ASSERT(qk->ne[1] == total_seq);
+        GGML_ASSERT(qk->ne[2] == n_heads);
+        GGML_ASSERT(qk->ne[3] == 4);
+        GGML_ASSERT(v->ne[0] == head_dim);
+        GGML_ASSERT(v->ne[1] == total_seq);
+        GGML_ASSERT(v->ne[2] == n_heads);
+        GGML_ASSERT(v->ne[3] == 1);
+
+        const size_t rope_plane_bytes = static_cast<size_t>(qk->nb[3]);
+        QwenSPFlashQKVViews views;
+        views.q = ggml_view_4d(ctx,
+                               qk,
+                               head_dim / 2,
+                               total_seq,
+                               n_heads,
+                               2,
+                               qk->nb[1],
+                               qk->nb[2],
+                               qk->nb[3],
+                               0);
+        views.k = ggml_view_4d(ctx,
+                               qk,
+                               head_dim / 2,
+                               total_seq,
+                               n_heads,
+                               2,
+                               qk->nb[1],
+                               qk->nb[2],
+                               qk->nb[3],
+                               rope_plane_bytes * 2);
+        views.v = v;
+        ggml_set_name(views.q, (name_prefix + "_qwen.flash_q.from_fused_qk_pack").c_str());
+        ggml_set_name(views.k, (name_prefix + "_qwen.flash_k.from_fused_qk_pack").c_str());
+        ggml_set_name(views.v, (name_prefix + "_qwen.flash_v.from_fused_v_pack").c_str());
+        return views;
+    }
+
+    static inline QwenSPFlashQKVViews qwen_sp_fused_pack_flash_qkv(ggml_context* ctx,
+                                                                   ggml_tensor* txt_recv_flat,
+                                                                   ggml_tensor* img_recv_flat,
+                                                                   int64_t txt_padded_seq,
+                                                                   int64_t img_padded_seq,
+                                                                   int64_t txt_real_seq,
+                                                                   int64_t img_real_seq,
+                                                                   int64_t head_dim,
+                                                                   int64_t n_heads,
+                                                                   const std::string& name_prefix) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(txt_recv_flat != nullptr);
+        GGML_ASSERT(img_recv_flat != nullptr);
+        GGML_ASSERT(txt_padded_seq >= txt_real_seq);
+        GGML_ASSERT(img_padded_seq >= img_real_seq);
+        GGML_ASSERT(txt_real_seq > 0);
+        GGML_ASSERT(img_real_seq > 0);
+        const int64_t total_seq    = txt_real_seq + img_real_seq;
+        GGML_ASSERT(total_seq == txt_real_seq + img_real_seq);
+        GGML_ASSERT(head_dim > 0 && head_dim % 2 == 0);
+        GGML_ASSERT(n_heads > 0);
+        GGML_ASSERT(txt_recv_flat->ne[0] == 3 * head_dim * n_heads * txt_padded_seq);
+        GGML_ASSERT(img_recv_flat->ne[0] == 3 * head_dim * n_heads * img_padded_seq);
+
+        ggml_tensor* qk = qwen_fused_qk_pack_from_recv(ctx,
+                                                       txt_recv_flat,
+                                                       img_recv_flat,
+                                                       txt_real_seq,
+                                                       img_real_seq,
+                                                       head_dim,
+                                                       n_heads);
+        ggml_tensor* v = qwen_fused_v_pack_from_recv(ctx,
+                                                     txt_recv_flat,
+                                                     img_recv_flat,
+                                                     txt_real_seq,
+                                                     img_real_seq,
+                                                     head_dim,
+                                                     n_heads);
+        ggml_set_name(qk, (name_prefix + "_qwen.fused_qk_pack.from_recv.out").c_str());
+        ggml_set_name(v, (name_prefix + "_qwen.fused_v_pack.from_recv.out").c_str());
+
+        GGML_ASSERT(qk->ne[0] == head_dim / 2);
+        GGML_ASSERT(qk->ne[1] == total_seq);
+        GGML_ASSERT(qk->ne[2] == n_heads);
+        GGML_ASSERT(qk->ne[3] == 4);
+        GGML_ASSERT(v->ne[0] == head_dim);
+        GGML_ASSERT(v->ne[1] == total_seq);
+        GGML_ASSERT(v->ne[2] == n_heads);
+        GGML_ASSERT(v->ne[3] == 1);
+        const size_t rope_plane_bytes = static_cast<size_t>(qk->nb[3]);
+
+        QwenSPFlashQKVViews views;
+        views.q = ggml_view_4d(ctx,
+                               qk,
+                               head_dim / 2,
+                               total_seq,
+                               n_heads,
+                               2,
+                               qk->nb[1],
+                               qk->nb[2],
+                               qk->nb[3],
+                               0);
+        views.k = ggml_view_4d(ctx,
+                               qk,
+                               head_dim / 2,
+                               total_seq,
+                               n_heads,
+                               2,
+                               qk->nb[1],
+                               qk->nb[2],
+                               qk->nb[3],
+                               rope_plane_bytes * 2);
+        views.v = v;
+        ggml_set_name(views.q, (name_prefix + "_qwen.flash_q.from_fused_pack").c_str());
+        ggml_set_name(views.k, (name_prefix + "_qwen.flash_k.from_fused_pack").c_str());
+        ggml_set_name(views.v, (name_prefix + "_qwen.flash_v.from_fused_pack").c_str());
+        return views;
     }
 
     static inline ggml_tensor* qwen_sp_pad_head_sequence(ggml_context* ctx,
@@ -379,60 +1660,57 @@ namespace Qwen {
             txt_q = norm_added_q->forward(ctx, txt_q);
             txt_k = norm_added_k->forward(ctx, txt_k);
 
-            img_q = ggml_cont(ctx->ggml_ctx, img_q);
-            img_k = ggml_cont(ctx->ggml_ctx, img_k);
-            img_v = ggml_cont(ctx->ggml_ctx, img_v);
-            txt_q = ggml_cont(ctx->ggml_ctx, txt_q);
-            txt_k = ggml_cont(ctx->ggml_ctx, txt_k);
-            txt_v = ggml_cont(ctx->ggml_ctx, txt_v);
+            ggml_tensor* txt_qkv_send_flat = qwen_fused_qkv_send_pack(ctx->ggml_ctx,
+                                                                      txt_q,
+                                                                      txt_k,
+                                                                      txt_v,
+                                                                      world_size);
+            ggml_set_name(txt_qkv_send_flat, (name_prefix + "_txt_qkv_fused_send_pack").c_str());
+            auto txt_qkv_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head_packed_recv_only(
+                ctx->ggml_ctx,
+                txt_qkv_send_flat,
+                dim_head * 3,
+                num_heads,
+                txt_local_seq,
+                N,
+                world_size,
+                name_prefix + "_txt_qkv_seq_to_head");
+            ggml_tensor* img_qkv_send_flat = qwen_fused_qkv_send_pack(ctx->ggml_ctx,
+                                                                      img_q,
+                                                                      img_k,
+                                                                      img_v,
+                                                                      world_size);
+            ggml_set_name(img_qkv_send_flat, (name_prefix + "_img_qkv_fused_send_pack").c_str());
+            auto img_qkv_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head_packed_recv_only(
+                ctx->ggml_ctx,
+                img_qkv_send_flat,
+                dim_head * 3,
+                num_heads,
+                img_local_seq,
+                N,
+                world_size,
+                name_prefix + "_img_qkv_seq_to_head");
+            GGML_ASSERT(txt_qkv_head.recv_flat != nullptr);
+            GGML_ASSERT(img_qkv_head.recv_flat != nullptr);
 
-            auto img_q_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
-                                                                              img_q,
-                                                                              world_size,
-                                                                              name_prefix + "_img_q_seq_to_head");
-            auto img_k_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
-                                                                              img_k,
-                                                                              world_size,
-                                                                              name_prefix + "_img_k_seq_to_head");
-            auto img_v_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
-                                                                              img_v,
-                                                                              world_size,
-                                                                              name_prefix + "_img_v_seq_to_head");
-            auto txt_q_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
-                                                                              txt_q,
-                                                                              world_size,
-                                                                              name_prefix + "_txt_q_seq_to_head");
-            auto txt_k_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
-                                                                              txt_k,
-                                                                              world_size,
-                                                                              name_prefix + "_txt_k_seq_to_head");
-            auto txt_v_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
-                                                                              txt_v,
-                                                                              world_size,
-                                                                              name_prefix + "_txt_v_seq_to_head");
-
-            ggml_tensor* q = qwen_sp_concat_real_attention_sequence(ctx->ggml_ctx,
-                                                                    txt_q_head.output,
-                                                                    img_q_head.output,
-                                                                    txt_pad,
-                                                                    img_pad);
-            ggml_tensor* k = qwen_sp_concat_real_attention_sequence(ctx->ggml_ctx,
-                                                                    txt_k_head.output,
-                                                                    img_k_head.output,
-                                                                    txt_pad,
-                                                                    img_pad);
-            ggml_tensor* v = qwen_sp_concat_real_attention_sequence(ctx->ggml_ctx,
-                                                                    txt_v_head.output,
-                                                                    img_v_head.output,
-                                                                    txt_pad,
-                                                                    img_pad);
-
-            q = ggml_cont(ctx->ggml_ctx, q);
-            k = ggml_cont(ctx->ggml_ctx, k);
-            v = ggml_cont(ctx->ggml_ctx, v);
-
-            ggml_tensor* attn = qwen_sp_attention(ctx, q, k, v, pe, 1.0f / 128.f);
-            sd::ggml_graph_cut::mark_graph_cut(attn, name_prefix + ".sp_attention", "attn");
+            const int64_t txt_full_seq_for_attn = txt_local_seq * world_size;
+            const int64_t img_full_seq_for_attn = img_local_seq * world_size;
+            const int64_t txt_real_seq_for_attn = txt_full_seq_for_attn - txt_pad;
+            const int64_t img_real_seq_for_attn = img_full_seq_for_attn - img_pad;
+            QwenSPFlashQKVViews fused_qkv =
+                qwen_sp_fused_pack_flash_qkv(ctx->ggml_ctx,
+                                             txt_qkv_head.recv_flat,
+                                             img_qkv_head.recv_flat,
+                                             txt_full_seq_for_attn,
+                                             img_full_seq_for_attn,
+                                             txt_real_seq_for_attn,
+                                             img_real_seq_for_attn,
+                                             dim_head,
+                                             num_heads / world_size,
+                                             name_prefix);
+            ggml_tensor* q = fused_qkv.q;
+            ggml_tensor* k = fused_qkv.k;
+            ggml_tensor* v = fused_qkv.v;
 
             const int64_t shard_heads = num_heads / world_size;
             const int64_t txt_full_seq = txt_local_seq * world_size;
@@ -441,6 +1719,15 @@ namespace Qwen {
             const int64_t img_real_seq = img_full_seq - img_pad;
             const int64_t total_seq    = txt_real_seq + img_real_seq;
 
+            ggml_tensor* attn = qwen_sp_attention_from_rope_work_layout(ctx,
+                                                                        q,
+                                                                        k,
+                                                                        v,
+                                                                        pe,
+                                                                        dim_head,
+                                                                        1.0f / 128.f);
+            sd::ggml_graph_cut::mark_graph_cut(attn, name_prefix + ".sp_attention", "attn");
+
             ggml_tensor* attn_4d = ggml_reshape_4d(ctx->ggml_ctx,
                                                    attn,
                                                    dim_head,
@@ -448,36 +1735,52 @@ namespace Qwen {
                                                    total_seq,
                                                    N);
 
-            ggml_tensor* txt_attn_head = qwen_sp_extract_stream_attention(ctx->ggml_ctx,
-                                                                          attn_4d,
-                                                                          0,
-                                                                          txt_real_seq,
-                                                                          txt_pad);
+            ggml_tensor* attn_head_to_seq_send = qwen_fused_attn_head_to_seq_send_pack(ctx->ggml_ctx,
+                                                                                       attn_4d,
+                                                                                       txt_real_seq,
+                                                                                       img_real_seq,
+                                                                                       txt_full_seq,
+                                                                                       img_full_seq,
+                                                                                       world_size);
+            ggml_set_name(attn_head_to_seq_send, (name_prefix + "_qwen.fused_attn_head_to_seq_send_pack").c_str());
+            auto attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq_packed_recv_only(
+                ctx->ggml_ctx,
+                attn_head_to_seq_send,
+                dim_head,
+                shard_heads,
+                {txt_full_seq, img_full_seq},
+                world_size,
+                name_prefix + "_txt_img_attn_head_to_seq");
+            GGML_ASSERT(attn_local.recv_flat != nullptr);
 
-            ggml_tensor* img_attn_head = qwen_sp_extract_stream_attention(ctx->ggml_ctx,
-                                                                          attn_4d,
-                                                                          txt_real_seq,
-                                                                          img_real_seq,
-                                                                          img_pad);
-
-            auto txt_attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
-                                                                                  txt_attn_head,
-                                                                                  world_size,
-                                                                                  name_prefix + "_txt_attn_head_to_seq");
-            auto img_attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
-                                                                                  img_attn_head,
-                                                                                  world_size,
-                                                                                  name_prefix + "_img_attn_head_to_seq");
+            ggml_tensor* txt_attn_local = qwen_fused_attn_head_to_seq_recv_unpack(ctx->ggml_ctx,
+                                                                                 attn_local.recv_flat,
+                                                                                 0,
+                                                                                 txt_full_seq,
+                                                                                 img_full_seq,
+                                                                                 dim_head,
+                                                                                 num_heads,
+                                                                                 world_size);
+            ggml_tensor* img_attn_local = qwen_fused_attn_head_to_seq_recv_unpack(ctx->ggml_ctx,
+                                                                                 attn_local.recv_flat,
+                                                                                 1,
+                                                                                 txt_full_seq,
+                                                                                 img_full_seq,
+                                                                                 dim_head,
+                                                                                 num_heads,
+                                                                                 world_size);
+            ggml_set_name(txt_attn_local, (name_prefix + "_qwen.fused_attn_recv_unpack_txt").c_str());
+            ggml_set_name(img_attn_local, (name_prefix + "_qwen.fused_attn_recv_unpack_img").c_str());
 
             ggml_tensor* txt_attn_out = ggml_reshape_3d(ctx->ggml_ctx,
-                                                        txt_attn_local.output,
+                                                        txt_attn_local,
                                                         dim_head * num_heads,
-                                                        txt_attn_local.output->ne[2],
+                                                        txt_attn_local->ne[2],
                                                         N);
             ggml_tensor* img_attn_out = ggml_reshape_3d(ctx->ggml_ctx,
-                                                        img_attn_local.output,
+                                                        img_attn_local,
                                                         dim_head * num_heads,
-                                                        img_attn_local.output->ne[2],
+                                                        img_attn_local->ne[2],
                                                         N);
 
             img_attn_out = to_out_0->forward(ctx, img_attn_out);

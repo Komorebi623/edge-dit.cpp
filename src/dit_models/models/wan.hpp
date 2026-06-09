@@ -1576,29 +1576,22 @@ namespace WAN {
             v = ggml_cont(ctx->ggml_ctx, v);
             ggml_set_name(v, (name_prefix + "_v_local").c_str());
 
-            auto q_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
-                                                                          q,
-                                                                          world_size,
-                                                                          name_prefix + "_q_seq_to_head");
-            auto k_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
-                                                                          k,
-                                                                          world_size,
-                                                                          name_prefix + "_k_seq_to_head");
-            auto v_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
-                                                                          v,
-                                                                          world_size,
-                                                                          name_prefix + "_v_seq_to_head");
+            auto qkv_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched(ctx->ggml_ctx,
+                                                                                    {q, k, v},
+                                                                                    world_size,
+                                                                                    name_prefix + "_qkv_seq_to_head");
+            GGML_ASSERT(qkv_head.outputs.size() == 3);
 
             ggml_tensor* q_attn = wan_sp_real_head_sequence(ctx->ggml_ctx,
-                                                            q_head.output,
+                                                            qkv_head.outputs[0],
                                                             x_pad,
                                                             name_prefix + "_q_attn_in");
             ggml_tensor* k_attn = wan_sp_real_head_sequence(ctx->ggml_ctx,
-                                                            k_head.output,
+                                                            qkv_head.outputs[1],
                                                             x_pad,
                                                             name_prefix + "_k_attn_in");
             ggml_tensor* v_attn = wan_sp_real_head_sequence(ctx->ggml_ctx,
-                                                            v_head.output,
+                                                            qkv_head.outputs[2],
                                                             x_pad,
                                                             name_prefix + "_v_attn_in");
 

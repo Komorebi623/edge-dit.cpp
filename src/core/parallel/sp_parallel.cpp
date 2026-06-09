@@ -586,7 +586,7 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_layouts(ggml_contex
         }
         layout.head_dims.push_back(input->ne[0]);
         layout.total_head_dim += input->ne[0];
-        contiguous_inputs.push_back(ggml_cont(ctx, input));
+        contiguous_inputs.push_back(ggml_is_contiguous(input) ? input : ggml_cont(ctx, input));
     }
 
     ggml_tensor* combined = contiguous_inputs.front();
@@ -704,6 +704,71 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_layouts(ggml_contex
         offset += static_cast<size_t>(head_dim) * mid->nb[0];
     }
 
+    return layout;
+}
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_packed_recv_only(ggml_context* ctx,
+                                                                      ggml_tensor* send_flat,
+                                                                      int64_t total_head_dim,
+                                                                      int64_t heads,
+                                                                      int64_t shard_sequence,
+                                                                      int64_t batch,
+                                                                      int world_size,
+                                                                      const std::string& name) {
+    check_world_size(world_size, "sp_all_to_all_4d_seq_to_head_packed_recv_only");
+    check_context_tensor(ctx, send_flat, "sp_all_to_all_4d_seq_to_head_packed_recv_only");
+    if (batch != 1) {
+        throw std::invalid_argument("sp_all_to_all_4d_seq_to_head_packed_recv_only supports batch == 1 only");
+    }
+    if (heads % world_size != 0) {
+        std::ostringstream oss;
+        oss << "sp_all_to_all_4d_seq_to_head_packed_recv_only heads must be divisible by world_size: heads="
+            << heads << " world_size=" << world_size;
+        throw std::invalid_argument(oss.str());
+    }
+
+    SPAllToAll4DBatchLayout layout;
+    layout.direction       = SPAllToAll4DDirection::kSeqToHead;
+    layout.world_size      = world_size;
+    layout.batch           = batch;
+    layout.heads           = heads;
+    layout.shard_heads     = heads / world_size;
+    layout.shard_sequence  = shard_sequence;
+    layout.sequence        = shard_sequence * world_size;
+    layout.total_head_dim  = total_head_dim;
+    layout.send_flat       = ggml_is_contiguous(send_flat) ? ggml_reshape_1d(ctx, send_flat, ggml_nelements(send_flat))
+                                                          : ggml_cont_1d(ctx, send_flat, ggml_nelements(send_flat));
+    layout.count_per_peer  = static_cast<size_t>(ggml_nelements(layout.send_flat)) /
+                             static_cast<size_t>(world_size);
+
+    const int64_t expected = total_head_dim * layout.shard_heads * world_size * shard_sequence * batch;
+    if (ggml_nelements(layout.send_flat) != expected) {
+        std::ostringstream oss;
+        oss << "sp_all_to_all_4d_seq_to_head_packed_recv_only send_flat size mismatch: got="
+            << ggml_nelements(layout.send_flat) << " expected=" << expected;
+        throw std::invalid_argument(oss.str());
+    }
+
+    if (!name.empty()) {
+        ggml_set_name(layout.send_flat, (name + "_send_flat").c_str());
+    }
+
+    layout.recv_flat = new_recv_placeholder(ctx,
+                                            layout.send_flat,
+                                            layout.send_flat,
+                                            ggml_nelements(layout.send_flat),
+                                            1,
+                                            1,
+                                            1,
+                                            name + "_flat");
+
+    mark_all_to_all_flat(layout.send_flat,
+                         layout.recv_flat,
+                         layout.count_per_peer,
+                         name);
+    sd::ggml_graph_cut::mark_graph_cut(layout.recv_flat,
+                                       graph_cut_group_name(name),
+                                       name + "_recv_flat");
     return layout;
 }
 
@@ -902,6 +967,129 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_batched(ggml_context* ctx,
                                        name + "_recv_flat");
 
     for (size_t i = 0; i < inputs.size(); ++i) {
+        const int64_t shard_sequence = layout.shard_sequences[i];
+        const int64_t chunk_ne = chunk_nelements[i];
+        size_t input_peer_offset = 0;
+        for (size_t j = 0; j < i; ++j) {
+            input_peer_offset += static_cast<size_t>(chunk_nelements[j]);
+        }
+
+        ggml_tensor* flat_view = nullptr;
+        for (int src = 0; src < world_size; ++src) {
+            const size_t offset = (static_cast<size_t>(src) * layout.count_per_peer +
+                                   input_peer_offset) *
+                                  layout.recv_flat->nb[0];
+            ggml_tensor* src_view = ggml_view_1d(ctx,
+                                                 layout.recv_flat,
+                                                 chunk_ne,
+                                                 offset);
+            if (flat_view == nullptr) {
+                flat_view = src_view;
+            } else {
+                flat_view = ggml_concat(ctx, flat_view, src_view, 0);
+            }
+        }
+
+        ggml_tensor* src_peer_major = ggml_reshape_4d(ctx,
+                                                      flat_view,
+                                                      layout.head_dim,
+                                                      layout.shard_heads,
+                                                      shard_sequence,
+                                                      world_size);
+        ggml_tensor* heads_before_sequence = ggml_permute(ctx, src_peer_major, 0, 1, 3, 2);
+        ggml_tensor* output = ggml_cont_4d(ctx,
+                                           heads_before_sequence,
+                                           layout.head_dim,
+                                           layout.heads,
+                                           shard_sequence,
+                                           layout.batch);
+        if (!name.empty()) {
+            ggml_set_name(output, (name + "_output_" + std::to_string(i)).c_str());
+        }
+        layout.outputs.push_back(output);
+    }
+
+    return layout;
+}
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_packed_recv_only(ggml_context* ctx,
+                                                                      ggml_tensor* send_flat,
+                                                                      int64_t head_dim,
+                                                                      int64_t shard_heads,
+                                                                      const std::vector<int64_t>& sequences,
+                                                                      int world_size,
+                                                                      const std::string& name) {
+    check_world_size(world_size, "sp_all_to_all_4d_head_to_seq_packed_recv_only");
+    check_context_tensor(ctx, send_flat, "sp_all_to_all_4d_head_to_seq_packed_recv_only");
+    if (sequences.empty()) {
+        throw std::invalid_argument("sp_all_to_all_4d_head_to_seq_packed_recv_only sequences must not be empty");
+    }
+    if (head_dim <= 0 || shard_heads <= 0) {
+        throw std::invalid_argument("sp_all_to_all_4d_head_to_seq_packed_recv_only invalid head shape");
+    }
+
+    SPAllToAll4DBatchLayout layout;
+    layout.direction = SPAllToAll4DDirection::kHeadToSeq;
+    layout.world_size = world_size;
+    layout.batch = 1;
+    layout.head_dim = head_dim;
+    layout.shard_heads = shard_heads;
+    layout.heads = shard_heads * world_size;
+    layout.outputs.reserve(sequences.size());
+    layout.sequences.reserve(sequences.size());
+    layout.shard_sequences.reserve(sequences.size());
+
+    std::vector<int64_t> chunk_nelements;
+    chunk_nelements.reserve(sequences.size());
+    int64_t expected_ne = 0;
+    for (size_t i = 0; i < sequences.size(); ++i) {
+        const int64_t sequence = sequences[i];
+        if (sequence <= 0 || sequence % world_size != 0) {
+            std::ostringstream oss;
+            oss << "sp_all_to_all_4d_head_to_seq_packed_recv_only sequence " << i
+                << " must be positive and divisible by world_size: sequence="
+                << sequence << " world_size=" << world_size;
+            throw std::invalid_argument(oss.str());
+        }
+        const int64_t shard_sequence = sequence / world_size;
+        const int64_t chunk_ne = head_dim * shard_heads * shard_sequence;
+        layout.sequences.push_back(sequence);
+        layout.shard_sequences.push_back(shard_sequence);
+        layout.sequence += sequence;
+        layout.shard_sequence += shard_sequence;
+        chunk_nelements.push_back(chunk_ne);
+        expected_ne += chunk_ne * world_size;
+    }
+
+    if (ggml_nelements(send_flat) != expected_ne) {
+        std::ostringstream oss;
+        oss << "sp_all_to_all_4d_head_to_seq_packed_recv_only send_flat size mismatch: got="
+            << ggml_nelements(send_flat) << " expected=" << expected_ne;
+        throw std::invalid_argument(oss.str());
+    }
+
+    layout.send_flat = send_flat;
+    if (!name.empty()) {
+        ggml_set_name(layout.send_flat, (name + "_send_flat").c_str());
+    }
+    layout.count_per_peer = static_cast<size_t>(expected_ne) / static_cast<size_t>(world_size);
+    layout.recv_flat = new_recv_placeholder(ctx,
+                                            layout.send_flat,
+                                            layout.send_flat,
+                                            expected_ne,
+                                            1,
+                                            1,
+                                            1,
+                                            name + "_flat");
+    mark_all_to_all_flat(layout.send_flat,
+                         layout.recv_flat,
+                         layout.count_per_peer,
+                         name);
+    sd::ggml_graph_cut::mark_graph_cut(layout.recv_flat,
+                                       graph_cut_group_name(name),
+                                       name + "_recv_flat");
+
+    for (size_t i = 0; i < sequences.size(); ++i) {
         const int64_t shard_sequence = layout.shard_sequences[i];
         const int64_t chunk_ne = chunk_nelements[i];
         size_t input_peer_offset = 0;

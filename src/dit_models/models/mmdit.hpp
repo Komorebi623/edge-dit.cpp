@@ -359,20 +359,12 @@ public:
         v = ggml_cont(ctx->ggml_ctx, v);
 
         const int world_size = mmdit_sp_world_size(ctx);
-        auto q_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
-                                                                      q,
-                                                                      world_size,
-                                                                      name_prefix + "_q_seq_to_head");
-        auto k_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
-                                                                      k,
-                                                                      world_size,
-                                                                      name_prefix + "_k_seq_to_head");
-        auto v_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
-                                                                      v,
-                                                                      world_size,
-                                                                      name_prefix + "_v_seq_to_head");
-
-        return {q_head.output, k_head.output, v_head.output};
+        auto qkv_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched(ctx->ggml_ctx,
+                                                                                {q, k, v},
+                                                                                world_size,
+                                                                                name_prefix + "_qkv_seq_to_head");
+        GGML_ASSERT(qkv_head.outputs.size() == 3);
+        return {qkv_head.outputs[0], qkv_head.outputs[1], qkv_head.outputs[2]};
     }
 
     ggml_tensor* post_attention(GGMLRunnerContext* ctx, ggml_tensor* x) {

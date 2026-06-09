@@ -201,6 +201,15 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_layouts(ggml_contex
                                                                      int world_size,
                                                                      const std::string& name = "sp_all_to_all_4d_seq_to_head_batched");
 
+SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_packed_recv_only(ggml_context* ctx,
+                                                                      ggml_tensor* send_flat,
+                                                                      int64_t total_head_dim,
+                                                                      int64_t heads,
+                                                                      int64_t shard_sequence,
+                                                                      int64_t batch,
+                                                                      int world_size,
+                                                                      const std::string& name = "sp_all_to_all_4d_seq_to_head_packed");
+
 // Same communication/layout contract as sp_all_to_all_4d_seq_to_head_batched,
 // but selected outputs can be materialized as [head_dim, sequence, shard_heads, batch].
 // This is useful when the immediate consumer wants sequence-major q/k tensors.
@@ -219,6 +228,14 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_batched(ggml_context* ctx,
                                                              const std::vector<ggml_tensor*>& inputs,
                                                              int world_size,
                                                              const std::string& name = "sp_all_to_all_4d_head_to_seq_batched");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_packed_recv_only(ggml_context* ctx,
+                                                                      ggml_tensor* send_flat,
+                                                                      int64_t head_dim,
+                                                                      int64_t shard_heads,
+                                                                      const std::vector<int64_t>& sequences,
+                                                                      int world_size,
+                                                                      const std::string& name = "sp_all_to_all_4d_head_to_seq_packed");
 
 } // namespace edgedit::parallel
 
