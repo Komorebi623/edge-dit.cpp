@@ -71,6 +71,19 @@ namespace sd::ggml_graph_cut {
                segment.output_bytes;
     }
 
+    static void populate_future_input_names(Plan& plan) {
+        std::unordered_set<std::string> future_input_names;
+        for (auto it = plan.segments.rbegin(); it != plan.segments.rend(); ++it) {
+            it->future_input_names = future_input_names;
+            for (const auto& input_ref : it->input_refs) {
+                if (input_ref.type == Segment::INPUT_PREVIOUS_CUT &&
+                    !input_ref.display_name.empty()) {
+                    future_input_names.insert(input_ref.display_name);
+                }
+            }
+        }
+    }
+
     static Segment make_segment_seed(const Plan& plan,
                                      size_t start_segment_index,
                                      size_t end_segment_index) {
@@ -883,6 +896,7 @@ namespace sd::ggml_graph_cut {
                           log_desc);
         }
 
+        populate_future_input_names(plan);
         return plan;
     }
 
@@ -989,6 +1003,7 @@ namespace sd::ggml_graph_cut {
                      ggml_time_ms() - t_budget_begin);
         }
 
+        populate_future_input_names(merged_plan);
         return merged_plan;
     }
 

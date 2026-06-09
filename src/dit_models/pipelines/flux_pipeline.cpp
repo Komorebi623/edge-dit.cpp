@@ -408,13 +408,17 @@ bool FluxPipeline::initialize_flux_transformer_spec(const ModelLoader& loader,
                                                 version_,
                                                 false));
         if (runtime_ != nullptr) {
+            const bool diffusion_flash = runtime_->flash_attention() || runtime_->diffusion_flash_attention();
+            flux_runner_->set_max_graph_vram_bytes(runtime_->max_graph_vram_bytes());
+            flux_runner_->set_flash_attention_enabled(diffusion_flash);
+
             auto process_group = runtime_->process_group_ref();
             if (process_group != nullptr) {
                 flux_runner_->set_process_group(process_group);
                 LOG_INFO("flux transformer process group attached: backend=%s rank=%d world_size=%d",
-                        edgedit::parallel::backend_name(process_group->backend()),
-                        process_group->rank(),
-                        process_group->size());
+                         edgedit::parallel::backend_name(process_group->backend()),
+                         process_group->rank(),
+                         process_group->size());
             }
         }
     } catch (const std::exception& e) {

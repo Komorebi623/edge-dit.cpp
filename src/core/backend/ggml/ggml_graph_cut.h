@@ -69,6 +69,7 @@ namespace sd::ggml_graph_cut {
         std::vector<int> internal_node_indices;
         std::vector<int> output_node_indices;
         std::vector<InputRef> input_refs;
+        std::unordered_set<std::string> future_input_names;
 
         std::vector<CommOp> comm_ops;
     };

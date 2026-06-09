@@ -855,7 +855,9 @@ namespace Qwen {
                 img         = result.first;
                 txt         = result.second;
                 sd::ggml_graph_cut::mark_graph_cut(img, "qwen_image.transformer_blocks." + std::to_string(i), "img");
-                sd::ggml_graph_cut::mark_graph_cut(txt, "qwen_image.transformer_blocks." + std::to_string(i), "txt");
+                if (i + 1 < params.num_layers) {
+                    sd::ggml_graph_cut::mark_graph_cut(txt, "qwen_image.transformer_blocks." + std::to_string(i), "txt");
+                }
             }
 
             if (use_sp_mainline) {

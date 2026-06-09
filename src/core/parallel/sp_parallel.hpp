@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "ggml.h"
 
@@ -54,6 +55,25 @@ struct SPSequenceGather {
     size_t count_per_rank = 0;
 };
 
+struct SPSequenceGatherBatch {
+    ggml_tensor* send_flat = nullptr;
+    ggml_tensor* recv_flat = nullptr;
+
+    std::vector<ggml_tensor*> gathered_padded;
+    std::vector<ggml_tensor*> gathered;
+
+    int world_size = 1;
+    int seq_dim    = 1;
+
+    std::vector<int64_t> local_seq_lens;
+    std::vector<int64_t> padded_seq_lens;
+    std::vector<int64_t> original_seq_lens;
+    std::vector<int64_t> pads;
+
+    std::vector<size_t> counts_per_input;
+    size_t count_per_rank = 0;
+};
+
 enum class SPAllToAll4DDirection {
     kSeqToHead,
     kHeadToSeq,
@@ -80,6 +100,30 @@ struct SPAllToAll4DLayout {
     int64_t shard_heads    = 0;
     int64_t sequence       = 0;
     int64_t shard_sequence = 0;
+
+    size_t count_per_peer = 0;
+};
+
+struct SPAllToAll4DBatchLayout {
+    SPAllToAll4DDirection direction = SPAllToAll4DDirection::kSeqToHead;
+
+    ggml_tensor* send_flat = nullptr;
+    ggml_tensor* recv_flat = nullptr;
+    std::vector<ggml_tensor*> outputs;
+
+    int world_size = 1;
+
+    int64_t batch          = 1;
+    int64_t head_dim       = 0;
+    int64_t heads          = 0;
+    int64_t shard_heads    = 0;
+    int64_t sequence       = 0;
+    int64_t shard_sequence = 0;
+    int64_t total_head_dim = 0;
+
+    std::vector<int64_t> head_dims;
+    std::vector<int64_t> sequences;
+    std::vector<int64_t> shard_sequences;
 
     size_t count_per_peer = 0;
 };
@@ -117,6 +161,13 @@ SPSequenceGather sp_mark_gather_sequence(ggml_context* ctx,
                                          int64_t pad,
                                          const std::string& name = "sp_gather_sequence");
 
+SPSequenceGatherBatch sp_mark_gather_sequence_batched(ggml_context* ctx,
+                                                      const std::vector<ggml_tensor*>& locals,
+                                                      int world_size,
+                                                      int seq_dim,
+                                                      const std::vector<int64_t>& pads,
+                                                      const std::string& name = "sp_gather_sequence_batched");
+
 // 4D all-to-all layout helpers for attention tensors in ggml BSND layout:
 //   [head_dim, heads, sequence, batch].
 //
@@ -133,10 +184,29 @@ SPAllToAll4DLayout sp_all_to_all_4d_seq_to_head(ggml_context* ctx,
                                                 int world_size,
                                                 const std::string& name = "sp_all_to_all_4d_seq_to_head");
 
+SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched(ggml_context* ctx,
+                                                             const std::vector<ggml_tensor*>& inputs,
+                                                             int world_size,
+                                                             const std::string& name = "sp_all_to_all_4d_seq_to_head_batched");
+
+// Same communication/layout contract as sp_all_to_all_4d_seq_to_head_batched,
+// but selected outputs can be materialized as [head_dim, sequence, shard_heads, batch].
+// This is useful when the immediate consumer wants sequence-major q/k tensors.
+SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_mixed(ggml_context* ctx,
+                                                                   const std::vector<ggml_tensor*>& inputs,
+                                                                   const std::vector<bool>& output_seq_major,
+                                                                   int world_size,
+                                                                   const std::string& name = "sp_all_to_all_4d_seq_to_head_batched");
+
 SPAllToAll4DLayout sp_all_to_all_4d_head_to_seq(ggml_context* ctx,
                                                 ggml_tensor* input,
                                                 int world_size,
                                                 const std::string& name = "sp_all_to_all_4d_head_to_seq");
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_batched(ggml_context* ctx,
+                                                             const std::vector<ggml_tensor*>& inputs,
+                                                             int world_size,
+                                                             const std::string& name = "sp_all_to_all_4d_head_to_seq_batched");
 
 } // namespace edgedit::parallel
 

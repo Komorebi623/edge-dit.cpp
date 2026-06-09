@@ -5,6 +5,7 @@
 #include <inttypes.h>
 #include <stdarg.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +22,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "ggml-alloc.h"
@@ -1722,6 +1724,285 @@ protected:
     using GraphCutSegment = sd::ggml_graph_cut::Segment;
     using GraphCutPlan    = sd::ggml_graph_cut::Plan;
 
+    struct GraphCopyProfile {
+        int64_t graph_tensor_set_us  = 0;
+        int64_t backend_map_scan_us  = 0;
+        int64_t backend_tensor_set_us = 0;
+
+        size_t graph_leafs          = 0;
+        size_t graph_nodes          = 0;
+        size_t graph_tensor_entries = 0;
+        size_t backend_map_entries  = 0;
+        size_t copied_tensors       = 0;
+        size_t skipped_not_in_graph = 0;
+        size_t skipped_no_buffer    = 0;
+        size_t copied_bytes         = 0;
+        size_t runtime_const_cache_hits = 0;
+        size_t runtime_const_cache_uploads = 0;
+        size_t runtime_const_cache_hit_bytes = 0;
+        size_t runtime_const_cache_upload_bytes = 0;
+        int64_t runtime_const_cache_hit_us = 0;
+        int64_t runtime_const_cache_upload_us = 0;
+    };
+
+    struct GraphExecuteProfile {
+        int64_t offload_ms = 0;
+        int64_t alloc_ms   = 0;
+        int64_t copy_ms    = 0;
+        int64_t compute_ms = 0;
+        int64_t post_ms    = 0;
+        int64_t cache_ms   = 0;
+        int64_t total_ms   = 0;
+
+        int64_t pre_compute_callback_us = 0;
+        GraphCopyProfile copy_detail;
+
+        size_t cache_live_bytes   = 0;
+        size_t cache_buffer_bytes = 0;
+        size_t cache_chunks       = 0;
+        size_t cache_pool_bytes   = 0;
+        size_t cache_pool_chunks  = 0;
+    };
+
+    struct GraphCutMaterializeStageProfile {
+        size_t ops = 0;
+        size_t bytes = 0;
+        size_t cont_ops = 0;
+        size_t cont_bytes = 0;
+        size_t cpy_ops = 0;
+        size_t cpy_bytes = 0;
+        size_t concat_ops = 0;
+        size_t concat_bytes = 0;
+        size_t dup_ops = 0;
+        size_t dup_bytes = 0;
+        size_t boundary_output_bytes = 0;
+        size_t cached_output_bytes = 0;
+        size_t comm_input_bytes = 0;
+        size_t comm_output_bytes = 0;
+        size_t src_boundary_input_bytes = 0;
+        size_t src_comm_output_bytes = 0;
+        size_t materialize_after_materialize_ops = 0;
+        size_t materialize_after_materialize_bytes = 0;
+        size_t cont_from_cont_ops = 0;
+        size_t cont_from_cont_bytes = 0;
+        size_t concat_to_cont_ops = 0;
+        size_t concat_to_cont_bytes = 0;
+        size_t permute_view_to_cont_ops = 0;
+        size_t permute_view_to_cont_bytes = 0;
+        size_t materialize_view_materialize_ops = 0;
+        size_t materialize_view_materialize_bytes = 0;
+        size_t cont_permute_cont_ops = 0;
+        size_t cont_permute_cont_bytes = 0;
+        std::map<std::string, std::pair<size_t, size_t>> chain_groups;
+    };
+
+    struct GraphCutSegmentProfile {
+        std::string name;
+        std::string comm_names;
+        std::string op_histogram;
+        std::string io_summary;
+        std::array<size_t, GGML_OP_COUNT> op_counts = {};
+
+        size_t nodes      = 0;
+        size_t comm_ops   = 0;
+        size_t comm_bytes = 0;
+        size_t output_bytes = 0;
+        size_t cached_output_bytes = 0;
+        size_t math_ops = 0;
+        size_t layout_ops = 0;
+        size_t materialize_ops = 0;
+        size_t materialize_bytes = 0;
+        size_t cont_ops = 0;
+        size_t cont_bytes = 0;
+        size_t cpy_ops = 0;
+        size_t cpy_bytes = 0;
+        size_t concat_ops = 0;
+        size_t concat_bytes = 0;
+        size_t dup_ops = 0;
+        size_t dup_bytes = 0;
+        size_t materialize_boundary_output_bytes = 0;
+        size_t materialize_cached_output_bytes = 0;
+        size_t materialize_comm_input_bytes = 0;
+        size_t materialize_comm_output_bytes = 0;
+        size_t repeated_materialize_source_groups = 0;
+        size_t repeated_materialize_source_ops = 0;
+        size_t repeated_materialize_source_bytes = 0;
+        size_t materialize_after_materialize_ops = 0;
+        size_t materialize_after_materialize_bytes = 0;
+        size_t cont_from_cont_ops = 0;
+        size_t cont_from_cont_bytes = 0;
+        size_t concat_to_cont_ops = 0;
+        size_t concat_to_cont_bytes = 0;
+        size_t permute_view_to_cont_ops = 0;
+        size_t permute_view_to_cont_bytes = 0;
+        size_t materialize_view_materialize_ops = 0;
+        size_t materialize_view_materialize_bytes = 0;
+        size_t cont_permute_cont_ops = 0;
+        size_t cont_permute_cont_bytes = 0;
+        std::map<std::string, GraphCutMaterializeStageProfile> materialize_stages;
+        std::string materialize_top_nodes;
+        std::string repeated_materialize_sources;
+        std::string materialize_chain_top_nodes;
+        std::string materialize_stage_summary;
+        std::string materialize_stage_details;
+
+        int64_t build_ms        = 0;
+        int64_t runtime_param_ms = 0;
+        int64_t offload_ms      = 0;
+        int64_t alloc_ms        = 0;
+        int64_t copy_ms         = 0;
+        int64_t compute_ms      = 0;
+        int64_t comm_ms         = 0;
+        int64_t cache_ms        = 0;
+        int64_t total_ms        = 0;
+
+        int64_t collect_future_inputs_us = 0;
+        int64_t reset_runtime_tensors_us = 0;
+        int64_t bind_cached_inputs_us    = 0;
+        int64_t mark_cache_outputs_us    = 0;
+        int64_t pre_compute_callback_us  = 0;
+        int64_t segment_graph_free_us    = 0;
+        GraphCopyProfile copy_detail;
+
+        size_t cache_live_bytes   = 0;
+        size_t cache_buffer_bytes = 0;
+        size_t cache_chunks       = 0;
+        size_t cache_pool_bytes   = 0;
+        size_t cache_pool_chunks  = 0;
+    };
+
+    struct GraphCacheChunk {
+        GraphCacheChunk() = default;
+        GraphCacheChunk(const GraphCacheChunk&) = delete;
+        GraphCacheChunk& operator=(const GraphCacheChunk&) = delete;
+
+        GraphCacheChunk(GraphCacheChunk&& other) noexcept {
+            move_from(std::move(other));
+        }
+
+        GraphCacheChunk& operator=(GraphCacheChunk&& other) noexcept {
+            if (this != &other) {
+                reset();
+                move_from(std::move(other));
+            }
+            return *this;
+        }
+
+        ~GraphCacheChunk() {
+            reset();
+        }
+
+        ggml_context* ctx            = nullptr;
+        ggml_backend_buffer_t buffer = nullptr;
+        std::string layout_key;
+        std::map<std::string, ggml_tensor*> tensors;
+        std::vector<ggml_tensor*> cache_tensors;
+
+        void reset() {
+            if (buffer != nullptr) {
+                ggml_backend_buffer_free(buffer);
+                buffer = nullptr;
+            }
+            if (ctx != nullptr) {
+                ggml_free(ctx);
+                ctx = nullptr;
+            }
+            layout_key.clear();
+            tensors.clear();
+            cache_tensors.clear();
+        }
+
+    private:
+        void move_from(GraphCacheChunk&& other) noexcept {
+            ctx           = other.ctx;
+            buffer        = other.buffer;
+            layout_key    = std::move(other.layout_key);
+            tensors       = std::move(other.tensors);
+            cache_tensors = std::move(other.cache_tensors);
+
+            other.ctx    = nullptr;
+            other.buffer = nullptr;
+            other.layout_key.clear();
+            other.tensors.clear();
+            other.cache_tensors.clear();
+        }
+    };
+
+    struct RuntimeConstCacheEntry {
+        RuntimeConstCacheEntry() = default;
+        RuntimeConstCacheEntry(const RuntimeConstCacheEntry&) = delete;
+        RuntimeConstCacheEntry& operator=(const RuntimeConstCacheEntry&) = delete;
+
+        RuntimeConstCacheEntry(RuntimeConstCacheEntry&& other) noexcept {
+            move_from(std::move(other));
+        }
+
+        RuntimeConstCacheEntry& operator=(RuntimeConstCacheEntry&& other) noexcept {
+            if (this != &other) {
+                reset();
+                move_from(std::move(other));
+            }
+            return *this;
+        }
+
+        ~RuntimeConstCacheEntry() {
+            reset();
+        }
+
+        ggml_context* ctx = nullptr;
+        ggml_backend_buffer_t buffer = nullptr;
+        ggml_tensor* tensor = nullptr;
+        const void* host_data = nullptr;
+        std::string key;
+        ggml_type type = GGML_TYPE_COUNT;
+        int64_t ne[GGML_MAX_DIMS] = {0, 0, 0, 0};
+        size_t nbytes = 0;
+
+        void reset() {
+            if (buffer != nullptr) {
+                ggml_backend_buffer_free(buffer);
+                buffer = nullptr;
+            }
+            if (ctx != nullptr) {
+                ggml_free(ctx);
+                ctx = nullptr;
+            }
+            tensor = nullptr;
+            host_data = nullptr;
+            key.clear();
+            type = GGML_TYPE_COUNT;
+            for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+                ne[i] = 0;
+            }
+            nbytes = 0;
+        }
+
+    private:
+        void move_from(RuntimeConstCacheEntry&& other) noexcept {
+            ctx       = other.ctx;
+            buffer    = other.buffer;
+            tensor    = other.tensor;
+            host_data = other.host_data;
+            key       = std::move(other.key);
+            type      = other.type;
+            nbytes    = other.nbytes;
+            for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+                ne[i] = other.ne[i];
+            }
+
+            other.ctx = nullptr;
+            other.buffer = nullptr;
+            other.tensor = nullptr;
+            other.host_data = nullptr;
+            other.key.clear();
+            other.type = GGML_TYPE_COUNT;
+            other.nbytes = 0;
+            for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+                other.ne[i] = 0;
+            }
+        }
+    };
+
     ggml_backend_t params_backend  = nullptr;
     ggml_backend_t runtime_backend = nullptr;
 
@@ -1733,6 +2014,9 @@ protected:
 
     ggml_context* cache_ctx            = nullptr;
     ggml_backend_buffer_t cache_buffer = nullptr;
+    std::vector<GraphCacheChunk> cache_chunks_;
+    std::vector<GraphCacheChunk> cache_chunk_pool_;
+    size_t cache_chunk_pool_bytes_ = 0;
 
     ggml_context* compute_ctx    = nullptr;
     ggml_gallocr* compute_allocr = nullptr;
@@ -1752,6 +2036,8 @@ protected:
 
     std::map<ggml_tensor*, const void*> backend_tensor_data_map;
     std::map<std::string, ggml_tensor*> cache_tensor_map;  // name -> tensor
+    std::unordered_map<std::string, ggml_tensor*> cache_tensor_index_;
+    std::vector<RuntimeConstCacheEntry> runtime_const_cache_;
     const std::string final_result_name = "ggml_runner_final_result_tensor";
 
     bool flash_attn_enabled    = false;
@@ -1762,6 +2048,7 @@ protected:
     sd::ggml_graph_cut::PlanCache graph_cut_plan_cache_;
     std::unordered_set<const ggml_tensor*> params_tensor_set_;
     std::shared_ptr<edgedit::parallel::ProcessGroup> process_group_ = nullptr;
+    size_t graph_cut_profile_index_ = 0;
 
     template <typename T>
     static sd::Tensor<T> take_or_empty(std::optional<sd::Tensor<T>> tensor) {
@@ -1787,6 +2074,2129 @@ protected:
             tensor.unsqueeze_(tensor.dim());
         }
         return tensor;
+    }
+
+    static bool env_flag_enabled(const char* name) {
+        const char* value = std::getenv(name);
+        if (value == nullptr || value[0] == '\0') {
+            return false;
+        }
+        return std::strcmp(value, "0") != 0 &&
+               std::strcmp(value, "false") != 0 &&
+               std::strcmp(value, "FALSE") != 0 &&
+               std::strcmp(value, "off") != 0 &&
+               std::strcmp(value, "OFF") != 0;
+    }
+
+    static int env_int_or_default(const char* name, int fallback) {
+        const char* value = std::getenv(name);
+        if (value == nullptr || value[0] == '\0') {
+            return fallback;
+        }
+        char* end = nullptr;
+        long parsed = std::strtol(value, &end, 10);
+        if (end == value || *end != '\0') {
+            return fallback;
+        }
+        return static_cast<int>(parsed);
+    }
+
+    bool graph_cut_profile_enabled() const {
+        return env_flag_enabled("ED_PROFILE_GRAPH_CUTS");
+    }
+
+    bool graph_cut_cache_compact_enabled() const {
+        return env_flag_enabled("ED_GRAPH_CUT_CACHE_COMPACT");
+    }
+
+    bool graph_cut_cache_sync_after_copy_enabled() const {
+        return env_flag_enabled("ED_GRAPH_CUT_CACHE_SYNC_AFTER_COPY");
+    }
+
+    bool graph_cut_cache_pool_enabled() const {
+        const char* value = std::getenv("ED_GRAPH_CUT_CACHE_POOL");
+        if (value == nullptr || value[0] == '\0') {
+            return true;
+        }
+        return env_flag_enabled("ED_GRAPH_CUT_CACHE_POOL");
+    }
+
+    size_t graph_cut_cache_pool_max_bytes() const {
+        int max_mb = env_int_or_default("ED_GRAPH_CUT_CACHE_POOL_MAX_MB", 1024);
+        if (max_mb <= 0) {
+            return 0;
+        }
+        return static_cast<size_t>(max_mb) * 1024 * 1024;
+    }
+
+    bool graph_cut_cache_pool_retained_between_runs() const {
+        return !graph_cut_cache_compact_enabled() && graph_cut_cache_pool_enabled();
+    }
+
+    bool runtime_const_cache_enabled() const {
+        const char* value = std::getenv("ED_RUNTIME_CONST_CACHE");
+        if (value == nullptr || value[0] == '\0') {
+            return true;
+        }
+        return env_flag_enabled("ED_RUNTIME_CONST_CACHE");
+    }
+
+    bool graph_cut_profile_should_log_rank() const {
+        if (env_flag_enabled("ED_PROFILE_GRAPH_CUTS_ALL_RANKS")) {
+            return true;
+        }
+        return process_group_ == nullptr || !process_group_->enabled() || process_group_->rank() == 0;
+    }
+
+    int graph_cut_profile_top_n() const {
+        return std::max(0, env_int_or_default("ED_PROFILE_GRAPH_CUTS_TOP", 8));
+    }
+
+    int graph_cut_profile_compute_top_n() const {
+        return std::max(0, env_int_or_default("ED_PROFILE_GRAPH_CUTS_COMPUTE_TOP", 0));
+    }
+
+    int graph_cut_profile_materialize_top_n() const {
+        return std::max(0, env_int_or_default("ED_PROFILE_GRAPH_CUTS_MATERIALIZE_TOP", 0));
+    }
+
+    static size_t graph_cut_comm_tensor_bytes(ggml_cgraph* gf,
+                                              const GraphCutSegment::CommOp& comm_op) {
+        ggml_tensor* output = sd::ggml_graph_cut::comm_output_tensor(gf, comm_op);
+        if (output != nullptr) {
+            return ggml_nbytes(output);
+        }
+        ggml_tensor* input = sd::ggml_graph_cut::comm_input_tensor(gf, comm_op);
+        return input != nullptr ? ggml_nbytes(input) : 0;
+    }
+
+    static std::string graph_cut_comm_names(const GraphCutSegment& segment) {
+        if (segment.comm_ops.empty()) {
+            return "-";
+        }
+
+        std::string names;
+        for (size_t i = 0; i < segment.comm_ops.size(); ++i) {
+            const auto& op = segment.comm_ops[i];
+            if (i > 0) {
+                names += ",";
+            }
+            names += sd::ggml_graph_cut::comm_kind_name(op.kind);
+            if (!op.name.empty()) {
+                names += ":";
+                names += op.name;
+            }
+            if (names.size() > 240) {
+                names.resize(240);
+                names += "...";
+                break;
+            }
+        }
+        return names;
+    }
+
+    static double bytes_to_mib(size_t bytes) {
+        return static_cast<double>(bytes) / (1024.0 * 1024.0);
+    }
+
+    static ggml_context* new_cache_context(size_t tensor_count_hint = MAX_PARAMS_TENSOR_NUM) {
+        ggml_init_params params;
+        params.mem_size   = static_cast<size_t>(std::max<size_t>(1, tensor_count_hint) * ggml_tensor_overhead());
+        params.mem_buffer = nullptr;
+        params.no_alloc   = true;
+
+        ggml_context* ctx = ggml_init(params);
+        GGML_ASSERT(ctx != nullptr);
+        return ctx;
+    }
+
+    static bool graph_cut_segment_name_starts_with(const std::string& name,
+                                                   const char* prefix) {
+        return name.rfind(prefix, 0) == 0;
+    }
+
+    static bool graph_cut_segment_is_double_block_output(const std::string& name) {
+        return graph_cut_segment_name_starts_with(name, "flux.double_blocks.");
+    }
+
+    static bool graph_cut_segment_is_single_block_output(const std::string& name) {
+        return graph_cut_segment_name_starts_with(name, "flux.single_blocks.");
+    }
+
+    static bool graph_cut_op_is_math(enum ggml_op op) {
+        switch (op) {
+            case GGML_OP_MUL_MAT:
+            case GGML_OP_MUL_MAT_ID:
+            case GGML_OP_FLASH_ATTN_EXT:
+            case GGML_OP_RMS_NORM:
+            case GGML_OP_NORM:
+            case GGML_OP_GROUP_NORM:
+            case GGML_OP_ADD:
+            case GGML_OP_ADD_ID:
+            case GGML_OP_ADD1:
+            case GGML_OP_MUL:
+            case GGML_OP_DIV:
+            case GGML_OP_SCALE:
+            case GGML_OP_SOFT_MAX:
+            case GGML_OP_UNARY:
+            case GGML_OP_GLU:
+            case GGML_OP_ROPE:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    static bool graph_cut_op_is_layout(enum ggml_op op) {
+        switch (op) {
+            case GGML_OP_DUP:
+            case GGML_OP_CPY:
+            case GGML_OP_CONT:
+            case GGML_OP_RESHAPE:
+            case GGML_OP_VIEW:
+            case GGML_OP_PERMUTE:
+            case GGML_OP_TRANSPOSE:
+            case GGML_OP_CONCAT:
+            case GGML_OP_GET_ROWS:
+            case GGML_OP_SET_ROWS:
+            case GGML_OP_REPEAT:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    static bool graph_cut_op_is_materialize(enum ggml_op op) {
+        switch (op) {
+            case GGML_OP_CONT:
+            case GGML_OP_CPY:
+            case GGML_OP_CONCAT:
+            case GGML_OP_DUP:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    static std::string graph_cut_tensor_summary(const ggml_tensor* tensor) {
+        if (tensor == nullptr) {
+            return "<null>";
+        }
+        std::ostringstream oss;
+        std::string name = tensor->name[0] != '\0' ? std::string(tensor->name) : std::string("<unnamed>");
+        if (name.size() > 96) {
+            name.resize(96);
+            name += "...";
+        }
+        oss << name
+            << "["
+            << ggml_type_name(tensor->type)
+            << ":"
+            << tensor->ne[0]
+            << "x"
+            << tensor->ne[1]
+            << "x"
+            << tensor->ne[2]
+            << "x"
+            << tensor->ne[3]
+            << "]";
+        return oss.str();
+    }
+
+    static std::string graph_cut_tensor_layout_summary(const ggml_tensor* tensor) {
+        if (tensor == nullptr) {
+            return "<null>";
+        }
+        std::ostringstream oss;
+        oss << graph_cut_tensor_summary(tensor)
+            << "/bytes=" << bytes_to_mib(ggml_nbytes(tensor)) << "MiB"
+            << "/nb=" << tensor->nb[0]
+            << ":" << tensor->nb[1]
+            << ":" << tensor->nb[2]
+            << ":" << tensor->nb[3]
+            << "/view=" << (tensor->view_src != nullptr ? "yes" : "no")
+            << "/contig=" << (ggml_is_contiguous(tensor) ? "yes" : "no");
+        return oss.str();
+    }
+
+    static void graph_cut_append_limited(std::ostringstream& oss,
+                                         const std::string& value,
+                                         size_t& emitted,
+                                         size_t limit,
+                                         const char* separator = ",") {
+        if (emitted >= limit) {
+            return;
+        }
+        if (emitted > 0) {
+            oss << separator;
+        }
+        oss << value;
+        ++emitted;
+    }
+
+    static std::string graph_cut_segment_io_summary(ggml_cgraph* gf,
+                                                    const GraphCutSegment& segment,
+                                                    size_t input_limit = 4,
+                                                    size_t output_limit = 4) {
+        std::ostringstream oss;
+        oss << "inputs=";
+        size_t emitted_inputs = 0;
+        for (const auto& input_ref : segment.input_refs) {
+            graph_cut_append_limited(oss,
+                                     graph_cut_tensor_summary(sd::ggml_graph_cut::input_tensor(gf, input_ref)),
+                                     emitted_inputs,
+                                     input_limit);
+        }
+        if (segment.input_refs.size() > input_limit) {
+            oss << ",...";
+        }
+
+        oss << " outputs=";
+        size_t emitted_outputs = 0;
+        for (size_t output_idx = 0; output_idx < segment.output_node_indices.size(); ++output_idx) {
+            graph_cut_append_limited(oss,
+                                     graph_cut_tensor_summary(sd::ggml_graph_cut::output_tensor(gf, segment, output_idx)),
+                                     emitted_outputs,
+                                     output_limit);
+        }
+        if (segment.output_node_indices.size() > output_limit) {
+            oss << ",...";
+        }
+        return oss.str();
+    }
+
+    struct GraphCutConsumerProfile {
+        size_t total = 0;
+        std::array<size_t, GGML_OP_COUNT> op_counts = {};
+    };
+
+    static GraphCutConsumerProfile graph_cut_tensor_consumers(ggml_cgraph* gf,
+                                                              const GraphCutSegment& segment,
+                                                              const ggml_tensor* tensor) {
+        GraphCutConsumerProfile profile;
+        if (gf == nullptr || tensor == nullptr) {
+            return profile;
+        }
+        for (int node_idx : segment.internal_node_indices) {
+            if (node_idx < 0 || node_idx >= ggml_graph_n_nodes(gf)) {
+                continue;
+            }
+            ggml_tensor* node = ggml_graph_node(gf, node_idx);
+            if (node == nullptr ||
+                node->op < GGML_OP_NONE ||
+                node->op >= GGML_OP_COUNT) {
+                continue;
+            }
+            bool consumes = false;
+            if (node->view_src == tensor) {
+                consumes = true;
+            }
+            for (int src_idx = 0; src_idx < GGML_MAX_SRC && !consumes; ++src_idx) {
+                if (node->src[src_idx] == tensor) {
+                    consumes = true;
+                }
+            }
+            if (!consumes) {
+                continue;
+            }
+            ++profile.total;
+            ++profile.op_counts[static_cast<size_t>(node->op)];
+        }
+        return profile;
+    }
+
+    static std::string graph_cut_consumer_histogram(const GraphCutConsumerProfile& profile,
+                                                    size_t limit = 6) {
+        if (profile.total == 0) {
+            return "-";
+        }
+        std::vector<size_t> order;
+        order.reserve(GGML_OP_COUNT);
+        for (size_t i = 0; i < GGML_OP_COUNT; ++i) {
+            if (profile.op_counts[i] > 0) {
+                order.push_back(i);
+            }
+        }
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            if (profile.op_counts[a] != profile.op_counts[b]) {
+                return profile.op_counts[a] > profile.op_counts[b];
+            }
+            return a < b;
+        });
+
+        std::ostringstream oss;
+        const size_t hist_limit = std::min(order.size(), limit);
+        for (size_t i = 0; i < hist_limit; ++i) {
+            if (i > 0) {
+                oss << ",";
+            }
+            const auto op = static_cast<enum ggml_op>(order[i]);
+            oss << ggml_op_name(op) << ":" << profile.op_counts[order[i]];
+        }
+        if (order.size() > hist_limit) {
+            oss << ",...";
+        }
+        return oss.str();
+    }
+
+    struct GraphCutMaterializeTrace {
+        int node_idx = -1;
+        enum ggml_op op = GGML_OP_NONE;
+        size_t bytes = 0;
+        size_t src_bytes = 0;
+        bool dst_is_boundary_output = false;
+        bool dst_is_cached_output = false;
+        bool dst_is_comm_input = false;
+        bool dst_is_comm_output = false;
+        bool src_is_boundary_input = false;
+        bool src_is_comm_output = false;
+        bool src_is_cached_input = false;
+        bool src_is_view = false;
+        bool src_is_contiguous = false;
+        bool is_materialize_after_materialize = false;
+        bool is_cont_from_cont = false;
+        bool is_concat_to_cont = false;
+        bool is_permute_view_to_cont = false;
+        bool is_materialize_view_materialize = false;
+        bool is_cont_permute_cont = false;
+        std::string dst;
+        std::string src;
+        std::string producer_op;
+        std::string consumer_ops;
+        std::string concat_inputs;
+        std::string chain;
+    };
+
+    struct GraphCutMaterializeProfile {
+        size_t ops = 0;
+        size_t bytes = 0;
+        size_t cont_ops = 0;
+        size_t cont_bytes = 0;
+        size_t cpy_ops = 0;
+        size_t cpy_bytes = 0;
+        size_t concat_ops = 0;
+        size_t concat_bytes = 0;
+        size_t dup_ops = 0;
+        size_t dup_bytes = 0;
+        size_t boundary_output_bytes = 0;
+        size_t cached_output_bytes = 0;
+        size_t comm_input_bytes = 0;
+        size_t comm_output_bytes = 0;
+        size_t repeated_source_groups = 0;
+        size_t repeated_source_ops = 0;
+        size_t repeated_source_bytes = 0;
+        size_t materialize_after_materialize_ops = 0;
+        size_t materialize_after_materialize_bytes = 0;
+        size_t cont_from_cont_ops = 0;
+        size_t cont_from_cont_bytes = 0;
+        size_t concat_to_cont_ops = 0;
+        size_t concat_to_cont_bytes = 0;
+        size_t permute_view_to_cont_ops = 0;
+        size_t permute_view_to_cont_bytes = 0;
+        size_t materialize_view_materialize_ops = 0;
+        size_t materialize_view_materialize_bytes = 0;
+        size_t cont_permute_cont_ops = 0;
+        size_t cont_permute_cont_bytes = 0;
+        std::map<std::string, GraphCutMaterializeStageProfile> stages;
+        std::string top_nodes;
+        std::string repeated_sources;
+        std::string top_chains;
+    };
+
+    static const ggml_tensor* graph_cut_primary_tensor_src(const ggml_tensor* tensor) {
+        if (tensor == nullptr) {
+            return nullptr;
+        }
+        if (tensor->src[0] != nullptr) {
+            return tensor->src[0];
+        }
+        return tensor->view_src;
+    }
+
+    static std::string graph_cut_tensor_name_or_empty(const ggml_tensor* tensor) {
+        if (tensor == nullptr || tensor->name[0] == '\0') {
+            return std::string();
+        }
+        return std::string(tensor->name);
+    }
+
+    static bool graph_cut_string_contains_any(const std::string& value,
+                                              std::initializer_list<const char*> needles) {
+        for (const char* needle : needles) {
+            if (needle != nullptr && value.find(needle) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool graph_cut_tensor_name_contains_any(const ggml_tensor* tensor,
+                                                   std::initializer_list<const char*> needles) {
+        return graph_cut_string_contains_any(graph_cut_tensor_name_or_empty(tensor), needles);
+    }
+
+    static bool graph_cut_tensor_name_ends_with(const ggml_tensor* tensor,
+                                                const char* suffix) {
+        if (tensor == nullptr || suffix == nullptr) {
+            return false;
+        }
+        const std::string name = graph_cut_tensor_name_or_empty(tensor);
+        const size_t suffix_len = std::strlen(suffix);
+        return name.size() >= suffix_len &&
+               name.compare(name.size() - suffix_len, suffix_len, suffix) == 0;
+    }
+
+    static std::string graph_cut_attention_qkv_layout_stage(const ggml_tensor* tensor,
+                                                            const std::string& fallback) {
+        if (graph_cut_tensor_name_contains_any(tensor, {"_q_attn"})) {
+            return "attention.q_layout";
+        }
+        if (graph_cut_tensor_name_contains_any(tensor, {"_k_attn"})) {
+            return "attention.k_layout";
+        }
+        if (graph_cut_tensor_name_contains_any(tensor, {"_v_attn"})) {
+            return "attention.v_layout";
+        }
+        return fallback;
+    }
+
+    static std::string graph_cut_chain_op_label(const ggml_tensor* tensor) {
+        if (tensor == nullptr ||
+            tensor->op < GGML_OP_NONE ||
+            tensor->op >= GGML_OP_COUNT) {
+            return "<invalid>";
+        }
+        std::string label = ggml_op_name(tensor->op);
+        if (tensor->view_src != nullptr) {
+            label += "(view)";
+        }
+        return label;
+    }
+
+    static std::string graph_cut_materialize_chain_signature(const ggml_tensor* node) {
+        if (node == nullptr) {
+            return "-";
+        }
+
+        std::vector<std::string> chain;
+        std::unordered_set<const ggml_tensor*> seen;
+        const ggml_tensor* current = node;
+        for (size_t depth = 0; current != nullptr && depth < 8; ++depth) {
+            if (seen.find(current) != seen.end()) {
+                break;
+            }
+            seen.insert(current);
+
+            const bool include =
+                current == node ||
+                graph_cut_op_is_materialize(current->op) ||
+                graph_cut_op_is_layout(current->op) ||
+                current->view_src != nullptr;
+            if (!include) {
+                break;
+            }
+
+            chain.push_back(graph_cut_chain_op_label(current));
+
+            // CONCAT has multiple semantic inputs; following src[0] would make
+            // the chain look more precise than it really is.  Stop at CONCAT
+            // and let concat_inputs carry the detailed source shapes.
+            if (current != node && current->op == GGML_OP_CONCAT) {
+                break;
+            }
+
+            const ggml_tensor* src = graph_cut_primary_tensor_src(current);
+            if (src == nullptr || src == current) {
+                break;
+            }
+            current = src;
+        }
+
+        if (chain.empty()) {
+            return "-";
+        }
+        std::reverse(chain.begin(), chain.end());
+        std::ostringstream oss;
+        for (size_t i = 0; i < chain.size(); ++i) {
+            if (i > 0) {
+                oss << "->";
+            }
+            oss << chain[i];
+        }
+        return oss.str();
+    }
+
+    static void graph_cut_accumulate_materialize_stage(GraphCutMaterializeStageProfile& stage,
+                                                       const GraphCutMaterializeTrace& trace) {
+        ++stage.ops;
+        stage.bytes += trace.bytes;
+        switch (trace.op) {
+            case GGML_OP_CONT:
+                ++stage.cont_ops;
+                stage.cont_bytes += trace.bytes;
+                break;
+            case GGML_OP_CPY:
+                ++stage.cpy_ops;
+                stage.cpy_bytes += trace.bytes;
+                break;
+            case GGML_OP_CONCAT:
+                ++stage.concat_ops;
+                stage.concat_bytes += trace.bytes;
+                break;
+            case GGML_OP_DUP:
+                ++stage.dup_ops;
+                stage.dup_bytes += trace.bytes;
+                break;
+            default:
+                break;
+        }
+        if (trace.dst_is_boundary_output) {
+            stage.boundary_output_bytes += trace.bytes;
+        }
+        if (trace.dst_is_cached_output) {
+            stage.cached_output_bytes += trace.bytes;
+        }
+        if (trace.dst_is_comm_input) {
+            stage.comm_input_bytes += trace.bytes;
+        }
+        if (trace.dst_is_comm_output) {
+            stage.comm_output_bytes += trace.bytes;
+        }
+        if (trace.src_is_boundary_input) {
+            stage.src_boundary_input_bytes += trace.bytes;
+        }
+        if (trace.src_is_comm_output) {
+            stage.src_comm_output_bytes += trace.bytes;
+        }
+        if (trace.is_materialize_after_materialize) {
+            ++stage.materialize_after_materialize_ops;
+            stage.materialize_after_materialize_bytes += trace.bytes;
+        }
+        if (trace.is_cont_from_cont) {
+            ++stage.cont_from_cont_ops;
+            stage.cont_from_cont_bytes += trace.bytes;
+        }
+        if (trace.is_concat_to_cont) {
+            ++stage.concat_to_cont_ops;
+            stage.concat_to_cont_bytes += trace.bytes;
+        }
+        if (trace.is_permute_view_to_cont) {
+            ++stage.permute_view_to_cont_ops;
+            stage.permute_view_to_cont_bytes += trace.bytes;
+        }
+        if (trace.is_materialize_view_materialize) {
+            ++stage.materialize_view_materialize_ops;
+            stage.materialize_view_materialize_bytes += trace.bytes;
+        }
+        if (trace.is_cont_permute_cont) {
+            ++stage.cont_permute_cont_ops;
+            stage.cont_permute_cont_bytes += trace.bytes;
+        }
+        if (trace.chain.find("->") != std::string::npos) {
+            auto& chain_group = stage.chain_groups[trace.chain];
+            ++chain_group.first;
+            chain_group.second += trace.bytes;
+        }
+    }
+
+    static std::string graph_cut_materialize_stage_from_trace(const GraphCutMaterializeTrace& trace,
+                                                              const ggml_tensor* node,
+                                                              const ggml_tensor* primary_src) {
+        if (trace.dst_is_comm_input) {
+            return "comm.send_input";
+        }
+        if (trace.dst_is_comm_output) {
+            return "comm.recv_placeholder";
+        }
+        if (trace.src_is_comm_output || trace.src_is_boundary_input) {
+            if (graph_cut_tensor_name_contains_any(node, {"qkv_seq_to_head_output"})) {
+                return "qkv.recv_output_restore";
+            }
+            if (graph_cut_tensor_name_contains_any(node, {"attn_head_to_seq_output"})) {
+                return "head_to_seq.recv_output_restore";
+            }
+            if (graph_cut_tensor_name_contains_any(node, {"_attn_head_to_seq_output_"})) {
+                return "head_to_seq.recv_output_restore";
+            }
+            if (graph_cut_tensor_name_contains_any(node, {"_q_attn", "_k_attn", "_v_attn"})) {
+                return "attention.qkv_from_boundary";
+            }
+            if (trace.op == GGML_OP_CONCAT &&
+                graph_cut_tensor_name_contains_any(node, {"double_txt_img_gather", "txt_img_split"})) {
+                return "double_to_single.gather_resplit";
+            }
+            return "boundary_input_restore";
+        }
+
+        if (graph_cut_tensor_name_contains_any(node, {"_qkv_seq_to_head_combined"})) {
+            return "qkv.send_combine";
+        }
+        if (graph_cut_tensor_name_contains_any(node, {"_qkv_seq_to_head_send_flat"})) {
+            return "qkv.send_pack";
+        }
+        if (graph_cut_tensor_name_contains_any(node, {"_qkv_seq_to_head_output_"})) {
+            return "qkv.recv_output_restore";
+        }
+        if (graph_cut_tensor_name_contains_any(node, {"_attn_head_to_seq_send_chunk"})) {
+            return "head_to_seq.send_chunk";
+        }
+        if (graph_cut_tensor_name_contains_any(node, {"_attn_head_to_seq_send_flat"})) {
+            return "head_to_seq.send_pack";
+        }
+        if (graph_cut_tensor_name_contains_any(node, {"_attn_head_to_seq_output"})) {
+            return "head_to_seq.recv_output_restore";
+        }
+        if (graph_cut_tensor_name_contains_any(node, {"_txt_attn_head", "_img_attn_head", "_attn_4d"})) {
+            return "attention.output_split_head";
+        }
+        if (graph_cut_tensor_name_contains_any(node, {"_attn_flat", "_attn_mlp"})) {
+            return "single.tail.attn_mlp";
+        }
+        if (graph_cut_tensor_name_contains_any(node, {"_mlp_in", "_mlp_out"})) {
+            return "block.mlp";
+        }
+        if (graph_cut_tensor_name_contains_any(node, {"_post_attn", "_after_attn"})) {
+            return "double.post_attention";
+        }
+        if (graph_cut_tensor_name_contains_any(node, {"_q_attn", "_k_attn", "_v_attn"})) {
+            if (trace.chain.find("CONCAT") != std::string::npos ||
+                graph_cut_tensor_name_contains_any(primary_src, {"_txt_", "_img_"})) {
+                return "double.attn_qkv_concat";
+            }
+            if (trace.chain.find("PERMUTE(view)->CONT->RESHAPE(view)->PERMUTE(view)->CONT") != std::string::npos) {
+                return graph_cut_attention_qkv_layout_stage(node, "attention.rope_qk_layout");
+            }
+            if (trace.consumer_ops.find("MUL_MAT") != std::string::npos ||
+                trace.consumer_ops.find("RMS_NORM") != std::string::npos) {
+                return graph_cut_attention_qkv_layout_stage(node, "attention.qkv_input_layout");
+            }
+            return graph_cut_attention_qkv_layout_stage(node, "attention.qkv_layout");
+        }
+        if (trace.chain.find("CONCAT->PERMUTE(view)->CONT") != std::string::npos) {
+            return "double.attn_qkv_concat";
+        }
+        if (trace.chain.find("PERMUTE(view)->CONT->RESHAPE(view)->PERMUTE(view)->CONT") != std::string::npos) {
+            return "attention.rope_qk_layout";
+        }
+        if (trace.chain.find("PERMUTE(view)->CONT") != std::string::npos &&
+            graph_cut_tensor_name_contains_any(primary_src, {"_v_attn"})) {
+            return "attention.v_layout";
+        }
+        if (trace.chain.find("DUP->RESHAPE(view)->VIEW(view)->CONT") != std::string::npos) {
+            return "qkv.recv_output_restore";
+        }
+        if (trace.chain.find("CONCAT->RESHAPE(view)->PERMUTE(view)->CONT") != std::string::npos) {
+            return "send_pack_layout";
+        }
+        if (trace.chain.find("ADD(view)->VIEW(view)->CONT") != std::string::npos) {
+            return "qkv.input_view_materialize";
+        }
+        if (trace.chain.find("CONCAT") != std::string::npos) {
+            return "concat_layout";
+        }
+        if (trace.chain.find("PERMUTE(view)->CONT") != std::string::npos) {
+            return "permute_to_cont_layout";
+        }
+        if (trace.dst_is_boundary_output) {
+            return "boundary_output_materialize";
+        }
+        return "other";
+    }
+
+    static std::string graph_cut_materialize_stage_summary(const GraphCutMaterializeProfile& profile,
+                                                           size_t limit = 12) {
+        if (profile.stages.empty()) {
+            return "-";
+        }
+
+        std::vector<std::pair<std::string, const GraphCutMaterializeStageProfile*>> stages;
+        stages.reserve(profile.stages.size());
+        for (const auto& entry : profile.stages) {
+            stages.emplace_back(entry.first, &entry.second);
+        }
+        std::sort(stages.begin(), stages.end(), [](const auto& a, const auto& b) {
+            if (a.second->bytes != b.second->bytes) {
+                return a.second->bytes > b.second->bytes;
+            }
+            return a.first < b.first;
+        });
+
+        std::ostringstream oss;
+        const size_t stage_limit = std::min(stages.size(), limit);
+        for (size_t i = 0; i < stage_limit; ++i) {
+            if (i > 0) {
+                oss << " || ";
+            }
+            const auto& name = stages[i].first;
+            const auto& s = *stages[i].second;
+            oss << name
+                << ":ops=" << s.ops
+                << "/bytes=" << bytes_to_mib(s.bytes) << "MiB"
+                << "/cont=" << s.cont_ops << "/" << bytes_to_mib(s.cont_bytes) << "MiB"
+                << "/concat=" << s.concat_ops << "/" << bytes_to_mib(s.concat_bytes) << "MiB"
+                << "/dup=" << s.dup_ops << "/" << bytes_to_mib(s.dup_bytes) << "MiB"
+                << "/src_boundary=" << bytes_to_mib(s.src_boundary_input_bytes) << "MiB"
+                << "/comm_in=" << bytes_to_mib(s.comm_input_bytes) << "MiB"
+                << "/comm_out=" << bytes_to_mib(s.comm_output_bytes) << "MiB"
+                << "/permute_view_to_cont=" << s.permute_view_to_cont_ops << "/"
+                << bytes_to_mib(s.permute_view_to_cont_bytes) << "MiB"
+                << "/cont_permute_cont=" << s.cont_permute_cont_ops << "/"
+                << bytes_to_mib(s.cont_permute_cont_bytes) << "MiB";
+        }
+        if (stages.size() > stage_limit) {
+            oss << " || ...";
+        }
+        return oss.str();
+    }
+
+    static std::string graph_cut_materialize_stage_chain_summary(const GraphCutMaterializeStageProfile& stage,
+                                                                 size_t limit = 3) {
+        if (stage.chain_groups.empty()) {
+            return "-";
+        }
+        std::vector<std::pair<std::string, std::pair<size_t, size_t>>> chains;
+        chains.reserve(stage.chain_groups.size());
+        for (const auto& entry : stage.chain_groups) {
+            chains.push_back(entry);
+        }
+        std::sort(chains.begin(), chains.end(), [](const auto& a, const auto& b) {
+            if (a.second.second != b.second.second) {
+                return a.second.second > b.second.second;
+            }
+            return a.second.first > b.second.first;
+        });
+        std::ostringstream oss;
+        const size_t chain_limit = std::min(chains.size(), limit);
+        for (size_t i = 0; i < chain_limit; ++i) {
+            if (i > 0) {
+                oss << " ; ";
+            }
+            oss << chains[i].first
+                << ":" << chains[i].second.first
+                << "/" << bytes_to_mib(chains[i].second.second) << "MiB";
+        }
+        return oss.str().empty() ? "-" : oss.str();
+    }
+
+    static std::string graph_cut_materialize_stage_detail_summary(const GraphCutMaterializeProfile& profile,
+                                                                  size_t limit = 8) {
+        if (profile.stages.empty()) {
+            return "-";
+        }
+        std::vector<std::pair<std::string, const GraphCutMaterializeStageProfile*>> stages;
+        stages.reserve(profile.stages.size());
+        for (const auto& entry : profile.stages) {
+            stages.emplace_back(entry.first, &entry.second);
+        }
+        std::sort(stages.begin(), stages.end(), [](const auto& a, const auto& b) {
+            if (a.second->bytes != b.second->bytes) {
+                return a.second->bytes > b.second->bytes;
+            }
+            return a.first < b.first;
+        });
+
+        std::ostringstream oss;
+        const size_t stage_limit = std::min(stages.size(), limit);
+        for (size_t i = 0; i < stage_limit; ++i) {
+            if (i > 0) {
+                oss << " || ";
+            }
+            const auto& name = stages[i].first;
+            const auto& s = *stages[i].second;
+            oss << "stage=" << name
+                << "/ops=" << s.ops
+                << "/bytes=" << bytes_to_mib(s.bytes) << "MiB"
+                << "/chains=" << graph_cut_materialize_stage_chain_summary(s);
+        }
+        if (stages.size() > stage_limit) {
+            oss << " || ...";
+        }
+        return oss.str();
+    }
+
+    static GraphCutMaterializeProfile graph_cut_segment_materialize_profile(ggml_cgraph* gf,
+                                                                            const GraphCutSegment& segment,
+                                                                            size_t top_limit = 8) {
+        GraphCutMaterializeProfile profile;
+        if (gf == nullptr) {
+            return profile;
+        }
+
+        std::unordered_set<int> output_indices(segment.output_node_indices.begin(),
+                                               segment.output_node_indices.end());
+        std::unordered_set<int> comm_input_indices;
+        std::unordered_set<int> comm_output_indices;
+        for (const auto& comm_op : segment.comm_ops) {
+            if (comm_op.input_node_index >= 0) {
+                comm_input_indices.insert(comm_op.input_node_index);
+            }
+            if (comm_op.output_node_index >= 0) {
+                comm_output_indices.insert(comm_op.output_node_index);
+            }
+        }
+        std::unordered_set<const ggml_tensor*> previous_cut_inputs;
+        for (const auto& input_ref : segment.input_refs) {
+            if (input_ref.type == GraphCutSegment::INPUT_PREVIOUS_CUT) {
+                ggml_tensor* input = sd::ggml_graph_cut::input_tensor(gf, input_ref);
+                if (input != nullptr) {
+                    previous_cut_inputs.insert(input);
+                }
+            }
+        }
+
+        std::vector<GraphCutMaterializeTrace> traces;
+        std::map<const ggml_tensor*, std::pair<size_t, size_t>> source_repeats;
+        std::map<std::string, std::pair<size_t, size_t>> chain_groups;
+        for (int node_idx : segment.internal_node_indices) {
+            if (node_idx < 0 || node_idx >= ggml_graph_n_nodes(gf)) {
+                continue;
+            }
+            ggml_tensor* node = ggml_graph_node(gf, node_idx);
+            if (node == nullptr ||
+                node->op < GGML_OP_NONE ||
+                node->op >= GGML_OP_COUNT ||
+                !graph_cut_op_is_materialize(node->op)) {
+                continue;
+            }
+
+            GraphCutMaterializeTrace trace;
+            trace.node_idx = node_idx;
+            trace.op = node->op;
+            trace.bytes = ggml_nbytes(node);
+            trace.dst_is_boundary_output = output_indices.find(node_idx) != output_indices.end();
+            trace.dst_is_cached_output = trace.dst_is_boundary_output &&
+                                         node->name[0] != '\0' &&
+                                         segment.future_input_names.find(node->name) != segment.future_input_names.end();
+            trace.dst_is_comm_input = comm_input_indices.find(node_idx) != comm_input_indices.end();
+            trace.dst_is_comm_output = comm_output_indices.find(node_idx) != comm_output_indices.end();
+            trace.dst = graph_cut_tensor_layout_summary(node);
+            trace.chain = graph_cut_materialize_chain_signature(node);
+
+            ggml_tensor* primary_src = node->src[0] != nullptr ? node->src[0] : node->view_src;
+            if (primary_src != nullptr) {
+                trace.src = graph_cut_tensor_layout_summary(primary_src);
+                trace.src_bytes = ggml_nbytes(primary_src);
+                trace.src_is_view = primary_src->view_src != nullptr;
+                trace.src_is_contiguous = ggml_is_contiguous(primary_src);
+                trace.src_is_boundary_input = previous_cut_inputs.find(primary_src) != previous_cut_inputs.end();
+                trace.src_is_cached_input = trace.src_is_boundary_input;
+                trace.src_is_comm_output = false;
+                for (int comm_output_idx : comm_output_indices) {
+                    if (comm_output_idx >= 0 && comm_output_idx < ggml_graph_n_nodes(gf) &&
+                        ggml_graph_node(gf, comm_output_idx) == primary_src) {
+                        trace.src_is_comm_output = true;
+                        break;
+                    }
+                }
+                trace.producer_op = primary_src->op >= GGML_OP_NONE && primary_src->op < GGML_OP_COUNT ?
+                                        ggml_op_name(primary_src->op) :
+                                        "<invalid>";
+                auto& repeat = source_repeats[primary_src];
+                ++repeat.first;
+                repeat.second += trace.bytes;
+
+                if (graph_cut_op_is_materialize(primary_src->op)) {
+                    trace.is_materialize_after_materialize = true;
+                    ++profile.materialize_after_materialize_ops;
+                    profile.materialize_after_materialize_bytes += trace.bytes;
+                }
+                if (node->op == GGML_OP_CONT && primary_src->op == GGML_OP_CONT) {
+                    trace.is_cont_from_cont = true;
+                    ++profile.cont_from_cont_ops;
+                    profile.cont_from_cont_bytes += trace.bytes;
+                }
+                if (node->op == GGML_OP_CONT && primary_src->op == GGML_OP_CONCAT) {
+                    trace.is_concat_to_cont = true;
+                    ++profile.concat_to_cont_ops;
+                    profile.concat_to_cont_bytes += trace.bytes;
+                }
+                if (node->op == GGML_OP_CONT &&
+                    primary_src->op == GGML_OP_PERMUTE &&
+                    primary_src->view_src != nullptr) {
+                    trace.is_permute_view_to_cont = true;
+                    ++profile.permute_view_to_cont_ops;
+                    profile.permute_view_to_cont_bytes += trace.bytes;
+                }
+                if (primary_src->view_src != nullptr &&
+                    graph_cut_op_is_materialize(primary_src->view_src->op)) {
+                    trace.is_materialize_view_materialize = true;
+                    ++profile.materialize_view_materialize_ops;
+                    profile.materialize_view_materialize_bytes += trace.bytes;
+                    if (node->op == GGML_OP_CONT &&
+                        primary_src->op == GGML_OP_PERMUTE &&
+                        primary_src->view_src->op == GGML_OP_CONT) {
+                        trace.is_cont_permute_cont = true;
+                        ++profile.cont_permute_cont_ops;
+                        profile.cont_permute_cont_bytes += trace.bytes;
+                    }
+                }
+            } else {
+                trace.src = "<null>";
+                trace.producer_op = "<none>";
+            }
+
+            if (node->op == GGML_OP_CONCAT) {
+                std::ostringstream concat;
+                size_t emitted = 0;
+                for (int src_idx = 0; src_idx < GGML_MAX_SRC; ++src_idx) {
+                    if (node->src[src_idx] == nullptr) {
+                        continue;
+                    }
+                    graph_cut_append_limited(concat,
+                                             graph_cut_tensor_layout_summary(node->src[src_idx]),
+                                             emitted,
+                                             4,
+                                             "|");
+                }
+                trace.concat_inputs = concat.str();
+            }
+
+            const auto consumers = graph_cut_tensor_consumers(gf, segment, node);
+            trace.consumer_ops = graph_cut_consumer_histogram(consumers);
+
+            ++profile.ops;
+            profile.bytes += trace.bytes;
+            if (trace.dst_is_boundary_output) {
+                profile.boundary_output_bytes += trace.bytes;
+            }
+            if (trace.dst_is_cached_output) {
+                profile.cached_output_bytes += trace.bytes;
+            }
+            if (trace.dst_is_comm_input) {
+                profile.comm_input_bytes += trace.bytes;
+            }
+            if (trace.dst_is_comm_output) {
+                profile.comm_output_bytes += trace.bytes;
+            }
+            switch (node->op) {
+                case GGML_OP_CONT:
+                    ++profile.cont_ops;
+                    profile.cont_bytes += trace.bytes;
+                    break;
+                case GGML_OP_CPY:
+                    ++profile.cpy_ops;
+                    profile.cpy_bytes += trace.bytes;
+                    break;
+                case GGML_OP_CONCAT:
+                    ++profile.concat_ops;
+                    profile.concat_bytes += trace.bytes;
+                    break;
+                case GGML_OP_DUP:
+                    ++profile.dup_ops;
+                    profile.dup_bytes += trace.bytes;
+                    break;
+                default:
+                    break;
+            }
+            if (trace.chain.find("->") != std::string::npos) {
+                auto& chain_group = chain_groups[trace.chain];
+                ++chain_group.first;
+                chain_group.second += trace.bytes;
+            }
+            const std::string stage =
+                graph_cut_materialize_stage_from_trace(trace, node, primary_src);
+            graph_cut_accumulate_materialize_stage(profile.stages[stage], trace);
+            traces.push_back(std::move(trace));
+        }
+
+        for (const auto& entry : source_repeats) {
+            if (entry.second.first > 1) {
+                ++profile.repeated_source_groups;
+                profile.repeated_source_ops += entry.second.first;
+                profile.repeated_source_bytes += entry.second.second;
+            }
+        }
+
+        std::sort(traces.begin(), traces.end(), [](const auto& a, const auto& b) {
+            if (a.bytes != b.bytes) {
+                return a.bytes > b.bytes;
+            }
+            return a.node_idx < b.node_idx;
+        });
+        std::ostringstream top;
+        const size_t trace_limit = std::min(traces.size(), top_limit);
+        for (size_t i = 0; i < trace_limit; ++i) {
+            const auto& t = traces[i];
+            if (i > 0) {
+                top << " || ";
+            }
+            top << "#idx=" << t.node_idx
+                << "/op=" << ggml_op_name(t.op)
+                << "/bytes=" << bytes_to_mib(t.bytes) << "MiB"
+                << "/dst=" << t.dst
+                << "/src_op=" << t.producer_op
+                << "/src=" << t.src
+                << "/src_view=" << (t.src_is_view ? "yes" : "no")
+                << "/src_contig=" << (t.src_is_contiguous ? "yes" : "no")
+                << "/consumers=" << t.consumer_ops
+                << "/flags="
+                << (t.dst_is_boundary_output ? "boundary_out," : "")
+                << (t.dst_is_cached_output ? "cached_out," : "")
+                << (t.dst_is_comm_input ? "comm_in," : "")
+                << (t.dst_is_comm_output ? "comm_out," : "")
+                << (t.src_is_boundary_input ? "src_boundary_in," : "")
+                << (t.src_is_comm_output ? "src_comm_out," : "");
+            if (!t.concat_inputs.empty()) {
+                top << "/concat_inputs=" << t.concat_inputs;
+            }
+            top << "/chain=" << t.chain;
+        }
+        profile.top_nodes = top.str().empty() ? "-" : top.str();
+
+        std::vector<std::pair<const ggml_tensor*, std::pair<size_t, size_t>>> repeated;
+        repeated.reserve(source_repeats.size());
+        for (const auto& entry : source_repeats) {
+            if (entry.second.first > 1) {
+                repeated.push_back(entry);
+            }
+        }
+        std::sort(repeated.begin(), repeated.end(), [](const auto& a, const auto& b) {
+            if (a.second.second != b.second.second) {
+                return a.second.second > b.second.second;
+            }
+            return a.second.first > b.second.first;
+        });
+        std::ostringstream repeated_oss;
+        const size_t repeat_limit = std::min<size_t>(repeated.size(), 6);
+        for (size_t i = 0; i < repeat_limit; ++i) {
+            if (i > 0) {
+                repeated_oss << " || ";
+            }
+            repeated_oss << "src=" << graph_cut_tensor_layout_summary(repeated[i].first)
+                         << "/ops=" << repeated[i].second.first
+                         << "/bytes=" << bytes_to_mib(repeated[i].second.second) << "MiB";
+        }
+        profile.repeated_sources = repeated_oss.str().empty() ? "-" : repeated_oss.str();
+
+        std::vector<std::pair<std::string, std::pair<size_t, size_t>>> chains;
+        chains.reserve(chain_groups.size());
+        for (const auto& entry : chain_groups) {
+            chains.push_back(entry);
+        }
+        std::sort(chains.begin(), chains.end(), [](const auto& a, const auto& b) {
+            if (a.second.second != b.second.second) {
+                return a.second.second > b.second.second;
+            }
+            return a.second.first > b.second.first;
+        });
+        std::ostringstream chains_oss;
+        const size_t chain_limit = std::min<size_t>(chains.size(), 8);
+        for (size_t i = 0; i < chain_limit; ++i) {
+            if (i > 0) {
+                chains_oss << " || ";
+            }
+            chains_oss << "chain=" << chains[i].first
+                       << "/ops=" << chains[i].second.first
+                       << "/bytes=" << bytes_to_mib(chains[i].second.second) << "MiB";
+        }
+        profile.top_chains = chains_oss.str().empty() ? "-" : chains_oss.str();
+        return profile;
+    }
+
+    static std::string graph_cut_segment_op_histogram(ggml_cgraph* gf,
+                                                      const GraphCutSegment& segment,
+                                                      std::array<size_t, GGML_OP_COUNT>* op_counts,
+                                                      size_t* math_ops,
+                                                      size_t* layout_ops,
+                                                      size_t limit = 12) {
+        std::array<size_t, GGML_OP_COUNT> local_counts = {};
+        size_t local_math_ops = 0;
+        size_t local_layout_ops = 0;
+        for (int node_idx : segment.internal_node_indices) {
+            if (node_idx < 0 || node_idx >= ggml_graph_n_nodes(gf)) {
+                continue;
+            }
+            ggml_tensor* node = ggml_graph_node(gf, node_idx);
+            if (node == nullptr ||
+                node->op < GGML_OP_NONE ||
+                node->op >= GGML_OP_COUNT) {
+                continue;
+            }
+            const auto op = node->op;
+            ++local_counts[static_cast<size_t>(op)];
+            if (graph_cut_op_is_math(op)) {
+                ++local_math_ops;
+            }
+            if (graph_cut_op_is_layout(op)) {
+                ++local_layout_ops;
+            }
+        }
+
+        if (op_counts != nullptr) {
+            *op_counts = local_counts;
+        }
+        if (math_ops != nullptr) {
+            *math_ops = local_math_ops;
+        }
+        if (layout_ops != nullptr) {
+            *layout_ops = local_layout_ops;
+        }
+
+        std::vector<size_t> order;
+        order.reserve(GGML_OP_COUNT);
+        for (size_t i = 0; i < GGML_OP_COUNT; ++i) {
+            if (local_counts[i] > 0) {
+                order.push_back(i);
+            }
+        }
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            if (local_counts[a] != local_counts[b]) {
+                return local_counts[a] > local_counts[b];
+            }
+            return a < b;
+        });
+
+        std::ostringstream oss;
+        const size_t hist_limit = std::min(order.size(), limit);
+        for (size_t i = 0; i < hist_limit; ++i) {
+            if (i > 0) {
+                oss << ",";
+            }
+            const auto op = static_cast<enum ggml_op>(order[i]);
+            oss << ggml_op_name(op) << ":" << local_counts[order[i]];
+        }
+        if (order.size() > hist_limit) {
+            oss << ",...";
+        }
+        if (oss.str().empty()) {
+            return "-";
+        }
+        return oss.str();
+    }
+
+    static std::string graph_cut_segment_compute_bucket(const GraphCutSegmentProfile& segment) {
+        const std::string& name = segment.name;
+        const std::string& comm = segment.comm_names;
+        if (name.rfind("sp:flux_double", 0) == 0 ||
+            comm.find("flux_double") != std::string::npos) {
+            if (comm.find("qkv_seq_to_head") != std::string::npos) {
+                return "sp.double.qkv_seq_to_head";
+            }
+            if (comm.find("head_to_seq") != std::string::npos) {
+                return "sp.double.attn_head_to_seq";
+            }
+            return "sp.double.other";
+        }
+        if (name.rfind("sp:flux_single", 0) == 0 ||
+            comm.find("flux_single") != std::string::npos) {
+            if (comm.find("qkv_seq_to_head") != std::string::npos) {
+                return "sp.single.qkv_seq_to_head";
+            }
+            if (comm.find("head_to_seq") != std::string::npos) {
+                return "sp.single.attn_head_to_seq";
+            }
+            return "sp.single.other";
+        }
+        if (graph_cut_segment_is_double_block_output(name)) {
+            return "flux.double_blocks.tail";
+        }
+        if (graph_cut_segment_is_single_block_output(name)) {
+            return "flux.single_blocks.tail";
+        }
+        if (comm.find("gather") != std::string::npos) {
+            return "sp.gather";
+        }
+        if (name.rfind("flux.prelude", 0) == 0) {
+            return "flux.prelude";
+        }
+        return "other";
+    }
+
+    struct GraphCutComputeBucketProfile {
+        size_t segments = 0;
+        size_t nodes = 0;
+        size_t math_ops = 0;
+        size_t layout_ops = 0;
+        size_t comm_ops = 0;
+        size_t comm_bytes = 0;
+        size_t materialize_ops = 0;
+        size_t materialize_bytes = 0;
+        size_t cont_ops = 0;
+        size_t cont_bytes = 0;
+        size_t cpy_ops = 0;
+        size_t cpy_bytes = 0;
+        size_t concat_ops = 0;
+        size_t concat_bytes = 0;
+        size_t dup_ops = 0;
+        size_t dup_bytes = 0;
+        size_t materialize_boundary_output_bytes = 0;
+        size_t materialize_cached_output_bytes = 0;
+        size_t materialize_comm_input_bytes = 0;
+        size_t materialize_comm_output_bytes = 0;
+        size_t repeated_materialize_source_groups = 0;
+        size_t repeated_materialize_source_ops = 0;
+        size_t repeated_materialize_source_bytes = 0;
+        size_t materialize_after_materialize_ops = 0;
+        size_t materialize_after_materialize_bytes = 0;
+        size_t cont_from_cont_ops = 0;
+        size_t cont_from_cont_bytes = 0;
+        size_t concat_to_cont_ops = 0;
+        size_t concat_to_cont_bytes = 0;
+        size_t permute_view_to_cont_ops = 0;
+        size_t permute_view_to_cont_bytes = 0;
+        size_t materialize_view_materialize_ops = 0;
+        size_t materialize_view_materialize_bytes = 0;
+        size_t cont_permute_cont_ops = 0;
+        size_t cont_permute_cont_bytes = 0;
+        std::map<std::string, GraphCutMaterializeStageProfile> materialize_stages;
+        int64_t total_ms = 0;
+        int64_t compute_ms = 0;
+        int64_t comm_ms = 0;
+        int64_t cache_ms = 0;
+        int64_t copy_ms = 0;
+        std::array<size_t, GGML_OP_COUNT> op_counts = {};
+    };
+
+    static void graph_cut_merge_materialize_stage_profile(GraphCutMaterializeStageProfile& dst,
+                                                          const GraphCutMaterializeStageProfile& src) {
+        dst.ops += src.ops;
+        dst.bytes += src.bytes;
+        dst.cont_ops += src.cont_ops;
+        dst.cont_bytes += src.cont_bytes;
+        dst.cpy_ops += src.cpy_ops;
+        dst.cpy_bytes += src.cpy_bytes;
+        dst.concat_ops += src.concat_ops;
+        dst.concat_bytes += src.concat_bytes;
+        dst.dup_ops += src.dup_ops;
+        dst.dup_bytes += src.dup_bytes;
+        dst.boundary_output_bytes += src.boundary_output_bytes;
+        dst.cached_output_bytes += src.cached_output_bytes;
+        dst.comm_input_bytes += src.comm_input_bytes;
+        dst.comm_output_bytes += src.comm_output_bytes;
+        dst.src_boundary_input_bytes += src.src_boundary_input_bytes;
+        dst.src_comm_output_bytes += src.src_comm_output_bytes;
+        dst.materialize_after_materialize_ops += src.materialize_after_materialize_ops;
+        dst.materialize_after_materialize_bytes += src.materialize_after_materialize_bytes;
+        dst.cont_from_cont_ops += src.cont_from_cont_ops;
+        dst.cont_from_cont_bytes += src.cont_from_cont_bytes;
+        dst.concat_to_cont_ops += src.concat_to_cont_ops;
+        dst.concat_to_cont_bytes += src.concat_to_cont_bytes;
+        dst.permute_view_to_cont_ops += src.permute_view_to_cont_ops;
+        dst.permute_view_to_cont_bytes += src.permute_view_to_cont_bytes;
+        dst.materialize_view_materialize_ops += src.materialize_view_materialize_ops;
+        dst.materialize_view_materialize_bytes += src.materialize_view_materialize_bytes;
+        dst.cont_permute_cont_ops += src.cont_permute_cont_ops;
+        dst.cont_permute_cont_bytes += src.cont_permute_cont_bytes;
+        for (const auto& chain : src.chain_groups) {
+            auto& dst_chain = dst.chain_groups[chain.first];
+            dst_chain.first += chain.second.first;
+            dst_chain.second += chain.second.second;
+        }
+    }
+
+    static void graph_cut_merge_materialize_stage_maps(std::map<std::string, GraphCutMaterializeStageProfile>& dst,
+                                                       const std::map<std::string, GraphCutMaterializeStageProfile>& src) {
+        for (const auto& entry : src) {
+            graph_cut_merge_materialize_stage_profile(dst[entry.first], entry.second);
+        }
+    }
+
+    static std::string graph_cut_bucket_op_histogram(const GraphCutComputeBucketProfile& bucket,
+                                                     size_t limit = 10) {
+        std::vector<size_t> order;
+        order.reserve(GGML_OP_COUNT);
+        for (size_t i = 0; i < GGML_OP_COUNT; ++i) {
+            if (bucket.op_counts[i] > 0) {
+                order.push_back(i);
+            }
+        }
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            if (bucket.op_counts[a] != bucket.op_counts[b]) {
+                return bucket.op_counts[a] > bucket.op_counts[b];
+            }
+            return a < b;
+        });
+
+        std::ostringstream oss;
+        const size_t hist_limit = std::min(order.size(), limit);
+        for (size_t i = 0; i < hist_limit; ++i) {
+            if (i > 0) {
+                oss << ",";
+            }
+            const auto op = static_cast<enum ggml_op>(order[i]);
+            oss << ggml_op_name(op) << ":" << bucket.op_counts[order[i]];
+        }
+        if (order.size() > hist_limit) {
+            oss << ",...";
+        }
+        if (oss.str().empty()) {
+            return "-";
+        }
+        return oss.str();
+    }
+
+    static bool runtime_const_cache_tensor_shape_matches(const ggml_tensor* a,
+                                                         const RuntimeConstCacheEntry& entry) {
+        if (a == nullptr || a->type != entry.type || ggml_nbytes(a) != entry.nbytes) {
+            return false;
+        }
+        for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+            if (a->ne[i] != entry.ne[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool should_cache_runtime_const_tensor(const ggml_tensor* tensor,
+                                           const void* data) const {
+        if (!runtime_const_cache_enabled() || tensor == nullptr || data == nullptr) {
+            return false;
+        }
+        if (tensor->view_src != nullptr || tensor->name[0] == '\0') {
+            return false;
+        }
+        if (tensor->type != GGML_TYPE_F32) {
+            return false;
+        }
+
+        const std::string name(tensor->name);
+        if (name == "ggml_runner_build_in_tensor:one" ||
+            name == "ggml_runner_build_in_tensor:zero_int") {
+            return false;
+        }
+
+        // Flux RoPE position embeddings are generated once for a denoise step
+        // and then read by many SP graph-cut segments.  Caching the uploaded
+        // device tensor fixes repeated runtime-input upload; it does not change
+        // RoPE math or operator placement.
+        return name == "pe" && ggml_nbytes(tensor) >= 1024 * 1024;
+    }
+
+    std::string runtime_const_cache_key(const ggml_tensor* tensor,
+                                        const void* data) const {
+        std::ostringstream oss;
+        oss << ggml_backend_name(runtime_backend)
+            << "|" << tensor->name
+            << "|data=" << data
+            << "|type=" << static_cast<int>(tensor->type);
+        for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+            oss << "|ne" << i << "=" << tensor->ne[i];
+        }
+        return oss.str();
+    }
+
+    void bind_tensor_to_runtime_const_cache(ggml_tensor* tensor,
+                                            RuntimeConstCacheEntry& entry) {
+        GGML_ASSERT(tensor != nullptr);
+        GGML_ASSERT(entry.tensor != nullptr);
+        tensor->buffer = entry.tensor->buffer;
+        tensor->data   = entry.tensor->data;
+        tensor->extra  = entry.tensor->extra;
+    }
+
+    RuntimeConstCacheEntry* find_runtime_const_cache_entry(const ggml_tensor* tensor,
+                                                           const void* data) {
+        const std::string key = runtime_const_cache_key(tensor, data);
+        for (auto& entry : runtime_const_cache_) {
+            if (entry.tensor == nullptr || entry.key.empty()) {
+                continue;
+            }
+            if (key == entry.key &&
+                entry.host_data == data &&
+                runtime_const_cache_tensor_shape_matches(tensor, entry)) {
+                return &entry;
+            }
+        }
+        return nullptr;
+    }
+
+    bool runtime_const_cache_entry_matches_tensor_slot(const ggml_tensor* tensor,
+                                                       const RuntimeConstCacheEntry& entry) const {
+        if (tensor == nullptr || entry.tensor == nullptr) {
+            return false;
+        }
+        if (std::strcmp(tensor->name, entry.tensor->name) != 0) {
+            return false;
+        }
+        return runtime_const_cache_tensor_shape_matches(tensor, entry);
+    }
+
+    void prune_stale_runtime_const_cache_entries(const ggml_tensor* tensor,
+                                                 const void* data) {
+        runtime_const_cache_.erase(std::remove_if(runtime_const_cache_.begin(),
+                                                  runtime_const_cache_.end(),
+                                                  [&](const RuntimeConstCacheEntry& entry) {
+                                                      return entry.host_data != data &&
+                                                             runtime_const_cache_entry_matches_tensor_slot(tensor, entry);
+                                                  }),
+                                   runtime_const_cache_.end());
+    }
+
+    RuntimeConstCacheEntry* upload_runtime_const_cache_entry(ggml_tensor* tensor,
+                                                             const void* data) {
+        prune_stale_runtime_const_cache_entries(tensor, data);
+
+        RuntimeConstCacheEntry entry;
+        entry.host_data = data;
+        entry.type = tensor->type;
+        entry.nbytes = ggml_nbytes(tensor);
+        for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+            entry.ne[i] = tensor->ne[i];
+        }
+
+        entry.ctx = new_cache_context(1);
+        entry.tensor = ggml_dup_tensor(entry.ctx, tensor);
+        entry.key = runtime_const_cache_key(tensor, data);
+        ggml_set_name(entry.tensor, tensor->name);
+        entry.buffer = ggml_backend_alloc_ctx_tensors(entry.ctx, runtime_backend);
+        if (entry.buffer == nullptr) {
+            LOG_WARN("%s runtime const cache alloc failed: tensor=%s bytes=%.2fMiB",
+                     get_desc().c_str(),
+                     tensor->name[0] != '\0' ? tensor->name : "<unnamed>",
+                     bytes_to_mib(entry.nbytes));
+            return nullptr;
+        }
+        ggml_backend_tensor_set(entry.tensor, data, 0, entry.nbytes);
+
+        runtime_const_cache_.push_back(std::move(entry));
+        return &runtime_const_cache_.back();
+    }
+
+    void free_runtime_const_cache() {
+        runtime_const_cache_.clear();
+    }
+
+    void refresh_graph_view_bindings(ggml_cgraph* gf) {
+        GGML_ASSERT(gf != nullptr);
+        const int n_leafs = sd::ggml_graph_cut::leaf_count(gf);
+        for (int i = 0; i < n_leafs; ++i) {
+            ggml_tensor* leaf = sd::ggml_graph_cut::leaf_tensor(gf, i);
+            if (leaf != nullptr &&
+                leaf->view_src != nullptr &&
+                leaf->view_src->data != nullptr) {
+                leaf->buffer = leaf->view_src->buffer;
+                leaf->data   = static_cast<void*>(static_cast<char*>(leaf->view_src->data) + leaf->view_offs);
+                leaf->extra  = leaf->view_src->extra;
+            }
+        }
+        const int n_nodes = ggml_graph_n_nodes(gf);
+        for (int i = 0; i < n_nodes; ++i) {
+            ggml_tensor* node = ggml_graph_node(gf, i);
+            if (node != nullptr &&
+                node->view_src != nullptr &&
+                node->view_src->data != nullptr) {
+                node->buffer = node->view_src->buffer;
+                node->data   = static_cast<void*>(static_cast<char*>(node->view_src->data) + node->view_offs);
+                node->extra  = node->view_src->extra;
+            }
+        }
+    }
+
+    void log_graph_cut_profile(const std::vector<GraphCutSegmentProfile>& segments,
+                               int64_t plan_ms,
+                               int64_t total_ms) {
+        if (segments.empty() || !graph_cut_profile_should_log_rank()) {
+            return;
+        }
+
+        int rank = 0;
+        int world_size = 1;
+        if (process_group_ != nullptr && process_group_->enabled()) {
+            rank = process_group_->rank();
+            world_size = process_group_->size();
+        }
+
+        size_t comm_segments = 0;
+        size_t comm_ops = 0;
+        size_t comm_bytes = 0;
+        size_t qkv_seq_to_head_ops = 0;
+        size_t q_seq_to_head_ops = 0;
+        size_t k_seq_to_head_ops = 0;
+        size_t v_seq_to_head_ops = 0;
+        size_t txt_img_head_to_seq_ops = 0;
+        size_t head_to_seq_ops = 0;
+        size_t gather_ops = 0;
+        size_t sp_attn_materialize_segments = 0;
+        size_t output_bytes = 0;
+        size_t cached_output_bytes = 0;
+        size_t math_ops = 0;
+        size_t layout_ops = 0;
+        size_t double_block_cached_bytes = 0;
+        size_t single_block_cached_bytes = 0;
+        size_t other_cached_bytes = 0;
+        size_t peak_cache_live_bytes = 0;
+        size_t peak_cache_buffer_bytes = 0;
+        size_t peak_cache_chunks = 0;
+        size_t peak_cache_pool_bytes = 0;
+        size_t peak_cache_pool_chunks = 0;
+        int64_t build_ms = 0;
+        int64_t runtime_param_ms = 0;
+        int64_t offload_ms = 0;
+        int64_t alloc_ms = 0;
+        int64_t copy_ms = 0;
+        int64_t compute_ms = 0;
+        int64_t comm_ms = 0;
+        int64_t cache_ms = 0;
+        int64_t double_block_cache_ms = 0;
+        int64_t single_block_cache_ms = 0;
+        int64_t other_cache_ms = 0;
+        int64_t collect_future_inputs_us = 0;
+        int64_t reset_runtime_tensors_us = 0;
+        int64_t bind_cached_inputs_us = 0;
+        int64_t mark_cache_outputs_us = 0;
+        int64_t pre_compute_callback_us = 0;
+        int64_t segment_graph_free_us = 0;
+        int64_t copy_graph_tensor_set_us = 0;
+        int64_t copy_backend_map_scan_us = 0;
+        int64_t copy_backend_tensor_set_us = 0;
+        size_t copy_graph_tensor_entries = 0;
+        size_t copy_backend_map_entries = 0;
+        size_t copied_tensors = 0;
+        size_t skipped_not_in_graph = 0;
+        size_t skipped_no_buffer = 0;
+        size_t copied_bytes = 0;
+        size_t runtime_const_cache_hits = 0;
+        size_t runtime_const_cache_uploads = 0;
+        size_t runtime_const_cache_hit_bytes = 0;
+        size_t runtime_const_cache_upload_bytes = 0;
+        int64_t runtime_const_cache_hit_us = 0;
+        int64_t runtime_const_cache_upload_us = 0;
+        int64_t segment_total_ms = 0;
+        const int compute_top_n = graph_cut_profile_compute_top_n();
+        const int materialize_top_n = graph_cut_profile_materialize_top_n();
+        const bool collect_materialize_breakdown = materialize_top_n > 0;
+        const bool collect_compute_breakdown = compute_top_n > 0 || collect_materialize_breakdown;
+        std::map<std::string, GraphCutComputeBucketProfile> compute_buckets;
+
+        for (const auto& segment : segments) {
+            if (segment.comm_ops > 0) {
+                ++comm_segments;
+            }
+            if (segment.name.find("sp_attn_q") != std::string::npos ||
+                segment.name.find("sp_attn_k") != std::string::npos ||
+                segment.name.find("sp_attn_v") != std::string::npos) {
+                ++sp_attn_materialize_segments;
+            }
+            comm_ops += segment.comm_ops;
+            comm_bytes += segment.comm_bytes;
+            if (segment.comm_names.find("qkv_seq_to_head") != std::string::npos) {
+                ++qkv_seq_to_head_ops;
+            }
+            if (segment.comm_names.find("_q_seq_to_head") != std::string::npos &&
+                segment.comm_names.find("qkv_seq_to_head") == std::string::npos) {
+                ++q_seq_to_head_ops;
+            }
+            if (segment.comm_names.find("_k_seq_to_head") != std::string::npos &&
+                segment.comm_names.find("qkv_seq_to_head") == std::string::npos) {
+                ++k_seq_to_head_ops;
+            }
+            if (segment.comm_names.find("_v_seq_to_head") != std::string::npos &&
+                segment.comm_names.find("qkv_seq_to_head") == std::string::npos) {
+                ++v_seq_to_head_ops;
+            }
+            if (segment.comm_names.find("txt_img_attn_head_to_seq") != std::string::npos) {
+                ++txt_img_head_to_seq_ops;
+            }
+            if (segment.comm_names.find("head_to_seq") != std::string::npos) {
+                ++head_to_seq_ops;
+            }
+            if (segment.comm_names.find("gather") != std::string::npos) {
+                ++gather_ops;
+            }
+            output_bytes += segment.output_bytes;
+            cached_output_bytes += segment.cached_output_bytes;
+            math_ops += segment.math_ops;
+            layout_ops += segment.layout_ops;
+            if (graph_cut_segment_is_double_block_output(segment.name)) {
+                double_block_cached_bytes += segment.cached_output_bytes;
+                double_block_cache_ms += segment.cache_ms;
+            } else if (graph_cut_segment_is_single_block_output(segment.name)) {
+                single_block_cached_bytes += segment.cached_output_bytes;
+                single_block_cache_ms += segment.cache_ms;
+            } else {
+                other_cached_bytes += segment.cached_output_bytes;
+                other_cache_ms += segment.cache_ms;
+            }
+            peak_cache_live_bytes = std::max(peak_cache_live_bytes, segment.cache_live_bytes);
+            peak_cache_buffer_bytes = std::max(peak_cache_buffer_bytes, segment.cache_buffer_bytes);
+            peak_cache_chunks = std::max(peak_cache_chunks, segment.cache_chunks);
+            peak_cache_pool_bytes = std::max(peak_cache_pool_bytes, segment.cache_pool_bytes);
+            peak_cache_pool_chunks = std::max(peak_cache_pool_chunks, segment.cache_pool_chunks);
+            build_ms += segment.build_ms;
+            runtime_param_ms += segment.runtime_param_ms;
+            offload_ms += segment.offload_ms;
+            alloc_ms += segment.alloc_ms;
+            copy_ms += segment.copy_ms;
+            collect_future_inputs_us += segment.collect_future_inputs_us;
+            reset_runtime_tensors_us += segment.reset_runtime_tensors_us;
+            bind_cached_inputs_us += segment.bind_cached_inputs_us;
+            mark_cache_outputs_us += segment.mark_cache_outputs_us;
+            pre_compute_callback_us += segment.pre_compute_callback_us;
+            segment_graph_free_us += segment.segment_graph_free_us;
+            copy_graph_tensor_set_us += segment.copy_detail.graph_tensor_set_us;
+            copy_backend_map_scan_us += segment.copy_detail.backend_map_scan_us;
+            copy_backend_tensor_set_us += segment.copy_detail.backend_tensor_set_us;
+            copy_graph_tensor_entries += segment.copy_detail.graph_tensor_entries;
+            copy_backend_map_entries += segment.copy_detail.backend_map_entries;
+            copied_tensors += segment.copy_detail.copied_tensors;
+            skipped_not_in_graph += segment.copy_detail.skipped_not_in_graph;
+            skipped_no_buffer += segment.copy_detail.skipped_no_buffer;
+            copied_bytes += segment.copy_detail.copied_bytes;
+            runtime_const_cache_hits += segment.copy_detail.runtime_const_cache_hits;
+            runtime_const_cache_uploads += segment.copy_detail.runtime_const_cache_uploads;
+            runtime_const_cache_hit_bytes += segment.copy_detail.runtime_const_cache_hit_bytes;
+            runtime_const_cache_upload_bytes += segment.copy_detail.runtime_const_cache_upload_bytes;
+            runtime_const_cache_hit_us += segment.copy_detail.runtime_const_cache_hit_us;
+            runtime_const_cache_upload_us += segment.copy_detail.runtime_const_cache_upload_us;
+            compute_ms += segment.compute_ms;
+            comm_ms += segment.comm_ms;
+            cache_ms += segment.cache_ms;
+            segment_total_ms += segment.total_ms;
+
+            if (collect_compute_breakdown) {
+                auto& bucket = compute_buckets[graph_cut_segment_compute_bucket(segment)];
+                ++bucket.segments;
+                bucket.nodes += segment.nodes;
+                bucket.math_ops += segment.math_ops;
+                bucket.layout_ops += segment.layout_ops;
+                bucket.comm_ops += segment.comm_ops;
+                bucket.comm_bytes += segment.comm_bytes;
+                bucket.materialize_ops += segment.materialize_ops;
+                bucket.materialize_bytes += segment.materialize_bytes;
+                bucket.cont_ops += segment.cont_ops;
+                bucket.cont_bytes += segment.cont_bytes;
+                bucket.cpy_ops += segment.cpy_ops;
+                bucket.cpy_bytes += segment.cpy_bytes;
+                bucket.concat_ops += segment.concat_ops;
+                bucket.concat_bytes += segment.concat_bytes;
+                bucket.dup_ops += segment.dup_ops;
+                bucket.dup_bytes += segment.dup_bytes;
+                bucket.materialize_boundary_output_bytes += segment.materialize_boundary_output_bytes;
+                bucket.materialize_cached_output_bytes += segment.materialize_cached_output_bytes;
+                bucket.materialize_comm_input_bytes += segment.materialize_comm_input_bytes;
+                bucket.materialize_comm_output_bytes += segment.materialize_comm_output_bytes;
+                bucket.repeated_materialize_source_groups += segment.repeated_materialize_source_groups;
+                bucket.repeated_materialize_source_ops += segment.repeated_materialize_source_ops;
+                bucket.repeated_materialize_source_bytes += segment.repeated_materialize_source_bytes;
+                bucket.materialize_after_materialize_ops += segment.materialize_after_materialize_ops;
+                bucket.materialize_after_materialize_bytes += segment.materialize_after_materialize_bytes;
+                bucket.cont_from_cont_ops += segment.cont_from_cont_ops;
+                bucket.cont_from_cont_bytes += segment.cont_from_cont_bytes;
+                bucket.concat_to_cont_ops += segment.concat_to_cont_ops;
+                bucket.concat_to_cont_bytes += segment.concat_to_cont_bytes;
+                bucket.permute_view_to_cont_ops += segment.permute_view_to_cont_ops;
+                bucket.permute_view_to_cont_bytes += segment.permute_view_to_cont_bytes;
+                bucket.materialize_view_materialize_ops += segment.materialize_view_materialize_ops;
+                bucket.materialize_view_materialize_bytes += segment.materialize_view_materialize_bytes;
+                bucket.cont_permute_cont_ops += segment.cont_permute_cont_ops;
+                bucket.cont_permute_cont_bytes += segment.cont_permute_cont_bytes;
+                graph_cut_merge_materialize_stage_maps(bucket.materialize_stages,
+                                                       segment.materialize_stages);
+                bucket.total_ms += segment.total_ms;
+                bucket.compute_ms += segment.compute_ms;
+                bucket.comm_ms += segment.comm_ms;
+                bucket.cache_ms += segment.cache_ms;
+                bucket.copy_ms += segment.copy_ms;
+                for (size_t op_idx = 0; op_idx < bucket.op_counts.size(); ++op_idx) {
+                    bucket.op_counts[op_idx] += segment.op_counts[op_idx];
+                }
+            }
+        }
+
+        const int64_t known_ms = plan_ms + build_ms + runtime_param_ms + offload_ms +
+                                 alloc_ms + copy_ms + compute_ms + comm_ms + cache_ms;
+        const int64_t other_ms = std::max<int64_t>(0, total_ms - known_ms);
+
+        ++graph_cut_profile_index_;
+        LOG_INFO("%s graph cut profile #%zu rank=%d/%d segments=%zu comm_segments=%zu comm_ops=%zu comm_bytes=%.2fMiB total=%lldms plan=%lldms build=%lldms params=%lldms offload=%lldms alloc=%lldms copy=%lldms compute=%lldms comm=%lldms cache=%lldms other=%lldms segment_total=%lldms",
+                 get_desc().c_str(),
+                 graph_cut_profile_index_,
+                 rank,
+                 world_size,
+                 segments.size(),
+                 comm_segments,
+                 comm_ops,
+                 bytes_to_mib(comm_bytes),
+                 static_cast<long long>(total_ms),
+                 static_cast<long long>(plan_ms),
+                 static_cast<long long>(build_ms),
+                 static_cast<long long>(runtime_param_ms),
+                 static_cast<long long>(offload_ms),
+                 static_cast<long long>(alloc_ms),
+                 static_cast<long long>(copy_ms),
+                 static_cast<long long>(compute_ms),
+                 static_cast<long long>(comm_ms),
+                 static_cast<long long>(cache_ms),
+                 static_cast<long long>(other_ms),
+                 static_cast<long long>(segment_total_ms));
+
+        LOG_INFO("%s graph cut profile #%zu cache-summary output_bytes=%.2fMiB cached_output_bytes=%.2fMiB double_block_cache=%.2fMiB/%lldms single_block_cache=%.2fMiB/%lldms other_cache=%.2fMiB/%lldms",
+                 get_desc().c_str(),
+                 graph_cut_profile_index_,
+                 bytes_to_mib(output_bytes),
+                 bytes_to_mib(cached_output_bytes),
+                 bytes_to_mib(double_block_cached_bytes),
+                 static_cast<long long>(double_block_cache_ms),
+                 bytes_to_mib(single_block_cached_bytes),
+                 static_cast<long long>(single_block_cache_ms),
+                 bytes_to_mib(other_cached_bytes),
+                 static_cast<long long>(other_cache_ms));
+
+        LOG_INFO("%s graph cut profile #%zu cache-live peak_live=%.2fMiB peak_buffer=%.2fMiB peak_chunks=%zu peak_pool=%.2fMiB pool_chunks=%zu",
+                 get_desc().c_str(),
+                 graph_cut_profile_index_,
+                 bytes_to_mib(peak_cache_live_bytes),
+                 bytes_to_mib(peak_cache_buffer_bytes),
+                 peak_cache_chunks,
+                 bytes_to_mib(peak_cache_pool_bytes),
+                 peak_cache_pool_chunks);
+
+        LOG_INFO("%s graph cut profile #%zu comm-name-summary qkv_seq_to_head=%zu q_seq_to_head=%zu k_seq_to_head=%zu v_seq_to_head=%zu txt_img_attn_head_to_seq=%zu head_to_seq_total=%zu gather=%zu sp_attn_materialize_segments=%zu",
+                 get_desc().c_str(),
+                 graph_cut_profile_index_,
+                 qkv_seq_to_head_ops,
+                 q_seq_to_head_ops,
+                 k_seq_to_head_ops,
+                 v_seq_to_head_ops,
+                 txt_img_head_to_seq_ops,
+                 head_to_seq_ops,
+                 gather_ops,
+                 sp_attn_materialize_segments);
+
+        if (collect_compute_breakdown) {
+            LOG_INFO("%s graph cut profile #%zu op-category-summary math_ops=%zu layout_ops=%zu layout_per_compute_ms=%.3f math_per_compute_ms=%.3f",
+                     get_desc().c_str(),
+                     graph_cut_profile_index_,
+                     math_ops,
+                     layout_ops,
+                     compute_ms > 0 ? static_cast<double>(layout_ops) / static_cast<double>(compute_ms) : 0.0,
+                     compute_ms > 0 ? static_cast<double>(math_ops) / static_cast<double>(compute_ms) : 0.0);
+        }
+
+        LOG_INFO("%s graph cut profile #%zu overhead-detail collect_future=%.3fms reset_runtime=%.3fms bind_cached=%.3fms mark_cache_outputs=%.3fms pre_compute_cb=%.3fms segment_graph_free=%.3fms copy_set_build=%.3fms copy_map_scan=%.3fms copy_tensor_set=%.3fms copied_tensors=%zu copied_bytes=%.2fMiB skipped_not_in_graph=%zu skipped_no_buffer=%zu runtime_const_hits=%zu runtime_const_hit=%.3fms runtime_const_hit_bytes=%.2fMiB runtime_const_uploads=%zu runtime_const_upload=%.3fms runtime_const_upload_bytes=%.2fMiB avg_graph_tensors=%.1f avg_backend_map=%.1f",
+                 get_desc().c_str(),
+                 graph_cut_profile_index_,
+                 collect_future_inputs_us / 1000.0,
+                 reset_runtime_tensors_us / 1000.0,
+                 bind_cached_inputs_us / 1000.0,
+                 mark_cache_outputs_us / 1000.0,
+                 pre_compute_callback_us / 1000.0,
+                 segment_graph_free_us / 1000.0,
+                 copy_graph_tensor_set_us / 1000.0,
+                 copy_backend_map_scan_us / 1000.0,
+                 copy_backend_tensor_set_us / 1000.0,
+                 copied_tensors,
+                 bytes_to_mib(copied_bytes),
+                 skipped_not_in_graph,
+                 skipped_no_buffer,
+                 runtime_const_cache_hits,
+                 runtime_const_cache_hit_us / 1000.0,
+                 bytes_to_mib(runtime_const_cache_hit_bytes),
+                 runtime_const_cache_uploads,
+                 runtime_const_cache_upload_us / 1000.0,
+                 bytes_to_mib(runtime_const_cache_upload_bytes),
+                 segments.empty() ? 0.0 : static_cast<double>(copy_graph_tensor_entries) / static_cast<double>(segments.size()),
+                 segments.empty() ? 0.0 : static_cast<double>(copy_backend_map_entries) / static_cast<double>(segments.size()));
+
+        if (collect_compute_breakdown) {
+            std::vector<std::pair<std::string, const GraphCutComputeBucketProfile*>> bucket_order;
+            bucket_order.reserve(compute_buckets.size());
+            for (const auto& entry : compute_buckets) {
+                bucket_order.emplace_back(entry.first, &entry.second);
+            }
+            std::sort(bucket_order.begin(), bucket_order.end(), [](const auto& a, const auto& b) {
+                if (a.second->compute_ms != b.second->compute_ms) {
+                    return a.second->compute_ms > b.second->compute_ms;
+                }
+                return a.first < b.first;
+            });
+
+            for (size_t bucket_idx = 0; bucket_idx < bucket_order.size(); ++bucket_idx) {
+                const auto& bucket_name = bucket_order[bucket_idx].first;
+                const auto& bucket = *bucket_order[bucket_idx].second;
+                if (bucket.compute_ms <= 0 && bucket.comm_ms <= 0 && bucket.total_ms <= 0) {
+                    continue;
+                }
+                LOG_INFO("%s graph cut profile #%zu compute-bucket%zu bucket=%s segments=%zu nodes=%zu math_ops=%zu layout_ops=%zu total=%lldms compute=%lldms comm=%lldms copy=%lldms cache=%lldms comm_ops=%zu comm_bytes=%.2fMiB ops=%s",
+                         get_desc().c_str(),
+                         graph_cut_profile_index_,
+                         bucket_idx + 1,
+                         bucket_name.c_str(),
+                         bucket.segments,
+                         bucket.nodes,
+                         bucket.math_ops,
+                         bucket.layout_ops,
+                         static_cast<long long>(bucket.total_ms),
+                         static_cast<long long>(bucket.compute_ms),
+                         static_cast<long long>(bucket.comm_ms),
+                         static_cast<long long>(bucket.copy_ms),
+                         static_cast<long long>(bucket.cache_ms),
+                         bucket.comm_ops,
+                         bytes_to_mib(bucket.comm_bytes),
+                         graph_cut_bucket_op_histogram(bucket).c_str());
+                if (collect_materialize_breakdown) {
+                    GraphCutMaterializeProfile bucket_materialize_view;
+                    bucket_materialize_view.stages = bucket.materialize_stages;
+                    LOG_INFO("%s graph cut profile #%zu materialize-bucket%zu bucket=%s materialize_ops=%zu materialize_bytes=%.2fMiB cont=%zu/%.2fMiB cpy=%zu/%.2fMiB concat=%zu/%.2fMiB dup=%zu/%.2fMiB boundary_out=%.2fMiB cached_out=%.2fMiB comm_in=%.2fMiB comm_out=%.2fMiB repeated_sources=%zu groups/%zu ops/%.2fMiB mat_after_mat=%zu/%.2fMiB cont_from_cont=%zu/%.2fMiB concat_to_cont=%zu/%.2fMiB permute_view_to_cont=%zu/%.2fMiB mat_view_mat=%zu/%.2fMiB cont_permute_cont=%zu/%.2fMiB stages=%s",
+                             get_desc().c_str(),
+                             graph_cut_profile_index_,
+                             bucket_idx + 1,
+                             bucket_name.c_str(),
+                             bucket.materialize_ops,
+                             bytes_to_mib(bucket.materialize_bytes),
+                             bucket.cont_ops,
+                             bytes_to_mib(bucket.cont_bytes),
+                             bucket.cpy_ops,
+                             bytes_to_mib(bucket.cpy_bytes),
+                             bucket.concat_ops,
+                             bytes_to_mib(bucket.concat_bytes),
+                             bucket.dup_ops,
+                             bytes_to_mib(bucket.dup_bytes),
+                             bytes_to_mib(bucket.materialize_boundary_output_bytes),
+                             bytes_to_mib(bucket.materialize_cached_output_bytes),
+                             bytes_to_mib(bucket.materialize_comm_input_bytes),
+                             bytes_to_mib(bucket.materialize_comm_output_bytes),
+                             bucket.repeated_materialize_source_groups,
+                             bucket.repeated_materialize_source_ops,
+                             bytes_to_mib(bucket.repeated_materialize_source_bytes),
+                             bucket.materialize_after_materialize_ops,
+                             bytes_to_mib(bucket.materialize_after_materialize_bytes),
+                             bucket.cont_from_cont_ops,
+                             bytes_to_mib(bucket.cont_from_cont_bytes),
+                             bucket.concat_to_cont_ops,
+                             bytes_to_mib(bucket.concat_to_cont_bytes),
+                             bucket.permute_view_to_cont_ops,
+                             bytes_to_mib(bucket.permute_view_to_cont_bytes),
+                             bucket.materialize_view_materialize_ops,
+                             bytes_to_mib(bucket.materialize_view_materialize_bytes),
+                             bucket.cont_permute_cont_ops,
+                             bytes_to_mib(bucket.cont_permute_cont_bytes),
+                             graph_cut_materialize_stage_summary(bucket_materialize_view).c_str());
+                }
+            }
+        }
+
+        const int top_n = graph_cut_profile_top_n();
+        const int breakdown_top_n = std::max(compute_top_n, materialize_top_n);
+        if (top_n <= 0 && breakdown_top_n <= 0) {
+            return;
+        }
+
+        std::vector<size_t> order;
+        order.reserve(segments.size());
+        for (size_t i = 0; i < segments.size(); ++i) {
+            order.push_back(i);
+        }
+        if (breakdown_top_n > 0) {
+            std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                if (segments[a].compute_ms != segments[b].compute_ms) {
+                    return segments[a].compute_ms > segments[b].compute_ms;
+                }
+                return segments[a].total_ms > segments[b].total_ms;
+            });
+
+            const size_t compute_limit = std::min(order.size(), static_cast<size_t>(breakdown_top_n));
+            for (size_t rank_idx = 0; rank_idx < compute_limit; ++rank_idx) {
+                const auto& segment = segments[order[rank_idx]];
+                if (segment.compute_ms <= 0) {
+                    break;
+                }
+                LOG_INFO("%s graph cut profile #%zu top-compute%zu segment=%s bucket=%s nodes=%zu math_ops=%zu layout_ops=%zu total=%lldms compute=%lldms comm=%lldms copy=%lldms cache=%lldms comm_ops=%zu comm_bytes=%.2fMiB ops=%s io=%s comm_names=%s",
+                         get_desc().c_str(),
+                         graph_cut_profile_index_,
+                         rank_idx + 1,
+                         segment.name.empty() ? "<unnamed>" : segment.name.c_str(),
+                         graph_cut_segment_compute_bucket(segment).c_str(),
+                         segment.nodes,
+                         segment.math_ops,
+                         segment.layout_ops,
+                         static_cast<long long>(segment.total_ms),
+                         static_cast<long long>(segment.compute_ms),
+                         static_cast<long long>(segment.comm_ms),
+                         static_cast<long long>(segment.copy_ms),
+                         static_cast<long long>(segment.cache_ms),
+                         segment.comm_ops,
+                         bytes_to_mib(segment.comm_bytes),
+                         segment.op_histogram.c_str(),
+                         segment.io_summary.c_str(),
+                         segment.comm_names.c_str());
+                if (collect_materialize_breakdown && segment.materialize_ops > 0) {
+                    LOG_INFO("%s graph cut profile #%zu top-materialize%zu segment=%s bucket=%s materialize_ops=%zu materialize_bytes=%.2fMiB cont=%zu/%.2fMiB cpy=%zu/%.2fMiB concat=%zu/%.2fMiB dup=%zu/%.2fMiB boundary_out=%.2fMiB cached_out=%.2fMiB comm_in=%.2fMiB comm_out=%.2fMiB repeated_sources=%zu groups/%zu ops/%.2fMiB mat_after_mat=%zu/%.2fMiB cont_from_cont=%zu/%.2fMiB concat_to_cont=%zu/%.2fMiB permute_view_to_cont=%zu/%.2fMiB mat_view_mat=%zu/%.2fMiB cont_permute_cont=%zu/%.2fMiB stages=%s stage_details=%s repeated=%s chains=%s nodes=%s",
+                             get_desc().c_str(),
+                             graph_cut_profile_index_,
+                             rank_idx + 1,
+                             segment.name.empty() ? "<unnamed>" : segment.name.c_str(),
+                             graph_cut_segment_compute_bucket(segment).c_str(),
+                             segment.materialize_ops,
+                             bytes_to_mib(segment.materialize_bytes),
+                             segment.cont_ops,
+                             bytes_to_mib(segment.cont_bytes),
+                             segment.cpy_ops,
+                             bytes_to_mib(segment.cpy_bytes),
+                             segment.concat_ops,
+                             bytes_to_mib(segment.concat_bytes),
+                             segment.dup_ops,
+                             bytes_to_mib(segment.dup_bytes),
+                             bytes_to_mib(segment.materialize_boundary_output_bytes),
+                             bytes_to_mib(segment.materialize_cached_output_bytes),
+                             bytes_to_mib(segment.materialize_comm_input_bytes),
+                             bytes_to_mib(segment.materialize_comm_output_bytes),
+                             segment.repeated_materialize_source_groups,
+                             segment.repeated_materialize_source_ops,
+                             bytes_to_mib(segment.repeated_materialize_source_bytes),
+                             segment.materialize_after_materialize_ops,
+                             bytes_to_mib(segment.materialize_after_materialize_bytes),
+                             segment.cont_from_cont_ops,
+                             bytes_to_mib(segment.cont_from_cont_bytes),
+                             segment.concat_to_cont_ops,
+                             bytes_to_mib(segment.concat_to_cont_bytes),
+                             segment.permute_view_to_cont_ops,
+                             bytes_to_mib(segment.permute_view_to_cont_bytes),
+                             segment.materialize_view_materialize_ops,
+                             bytes_to_mib(segment.materialize_view_materialize_bytes),
+                             segment.cont_permute_cont_ops,
+                             bytes_to_mib(segment.cont_permute_cont_bytes),
+                             segment.materialize_stage_summary.c_str(),
+                             segment.materialize_stage_details.c_str(),
+                             segment.repeated_materialize_sources.c_str(),
+                             segment.materialize_chain_top_nodes.c_str(),
+                             segment.materialize_top_nodes.c_str());
+                }
+            }
+        }
+
+        if (top_n <= 0) {
+            return;
+        }
+
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            return segments[a].total_ms > segments[b].total_ms;
+        });
+
+        const size_t limit = std::min(order.size(), static_cast<size_t>(top_n));
+        for (size_t rank_idx = 0; rank_idx < limit; ++rank_idx) {
+            const auto& segment = segments[order[rank_idx]];
+            LOG_INFO("%s graph cut profile #%zu top%zu segment=%s nodes=%zu comm_ops=%zu comm_bytes=%.2fMiB output_bytes=%.2fMiB cached_output_bytes=%.2fMiB cache_live=%.2fMiB cache_chunks=%zu cache_pool=%.2fMiB pool_chunks=%zu total=%lldms build=%lldms params=%lldms offload=%lldms alloc=%lldms copy=%lldms compute=%lldms comm=%lldms cache=%lldms comm_names=%s",
+                     get_desc().c_str(),
+                     graph_cut_profile_index_,
+                     rank_idx + 1,
+                     segment.name.empty() ? "<unnamed>" : segment.name.c_str(),
+                     segment.nodes,
+                     segment.comm_ops,
+                     bytes_to_mib(segment.comm_bytes),
+                     bytes_to_mib(segment.output_bytes),
+                     bytes_to_mib(segment.cached_output_bytes),
+                     bytes_to_mib(segment.cache_live_bytes),
+                     segment.cache_chunks,
+                     bytes_to_mib(segment.cache_pool_bytes),
+                     segment.cache_pool_chunks,
+                     static_cast<long long>(segment.total_ms),
+                     static_cast<long long>(segment.build_ms),
+                     static_cast<long long>(segment.runtime_param_ms),
+                     static_cast<long long>(segment.offload_ms),
+                     static_cast<long long>(segment.alloc_ms),
+                     static_cast<long long>(segment.copy_ms),
+                     static_cast<long long>(segment.compute_ms),
+                     static_cast<long long>(segment.comm_ms),
+                     static_cast<long long>(segment.cache_ms),
+                     segment.comm_names.c_str());
+        }
+
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            return segments[a].copy_ms > segments[b].copy_ms;
+        });
+
+        for (size_t rank_idx = 0; rank_idx < limit; ++rank_idx) {
+            const auto& segment = segments[order[rank_idx]];
+            if (segment.copy_ms <= 0 &&
+                segment.copy_detail.graph_tensor_set_us <= 0 &&
+                segment.copy_detail.backend_map_scan_us <= 0 &&
+                segment.copy_detail.backend_tensor_set_us <= 0 &&
+                segment.pre_compute_callback_us <= 0) {
+                break;
+            }
+            LOG_INFO("%s graph cut profile #%zu top-copy%zu segment=%s copy=%lldms copy_set_build=%.3fms copy_map_scan=%.3fms copy_tensor_set=%.3fms pre_compute_cb=%.3fms copied_tensors=%zu copied_bytes=%.2fMiB runtime_const_hits=%zu runtime_const_hit=%.3fms runtime_const_hit_bytes=%.2fMiB runtime_const_uploads=%zu runtime_const_upload=%.3fms runtime_const_upload_bytes=%.2fMiB skipped_not_in_graph=%zu skipped_no_buffer=%zu graph_tensors=%zu backend_map=%zu total=%lldms compute=%lldms comm=%lldms comm_names=%s",
+                     get_desc().c_str(),
+                     graph_cut_profile_index_,
+                     rank_idx + 1,
+                     segment.name.empty() ? "<unnamed>" : segment.name.c_str(),
+                     static_cast<long long>(segment.copy_ms),
+                     segment.copy_detail.graph_tensor_set_us / 1000.0,
+                     segment.copy_detail.backend_map_scan_us / 1000.0,
+                     segment.copy_detail.backend_tensor_set_us / 1000.0,
+                     segment.pre_compute_callback_us / 1000.0,
+                     segment.copy_detail.copied_tensors,
+                     bytes_to_mib(segment.copy_detail.copied_bytes),
+                     segment.copy_detail.runtime_const_cache_hits,
+                     segment.copy_detail.runtime_const_cache_hit_us / 1000.0,
+                     bytes_to_mib(segment.copy_detail.runtime_const_cache_hit_bytes),
+                     segment.copy_detail.runtime_const_cache_uploads,
+                     segment.copy_detail.runtime_const_cache_upload_us / 1000.0,
+                     bytes_to_mib(segment.copy_detail.runtime_const_cache_upload_bytes),
+                     segment.copy_detail.skipped_not_in_graph,
+                     segment.copy_detail.skipped_no_buffer,
+                     segment.copy_detail.graph_tensor_entries,
+                     segment.copy_detail.backend_map_entries,
+                     static_cast<long long>(segment.total_ms),
+                     static_cast<long long>(segment.compute_ms),
+                     static_cast<long long>(segment.comm_ms),
+                     segment.comm_names.c_str());
+        }
+
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            const int64_t a_non_compute = a < segments.size()
+                                              ? segments[a].total_ms - segments[a].compute_ms - segments[a].comm_ms
+                                              : 0;
+            const int64_t b_non_compute = b < segments.size()
+                                              ? segments[b].total_ms - segments[b].compute_ms - segments[b].comm_ms
+                                              : 0;
+            return a_non_compute > b_non_compute;
+        });
+
+        for (size_t rank_idx = 0; rank_idx < limit; ++rank_idx) {
+            const auto& segment = segments[order[rank_idx]];
+            const int64_t non_compute_ms = segment.total_ms - segment.compute_ms - segment.comm_ms;
+            if (non_compute_ms <= 0) {
+                break;
+            }
+            LOG_INFO("%s graph cut profile #%zu top-non-compute%zu segment=%s non_compute=%lldms total=%lldms compute=%lldms comm=%lldms build=%lldms params=%lldms offload=%lldms alloc=%lldms copy=%lldms cache=%lldms collect_future=%.3fms reset_runtime=%.3fms bind_cached=%.3fms mark_cache_outputs=%.3fms graph_free=%.3fms comm_names=%s",
+                     get_desc().c_str(),
+                     graph_cut_profile_index_,
+                     rank_idx + 1,
+                     segment.name.empty() ? "<unnamed>" : segment.name.c_str(),
+                     static_cast<long long>(non_compute_ms),
+                     static_cast<long long>(segment.total_ms),
+                     static_cast<long long>(segment.compute_ms),
+                     static_cast<long long>(segment.comm_ms),
+                     static_cast<long long>(segment.build_ms),
+                     static_cast<long long>(segment.runtime_param_ms),
+                     static_cast<long long>(segment.offload_ms),
+                     static_cast<long long>(segment.alloc_ms),
+                     static_cast<long long>(segment.copy_ms),
+                     static_cast<long long>(segment.cache_ms),
+                     segment.collect_future_inputs_us / 1000.0,
+                     segment.reset_runtime_tensors_us / 1000.0,
+                     segment.bind_cached_inputs_us / 1000.0,
+                     segment.mark_cache_outputs_us / 1000.0,
+                     segment.segment_graph_free_us / 1000.0,
+                     segment.comm_names.c_str());
+        }
+
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            return segments[a].cache_ms > segments[b].cache_ms;
+        });
+
+        for (size_t rank_idx = 0; rank_idx < limit; ++rank_idx) {
+            const auto& segment = segments[order[rank_idx]];
+            if (segment.cache_ms <= 0 && segment.cached_output_bytes == 0) {
+                break;
+            }
+            LOG_INFO("%s graph cut profile #%zu top-cache%zu segment=%s cache=%lldms cached_output_bytes=%.2fMiB output_bytes=%.2fMiB cache_live=%.2fMiB cache_chunks=%zu cache_pool=%.2fMiB pool_chunks=%zu total=%lldms comm_names=%s",
+                     get_desc().c_str(),
+                     graph_cut_profile_index_,
+                     rank_idx + 1,
+                     segment.name.empty() ? "<unnamed>" : segment.name.c_str(),
+                     static_cast<long long>(segment.cache_ms),
+                     bytes_to_mib(segment.cached_output_bytes),
+                     bytes_to_mib(segment.output_bytes),
+                     bytes_to_mib(segment.cache_live_bytes),
+                     segment.cache_chunks,
+                     bytes_to_mib(segment.cache_pool_bytes),
+                     segment.cache_pool_chunks,
+                     static_cast<long long>(segment.total_ms),
+                     segment.comm_names.c_str());
+        }
     }
 
     void alloc_params_ctx() {
@@ -1821,19 +4231,45 @@ protected:
     }
 
     void alloc_cache_ctx() {
-        ggml_init_params params;
-        params.mem_size   = static_cast<size_t>(MAX_PARAMS_TENSOR_NUM * ggml_tensor_overhead());
-        params.mem_buffer = nullptr;
-        params.no_alloc   = true;
-
-        cache_ctx = ggml_init(params);
-        GGML_ASSERT(cache_ctx != nullptr);
+        cache_ctx = new_cache_context();
     }
 
     void free_cache_ctx() {
         if (cache_ctx != nullptr) {
             ggml_free(cache_ctx);
             cache_ctx = nullptr;
+        }
+    }
+
+    void free_cache_chunk(GraphCacheChunk& chunk) {
+        chunk.reset();
+    }
+
+    void free_active_cache_chunks(bool release_to_pool) {
+        if (release_to_pool) {
+            for (auto& chunk : cache_chunks_) {
+                release_cache_chunk(std::move(chunk));
+            }
+        } else {
+            for (auto& chunk : cache_chunks_) {
+                free_cache_chunk(chunk);
+            }
+        }
+        cache_chunks_.clear();
+    }
+
+    void free_cache_chunk_pool() {
+        for (auto& chunk : cache_chunk_pool_) {
+            free_cache_chunk(chunk);
+        }
+        cache_chunk_pool_.clear();
+        cache_chunk_pool_bytes_ = 0;
+    }
+
+    void free_cache_chunks(bool keep_pool = false) {
+        free_active_cache_chunks(keep_pool);
+        if (!keep_pool) {
+            free_cache_chunk_pool();
         }
     }
 
@@ -1939,11 +4375,181 @@ protected:
         }
     }
 
-    bool copy_cache_tensors_to_cache_buffer(const std::unordered_set<std::string>* cache_keep_names = nullptr) {
+    void rebuild_compact_cache_tensor_index() {
+        cache_tensor_index_.clear();
+        if (cache_ctx == nullptr) {
+            return;
+        }
+        for (ggml_tensor* tensor = ggml_get_first_tensor(cache_ctx); tensor != nullptr; tensor = ggml_get_next_tensor(cache_ctx, tensor)) {
+            if (tensor->name[0] != '\0') {
+                cache_tensor_index_[tensor->name] = tensor;
+            }
+        }
+    }
+
+    size_t graph_cache_live_bytes() const {
+        size_t bytes = 0;
+        std::unordered_set<const ggml_tensor*> seen;
+        seen.reserve(cache_tensor_index_.size());
+        for (const auto& kv : cache_tensor_index_) {
+            if (kv.second != nullptr && seen.insert(kv.second).second) {
+                bytes += ggml_nbytes(kv.second);
+            }
+        }
+        return bytes;
+    }
+
+    size_t graph_cache_buffer_bytes() const {
+        size_t bytes = 0;
+        if (cache_buffer != nullptr) {
+            bytes += ggml_backend_buffer_get_size(cache_buffer);
+        }
+        for (const auto& chunk : cache_chunks_) {
+            if (chunk.buffer != nullptr) {
+                bytes += ggml_backend_buffer_get_size(chunk.buffer);
+            }
+        }
+        bytes += cache_chunk_pool_bytes_;
+        return bytes;
+    }
+
+    size_t graph_cache_chunk_count() const {
+        return cache_chunks_.size() + (cache_buffer != nullptr ? 1 : 0);
+    }
+
+    size_t graph_cache_pool_chunk_count() const {
+        return cache_chunk_pool_.size();
+    }
+
+    static std::string graph_cache_layout_key(const std::vector<ggml_tensor*>& source_tensors) {
+        std::ostringstream oss;
+        oss << source_tensors.size();
+        for (ggml_tensor* tensor : source_tensors) {
+            oss << '|';
+            if (tensor == nullptr) {
+                oss << "null";
+                continue;
+            }
+            oss << static_cast<int>(tensor->type);
+            for (int d = 0; d < GGML_MAX_DIMS; ++d) {
+                oss << ':' << tensor->ne[d] << '/' << tensor->nb[d];
+            }
+        }
+        return oss.str();
+    }
+
+    static bool graph_cache_same_layout(const ggml_tensor* a, const ggml_tensor* b) {
+        if (a == nullptr || b == nullptr || a->type != b->type) {
+            return false;
+        }
+        for (int d = 0; d < GGML_MAX_DIMS; ++d) {
+            if (a->ne[d] != b->ne[d] || a->nb[d] != b->nb[d]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    GraphCacheChunk make_cache_chunk_for_sources(const std::vector<ggml_tensor*>& source_tensors,
+                                                 const std::string& layout_key) {
+        GraphCacheChunk chunk;
+        chunk.ctx = new_cache_context(source_tensors.size());
+        chunk.layout_key = layout_key;
+        chunk.cache_tensors.reserve(source_tensors.size());
+        for (ggml_tensor* source_tensor : source_tensors) {
+            ggml_tensor* cache_tensor = ggml_dup_tensor(chunk.ctx, source_tensor);
+            chunk.cache_tensors.push_back(cache_tensor);
+        }
+        return chunk;
+    }
+
+    bool cache_chunk_layout_matches(const GraphCacheChunk& chunk,
+                                    const std::vector<ggml_tensor*>& source_tensors,
+                                    const std::string& layout_key) const {
+        if (chunk.layout_key != layout_key || chunk.cache_tensors.size() != source_tensors.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < source_tensors.size(); ++i) {
+            if (source_tensors[i] == nullptr || chunk.cache_tensors[i] == nullptr) {
+                return false;
+            }
+            if (!graph_cache_same_layout(source_tensors[i], chunk.cache_tensors[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    GraphCacheChunk acquire_cache_chunk(const std::vector<ggml_tensor*>& source_tensors,
+                                        const std::string& layout_key) {
+        if (graph_cut_cache_pool_enabled()) {
+            for (auto it = cache_chunk_pool_.begin(); it != cache_chunk_pool_.end(); ++it) {
+                if (!cache_chunk_layout_matches(*it, source_tensors, layout_key)) {
+                    continue;
+                }
+                GraphCacheChunk chunk = std::move(*it);
+                if (chunk.buffer != nullptr) {
+                    size_t buffer_size = ggml_backend_buffer_get_size(chunk.buffer);
+                    cache_chunk_pool_bytes_ = cache_chunk_pool_bytes_ >= buffer_size
+                                                  ? cache_chunk_pool_bytes_ - buffer_size
+                                                  : 0;
+                }
+                cache_chunk_pool_.erase(it);
+                chunk.tensors.clear();
+                return chunk;
+            }
+        }
+        return make_cache_chunk_for_sources(source_tensors, layout_key);
+    }
+
+    void release_cache_chunk(GraphCacheChunk&& chunk) {
+        chunk.tensors.clear();
+        if (!graph_cut_cache_pool_enabled() || chunk.buffer == nullptr || chunk.ctx == nullptr) {
+            free_cache_chunk(chunk);
+            return;
+        }
+
+        const size_t buffer_size = ggml_backend_buffer_get_size(chunk.buffer);
+        const size_t max_pool_bytes = graph_cut_cache_pool_max_bytes();
+        if (max_pool_bytes == 0 || cache_chunk_pool_bytes_ + buffer_size > max_pool_bytes) {
+            free_cache_chunk(chunk);
+            return;
+        }
+
+        cache_chunk_pool_bytes_ += buffer_size;
+        cache_chunk_pool_.push_back(std::move(chunk));
+    }
+
+    bool copy_cache_tensor_data(ggml_tensor* src, ggml_tensor* dst) {
+        ggml_backend_buffer_t src_buf = sd::ggml_graph_cut::tensor_buffer(src);
+        ggml_backend_buffer_t dst_buf = sd::ggml_graph_cut::tensor_buffer(dst);
+        if (src_buf == nullptr || dst_buf == nullptr) {
+            LOG_ERROR("%s cache copy tensor buffer missing: name=%s src_buffer=%p src_view_src=%p src_view_src_buffer=%p dst_buffer=%p",
+                      get_desc().c_str(),
+                      src && src->name[0] != '\0' ? src->name : "<unnamed>",
+                      src ? src->buffer : nullptr,
+                      src ? src->view_src : nullptr,
+                      (src && src->view_src) ? src->view_src->buffer : nullptr,
+                      dst ? dst->buffer : nullptr);
+            return false;
+        }
+        const bool use_staging_copy = src->view_src != nullptr || !ggml_is_contiguous(src) || src->buffer == nullptr;
+        if (use_staging_copy) {
+            std::vector<uint8_t> host_data(ggml_nbytes(src));
+            ggml_backend_tensor_get(src, host_data.data(), 0, host_data.size());
+            ggml_backend_tensor_set(dst, host_data.data(), 0, host_data.size());
+        } else {
+            ggml_backend_tensor_copy(src, dst);
+        }
+        return true;
+    }
+
+    bool compact_cache_tensors_to_cache_buffer(const std::unordered_set<std::string>* cache_keep_names = nullptr) {
         ggml_context* old_cache_ctx            = cache_ctx;
         ggml_backend_buffer_t old_cache_buffer = cache_buffer;
         cache_ctx                              = nullptr;
         cache_buffer                           = nullptr;
+        cache_tensor_index_.clear();
         std::map<std::string, ggml_tensor*> merged_cache_sources;
         if (old_cache_ctx != nullptr) {
             for (ggml_tensor* tensor = ggml_get_first_tensor(old_cache_ctx); tensor != nullptr; tensor = ggml_get_next_tensor(old_cache_ctx, tensor)) {
@@ -1983,31 +4589,25 @@ protected:
         cache_buffer       = ggml_backend_alloc_ctx_tensors(cache_ctx, runtime_backend);
         GGML_ASSERT(cache_buffer != nullptr);
         for (const auto& kv : source_to_cache_tensors) {
-            ggml_tensor* src              = kv.first;
-            ggml_tensor* dst              = kv.second;
-            ggml_backend_buffer_t src_buf = sd::ggml_graph_cut::tensor_buffer(src);
-            ggml_backend_buffer_t dst_buf = sd::ggml_graph_cut::tensor_buffer(dst);
-            if (src_buf == nullptr || dst_buf == nullptr) {
-                LOG_ERROR("%s cache copy tensor buffer missing: name=%s src_buffer=%p src_view_src=%p src_view_src_buffer=%p dst_buffer=%p",
-                          get_desc().c_str(),
-                          src && src->name[0] != '\0' ? src->name : "<unnamed>",
-                          src ? src->buffer : nullptr,
-                          src ? src->view_src : nullptr,
-                          (src && src->view_src) ? src->view_src->buffer : nullptr,
-                          dst ? dst->buffer : nullptr);
+            if (!copy_cache_tensor_data(kv.first, kv.second)) {
+                free_cache_buffer();
+                free_cache_ctx();
+                if (old_cache_buffer != nullptr) {
+                    ggml_backend_buffer_free(old_cache_buffer);
+                }
+                if (old_cache_ctx != nullptr) {
+                    ggml_free(old_cache_ctx);
+                }
                 return false;
             }
-            const bool use_staging_copy = src->view_src != nullptr || !ggml_is_contiguous(src) || src->buffer == nullptr;
-            if (use_staging_copy) {
-                std::vector<uint8_t> host_data(ggml_nbytes(src));
-                ggml_backend_tensor_get(src, host_data.data(), 0, host_data.size());
-                ggml_backend_tensor_set(dst, host_data.data(), 0, host_data.size());
-            } else {
-                ggml_backend_tensor_copy(src, dst);
-            }
         }
-        ggml_backend_synchronize(runtime_backend);
+        if (graph_cut_cache_sync_after_copy_enabled()) {
+            ggml_backend_synchronize(runtime_backend);
+        }
         size_t cache_buffer_size = ggml_backend_buffer_get_size(cache_buffer);
+        ED_UNUSED(num_tensors);
+        ED_UNUSED(cache_buffer_size);
+        rebuild_compact_cache_tensor_index();
         if (old_cache_buffer != nullptr) {
             ggml_backend_buffer_free(old_cache_buffer);
         }
@@ -2017,8 +4617,127 @@ protected:
         return true;
     }
 
-    void copy_data_to_backend_tensor(ggml_cgraph* gf, bool clear_after_copy = true) {
+    void prune_incremental_cache_chunks(const std::unordered_set<std::string>* cache_keep_names) {
+        if (cache_keep_names == nullptr) {
+            return;
+        }
+
+        for (auto it = cache_tensor_index_.begin(); it != cache_tensor_index_.end();) {
+            if (cache_keep_names->find(it->first) == cache_keep_names->end()) {
+                it = cache_tensor_index_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        for (auto chunk_it = cache_chunks_.begin(); chunk_it != cache_chunks_.end();) {
+            for (auto tensor_it = chunk_it->tensors.begin(); tensor_it != chunk_it->tensors.end();) {
+                if (cache_keep_names->find(tensor_it->first) == cache_keep_names->end()) {
+                    tensor_it = chunk_it->tensors.erase(tensor_it);
+                } else {
+                    ++tensor_it;
+                }
+            }
+            if (chunk_it->tensors.empty()) {
+                GraphCacheChunk released = std::move(*chunk_it);
+                chunk_it = cache_chunks_.erase(chunk_it);
+                release_cache_chunk(std::move(released));
+            } else {
+                ++chunk_it;
+            }
+        }
+    }
+
+    bool append_cache_tensors_to_cache_chunks(const std::unordered_set<std::string>* cache_keep_names = nullptr) {
+        prune_incremental_cache_chunks(cache_keep_names);
+
+        std::map<ggml_tensor*, std::vector<std::string>> source_to_names;
+        for (const auto& kv : cache_tensor_map) {
+            if (cache_keep_names != nullptr && cache_keep_names->find(kv.first) == cache_keep_names->end()) {
+                continue;
+            }
+            ggml_tensor* source_tensor = sd::ggml_graph_cut::cache_source_tensor(kv.second);
+            if (source_tensor == nullptr) {
+                continue;
+            }
+            source_to_names[source_tensor].push_back(kv.first);
+        }
+        cache_tensor_map.clear();
+        if (source_to_names.empty()) {
+            return true;
+        }
+
+        GraphCacheChunk chunk;
+        std::vector<std::pair<ggml_tensor*, ggml_tensor*>> source_to_cache_tensors;
+        source_to_cache_tensors.reserve(source_to_names.size());
+        std::vector<ggml_tensor*> source_tensors;
+        source_tensors.reserve(source_to_names.size());
+
+        for (const auto& kv : source_to_names) {
+            source_tensors.push_back(kv.first);
+        }
+
+        const std::string layout_key = graph_cache_layout_key(source_tensors);
+        chunk = acquire_cache_chunk(source_tensors, layout_key);
+
+        if (chunk.buffer == nullptr) {
+            chunk.buffer = ggml_backend_alloc_ctx_tensors(chunk.ctx, runtime_backend);
+            if (chunk.buffer == nullptr) {
+                LOG_ERROR("%s alloc graph cut cache chunk failed, num_tensors = %zu",
+                          get_desc().c_str(),
+                          source_tensors.size());
+                free_cache_chunk(chunk);
+                return false;
+            }
+        }
+
+        size_t tensor_idx = 0;
+        for (const auto& kv : source_to_names) {
+            ggml_tensor* source_tensor = kv.first;
+            const auto& names          = kv.second;
+            GGML_ASSERT(tensor_idx < chunk.cache_tensors.size());
+            ggml_tensor* cache_tensor = chunk.cache_tensors[tensor_idx++];
+            GGML_ASSERT(graph_cache_same_layout(source_tensor, cache_tensor));
+            ggml_set_name(cache_tensor, names.front().c_str());
+            for (const auto& name : names) {
+                chunk.tensors[name] = cache_tensor;
+            }
+            source_to_cache_tensors.push_back({source_tensor, cache_tensor});
+        }
+
+        for (const auto& kv : source_to_cache_tensors) {
+            if (!copy_cache_tensor_data(kv.first, kv.second)) {
+                free_cache_chunk(chunk);
+                return false;
+            }
+        }
+        if (graph_cut_cache_sync_after_copy_enabled()) {
+            ggml_backend_synchronize(runtime_backend);
+        }
+
+        for (const auto& kv : chunk.tensors) {
+            cache_tensor_index_[kv.first] = kv.second;
+        }
+        cache_chunks_.push_back(std::move(chunk));
+        return true;
+    }
+
+    bool copy_cache_tensors_to_cache_buffer(const std::unordered_set<std::string>* cache_keep_names = nullptr) {
+        if (graph_cut_cache_compact_enabled()) {
+            return compact_cache_tensors_to_cache_buffer(cache_keep_names);
+        }
+        return append_cache_tensors_to_cache_chunks(cache_keep_names);
+    }
+
+    void copy_data_to_backend_tensor(ggml_cgraph* gf,
+                                     bool clear_after_copy = true,
+                                     GraphCopyProfile* profile_out = nullptr) {
         GGML_ASSERT(gf != nullptr);
+        if (profile_out != nullptr) {
+            *profile_out = GraphCopyProfile{};
+        }
+
+        const int64_t t_graph_tensor_set_begin = profile_out != nullptr ? ggml_time_us() : 0;
         std::unordered_set<const ggml_tensor*> graph_tensor_set;
         const int n_leafs = sd::ggml_graph_cut::leaf_count(gf);
         const int n_nodes = ggml_graph_n_nodes(gf);
@@ -2029,17 +4748,33 @@ protected:
         for (int i = 0; i < n_nodes; ++i) {
             graph_tensor_set.insert(ggml_graph_node(gf, i));
         }
+        if (profile_out != nullptr) {
+            const int64_t t_graph_tensor_set_end = ggml_time_us();
+            profile_out->graph_tensor_set_us = t_graph_tensor_set_end - t_graph_tensor_set_begin;
+            profile_out->graph_leafs = static_cast<size_t>(n_leafs);
+            profile_out->graph_nodes = static_cast<size_t>(n_nodes);
+            profile_out->graph_tensor_entries = graph_tensor_set.size();
+            profile_out->backend_map_entries = backend_tensor_data_map.size();
+        }
 
+        const int64_t t_backend_map_scan_begin = profile_out != nullptr ? ggml_time_us() : 0;
+        bool refreshed_runtime_const_binding = false;
         for (auto& kv : backend_tensor_data_map) {
             auto tensor = kv.first;
             auto data   = kv.second;
 
             if (graph_tensor_set.find(tensor) == graph_tensor_set.end()) {
+                if (profile_out != nullptr) {
+                    ++profile_out->skipped_not_in_graph;
+                }
                 continue;
             }
 
             ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
             if (buf == nullptr) {
+                if (profile_out != nullptr) {
+                    ++profile_out->skipped_no_buffer;
+                }
                 LOG_WARN("%s graph exec skip tensor copy: name=%s op=%s reason=buffer_not_set data=%p view_src=%p view_src_buffer=%p",
                          get_desc().c_str(),
                          tensor && tensor->name[0] != '\0' ? tensor->name : "<unnamed>",
@@ -2050,11 +4785,57 @@ protected:
                 continue;
             }
 
-            ggml_backend_tensor_set(tensor, data, 0, ggml_nbytes(tensor));
+            const size_t nbytes = ggml_nbytes(tensor);
+            if (should_cache_runtime_const_tensor(tensor, data)) {
+                const int64_t t_runtime_const_begin = profile_out != nullptr ? ggml_time_us() : 0;
+                RuntimeConstCacheEntry* entry = find_runtime_const_cache_entry(tensor, data);
+                if (entry != nullptr) {
+                    bind_tensor_to_runtime_const_cache(tensor, *entry);
+                    refreshed_runtime_const_binding = true;
+                    if (profile_out != nullptr) {
+                        const int64_t t_runtime_const_end = ggml_time_us();
+                        ++profile_out->runtime_const_cache_hits;
+                        profile_out->runtime_const_cache_hit_bytes += nbytes;
+                        profile_out->runtime_const_cache_hit_us += t_runtime_const_end - t_runtime_const_begin;
+                    }
+                    continue;
+                }
+
+                entry = upload_runtime_const_cache_entry(tensor, data);
+                if (entry != nullptr) {
+                    bind_tensor_to_runtime_const_cache(tensor, *entry);
+                    refreshed_runtime_const_binding = true;
+                    if (profile_out != nullptr) {
+                        const int64_t t_runtime_const_end = ggml_time_us();
+                        ++profile_out->runtime_const_cache_uploads;
+                        profile_out->runtime_const_cache_upload_bytes += nbytes;
+                        profile_out->runtime_const_cache_upload_us += t_runtime_const_end - t_runtime_const_begin;
+                    }
+                    continue;
+                }
+            }
+
+            const int64_t t_tensor_set_begin = profile_out != nullptr ? ggml_time_us() : 0;
+            ggml_backend_tensor_set(tensor, data, 0, nbytes);
+            if (profile_out != nullptr) {
+                const int64_t t_tensor_set_end = ggml_time_us();
+                profile_out->backend_tensor_set_us += t_tensor_set_end - t_tensor_set_begin;
+                ++profile_out->copied_tensors;
+                profile_out->copied_bytes += nbytes;
+            }
+        }
+        if (profile_out != nullptr) {
+            const int64_t t_backend_map_scan_end = ggml_time_us();
+            profile_out->backend_map_scan_us = t_backend_map_scan_end - t_backend_map_scan_begin -
+                                               profile_out->backend_tensor_set_us;
         }
 
         if (clear_after_copy) {
             backend_tensor_data_map.clear();
+        }
+
+        if (refreshed_runtime_const_binding) {
+            refresh_graph_view_bindings(gf);
         }
     }
 
@@ -2396,7 +5177,11 @@ protected:
                                             bool no_return                                          = false,
                                             const std::unordered_set<std::string>* cache_keep_names = nullptr,
                                             post_compute_cb_t post_compute_cb                      = nullptr,
-                                            pre_compute_cb_t pre_compute_cb                        = nullptr) {
+                                            pre_compute_cb_t pre_compute_cb                        = nullptr,
+                                            GraphExecuteProfile* profile_out                       = nullptr) {
+        if (profile_out != nullptr) {
+            *profile_out = GraphExecuteProfile{};
+        }
         int64_t t_execute_begin              = ggml_time_ms();
         const bool use_partial_param_offload = !runtime_param_tensors.empty();
         int64_t t_offload_begin              = ggml_time_ms();
@@ -2412,6 +5197,9 @@ protected:
             }
         }
         int64_t t_offload_end = ggml_time_ms();
+        if (profile_out != nullptr) {
+            profile_out->offload_ms = t_offload_end - t_offload_begin;
+        }
 
         int64_t t_alloc_begin = ggml_time_ms();
         if (!alloc_compute_buffer(gf)) {
@@ -2432,10 +5220,21 @@ protected:
             return std::nullopt;
         }
         int64_t t_alloc_end = ggml_time_ms();
+        if (profile_out != nullptr) {
+            profile_out->alloc_ms = t_alloc_end - t_alloc_begin;
+        }
 
         int64_t t_copy_begin = ggml_time_ms();
-        copy_data_to_backend_tensor(gf, !preserve_backend_tensor_data_map);
+        GraphCopyProfile copy_detail;
+        copy_data_to_backend_tensor(gf,
+                                    !preserve_backend_tensor_data_map,
+                                    profile_out != nullptr ? &copy_detail : nullptr);
+        int64_t t_copy_data_end = ggml_time_ms();
+        if (profile_out != nullptr) {
+            profile_out->copy_detail = copy_detail;
+        }
         if (pre_compute_cb) {
+            const int64_t t_pre_compute_begin = profile_out != nullptr ? ggml_time_us() : 0;
             if (!pre_compute_cb(gf)) {
                 LOG_ERROR("%s pre compute callback failed", get_desc().c_str());
                 if (free_compute_buffer_immediately) {
@@ -2445,8 +5244,16 @@ protected:
                 }
                 return std::nullopt;
             }
+            if (profile_out != nullptr) {
+                const int64_t t_pre_compute_end = ggml_time_us();
+                profile_out->pre_compute_callback_us = t_pre_compute_end - t_pre_compute_begin;
+            }
         }
         int64_t t_copy_end = ggml_time_ms();
+        if (profile_out != nullptr) {
+            profile_out->copy_ms = t_copy_end - t_copy_begin;
+            ED_UNUSED(t_copy_data_end);
+        }
         if (ggml_backend_is_cpu(runtime_backend)) {
             ggml_backend_cpu_set_n_threads(runtime_backend, n_threads);
         }
@@ -2463,6 +5270,9 @@ protected:
             }
             return std::nullopt;
         }
+        if (profile_out != nullptr) {
+            profile_out->compute_ms = t_compute_end - t_compute_begin;
+        }
 
         if (post_compute_cb) {
             int64_t t_comm_begin = ggml_time_ms();
@@ -2476,6 +5286,9 @@ protected:
                 return std::nullopt;
             }
             int64_t t_comm_end = ggml_time_ms();
+            if (profile_out != nullptr) {
+                profile_out->post_ms = t_comm_end - t_comm_begin;
+            }
         }
 
         auto result = ggml_get_tensor(compute_ctx, final_result_name.c_str());
@@ -2496,11 +5309,22 @@ protected:
             return std::nullopt;
         }
         int64_t t_cache_end = ggml_time_ms();
+        if (profile_out != nullptr) {
+            profile_out->cache_ms = t_cache_end - t_cache_begin;
+            profile_out->cache_live_bytes = graph_cache_live_bytes();
+            profile_out->cache_buffer_bytes = graph_cache_buffer_bytes();
+            profile_out->cache_chunks = graph_cache_chunk_count();
+            profile_out->cache_pool_bytes = cache_chunk_pool_bytes_;
+            profile_out->cache_pool_chunks = graph_cache_pool_chunk_count();
+        }
 
         if (free_compute_buffer_immediately) {
             free_compute_buffer();
         } else if (use_partial_param_offload) {
             restore_partial_params();
+        }
+        if (profile_out != nullptr) {
+            profile_out->total_ms = ggml_time_ms() - t_execute_begin;
         }
         return output;
     }
@@ -2510,27 +5334,120 @@ protected:
                                                          const GraphCutPlan& plan,
                                                          int n_threads,
                                                          bool free_compute_buffer_immediately,
-                                                         bool no_return = false) {
+                                                         bool no_return = false,
+                                                         int64_t plan_ms = 0) {
         GGML_ASSERT(gf != nullptr);
 
+        const bool collect_profile = graph_cut_profile_enabled();
+        const int materialize_top_n = graph_cut_profile_materialize_top_n();
+        const bool collect_materialize_breakdown =
+            collect_profile && materialize_top_n > 0;
+        const bool collect_compute_breakdown =
+            collect_profile && (graph_cut_profile_compute_top_n() > 0 || collect_materialize_breakdown);
+        const int64_t t_profile_begin = ggml_time_ms();
+        std::vector<GraphCutSegmentProfile> segment_profiles;
+        if (collect_profile) {
+            segment_profiles.reserve(plan.segments.size());
+        }
+
         free_compute_buffer();
-        free_cache_ctx_and_buffer();
+        reset_graph_cut_run_cache();
 
         std::optional<sd::Tensor<T>> output = sd::Tensor<T>();
         for (size_t seg_idx = 0; seg_idx < plan.segments.size(); ++seg_idx) {
             int64_t t_segment_begin = ggml_time_ms();
             const auto& segment     = plan.segments[seg_idx];
-            auto future_cut_names   = sd::ggml_graph_cut::collect_future_input_names(gf, plan, seg_idx);
+            const int64_t t_collect_future_begin = collect_profile ? ggml_time_us() : 0;
+            const auto& future_cut_names = segment.future_input_names;
+            const int64_t t_collect_future_end = collect_profile ? ggml_time_us() : 0;
+            GraphCutSegmentProfile segment_profile;
+            if (collect_profile) {
+                segment_profile.name = segment.group_name;
+                segment_profile.nodes = segment.internal_node_indices.size();
+                segment_profile.comm_ops = segment.comm_ops.size();
+                segment_profile.output_bytes = segment.output_bytes;
+                segment_profile.comm_names = graph_cut_comm_names(segment);
+                if (collect_compute_breakdown) {
+                    segment_profile.io_summary = graph_cut_segment_io_summary(gf, segment);
+                    segment_profile.op_histogram =
+                        graph_cut_segment_op_histogram(gf,
+                                                       segment,
+                                                       &segment_profile.op_counts,
+                                                       &segment_profile.math_ops,
+                                                       &segment_profile.layout_ops);
+                }
+                if (collect_materialize_breakdown) {
+                    GraphCutMaterializeProfile materialize =
+                        graph_cut_segment_materialize_profile(gf,
+                                                              segment,
+                                                              static_cast<size_t>(materialize_top_n));
+                    segment_profile.materialize_ops = materialize.ops;
+                    segment_profile.materialize_bytes = materialize.bytes;
+                    segment_profile.cont_ops = materialize.cont_ops;
+                    segment_profile.cont_bytes = materialize.cont_bytes;
+                    segment_profile.cpy_ops = materialize.cpy_ops;
+                    segment_profile.cpy_bytes = materialize.cpy_bytes;
+                    segment_profile.concat_ops = materialize.concat_ops;
+                    segment_profile.concat_bytes = materialize.concat_bytes;
+                    segment_profile.dup_ops = materialize.dup_ops;
+                    segment_profile.dup_bytes = materialize.dup_bytes;
+                    segment_profile.materialize_boundary_output_bytes = materialize.boundary_output_bytes;
+                    segment_profile.materialize_cached_output_bytes = materialize.cached_output_bytes;
+                    segment_profile.materialize_comm_input_bytes = materialize.comm_input_bytes;
+                    segment_profile.materialize_comm_output_bytes = materialize.comm_output_bytes;
+                    segment_profile.repeated_materialize_source_groups = materialize.repeated_source_groups;
+                    segment_profile.repeated_materialize_source_ops = materialize.repeated_source_ops;
+                    segment_profile.repeated_materialize_source_bytes = materialize.repeated_source_bytes;
+                    segment_profile.materialize_after_materialize_ops = materialize.materialize_after_materialize_ops;
+                    segment_profile.materialize_after_materialize_bytes = materialize.materialize_after_materialize_bytes;
+                    segment_profile.cont_from_cont_ops = materialize.cont_from_cont_ops;
+                    segment_profile.cont_from_cont_bytes = materialize.cont_from_cont_bytes;
+                    segment_profile.concat_to_cont_ops = materialize.concat_to_cont_ops;
+                    segment_profile.concat_to_cont_bytes = materialize.concat_to_cont_bytes;
+                    segment_profile.permute_view_to_cont_ops = materialize.permute_view_to_cont_ops;
+                    segment_profile.permute_view_to_cont_bytes = materialize.permute_view_to_cont_bytes;
+                    segment_profile.materialize_view_materialize_ops = materialize.materialize_view_materialize_ops;
+                    segment_profile.materialize_view_materialize_bytes = materialize.materialize_view_materialize_bytes;
+                    segment_profile.cont_permute_cont_ops = materialize.cont_permute_cont_ops;
+                    segment_profile.cont_permute_cont_bytes = materialize.cont_permute_cont_bytes;
+                    segment_profile.materialize_stage_summary =
+                        graph_cut_materialize_stage_summary(materialize);
+                    segment_profile.materialize_stage_details =
+                        graph_cut_materialize_stage_detail_summary(materialize);
+                    segment_profile.materialize_stages = std::move(materialize.stages);
+                    segment_profile.materialize_top_nodes = std::move(materialize.top_nodes);
+                    segment_profile.repeated_materialize_sources = std::move(materialize.repeated_sources);
+                    segment_profile.materialize_chain_top_nodes = std::move(materialize.top_chains);
+                }
+                segment_profile.collect_future_inputs_us = t_collect_future_end - t_collect_future_begin;
+                for (const auto& comm_op : segment.comm_ops) {
+                    if (comm_op.enabled) {
+                        segment_profile.comm_bytes += graph_cut_comm_tensor_bytes(gf, comm_op);
+                    }
+                }
+            }
 
+            const int64_t t_reset_runtime_begin = collect_profile ? ggml_time_us() : 0;
             reset_segment_runtime_tensors(segment, gf);
+            const int64_t t_reset_runtime_end = collect_profile ? ggml_time_us() : 0;
+            if (collect_profile) {
+                segment_profile.reset_runtime_tensors_us = t_reset_runtime_end - t_reset_runtime_begin;
+            }
+
+            const int64_t t_bind_cached_begin = collect_profile ? ggml_time_us() : 0;
             if (!bind_segment_cached_inputs(gf, segment)) {
                 free_cache_ctx_and_buffer();
                 free_compute_buffer();
                 free_compute_ctx();
                 return std::nullopt;
             }
+            const int64_t t_bind_cached_end = collect_profile ? ggml_time_us() : 0;
+            if (collect_profile) {
+                segment_profile.bind_cached_inputs_us = t_bind_cached_end - t_bind_cached_begin;
+            }
 
             const bool is_last_segment = seg_idx + 1 == plan.segments.size();
+            const int64_t t_mark_cache_outputs_begin = collect_profile ? ggml_time_us() : 0;
             if (!is_last_segment) {
                 for (size_t output_idx = 0; output_idx < segment.output_node_indices.size(); ++output_idx) {
                     ggml_tensor* output_tensor = sd::ggml_graph_cut::output_tensor(gf, segment, output_idx);
@@ -2538,8 +5455,16 @@ protected:
                         sd::ggml_graph_cut::is_graph_cut_tensor(output_tensor) &&
                         future_cut_names.find(output_tensor->name) != future_cut_names.end()) {
                         cache(output_tensor->name, output_tensor);
+                        if (collect_profile) {
+                            segment_profile.cached_output_bytes +=
+                                sd::ggml_graph_cut::cache_tensor_bytes(output_tensor);
+                        }
                     }
                 }
+            }
+            const int64_t t_mark_cache_outputs_end = collect_profile ? ggml_time_us() : 0;
+            if (collect_profile) {
+                segment_profile.mark_cache_outputs_us = t_mark_cache_outputs_end - t_mark_cache_outputs_begin;
             }
             
             post_compute_cb_t segment_post_compute_cb = nullptr;
@@ -2576,17 +5501,32 @@ protected:
             }
 
             ggml_context* segment_graph_ctx = nullptr;
+            int64_t t_build_begin = ggml_time_ms();
             ggml_cgraph* segment_graph      = sd::ggml_graph_cut::build_segment_graph(gf, segment, &segment_graph_ctx);
+            int64_t t_build_end = ggml_time_ms();
+            if (collect_profile) {
+                segment_profile.build_ms = t_build_end - t_build_begin;
+            }
+            int64_t t_runtime_param_begin = ggml_time_ms();
+            auto runtime_param_tensors = sd::ggml_graph_cut::runtime_param_tensors(gf, segment, get_desc().c_str());
+            int64_t t_runtime_param_end = ggml_time_ms();
+            if (collect_profile) {
+                segment_profile.runtime_param_ms = t_runtime_param_end - t_runtime_param_begin;
+            }
+            GraphExecuteProfile execute_profile;
             auto segment_output             = execute_graph<T>(segment_graph,
                                        n_threads,
-                                       true,
-                                       sd::ggml_graph_cut::runtime_param_tensors(gf, segment, get_desc().c_str()),
+                                       false,
+                                       runtime_param_tensors,
                                        true,
                                        !is_last_segment || no_return,
                                        &future_cut_names,
                                        segment_post_compute_cb,
-                                       segment_pre_compute_cb);
+                                       segment_pre_compute_cb,
+                                       collect_profile ? &execute_profile : nullptr);
+            const int64_t t_segment_graph_free_begin = collect_profile ? ggml_time_us() : 0;
             ggml_free(segment_graph_ctx);
+            const int64_t t_segment_graph_free_end = collect_profile ? ggml_time_us() : 0;
             if (!segment_output.has_value()) {
                 free_cache_ctx_and_buffer();
                 free_compute_buffer();
@@ -2594,10 +5534,32 @@ protected:
                 return std::nullopt;
             }
             output = std::move(segment_output);
+            if (collect_profile) {
+                segment_profile.offload_ms = execute_profile.offload_ms;
+                segment_profile.alloc_ms = execute_profile.alloc_ms;
+                segment_profile.copy_ms = execute_profile.copy_ms;
+                segment_profile.pre_compute_callback_us = execute_profile.pre_compute_callback_us;
+                segment_profile.copy_detail = execute_profile.copy_detail;
+                segment_profile.segment_graph_free_us = t_segment_graph_free_end - t_segment_graph_free_begin;
+                segment_profile.compute_ms = execute_profile.compute_ms;
+                segment_profile.comm_ms = execute_profile.post_ms;
+                segment_profile.cache_ms = execute_profile.cache_ms;
+                segment_profile.cache_live_bytes = execute_profile.cache_live_bytes;
+                segment_profile.cache_buffer_bytes = execute_profile.cache_buffer_bytes;
+                segment_profile.cache_chunks = execute_profile.cache_chunks;
+                segment_profile.cache_pool_bytes = execute_profile.cache_pool_bytes;
+                segment_profile.cache_pool_chunks = execute_profile.cache_pool_chunks;
+                segment_profile.total_ms = ggml_time_ms() - t_segment_begin;
+                segment_profiles.push_back(std::move(segment_profile));
+            }
         }
 
+        if (collect_profile) {
+            log_graph_cut_profile(segment_profiles, plan_ms, plan_ms + ggml_time_ms() - t_profile_begin);
+        }
         backend_tensor_data_map.clear();
-        free_cache_ctx_and_buffer();
+        reset_graph_cut_run_cache();
+        free_compute_buffer();
         free_compute_ctx();
         return output;
     }
@@ -2616,6 +5578,7 @@ public:
     }
 
     virtual ~GGMLRunner() {
+        free_runtime_const_cache();
         free_params_buffer();
         free_compute_buffer();
         free_params_ctx();
@@ -2682,6 +5645,17 @@ public:
     void free_cache_ctx_and_buffer() {
         free_cache_buffer();
         free_cache_ctx();
+        free_cache_chunks();
+        cache_tensor_map.clear();
+        cache_tensor_index_.clear();
+    }
+
+    void reset_graph_cut_run_cache() {
+        free_cache_buffer();
+        free_cache_ctx();
+        free_cache_chunks(graph_cut_cache_pool_retained_between_runs());
+        cache_tensor_map.clear();
+        cache_tensor_index_.clear();
     }
 
     void free_compute_buffer() {
@@ -2743,10 +5717,11 @@ public:
     }
 
     ggml_tensor* get_cache_tensor_by_name(const std::string& name) {
-        if (cache_ctx == nullptr) {
+        auto iter = cache_tensor_index_.find(name);
+        if (iter == cache_tensor_index_.end()) {
             return nullptr;
         }
-        return ggml_get_tensor(cache_ctx, name.c_str());
+        return iter->second;
     }
 
     template <typename T>
@@ -2762,18 +5737,21 @@ public:
 
         if (can_attempt_graph_cut_segmented_compute()) {
             GraphCutPlan plan;
+            int64_t t_plan_begin = ggml_time_ms();
             if (!resolve_graph_cut_plan(gf, &plan)) {
                 sd::ggml_graph_cut::clear_comm_marks();
                 free_compute_ctx();
                 return std::nullopt;
             }
+            int64_t t_plan_end = ggml_time_ms();
             sd::ggml_graph_cut::clear_comm_marks();
             if (should_use_graph_cut_segmented_compute(plan)) {
                 return compute_with_graph_cuts<T>(gf,
                                                   plan,
                                                   n_threads,
                                                   free_compute_buffer_immediately,
-                                                  no_return);
+                                                  no_return,
+                                                  t_plan_end - t_plan_begin);
             }
         }
         sd::ggml_graph_cut::clear_comm_marks();
@@ -2990,6 +5968,40 @@ public:
         }
         return ggml_ext_linear(ctx->ggml_ctx, x, w, b, force_prec_f32, scale);
     }
+
+    ggml_tensor* forward_output_slice(GGMLRunnerContext* ctx,
+                                      ggml_tensor* x,
+                                      int64_t output_offset,
+                                      int64_t output_count) {
+        if (ctx == nullptr ||
+            x == nullptr ||
+            ctx->weight_adapter != nullptr ||
+            output_offset < 0 ||
+            output_count <= 0 ||
+            output_offset + output_count > out_features) {
+            return nullptr;
+        }
+
+        ggml_tensor* w = params["weight"];
+        ggml_tensor* w_slice = ggml_view_2d(ctx->ggml_ctx,
+                                            w,
+                                            w->ne[0],
+                                            output_count,
+                                            w->nb[1],
+                                            static_cast<size_t>(output_offset) * w->nb[1]);
+
+        ggml_tensor* b_slice = nullptr;
+        if (bias) {
+            ggml_tensor* b = params["bias"];
+            b_slice = ggml_view_1d(ctx->ggml_ctx,
+                                   b,
+                                   output_count,
+                                   static_cast<size_t>(output_offset) * b->nb[0]);
+        }
+
+        return ggml_ext_linear(ctx->ggml_ctx, x, w_slice, b_slice, force_prec_f32, scale);
+    }
+
 };
 
 __STATIC_INLINE__ bool support_get_rows(ggml_type wtype) {

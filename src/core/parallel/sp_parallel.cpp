@@ -5,6 +5,7 @@
 #include <climits>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 namespace edgedit::parallel {
 namespace {
@@ -125,6 +126,26 @@ void mark_all_to_all_flat(ggml_tensor* send_flat,
                                      name,
                                      ReduceOp::kSum,
                                      count_per_peer);
+}
+
+ggml_tensor* flatten_for_comm_1d(ggml_context* ctx,
+                                 ggml_tensor* tensor) {
+    if (ggml_is_contiguous(tensor)) {
+        return ggml_reshape_1d(ctx, tensor, ggml_nelements(tensor));
+    }
+    return ggml_cont_1d(ctx, tensor, ggml_nelements(tensor));
+}
+
+ggml_tensor* cont_4d_if_needed(ggml_context* ctx,
+                               ggml_tensor* tensor,
+                               int64_t ne0,
+                               int64_t ne1,
+                               int64_t ne2,
+                               int64_t ne3) {
+    if (ggml_is_contiguous(tensor)) {
+        return ggml_reshape_4d(ctx, tensor, ne0, ne1, ne2, ne3);
+    }
+    return ggml_cont_4d(ctx, tensor, ne0, ne1, ne2, ne3);
 }
 
 } // namespace
@@ -269,6 +290,144 @@ SPSequenceGather sp_mark_gather_sequence(ggml_context* ctx,
     return gather;
 }
 
+SPSequenceGatherBatch sp_mark_gather_sequence_batched(ggml_context* ctx,
+                                                      const std::vector<ggml_tensor*>& locals,
+                                                      int world_size,
+                                                      int seq_dim,
+                                                      const std::vector<int64_t>& pads,
+                                                      const std::string& name) {
+    check_world_size(world_size, "sp_mark_gather_sequence_batched");
+    check_seq_dim(seq_dim, "sp_mark_gather_sequence_batched");
+    if (locals.empty()) {
+        throw std::invalid_argument("sp_mark_gather_sequence_batched locals must not be empty");
+    }
+    if (locals.size() != pads.size()) {
+        throw std::invalid_argument("sp_mark_gather_sequence_batched locals and pads size mismatch");
+    }
+
+    SPSequenceGatherBatch gather;
+    gather.world_size = world_size;
+    gather.seq_dim = seq_dim;
+    gather.gathered_padded.reserve(locals.size());
+    gather.gathered.reserve(locals.size());
+    gather.local_seq_lens.reserve(locals.size());
+    gather.padded_seq_lens.reserve(locals.size());
+    gather.original_seq_lens.reserve(locals.size());
+    gather.pads.reserve(locals.size());
+    gather.counts_per_input.reserve(locals.size());
+
+    std::vector<ggml_tensor*> send_chunks;
+    send_chunks.reserve(locals.size());
+    for (size_t i = 0; i < locals.size(); ++i) {
+        ggml_tensor* local = locals[i];
+        check_context_tensor(ctx, local, "sp_mark_gather_sequence_batched");
+        if (local->ne[2] != 1 || local->ne[3] != 1) {
+            throw std::invalid_argument("sp_mark_gather_sequence_batched phase 1 supports [hidden, sequence, 1, 1] only");
+        }
+
+        const int64_t pad = pads[i];
+        if (pad < 0 || pad >= local->ne[seq_dim] * static_cast<int64_t>(world_size)) {
+            std::ostringstream oss;
+            oss << "sp_mark_gather_sequence_batched invalid pad=" << pad
+                << " local_seq_len=" << local->ne[seq_dim]
+                << " world_size=" << world_size;
+            throw std::invalid_argument(oss.str());
+        }
+
+        const int64_t local_seq_len = local->ne[seq_dim];
+        const int64_t padded_seq_len = local_seq_len * world_size;
+        const int64_t original_seq_len = padded_seq_len - pad;
+        const size_t count = static_cast<size_t>(ggml_nelements(local));
+
+        gather.local_seq_lens.push_back(local_seq_len);
+        gather.padded_seq_lens.push_back(padded_seq_len);
+        gather.original_seq_lens.push_back(original_seq_len);
+        gather.pads.push_back(pad);
+        gather.counts_per_input.push_back(count);
+        gather.count_per_rank += count;
+
+        ggml_tensor* flat = flatten_for_comm_1d(ctx, local);
+        if (!name.empty()) {
+            ggml_set_name(flat, (name + "_send_" + std::to_string(i)).c_str());
+        }
+        send_chunks.push_back(flat);
+    }
+
+    gather.send_flat = send_chunks.front();
+    for (size_t i = 1; i < send_chunks.size(); ++i) {
+        gather.send_flat = ggml_concat(ctx, gather.send_flat, send_chunks[i], 0);
+    }
+    gather.send_flat = flatten_for_comm_1d(ctx, gather.send_flat);
+    if (!name.empty()) {
+        ggml_set_name(gather.send_flat, (name + "_send_flat").c_str());
+    }
+
+    gather.recv_flat = new_recv_placeholder(ctx,
+                                            gather.send_flat,
+                                            gather.send_flat,
+                                            ggml_nelements(gather.send_flat) * world_size,
+                                            1,
+                                            1,
+                                            1,
+                                            name + "_flat");
+
+    sd::ggml_graph_cut::mark_comm_op(gather.send_flat,
+                                     gather.recv_flat,
+                                     sd::ggml_graph_cut::Segment::CommKind::ALL_GATHER,
+                                     name);
+    sd::ggml_graph_cut::mark_graph_cut(gather.recv_flat,
+                                       graph_cut_group_name(name),
+                                       name + "_recv_flat");
+
+    size_t input_offset = 0;
+    for (size_t i = 0; i < locals.size(); ++i) {
+        const size_t count = gather.counts_per_input[i];
+        ggml_tensor* flat_view = nullptr;
+        for (int src = 0; src < world_size; ++src) {
+            const size_t offset = (static_cast<size_t>(src) * gather.count_per_rank +
+                                   input_offset) *
+                                  gather.recv_flat->nb[0];
+            ggml_tensor* src_view = ggml_view_1d(ctx,
+                                                 gather.recv_flat,
+                                                 count,
+                                                 offset);
+            if (flat_view == nullptr) {
+                flat_view = src_view;
+            } else {
+                flat_view = ggml_concat(ctx, flat_view, src_view, 0);
+            }
+        }
+
+        ggml_tensor* padded = ggml_reshape_4d(ctx,
+                                              flat_view,
+                                              locals[i]->ne[0],
+                                              gather.padded_seq_lens[i],
+                                              locals[i]->ne[2],
+                                              locals[i]->ne[3]);
+        if (!name.empty()) {
+            ggml_set_name(padded, (name + "_padded_" + std::to_string(i)).c_str());
+        }
+        gather.gathered_padded.push_back(padded);
+
+        ggml_tensor* output = nullptr;
+        if (gather.pads[i] > 0) {
+            output = view_sequence_dim_1(ctx,
+                                         padded,
+                                         0,
+                                         gather.original_seq_lens[i]);
+        } else {
+            output = ggml_dup(ctx, padded);
+        }
+        if (!name.empty()) {
+            ggml_set_name(output, (name + "_output_" + std::to_string(i)).c_str());
+        }
+        gather.gathered.push_back(output);
+        input_offset += count;
+    }
+
+    return gather;
+}
+
 SPAllToAll4DLayout sp_all_to_all_4d_seq_to_head(ggml_context* ctx,
                                                 ggml_tensor* input,
                                                 int world_size,
@@ -305,7 +464,7 @@ SPAllToAll4DLayout sp_all_to_all_4d_seq_to_head(ggml_context* ctx,
                                             world_size,
                                             layout.shard_sequence);
     ggml_tensor* peer_last = ggml_cont(ctx, ggml_permute(ctx, reshaped, 0, 1, 3, 2));
-    layout.send_flat = ggml_cont_1d(ctx, peer_last, ggml_nelements(peer_last));
+    layout.send_flat = flatten_for_comm_1d(ctx, peer_last);
     if (!name.empty()) {
         ggml_set_name(layout.send_flat, (name + "_send_flat").c_str());
     }
@@ -335,15 +494,169 @@ SPAllToAll4DLayout sp_all_to_all_4d_seq_to_head(ggml_context* ctx,
                                        layout.shard_heads,
                                        layout.shard_sequence,
                                        world_size);
-    layout.output = ggml_cont_4d(ctx,
-                                 mid,
-                                 layout.head_dim,
-                                 layout.shard_heads,
-                                 layout.sequence,
-                                 layout.batch);
+    layout.output = cont_4d_if_needed(ctx,
+                                      mid,
+                                      layout.head_dim,
+                                      layout.shard_heads,
+                                      layout.sequence,
+                                      layout.batch);
     if (!name.empty()) {
         ggml_set_name(layout.output, (name + "_output").c_str());
     }
+    return layout;
+}
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched(ggml_context* ctx,
+                                                             const std::vector<ggml_tensor*>& inputs,
+                                                             int world_size,
+                                                             const std::string& name) {
+    return sp_all_to_all_4d_seq_to_head_batched_mixed(ctx,
+                                                      inputs,
+                                                      std::vector<bool>(inputs.size(), false),
+                                                      world_size,
+                                                      name);
+}
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_mixed(ggml_context* ctx,
+                                                                   const std::vector<ggml_tensor*>& inputs,
+                                                                   const std::vector<bool>& output_seq_major,
+                                                                   int world_size,
+                                                                   const std::string& name) {
+    check_world_size(world_size, "sp_all_to_all_4d_seq_to_head_batched");
+    if (inputs.empty()) {
+        throw std::invalid_argument("sp_all_to_all_4d_seq_to_head_batched inputs must not be empty");
+    }
+    if (output_seq_major.size() != inputs.size()) {
+        throw std::invalid_argument("sp_all_to_all_4d_seq_to_head_batched_mixed output_seq_major size mismatch");
+    }
+
+    ggml_tensor* first = inputs.front();
+    check_context_tensor(ctx, first, "sp_all_to_all_4d_seq_to_head_batched");
+    if (first->ne[3] != 1) {
+        throw std::invalid_argument("sp_all_to_all_4d_seq_to_head_batched phase 1 supports batch == 1 only");
+    }
+    if (first->ne[1] % world_size != 0) {
+        std::ostringstream oss;
+        oss << "sp_all_to_all_4d_seq_to_head_batched heads must be divisible by world_size: heads="
+            << first->ne[1] << " world_size=" << world_size;
+        throw std::invalid_argument(oss.str());
+    }
+
+    SPAllToAll4DBatchLayout layout;
+    layout.direction = SPAllToAll4DDirection::kSeqToHead;
+    layout.world_size = world_size;
+    layout.batch = first->ne[3];
+    layout.heads = first->ne[1];
+    layout.shard_heads = first->ne[1] / world_size;
+    layout.shard_sequence = first->ne[2];
+    layout.sequence = first->ne[2] * world_size;
+    layout.outputs.reserve(inputs.size());
+    layout.head_dims.reserve(inputs.size());
+
+    std::vector<ggml_tensor*> contiguous_inputs;
+    contiguous_inputs.reserve(inputs.size());
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        ggml_tensor* input = inputs[i];
+        check_context_tensor(ctx, input, "sp_all_to_all_4d_seq_to_head_batched");
+        if (input->ne[1] != layout.heads ||
+            input->ne[2] != layout.shard_sequence ||
+            input->ne[3] != layout.batch) {
+            std::ostringstream oss;
+            oss << "sp_all_to_all_4d_seq_to_head_batched input " << i
+                << " shape mismatch";
+            throw std::invalid_argument(oss.str());
+        }
+        layout.head_dims.push_back(input->ne[0]);
+        layout.total_head_dim += input->ne[0];
+        contiguous_inputs.push_back(ggml_cont(ctx, input));
+    }
+
+    ggml_tensor* combined = contiguous_inputs.front();
+    for (size_t i = 1; i < contiguous_inputs.size(); ++i) {
+        combined = ggml_concat(ctx, combined, contiguous_inputs[i], 0);
+    }
+    if (!name.empty()) {
+        ggml_set_name(combined, (name + "_combined").c_str());
+    }
+
+    // combined [sum_head_dim, heads, shard_seq, 1]
+    // -> [sum_head_dim, shard_heads, P, shard_seq]
+    // -> [sum_head_dim, shard_heads, shard_seq, P] peer-major after flatten.
+    ggml_tensor* reshaped = ggml_reshape_4d(ctx,
+                                            combined,
+                                            layout.total_head_dim,
+                                            layout.shard_heads,
+                                            world_size,
+                                            layout.shard_sequence);
+    ggml_tensor* peer_last = ggml_cont(ctx, ggml_permute(ctx, reshaped, 0, 1, 3, 2));
+    layout.send_flat = flatten_for_comm_1d(ctx, peer_last);
+    if (!name.empty()) {
+        ggml_set_name(layout.send_flat, (name + "_send_flat").c_str());
+    }
+
+    layout.count_per_peer = static_cast<size_t>(ggml_nelements(layout.send_flat)) /
+                            static_cast<size_t>(world_size);
+    layout.recv_flat = new_recv_placeholder(ctx,
+                                            layout.send_flat,
+                                            layout.send_flat,
+                                            ggml_nelements(layout.send_flat),
+                                            1,
+                                            1,
+                                            1,
+                                            name + "_flat");
+
+    mark_all_to_all_flat(layout.send_flat,
+                         layout.recv_flat,
+                         layout.count_per_peer,
+                         name);
+    sd::ggml_graph_cut::mark_graph_cut(layout.recv_flat,
+                                       graph_cut_group_name(name),
+                                       name + "_recv_flat");
+
+    ggml_tensor* mid = ggml_reshape_4d(ctx,
+                                       layout.recv_flat,
+                                       layout.total_head_dim,
+                                       layout.shard_heads,
+                                       layout.shard_sequence,
+                                       world_size);
+
+    size_t offset = 0;
+    for (size_t i = 0; i < layout.head_dims.size(); ++i) {
+        const int64_t head_dim = layout.head_dims[i];
+        ggml_tensor* output_view = ggml_view_4d(ctx,
+                                                mid,
+                                                head_dim,
+                                                layout.shard_heads,
+                                                layout.shard_sequence,
+                                                world_size,
+                                                mid->nb[1],
+                                                mid->nb[2],
+                                                mid->nb[3],
+                                                offset);
+        ggml_tensor* output = nullptr;
+        if (output_seq_major[i]) {
+            ggml_tensor* seq_before_heads = ggml_permute(ctx, output_view, 0, 3, 1, 2);
+            output = cont_4d_if_needed(ctx,
+                                       seq_before_heads,
+                                       head_dim,
+                                       layout.sequence,
+                                       layout.shard_heads,
+                                       layout.batch);
+        } else {
+            output = cont_4d_if_needed(ctx,
+                                       output_view,
+                                       head_dim,
+                                       layout.shard_heads,
+                                       layout.sequence,
+                                       layout.batch);
+        }
+        if (!name.empty()) {
+            ggml_set_name(output, (name + "_output_" + std::to_string(i)).c_str());
+        }
+        layout.outputs.push_back(output);
+        offset += static_cast<size_t>(head_dim) * mid->nb[0];
+    }
+
     return layout;
 }
 
@@ -382,8 +695,7 @@ SPAllToAll4DLayout sp_all_to_all_4d_head_to_seq(ggml_context* ctx,
                                             layout.shard_heads,
                                             layout.shard_sequence,
                                             world_size);
-    ggml_tensor* peer_last = ggml_cont(ctx, reshaped);
-    layout.send_flat = ggml_cont_1d(ctx, peer_last, ggml_nelements(peer_last));
+    layout.send_flat = flatten_for_comm_1d(ctx, reshaped);
     if (!name.empty()) {
         ggml_set_name(layout.send_flat, (name + "_send_flat").c_str());
     }
@@ -414,15 +726,177 @@ SPAllToAll4DLayout sp_all_to_all_4d_head_to_seq(ggml_context* ctx,
                                        layout.shard_sequence,
                                        world_size);
     ggml_tensor* heads_before_sequence = ggml_permute(ctx, mid, 0, 1, 3, 2);
-    layout.output = ggml_cont_4d(ctx,
-                                 heads_before_sequence,
-                                 layout.head_dim,
-                                 layout.heads,
-                                 layout.shard_sequence,
-                                 layout.batch);
+    layout.output = cont_4d_if_needed(ctx,
+                                      heads_before_sequence,
+                                      layout.head_dim,
+                                      layout.heads,
+                                      layout.shard_sequence,
+                                      layout.batch);
     if (!name.empty()) {
         ggml_set_name(layout.output, (name + "_output").c_str());
     }
+    return layout;
+}
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_batched(ggml_context* ctx,
+                                                             const std::vector<ggml_tensor*>& inputs,
+                                                             int world_size,
+                                                             const std::string& name) {
+    check_world_size(world_size, "sp_all_to_all_4d_head_to_seq_batched");
+    if (inputs.empty()) {
+        throw std::invalid_argument("sp_all_to_all_4d_head_to_seq_batched inputs must not be empty");
+    }
+
+    ggml_tensor* first = inputs.front();
+    check_context_tensor(ctx, first, "sp_all_to_all_4d_head_to_seq_batched");
+    if (first->ne[3] != 1) {
+        throw std::invalid_argument("sp_all_to_all_4d_head_to_seq_batched phase 1 supports batch == 1 only");
+    }
+    if (first->ne[2] % world_size != 0) {
+        std::ostringstream oss;
+        oss << "sp_all_to_all_4d_head_to_seq_batched sequence must be divisible by world_size: sequence="
+            << first->ne[2] << " world_size=" << world_size;
+        throw std::invalid_argument(oss.str());
+    }
+
+    SPAllToAll4DBatchLayout layout;
+    layout.direction = SPAllToAll4DDirection::kHeadToSeq;
+    layout.world_size = world_size;
+    layout.batch = first->ne[3];
+    layout.head_dim = first->ne[0];
+    layout.shard_heads = first->ne[1];
+    layout.heads = first->ne[1] * world_size;
+    layout.outputs.reserve(inputs.size());
+    layout.sequences.reserve(inputs.size());
+    layout.shard_sequences.reserve(inputs.size());
+
+    std::vector<int64_t> chunk_nelements;
+    chunk_nelements.reserve(inputs.size());
+    std::vector<ggml_tensor*> send_chunks;
+    send_chunks.reserve(inputs.size() * static_cast<size_t>(world_size));
+    for (int dst = 0; dst < world_size; ++dst) {
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            ggml_tensor* input = inputs[i];
+            check_context_tensor(ctx, input, "sp_all_to_all_4d_head_to_seq_batched");
+            if (input->ne[0] != layout.head_dim ||
+                input->ne[1] != layout.shard_heads ||
+                input->ne[3] != layout.batch) {
+                std::ostringstream oss;
+                oss << "sp_all_to_all_4d_head_to_seq_batched input " << i
+                    << " shape mismatch";
+                throw std::invalid_argument(oss.str());
+            }
+            if (input->ne[2] % world_size != 0) {
+                std::ostringstream oss;
+                oss << "sp_all_to_all_4d_head_to_seq_batched input " << i
+                    << " sequence must be divisible by world_size: sequence="
+                    << input->ne[2] << " world_size=" << world_size;
+                throw std::invalid_argument(oss.str());
+            }
+
+            const int64_t shard_sequence = input->ne[2] / world_size;
+            if (dst == 0) {
+                layout.sequences.push_back(input->ne[2]);
+                layout.shard_sequences.push_back(shard_sequence);
+                layout.sequence += input->ne[2];
+                layout.shard_sequence += shard_sequence;
+                chunk_nelements.push_back(input->ne[0] *
+                                          input->ne[1] *
+                                          shard_sequence *
+                                          input->ne[3]);
+            }
+
+            ggml_tensor* chunk = ggml_view_4d(ctx,
+                                              input,
+                                              layout.head_dim,
+                                              layout.shard_heads,
+                                              shard_sequence,
+                                              layout.batch,
+                                              input->nb[1],
+                                              input->nb[2],
+                                              input->nb[3],
+                                              static_cast<size_t>(dst) *
+                                                  static_cast<size_t>(shard_sequence) *
+                                                  input->nb[2]);
+            chunk = flatten_for_comm_1d(ctx, chunk);
+            if (!name.empty()) {
+                ggml_set_name(chunk, (name + "_send_chunk_" + std::to_string(dst) + "_" + std::to_string(i)).c_str());
+            }
+            send_chunks.push_back(chunk);
+        }
+    }
+
+    ggml_tensor* send_flat = send_chunks.front();
+    for (size_t i = 1; i < send_chunks.size(); ++i) {
+        send_flat = ggml_concat(ctx, send_flat, send_chunks[i], 0);
+    }
+    layout.send_flat = flatten_for_comm_1d(ctx, send_flat);
+    if (!name.empty()) {
+        ggml_set_name(layout.send_flat, (name + "_send_flat").c_str());
+    }
+
+    layout.count_per_peer = static_cast<size_t>(ggml_nelements(layout.send_flat)) /
+                            static_cast<size_t>(world_size);
+    layout.recv_flat = new_recv_placeholder(ctx,
+                                            layout.send_flat,
+                                            layout.send_flat,
+                                            ggml_nelements(layout.send_flat),
+                                            1,
+                                            1,
+                                            1,
+                                            name + "_flat");
+
+    mark_all_to_all_flat(layout.send_flat,
+                         layout.recv_flat,
+                         layout.count_per_peer,
+                         name);
+    sd::ggml_graph_cut::mark_graph_cut(layout.recv_flat,
+                                       graph_cut_group_name(name),
+                                       name + "_recv_flat");
+
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        const int64_t shard_sequence = layout.shard_sequences[i];
+        const int64_t chunk_ne = chunk_nelements[i];
+        size_t input_peer_offset = 0;
+        for (size_t j = 0; j < i; ++j) {
+            input_peer_offset += static_cast<size_t>(chunk_nelements[j]);
+        }
+
+        ggml_tensor* flat_view = nullptr;
+        for (int src = 0; src < world_size; ++src) {
+            const size_t offset = (static_cast<size_t>(src) * layout.count_per_peer +
+                                   input_peer_offset) *
+                                  layout.recv_flat->nb[0];
+            ggml_tensor* src_view = ggml_view_1d(ctx,
+                                                 layout.recv_flat,
+                                                 chunk_ne,
+                                                 offset);
+            if (flat_view == nullptr) {
+                flat_view = src_view;
+            } else {
+                flat_view = ggml_concat(ctx, flat_view, src_view, 0);
+            }
+        }
+
+        ggml_tensor* src_peer_major = ggml_reshape_4d(ctx,
+                                                      flat_view,
+                                                      layout.head_dim,
+                                                      layout.shard_heads,
+                                                      shard_sequence,
+                                                      world_size);
+        ggml_tensor* heads_before_sequence = ggml_permute(ctx, src_peer_major, 0, 1, 3, 2);
+        ggml_tensor* output = ggml_cont_4d(ctx,
+                                           heads_before_sequence,
+                                           layout.head_dim,
+                                           layout.heads,
+                                           shard_sequence,
+                                           layout.batch);
+        if (!name.empty()) {
+            ggml_set_name(output, (name + "_output_" + std::to_string(i)).c_str());
+        }
+        layout.outputs.push_back(output);
+    }
+
     return layout;
 }
 

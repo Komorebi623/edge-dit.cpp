@@ -616,6 +616,141 @@ void run_split_gather_no_pad_test(edgedit::parallel::ProcessGroup& group,
     ggml_free(ctx);
 }
 
+void run_split_gather_batched_no_pad_test(edgedit::parallel::ProcessGroup& group,
+                                          ggml_backend_t backend) {
+    const int rank = group.rank();
+    const int world_size = group.size();
+    if (world_size != 2) {
+        throw std::runtime_error("run_split_gather_batched_no_pad_test expects world_size == 2");
+    }
+
+    ggml_context* ctx = new_test_context();
+
+    const int hidden = 3;
+    const int txt_seq = 8;
+    const int img_seq = 6;
+    ggml_tensor* txt_full = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hidden, txt_seq, 1, 1);
+    ggml_tensor* img_full = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hidden, img_seq, 1, 1);
+    ggml_set_name(txt_full, "sp_sequence_batched_txt_full");
+    ggml_set_name(img_full, "sp_sequence_batched_img_full");
+
+    sd::ggml_graph_cut::clear_comm_marks();
+    edgedit::parallel::SPSequenceSplit txt_split =
+        edgedit::parallel::sp_split_sequence(ctx,
+                                             txt_full,
+                                             rank,
+                                             world_size,
+                                             1,
+                                             "sp_test_sequence_batched_txt_split");
+    edgedit::parallel::SPSequenceSplit img_split =
+        edgedit::parallel::sp_split_sequence(ctx,
+                                             img_full,
+                                             rank,
+                                             world_size,
+                                             1,
+                                             "sp_test_sequence_batched_img_split");
+
+    edgedit::parallel::SPSequenceGatherBatch gather =
+        edgedit::parallel::sp_mark_gather_sequence_batched(ctx,
+                                                           {txt_split.local, img_split.local},
+                                                           world_size,
+                                                           1,
+                                                           {txt_split.pad, img_split.pad},
+                                                           "sp_test_gather_sequence_batched");
+
+    if (gather.gathered.size() != 2 ||
+        gather.gathered_padded.size() != 2 ||
+        gather.count_per_rank != static_cast<size_t>(hidden * (txt_seq + img_seq) / world_size) ||
+        gather.gathered[0]->ne[0] != hidden ||
+        gather.gathered[0]->ne[1] != txt_seq ||
+        gather.gathered[1]->ne[0] != hidden ||
+        gather.gathered[1]->ne[1] != img_seq) {
+        throw std::runtime_error("sp_mark_gather_sequence_batched returned wrong metadata or shape");
+    }
+
+    ggml_cgraph* pre_graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(pre_graph, txt_split.local);
+    ggml_build_forward_expand(pre_graph, img_split.local);
+    ggml_build_forward_expand(pre_graph, gather.recv_flat);
+
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buffer == nullptr) {
+        ggml_free(ctx);
+        throw std::runtime_error("alloc ctx tensors failed in batched split/gather test");
+    }
+
+    std::vector<float> txt_values = make_sequence_full_values(hidden, txt_seq);
+    std::vector<float> img_values = make_sequence_full_values(hidden, img_seq);
+    for (float& value : img_values) {
+        value += 10000.0f;
+    }
+    tensor_set_f32(txt_full, txt_values);
+    tensor_set_f32(img_full, img_values);
+    tensor_set_f32(gather.recv_flat->src[0],
+                   std::vector<float>(static_cast<size_t>(ggml_nelements(gather.recv_flat)), 0.0f));
+
+    run_graph(backend, pre_graph);
+
+    check_close(tensor_get_f32(txt_split.local),
+                make_sequence_local_expected(rank, hidden, txt_seq, txt_seq / world_size),
+                "sp split batched txt local shard");
+    std::vector<float> img_local_expected =
+        make_sequence_local_expected(rank, hidden, img_seq, img_seq / world_size);
+    for (float& value : img_local_expected) {
+        value += 10000.0f;
+    }
+    check_close(tensor_get_f32(img_split.local),
+                img_local_expected,
+                "sp split batched img local shard");
+
+    const int send_idx = find_node_index(pre_graph, gather.send_flat, "gather.batched.send_flat");
+    const int recv_idx = find_node_index(pre_graph, gather.recv_flat, "gather.batched.recv_flat");
+    sd::ggml_graph_cut::Plan base_plan =
+        make_single_segment_plan(pre_graph, {send_idx, recv_idx}, {recv_idx});
+    sd::ggml_graph_cut::Segment segment =
+        attach_one_comm_or_throw(pre_graph, base_plan, "sp_split_gather_batched_no_pad");
+
+    if (segment.comm_ops.front().kind != sd::ggml_graph_cut::Segment::CommKind::ALL_GATHER) {
+        throw std::runtime_error("sp_split_gather_batched_no_pad expected one ALL_GATHER comm op");
+    }
+
+    execute_segment_comm_or_throw(group, pre_graph, segment, "sp_split_gather_batched_no_pad");
+
+    std::vector<float> expected_flat;
+    expected_flat.reserve(static_cast<size_t>(hidden * (txt_seq + img_seq)));
+    for (int src = 0; src < world_size; ++src) {
+        std::vector<float> txt_local =
+            make_sequence_local_expected(src, hidden, txt_seq, txt_seq / world_size);
+        expected_flat.insert(expected_flat.end(), txt_local.begin(), txt_local.end());
+
+        std::vector<float> img_local =
+            make_sequence_local_expected(src, hidden, img_seq, img_seq / world_size);
+        for (float& value : img_local) {
+            value += 10000.0f;
+        }
+        expected_flat.insert(expected_flat.end(), img_local.begin(), img_local.end());
+    }
+    check_close(tensor_get_f32(gather.recv_flat),
+                expected_flat,
+                "sp split batched all_gather flat recv");
+
+    tensor_set_f32(gather.recv_flat->src[0], expected_flat);
+    ggml_cgraph* post_graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(post_graph, gather.gathered[0]);
+    ggml_build_forward_expand(post_graph, gather.gathered[1]);
+    run_graph(backend, post_graph);
+
+    check_close(tensor_get_f32(gather.gathered[0]),
+                txt_values,
+                "sp gather batched txt post layout");
+    check_close(tensor_get_f32(gather.gathered[1]),
+                img_values,
+                "sp gather batched img post layout");
+
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+}
+
 std::vector<float> make_seq_to_head_input(int rank,
                                           int hidden,
                                           int heads,
@@ -643,6 +778,26 @@ std::vector<float> make_seq_to_head_expected(int rank,
         for (int seq = 0; seq < shard_seq; ++seq) {
             for (int local_head = 0; local_head < shard_heads; ++local_head) {
                 const int full_head = rank * shard_heads + local_head;
+                for (int h = 0; h < hidden; ++h) {
+                    expected.push_back(a2a_seq_to_head_value(src, seq, full_head, h));
+                }
+            }
+        }
+    }
+    return expected;
+}
+
+std::vector<float> make_seq_to_head_seq_major_expected(int rank,
+                                                       int world_size,
+                                                       int hidden,
+                                                       int shard_heads,
+                                                       int shard_seq) {
+    std::vector<float> expected;
+    expected.reserve(static_cast<size_t>(hidden * shard_heads * shard_seq * world_size));
+    for (int local_head = 0; local_head < shard_heads; ++local_head) {
+        const int full_head = rank * shard_heads + local_head;
+        for (int src = 0; src < world_size; ++src) {
+            for (int seq = 0; seq < shard_seq; ++seq) {
                 for (int h = 0; h < hidden; ++h) {
                     expected.push_back(a2a_seq_to_head_value(src, seq, full_head, h));
                 }
@@ -726,6 +881,442 @@ void run_seq_to_head_test(edgedit::parallel::ProcessGroup& group,
     check_close(tensor_get_f32(layout.output),
                 expected,
                 "sp seq_to_head post layout");
+
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+}
+
+void run_seq_to_head_batched_test(edgedit::parallel::ProcessGroup& group,
+                                  ggml_backend_t backend) {
+    const int rank = group.rank();
+    const int world_size = group.size();
+    if (world_size != 2) {
+        throw std::runtime_error("run_seq_to_head_batched_test expects world_size == 2");
+    }
+
+    ggml_context* ctx = new_test_context();
+
+    const int hidden = 2;
+    const int heads = 4;
+    const int shard_heads = heads / world_size;
+    const int shard_seq = 3;
+    ggml_tensor* q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hidden, heads, shard_seq, 1);
+    ggml_tensor* k = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hidden, heads, shard_seq, 1);
+    ggml_tensor* v = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hidden, heads, shard_seq, 1);
+    ggml_set_name(q, "sp_seq_to_head_batched_q");
+    ggml_set_name(k, "sp_seq_to_head_batched_k");
+    ggml_set_name(v, "sp_seq_to_head_batched_v");
+
+    sd::ggml_graph_cut::clear_comm_marks();
+    edgedit::parallel::SPAllToAll4DBatchLayout layout =
+        edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched(ctx,
+                                                                {q, k, v},
+                                                                world_size,
+                                                                "sp_test_seq_to_head_batched");
+
+    if (layout.outputs.size() != 3 ||
+        layout.outputs[0]->ne[0] != hidden ||
+        layout.outputs[0]->ne[1] != shard_heads ||
+        layout.outputs[0]->ne[2] != shard_seq * world_size ||
+        layout.count_per_peer != static_cast<size_t>(hidden * 3 * shard_heads * shard_seq)) {
+        throw std::runtime_error("sp_all_to_all_4d_seq_to_head_batched returned wrong metadata or shape");
+    }
+
+    ggml_cgraph* pre_graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(pre_graph, layout.send_flat);
+    ggml_build_forward_expand(pre_graph, layout.recv_flat);
+
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buffer == nullptr) {
+        ggml_free(ctx);
+        throw std::runtime_error("alloc ctx tensors failed in seq_to_head batched test");
+    }
+
+    std::vector<float> q_values = make_seq_to_head_input(rank, hidden, heads, shard_seq);
+    std::vector<float> k_values = q_values;
+    std::vector<float> v_values = q_values;
+    for (float& value : k_values) {
+        value += 10000.0f;
+    }
+    for (float& value : v_values) {
+        value += 20000.0f;
+    }
+    tensor_set_f32(q, q_values);
+    tensor_set_f32(k, k_values);
+    tensor_set_f32(v, v_values);
+    tensor_set_f32(layout.recv_flat->src[0],
+                   std::vector<float>(static_cast<size_t>(ggml_nelements(layout.recv_flat)), 0.0f));
+
+    run_graph(backend, pre_graph);
+
+    const int send_idx = find_node_index(pre_graph, layout.send_flat, "seq_to_head_batched.send_flat");
+    const int recv_idx = find_node_index(pre_graph, layout.recv_flat, "seq_to_head_batched.recv_flat");
+    sd::ggml_graph_cut::Plan base_plan =
+        make_single_segment_plan(pre_graph, {send_idx, recv_idx}, {recv_idx});
+    sd::ggml_graph_cut::Segment segment =
+        attach_one_comm_or_throw(pre_graph, base_plan, "sp_seq_to_head_batched");
+
+    if (segment.comm_ops.front().kind != sd::ggml_graph_cut::Segment::CommKind::ALL_TO_ALL ||
+        segment.comm_ops.front().count_per_peer != layout.count_per_peer) {
+        throw std::runtime_error("sp_seq_to_head_batched expected one ALL_TO_ALL comm op with layout count_per_peer");
+    }
+
+    execute_segment_comm_or_throw(group, pre_graph, segment, "sp_seq_to_head_batched");
+
+    std::vector<float> q_expected =
+        make_seq_to_head_expected(rank, world_size, hidden, shard_heads, shard_seq);
+    std::vector<float> k_expected = q_expected;
+    std::vector<float> v_expected = q_expected;
+    for (float& value : k_expected) {
+        value += 10000.0f;
+    }
+    for (float& value : v_expected) {
+        value += 20000.0f;
+    }
+
+    std::vector<float> expected_flat;
+    expected_flat.reserve(q_expected.size() + k_expected.size() + v_expected.size());
+    for (int src = 0; src < world_size; ++src) {
+        for (int seq = 0; seq < shard_seq; ++seq) {
+            for (int local_head = 0; local_head < shard_heads; ++local_head) {
+                const int full_head = rank * shard_heads + local_head;
+                for (int h = 0; h < hidden; ++h) {
+                    expected_flat.push_back(a2a_seq_to_head_value(src, seq, full_head, h));
+                }
+                for (int h = 0; h < hidden; ++h) {
+                    expected_flat.push_back(a2a_seq_to_head_value(src, seq, full_head, h) + 10000.0f);
+                }
+                for (int h = 0; h < hidden; ++h) {
+                    expected_flat.push_back(a2a_seq_to_head_value(src, seq, full_head, h) + 20000.0f);
+                }
+            }
+        }
+    }
+    check_close(tensor_get_f32(layout.recv_flat),
+                expected_flat,
+                "sp seq_to_head batched flat recv");
+
+    tensor_set_f32(layout.recv_flat->src[0], expected_flat);
+    ggml_cgraph* post_graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(post_graph, layout.outputs[0]);
+    ggml_build_forward_expand(post_graph, layout.outputs[1]);
+    ggml_build_forward_expand(post_graph, layout.outputs[2]);
+    run_graph(backend, post_graph);
+    check_close(tensor_get_f32(layout.outputs[0]),
+                q_expected,
+                "sp seq_to_head batched q output");
+    check_close(tensor_get_f32(layout.outputs[1]),
+                k_expected,
+                "sp seq_to_head batched k output");
+    check_close(tensor_get_f32(layout.outputs[2]),
+                v_expected,
+                "sp seq_to_head batched v output");
+
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+}
+
+void run_seq_to_head_batched_mixed_layout_test(edgedit::parallel::ProcessGroup& group,
+                                               ggml_backend_t backend) {
+    const int rank = group.rank();
+    const int world_size = group.size();
+    if (world_size != 2) {
+        throw std::runtime_error("run_seq_to_head_batched_mixed_layout_test expects world_size == 2");
+    }
+
+    ggml_context* ctx = new_test_context();
+
+    const int hidden = 2;
+    const int heads = 4;
+    const int shard_heads = heads / world_size;
+    const int shard_seq = 3;
+    ggml_tensor* q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hidden, heads, shard_seq, 1);
+    ggml_tensor* k = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hidden, heads, shard_seq, 1);
+    ggml_tensor* v = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hidden, heads, shard_seq, 1);
+    ggml_set_name(q, "sp_seq_to_head_batched_mixed_q");
+    ggml_set_name(k, "sp_seq_to_head_batched_mixed_k");
+    ggml_set_name(v, "sp_seq_to_head_batched_mixed_v");
+
+    sd::ggml_graph_cut::clear_comm_marks();
+    edgedit::parallel::SPAllToAll4DBatchLayout layout =
+        edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched_mixed(ctx,
+                                                                      {q, k, v},
+                                                                      {true, true, false},
+                                                                      world_size,
+                                                                      "sp_test_seq_to_head_batched_mixed");
+
+    if (layout.outputs.size() != 3 ||
+        layout.outputs[0]->ne[0] != hidden ||
+        layout.outputs[0]->ne[1] != shard_seq * world_size ||
+        layout.outputs[0]->ne[2] != shard_heads ||
+        layout.outputs[1]->ne[0] != hidden ||
+        layout.outputs[1]->ne[1] != shard_seq * world_size ||
+        layout.outputs[1]->ne[2] != shard_heads ||
+        layout.outputs[2]->ne[0] != hidden ||
+        layout.outputs[2]->ne[1] != shard_heads ||
+        layout.outputs[2]->ne[2] != shard_seq * world_size ||
+        layout.count_per_peer != static_cast<size_t>(hidden * 3 * shard_heads * shard_seq)) {
+        throw std::runtime_error("sp_all_to_all_4d_seq_to_head_batched_mixed returned wrong metadata or shape");
+    }
+
+    ggml_cgraph* pre_graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(pre_graph, layout.send_flat);
+    ggml_build_forward_expand(pre_graph, layout.recv_flat);
+
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buffer == nullptr) {
+        ggml_free(ctx);
+        throw std::runtime_error("alloc ctx tensors failed in seq_to_head batched mixed layout test");
+    }
+
+    std::vector<float> q_values = make_seq_to_head_input(rank, hidden, heads, shard_seq);
+    std::vector<float> k_values = q_values;
+    std::vector<float> v_values = q_values;
+    for (float& value : k_values) {
+        value += 10000.0f;
+    }
+    for (float& value : v_values) {
+        value += 20000.0f;
+    }
+    tensor_set_f32(q, q_values);
+    tensor_set_f32(k, k_values);
+    tensor_set_f32(v, v_values);
+    tensor_set_f32(layout.recv_flat->src[0],
+                   std::vector<float>(static_cast<size_t>(ggml_nelements(layout.recv_flat)), 0.0f));
+
+    run_graph(backend, pre_graph);
+
+    const int send_idx = find_node_index(pre_graph, layout.send_flat, "seq_to_head_batched_mixed.send_flat");
+    const int recv_idx = find_node_index(pre_graph, layout.recv_flat, "seq_to_head_batched_mixed.recv_flat");
+    sd::ggml_graph_cut::Plan base_plan =
+        make_single_segment_plan(pre_graph, {send_idx, recv_idx}, {recv_idx});
+    sd::ggml_graph_cut::Segment segment =
+        attach_one_comm_or_throw(pre_graph, base_plan, "sp_seq_to_head_batched_mixed");
+
+    if (segment.comm_ops.front().kind != sd::ggml_graph_cut::Segment::CommKind::ALL_TO_ALL ||
+        segment.comm_ops.front().count_per_peer != layout.count_per_peer) {
+        throw std::runtime_error("sp_seq_to_head_batched_mixed expected one ALL_TO_ALL comm op with layout count_per_peer");
+    }
+
+    execute_segment_comm_or_throw(group, pre_graph, segment, "sp_seq_to_head_batched_mixed");
+
+    std::vector<float> q_expected =
+        make_seq_to_head_expected(rank, world_size, hidden, shard_heads, shard_seq);
+    std::vector<float> k_expected = q_expected;
+    std::vector<float> v_expected = q_expected;
+    for (float& value : k_expected) {
+        value += 10000.0f;
+    }
+    for (float& value : v_expected) {
+        value += 20000.0f;
+    }
+
+    std::vector<float> expected_flat;
+    expected_flat.reserve(q_expected.size() + k_expected.size() + v_expected.size());
+    for (int src = 0; src < world_size; ++src) {
+        for (int seq = 0; seq < shard_seq; ++seq) {
+            for (int local_head = 0; local_head < shard_heads; ++local_head) {
+                const int full_head = rank * shard_heads + local_head;
+                for (int h = 0; h < hidden; ++h) {
+                    expected_flat.push_back(a2a_seq_to_head_value(src, seq, full_head, h));
+                }
+                for (int h = 0; h < hidden; ++h) {
+                    expected_flat.push_back(a2a_seq_to_head_value(src, seq, full_head, h) + 10000.0f);
+                }
+                for (int h = 0; h < hidden; ++h) {
+                    expected_flat.push_back(a2a_seq_to_head_value(src, seq, full_head, h) + 20000.0f);
+                }
+            }
+        }
+    }
+    check_close(tensor_get_f32(layout.recv_flat),
+                expected_flat,
+                "sp seq_to_head batched mixed flat recv");
+
+    tensor_set_f32(layout.recv_flat->src[0], expected_flat);
+    ggml_cgraph* post_graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(post_graph, layout.outputs[0]);
+    ggml_build_forward_expand(post_graph, layout.outputs[1]);
+    ggml_build_forward_expand(post_graph, layout.outputs[2]);
+    run_graph(backend, post_graph);
+
+    std::vector<float> q_seq_major_expected =
+        make_seq_to_head_seq_major_expected(rank, world_size, hidden, shard_heads, shard_seq);
+    std::vector<float> k_seq_major_expected = q_seq_major_expected;
+    for (float& value : k_seq_major_expected) {
+        value += 10000.0f;
+    }
+
+    check_close(tensor_get_f32(layout.outputs[0]),
+                q_seq_major_expected,
+                "sp seq_to_head batched mixed q seq-major output");
+    check_close(tensor_get_f32(layout.outputs[1]),
+                k_seq_major_expected,
+                "sp seq_to_head batched mixed k seq-major output");
+    check_close(tensor_get_f32(layout.outputs[2]),
+                v_expected,
+                "sp seq_to_head batched mixed v output");
+
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+}
+
+void run_seq_to_head_batched_packed_view_input_test(edgedit::parallel::ProcessGroup& group,
+                                                   ggml_backend_t backend) {
+    const int rank = group.rank();
+    const int world_size = group.size();
+    if (world_size != 2) {
+        throw std::runtime_error("run_seq_to_head_batched_packed_view_input_test expects world_size == 2");
+    }
+
+    ggml_context* ctx = new_test_context();
+
+    const int hidden = 2;
+    const int heads = 4;
+    const int shard_heads = heads / world_size;
+    const int shard_seq = 3;
+    ggml_tensor* packed = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hidden * heads * 3, shard_seq, 1, 1);
+    ggml_set_name(packed, "sp_seq_to_head_batched_packed_qkv");
+
+    ggml_tensor* q = ggml_view_4d(ctx,
+                                  packed,
+                                  hidden,
+                                  heads,
+                                  shard_seq,
+                                  1,
+                                  packed->nb[0] * hidden,
+                                  packed->nb[1],
+                                  packed->nb[2],
+                                  0);
+    ggml_tensor* k = ggml_view_4d(ctx,
+                                  packed,
+                                  hidden,
+                                  heads,
+                                  shard_seq,
+                                  1,
+                                  packed->nb[0] * hidden,
+                                  packed->nb[1],
+                                  packed->nb[2],
+                                  packed->nb[0] * hidden * heads);
+    ggml_tensor* v = ggml_view_4d(ctx,
+                                  packed,
+                                  hidden,
+                                  heads,
+                                  shard_seq,
+                                  1,
+                                  packed->nb[0] * hidden,
+                                  packed->nb[1],
+                                  packed->nb[2],
+                                  packed->nb[0] * hidden * heads * 2);
+    ggml_set_name(q, "sp_seq_to_head_batched_packed_q");
+    ggml_set_name(k, "sp_seq_to_head_batched_packed_k");
+    ggml_set_name(v, "sp_seq_to_head_batched_packed_v");
+
+    sd::ggml_graph_cut::clear_comm_marks();
+    edgedit::parallel::SPAllToAll4DBatchLayout layout =
+        edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched(ctx,
+                                                                {q, k, v},
+                                                                world_size,
+                                                                "sp_test_seq_to_head_batched_packed");
+
+    if (layout.outputs.size() != 3 ||
+        layout.outputs[0]->ne[0] != hidden ||
+        layout.outputs[0]->ne[1] != shard_heads ||
+        layout.outputs[0]->ne[2] != shard_seq * world_size ||
+        layout.count_per_peer != static_cast<size_t>(hidden * 3 * shard_heads * shard_seq)) {
+        throw std::runtime_error("sp_all_to_all_4d_seq_to_head_batched packed view returned wrong metadata or shape");
+    }
+
+    ggml_cgraph* pre_graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(pre_graph, layout.send_flat);
+    ggml_build_forward_expand(pre_graph, layout.recv_flat);
+
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buffer == nullptr) {
+        ggml_free(ctx);
+        throw std::runtime_error("alloc ctx tensors failed in seq_to_head batched packed view test");
+    }
+
+    std::vector<float> packed_values;
+    packed_values.reserve(static_cast<size_t>(hidden * heads * 3 * shard_seq));
+    for (int seq = 0; seq < shard_seq; ++seq) {
+        for (int part = 0; part < 3; ++part) {
+            for (int head = 0; head < heads; ++head) {
+                const float offset = static_cast<float>(part * 10000);
+                for (int h = 0; h < hidden; ++h) {
+                    packed_values.push_back(a2a_seq_to_head_value(rank, seq, head, h) + offset);
+                }
+            }
+        }
+    }
+    tensor_set_f32(packed, packed_values);
+    tensor_set_f32(layout.recv_flat->src[0],
+                   std::vector<float>(static_cast<size_t>(ggml_nelements(layout.recv_flat)), 0.0f));
+
+    run_graph(backend, pre_graph);
+
+    const int send_idx = find_node_index(pre_graph, layout.send_flat, "seq_to_head_batched_packed.send_flat");
+    const int recv_idx = find_node_index(pre_graph, layout.recv_flat, "seq_to_head_batched_packed.recv_flat");
+    sd::ggml_graph_cut::Plan base_plan =
+        make_single_segment_plan(pre_graph, {send_idx, recv_idx}, {recv_idx});
+    sd::ggml_graph_cut::Segment segment =
+        attach_one_comm_or_throw(pre_graph, base_plan, "sp_seq_to_head_batched_packed");
+
+    if (segment.comm_ops.front().kind != sd::ggml_graph_cut::Segment::CommKind::ALL_TO_ALL ||
+        segment.comm_ops.front().count_per_peer != layout.count_per_peer) {
+        throw std::runtime_error("sp_seq_to_head_batched_packed expected one ALL_TO_ALL comm op with layout count_per_peer");
+    }
+
+    execute_segment_comm_or_throw(group, pre_graph, segment, "sp_seq_to_head_batched_packed");
+
+    std::vector<float> q_expected =
+        make_seq_to_head_expected(rank, world_size, hidden, shard_heads, shard_seq);
+    std::vector<float> k_expected = q_expected;
+    std::vector<float> v_expected = q_expected;
+    for (float& value : k_expected) {
+        value += 10000.0f;
+    }
+    for (float& value : v_expected) {
+        value += 20000.0f;
+    }
+
+    std::vector<float> expected_flat;
+    expected_flat.reserve(q_expected.size() + k_expected.size() + v_expected.size());
+    for (int src = 0; src < world_size; ++src) {
+        for (int seq = 0; seq < shard_seq; ++seq) {
+            for (int local_head = 0; local_head < shard_heads; ++local_head) {
+                const int full_head = rank * shard_heads + local_head;
+                for (int h = 0; h < hidden; ++h) {
+                    expected_flat.push_back(a2a_seq_to_head_value(src, seq, full_head, h));
+                }
+                for (int h = 0; h < hidden; ++h) {
+                    expected_flat.push_back(a2a_seq_to_head_value(src, seq, full_head, h) + 10000.0f);
+                }
+                for (int h = 0; h < hidden; ++h) {
+                    expected_flat.push_back(a2a_seq_to_head_value(src, seq, full_head, h) + 20000.0f);
+                }
+            }
+        }
+    }
+    check_close(tensor_get_f32(layout.recv_flat),
+                expected_flat,
+                "sp seq_to_head batched packed flat recv");
+
+    tensor_set_f32(layout.recv_flat->src[0], expected_flat);
+    ggml_cgraph* post_graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(post_graph, layout.outputs[0]);
+    ggml_build_forward_expand(post_graph, layout.outputs[1]);
+    ggml_build_forward_expand(post_graph, layout.outputs[2]);
+    run_graph(backend, post_graph);
+    check_close(tensor_get_f32(layout.outputs[0]),
+                q_expected,
+                "sp seq_to_head batched packed q output");
+    check_close(tensor_get_f32(layout.outputs[1]),
+                k_expected,
+                "sp seq_to_head batched packed k output");
+    check_close(tensor_get_f32(layout.outputs[2]),
+                v_expected,
+                "sp seq_to_head batched packed v output");
 
     ggml_backend_buffer_free(buffer);
     ggml_free(ctx);
@@ -861,6 +1452,130 @@ void run_head_to_seq_test(edgedit::parallel::ProcessGroup& group,
     check_close(tensor_get_f32(layout.output),
                 make_head_to_seq_output_expected(rank, world_size, hidden, shard_heads, shard_seq),
                 "sp head_to_seq post layout");
+
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+}
+
+void run_head_to_seq_batched_test(edgedit::parallel::ProcessGroup& group,
+                                  ggml_backend_t backend) {
+    const int rank = group.rank();
+    const int world_size = group.size();
+    if (world_size != 2) {
+        throw std::runtime_error("run_head_to_seq_batched_test expects world_size == 2");
+    }
+
+    ggml_context* ctx = new_test_context();
+
+    const int hidden = 2;
+    const int shard_heads = 2;
+    const int txt_sequence = 6;
+    const int img_sequence = 4;
+    const int txt_shard_seq = txt_sequence / world_size;
+    const int img_shard_seq = img_sequence / world_size;
+    ggml_tensor* txt = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hidden, shard_heads, txt_sequence, 1);
+    ggml_tensor* img = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hidden, shard_heads, img_sequence, 1);
+    ggml_set_name(txt, "sp_head_to_seq_batched_txt");
+    ggml_set_name(img, "sp_head_to_seq_batched_img");
+
+    sd::ggml_graph_cut::clear_comm_marks();
+    edgedit::parallel::SPAllToAll4DBatchLayout layout =
+        edgedit::parallel::sp_all_to_all_4d_head_to_seq_batched(ctx,
+                                                                {txt, img},
+                                                                world_size,
+                                                                "sp_test_head_to_seq_batched");
+
+    if (layout.outputs.size() != 2 ||
+        layout.outputs[0]->ne[0] != hidden ||
+        layout.outputs[0]->ne[1] != shard_heads * world_size ||
+        layout.outputs[0]->ne[2] != txt_shard_seq ||
+        layout.outputs[1]->ne[0] != hidden ||
+        layout.outputs[1]->ne[1] != shard_heads * world_size ||
+        layout.outputs[1]->ne[2] != img_shard_seq ||
+        layout.count_per_peer != static_cast<size_t>(hidden * shard_heads * (txt_shard_seq + img_shard_seq))) {
+        throw std::runtime_error("sp_all_to_all_4d_head_to_seq_batched returned wrong metadata or shape");
+    }
+
+    ggml_cgraph* pre_graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(pre_graph, layout.send_flat);
+    ggml_build_forward_expand(pre_graph, layout.recv_flat);
+
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buffer == nullptr) {
+        ggml_free(ctx);
+        throw std::runtime_error("alloc ctx tensors failed in head_to_seq batched test");
+    }
+
+    std::vector<float> txt_values = make_head_to_seq_input(rank, hidden, shard_heads, txt_sequence);
+    std::vector<float> img_values = make_head_to_seq_input(rank, hidden, shard_heads, img_sequence);
+    for (float& value : img_values) {
+        value += 10000.0f;
+    }
+    tensor_set_f32(txt, txt_values);
+    tensor_set_f32(img, img_values);
+    tensor_set_f32(layout.recv_flat->src[0],
+                   std::vector<float>(static_cast<size_t>(ggml_nelements(layout.recv_flat)), 0.0f));
+
+    run_graph(backend, pre_graph);
+
+    const int send_idx = find_node_index(pre_graph, layout.send_flat, "head_to_seq_batched.send_flat");
+    const int recv_idx = find_node_index(pre_graph, layout.recv_flat, "head_to_seq_batched.recv_flat");
+    sd::ggml_graph_cut::Plan base_plan =
+        make_single_segment_plan(pre_graph, {send_idx, recv_idx}, {recv_idx});
+    sd::ggml_graph_cut::Segment segment =
+        attach_one_comm_or_throw(pre_graph, base_plan, "sp_head_to_seq_batched");
+
+    if (segment.comm_ops.front().kind != sd::ggml_graph_cut::Segment::CommKind::ALL_TO_ALL ||
+        segment.comm_ops.front().count_per_peer != layout.count_per_peer) {
+        throw std::runtime_error("sp_head_to_seq_batched expected one ALL_TO_ALL comm op with layout count_per_peer");
+    }
+
+    execute_segment_comm_or_throw(group, pre_graph, segment, "sp_head_to_seq_batched");
+
+    std::vector<float> expected_flat;
+    expected_flat.reserve(static_cast<size_t>(hidden * shard_heads * (txt_shard_seq + img_shard_seq) * world_size));
+    for (int src = 0; src < world_size; ++src) {
+        for (int seq = 0; seq < txt_shard_seq; ++seq) {
+            const int global_seq = rank * txt_shard_seq + seq;
+            for (int local_head = 0; local_head < shard_heads; ++local_head) {
+                for (int h = 0; h < hidden; ++h) {
+                    expected_flat.push_back(a2a_head_to_seq_value(src, global_seq, local_head, h));
+                }
+            }
+        }
+        for (int seq = 0; seq < img_shard_seq; ++seq) {
+            const int global_seq = rank * img_shard_seq + seq;
+            for (int local_head = 0; local_head < shard_heads; ++local_head) {
+                for (int h = 0; h < hidden; ++h) {
+                    expected_flat.push_back(a2a_head_to_seq_value(src, global_seq, local_head, h) + 10000.0f);
+                }
+            }
+        }
+    }
+    check_close(tensor_get_f32(layout.recv_flat),
+                expected_flat,
+                "sp head_to_seq batched flat recv");
+
+    tensor_set_f32(layout.recv_flat->src[0], expected_flat);
+    ggml_cgraph* post_graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(post_graph, layout.outputs[0]);
+    ggml_build_forward_expand(post_graph, layout.outputs[1]);
+    run_graph(backend, post_graph);
+
+    std::vector<float> txt_expected =
+        make_head_to_seq_output_expected(rank, world_size, hidden, shard_heads, txt_shard_seq);
+    std::vector<float> img_expected =
+        make_head_to_seq_output_expected(rank, world_size, hidden, shard_heads, img_shard_seq);
+    for (float& value : img_expected) {
+        value += 10000.0f;
+    }
+
+    check_close(tensor_get_f32(layout.outputs[0]),
+                txt_expected,
+                "sp head_to_seq batched txt output");
+    check_close(tensor_get_f32(layout.outputs[1]),
+                img_expected,
+                "sp head_to_seq batched img output");
 
     ggml_backend_buffer_free(buffer);
     ggml_free(ctx);
@@ -1259,8 +1974,13 @@ void run_sp_parallel_tests(edgedit::parallel::ProcessGroup& group,
 
     run_split_gather_test(group, backend);
     run_split_gather_no_pad_test(group, backend);
+    run_split_gather_batched_no_pad_test(group, backend);
     run_seq_to_head_test(group, backend);
+    run_seq_to_head_batched_test(group, backend);
+    run_seq_to_head_batched_mixed_layout_test(group, backend);
+    run_seq_to_head_batched_packed_view_input_test(group, backend);
     run_head_to_seq_test(group, backend);
+    run_head_to_seq_batched_test(group, backend);
     run_roundtrip_plan_shape_test(group, backend);
     run_runner_segmented_tests(group, backend);
 

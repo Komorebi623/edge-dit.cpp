@@ -72,10 +72,18 @@ static void print_usage(const char* prog) {
         "  --backend <name>          Backend: auto, cpu, cuda, gpu. Default: auto\n"
         "  --gpu                     Alias for --backend gpu\n"
         "  --devices <csv>           GPU devices for parallel workers, e.g. 0,1,2,3\n"
+        "  --flash-attention         Enable flash attention for text and diffusion models\n"
+        "  --diffusion-flash-attention\n"
+        "                            Enable flash attention for the diffusion/transformer model only\n"
         "  --cfg-parallel-size <n>   Split CFG cond/uncond branches across n GPUs, currently supports 1 or 2\n"
         "  --cfg-size <n>            Alias for --cfg-parallel-size\n"
         "  --tp-size <n>             Reserved tensor parallel size, default: 1\n"
         "  --sp-size <n>             Sequence parallel size, default: 1\n"
+        "  --profile-graph-cuts      Print graph-cut compute/communication timing summary\n"
+        "  --profile-graph-cuts-top <n>\n"
+        "                            Print top n slowest graph-cut segments, default: 8\n"
+        "  --profile-graph-cuts-all-ranks\n"
+        "                            Print graph-cut profile from every parallel rank\n"
         "  --help              Show this help\n",
         prog,
         prog
@@ -776,8 +784,13 @@ struct FluxCliArgs {
     int cfg_parallel_size = 1;
     int tp_parallel_size = 1;
     int sp_parallel_size = 1;
+    int profile_graph_cuts_top = 8;
 
     bool video = false;
+    bool profile_graph_cuts = false;
+    bool profile_graph_cuts_all_ranks = false;
+    bool flash_attention = false;
+    bool diffusion_flash_attention = false;
     int width = 1024;
     int height = 1024;
     int frames = 1;
@@ -977,6 +990,12 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         } else if (std::strcmp(key, "--devices") == 0 ||
                    std::strcmp(key, "--gpus") == 0) {
             args->devices = require_value(key);
+        } else if (std::strcmp(key, "--flash-attention") == 0 ||
+                   std::strcmp(key, "--flash-attn") == 0) {
+            args->flash_attention = true;
+        } else if (std::strcmp(key, "--diffusion-flash-attention") == 0 ||
+                   std::strcmp(key, "--diffusion-flash-attn") == 0) {
+            args->diffusion_flash_attention = true;
         } else if (std::strcmp(key, "--cfg-parallel-size") == 0 ||
                    std::strcmp(key, "--cfg-size") == 0) {
             const char* v = require_value(key);
@@ -992,6 +1011,15 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             const char* v = require_value(key);
             if (!v) return false;
             args->sp_parallel_size = parse_int_value(v, args->sp_parallel_size);
+        } else if (std::strcmp(key, "--profile-graph-cuts") == 0) {
+            args->profile_graph_cuts = true;
+        } else if (std::strcmp(key, "--profile-graph-cuts-top") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->profile_graph_cuts_top = parse_int_value(v, args->profile_graph_cuts_top);
+        } else if (std::strcmp(key, "--profile-graph-cuts-all-ranks") == 0) {
+            args->profile_graph_cuts = true;
+            args->profile_graph_cuts_all_ranks = true;
         } else if (std::strcmp(key, "--help") == 0 || std::strcmp(key, "-h") == 0) {
             return false;
         } else {
@@ -1109,6 +1137,11 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         return false;
     }
 
+    if (args->profile_graph_cuts_top < 0) {
+        std::fprintf(stderr, "--profile-graph-cuts-top must be non-negative\n");
+        return false;
+    }
+
     return true;
 }
 
@@ -1213,6 +1246,14 @@ int main(int argc, char** argv) {
     if (args.backend != nullptr && std::strlen(args.backend) > 0) {
         setenv("ED_BACKEND", args.backend, 1);
     }
+    if (args.profile_graph_cuts) {
+        setenv("ED_PROFILE_GRAPH_CUTS", "1", 1);
+        std::string top = std::to_string(args.profile_graph_cuts_top);
+        setenv("ED_PROFILE_GRAPH_CUTS_TOP", top.c_str(), 1);
+        if (args.profile_graph_cuts_all_ranks) {
+            setenv("ED_PROFILE_GRAPH_CUTS_ALL_RANKS", "1", 1);
+        }
+    }
 
     ed_context_params_t ctx_params;
     ed_context_params_init(&ctx_params);
@@ -1226,6 +1267,8 @@ int main(int argc, char** argv) {
     ctx_params.cfg_parallel_size = args.cfg_parallel_size;
     ctx_params.tp_parallel_size = args.tp_parallel_size;
     ctx_params.sp_parallel_size = args.sp_parallel_size;
+    ctx_params.flash_attention = args.flash_attention;
+    ctx_params.diffusion_flash_attention = args.diffusion_flash_attention;
 
     if (args.threads > 0) {
         ctx_params.n_threads = args.threads;
