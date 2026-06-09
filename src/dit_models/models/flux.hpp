@@ -74,23 +74,31 @@ namespace Flux {
     }
 
     static inline bool flux_sp_qk_seq_major_enabled() {
-        return flux_env_flag_enabled("ED_FLUX_SP_QK_SEQ_MAJOR");
+        return true;
     }
 
     static inline bool flux_sp_flash_attn_enabled(GGMLRunnerContext* ctx) {
-        return ctx != nullptr &&
-               (ctx->flash_attn_enabled ||
-                flux_env_flag_enabled("ED_FLUX_SP_FLASH_ATTN"));
+        if (ctx == nullptr) {
+            return false;
+        }
+        const char* env = std::getenv("ED_FLUX_SP_FLASH_ATTN");
+        if (env != nullptr && env[0] != '\0') {
+            return flux_env_flag_enabled("ED_FLUX_SP_FLASH_ATTN");
+        }
+        return ctx->flash_attn_enabled;
     }
 
     static inline bool flux_sp_flash_v_seq_major_enabled(GGMLRunnerContext* ctx) {
         return flux_sp_qk_seq_major_enabled() &&
-               flux_sp_flash_attn_enabled(ctx) &&
-               flux_env_flag_enabled("ED_FLUX_SP_FLASH_V_SEQ_MAJOR");
+               flux_sp_flash_attn_enabled(ctx);
     }
 
     static inline bool flux_sp_split_single_linear1_enabled() {
-        return flux_env_flag_enabled("ED_FLUX_SP_SPLIT_SINGLE_LINEAR1");
+        return true;
+    }
+
+    static inline bool flux_sp_pre_qk_norm_enabled() {
+        return true;
     }
 
 #ifdef ED_DEBUG_SP_COMM
@@ -361,10 +369,23 @@ namespace Flux {
         return x;
     }
 
+    static inline ggml_tensor* flux_sp_prepare_rope_pe_seq_major(ggml_context* ctx,
+                                                                 ggml_tensor* pe,
+                                                                 const std::string& name = "") {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(pe != nullptr);
+        ggml_tensor* prepared = ggml_cont(ctx, ggml_permute(ctx, pe, 3, 0, 1, 2));
+        if (!name.empty()) {
+            ggml_set_name(prepared, name.c_str());
+        }
+        return prepared;
+    }
+
     static inline ggml_tensor* flux_sp_apply_rope_seq_major(ggml_context* ctx,
                                                             ggml_tensor* x,
                                                             ggml_tensor* pe,
-                                                            bool rope_interleaved = true) {
+                                                            bool rope_interleaved = true,
+                                                            ggml_tensor* prepared_pe = nullptr) {
         GGML_ASSERT(ctx != nullptr);
         GGML_ASSERT(x != nullptr);
         GGML_ASSERT(pe != nullptr);
@@ -392,7 +413,8 @@ namespace Flux {
         x_0            = ggml_repeat(ctx, x_0, temp_x);
         x_1            = ggml_repeat(ctx, x_1, temp_x);
 
-        pe        = ggml_cont(ctx, ggml_permute(ctx, pe, 3, 0, 1, 2));
+        pe        = prepared_pe != nullptr ? prepared_pe :
+                    flux_sp_prepare_rope_pe_seq_major(ctx, pe);
         offset    = pe->nb[2] * pe->ne[2];
         auto pe_0 = ggml_view_3d(ctx, pe, pe->ne[0], pe->ne[1], pe->ne[2], pe->nb[1], pe->nb[2], offset * 0);
         auto pe_1 = ggml_view_3d(ctx, pe, pe->ne[0], pe->ne[1], pe->ne[2], pe->nb[1], pe->nb[2], offset * 1);
@@ -402,6 +424,105 @@ namespace Flux {
             x_out = ggml_cont(ctx, ggml_permute(ctx, x_out, 1, 0, 2, 3));
         }
         return ggml_reshape_3d(ctx, x_out, d_head, L, n_head * N);
+    }
+
+    static inline ggml_tensor* flux_sp_apply_rope_seq_major_work_layout(ggml_context* ctx,
+                                                                        ggml_tensor* x,
+                                                                        ggml_tensor* pe,
+                                                                        int64_t d_head,
+                                                                        ggml_tensor* prepared_pe = nullptr) {
+        GGML_ASSERT(ctx != nullptr);
+        GGML_ASSERT(x != nullptr);
+        GGML_ASSERT(pe != nullptr);
+        GGML_ASSERT(x->ne[0] * 2 == d_head);
+        GGML_ASSERT(x->ne[3] == 2);
+
+        const int64_t L      = x->ne[1];
+        const int64_t n_head = x->ne[2];
+        const int64_t offset = x->nb[2] * x->ne[2];
+        auto x_0             = ggml_view_3d(ctx, x, x->ne[0], x->ne[1], x->ne[2], x->nb[1], x->nb[2], offset * 0);
+        auto x_1             = ggml_view_3d(ctx, x, x->ne[0], x->ne[1], x->ne[2], x->nb[1], x->nb[2], offset * 1);
+        x_0                  = ggml_reshape_4d(ctx, x_0, 1, x_0->ne[0], x_0->ne[1], x_0->ne[2]);
+        x_1                  = ggml_reshape_4d(ctx, x_1, 1, x_1->ne[0], x_1->ne[1], x_1->ne[2]);
+        auto temp_x          = ggml_new_tensor_4d(ctx, x_0->type, 2, x_0->ne[1], x_0->ne[2], x_0->ne[3]);
+        x_0                  = ggml_repeat(ctx, x_0, temp_x);
+        x_1                  = ggml_repeat(ctx, x_1, temp_x);
+
+        pe        = prepared_pe != nullptr ? prepared_pe :
+                    flux_sp_prepare_rope_pe_seq_major(ctx, pe);
+        auto pe_offset = pe->nb[2] * pe->ne[2];
+        auto pe_0      = ggml_view_3d(ctx, pe, pe->ne[0], pe->ne[1], pe->ne[2], pe->nb[1], pe->nb[2], pe_offset * 0);
+        auto pe_1      = ggml_view_3d(ctx, pe, pe->ne[0], pe->ne[1], pe->ne[2], pe->nb[1], pe->nb[2], pe_offset * 1);
+
+        auto x_out = ggml_add_inplace(ctx, ggml_mul(ctx, x_0, pe_0), ggml_mul(ctx, x_1, pe_1));
+        return ggml_reshape_3d(ctx, x_out, d_head, L, n_head);
+    }
+
+    static inline ggml_tensor* flux_sp_flash_attention_seq_major(GGMLRunnerContext* ctx,
+                                                                 ggml_tensor* q,
+                                                                 ggml_tensor* k,
+                                                                 ggml_tensor* v,
+                                                                 int64_t n_head,
+                                                                 ggml_tensor* mask);
+
+    static inline ggml_tensor* flux_sp_attention_prepared_qk(GGMLRunnerContext* ctx,
+                                                             ggml_tensor* q,
+                                                             ggml_tensor* k,
+                                                             ggml_tensor* v,
+                                                             ggml_tensor* mask,
+                                                             const std::string& name_prefix) {
+        q = flux_sp_materialize_cut(ctx,
+                                    q,
+                                    name_prefix + ".sp_attn_q",
+                                    "q");
+
+        k = flux_sp_materialize_cut(ctx,
+                                    k,
+                                    name_prefix + ".sp_attn_k",
+                                    "k");
+
+        v = flux_sp_materialize_cut(ctx,
+                                    v,
+                                    name_prefix + ".sp_attn_v",
+                                    "v");
+
+        const bool v_seq_major = flux_sp_flash_v_seq_major_enabled(ctx);
+        const int64_t n_head   = v_seq_major ? v->ne[2] : v->ne[1];
+
+        GGML_ASSERT(q->ne[0] == k->ne[0]);
+        GGML_ASSERT(q->ne[1] == k->ne[1]);
+        GGML_ASSERT(q->ne[2] == k->ne[2]);
+        GGML_ASSERT(q->ne[3] == k->ne[3]);
+
+        GGML_ASSERT(v->ne[0] == q->ne[0]);
+        if (v_seq_major) {
+            GGML_ASSERT(v->ne[1] == q->ne[1]);
+            GGML_ASSERT(v->ne[2] == q->ne[2]);
+        } else {
+            GGML_ASSERT(v->ne[1] == q->ne[2]);
+            GGML_ASSERT(v->ne[2] == q->ne[1]);
+        }
+        GGML_ASSERT(v->ne[3] == q->ne[3]);
+
+        if (v_seq_major) {
+            ggml_tensor* attn = flux_sp_flash_attention_seq_major(ctx, q, k, v, n_head, mask);
+            if (attn != nullptr) {
+                ggml_set_name(attn, (name_prefix + "_attn").c_str());
+                return attn;
+            }
+        }
+
+        ggml_tensor* attn = ggml_ext_attention_ext(ctx->ggml_ctx,
+                                                   ctx->backend,
+                                                   q,
+                                                   k,
+                                                   v,
+                                                   n_head,
+                                                   mask,
+                                                   true,
+                                                   flux_sp_flash_attn_enabled(ctx));
+        ggml_set_name(attn, (name_prefix + "_attn").c_str());
+        return attn;
     }
 
     static inline ggml_tensor* flux_sp_flash_attention_seq_major(GGMLRunnerContext* ctx,
@@ -496,64 +617,35 @@ namespace Flux {
         GGML_ASSERT(pe != nullptr);
 
         const bool qk_seq_major = flux_sp_qk_seq_major_enabled();
-        q = qk_seq_major ? flux_sp_apply_rope_seq_major(ctx->ggml_ctx, q, pe) :
+        ggml_tensor* prepared_pe = qk_seq_major ?
+                                       flux_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
+                                                                         pe,
+                                                                         name_prefix + "_pe_seq_major") :
+                                       nullptr;
+        q = qk_seq_major ? flux_sp_apply_rope_seq_major(ctx->ggml_ctx, q, pe, true, prepared_pe) :
                            Rope::apply_rope(ctx->ggml_ctx, q, pe);
-        k = qk_seq_major ? flux_sp_apply_rope_seq_major(ctx->ggml_ctx, k, pe) :
+        k = qk_seq_major ? flux_sp_apply_rope_seq_major(ctx->ggml_ctx, k, pe, true, prepared_pe) :
                            Rope::apply_rope(ctx->ggml_ctx, k, pe);
 
-        q = flux_sp_materialize_cut(ctx,
-                                    q,
-                                    name_prefix + ".sp_attn_q",
-                                    "q");
-
-        k = flux_sp_materialize_cut(ctx,
-                                    k,
-                                    name_prefix + ".sp_attn_k",
-                                    "k");
-
-        v = flux_sp_materialize_cut(ctx,
-                                    v,
-                                    name_prefix + ".sp_attn_v",
-                                    "v");
-
-        const bool v_seq_major = flux_sp_flash_v_seq_major_enabled(ctx);
-        const int64_t n_head   = v_seq_major ? v->ne[2] : v->ne[1];
-
-        GGML_ASSERT(q->ne[0] == k->ne[0]);
-        GGML_ASSERT(q->ne[1] == k->ne[1]);
-        GGML_ASSERT(q->ne[2] == k->ne[2]);
-        GGML_ASSERT(q->ne[3] == k->ne[3]);
-
-        GGML_ASSERT(v->ne[0] == q->ne[0]);
-        if (v_seq_major) {
-            GGML_ASSERT(v->ne[1] == q->ne[1]);
-            GGML_ASSERT(v->ne[2] == q->ne[2]);
-        } else {
-            GGML_ASSERT(v->ne[1] == q->ne[2]);
-            GGML_ASSERT(v->ne[2] == q->ne[1]);
-        }
-        GGML_ASSERT(v->ne[3] == q->ne[3]);
         GGML_ASSERT(pe->ne[3] == q->ne[1]);
+        return flux_sp_attention_prepared_qk(ctx, q, k, v, mask, name_prefix);
+    }
 
-        if (v_seq_major) {
-            ggml_tensor* attn = flux_sp_flash_attention_seq_major(ctx, q, k, v, n_head, mask);
-            if (attn != nullptr) {
-                ggml_set_name(attn, (name_prefix + "_attn").c_str());
-                return attn;
-            }
-        }
-
-        ggml_tensor* attn = ggml_ext_attention_ext(ctx->ggml_ctx,
-                                                   ctx->backend,
-                                                   q,
-                                                   k,
-                                                   v,
-                                                   n_head,
-                                                   mask,
-                                                   true,
-                                                   flux_sp_flash_attn_enabled(ctx));
-        ggml_set_name(attn, (name_prefix + "_attn").c_str());
-        return attn;
+    static inline ggml_tensor* flux_sp_attention_from_rope_work_layout(GGMLRunnerContext* ctx,
+                                                                       ggml_tensor* q,
+                                                                       ggml_tensor* k,
+                                                                       ggml_tensor* v,
+                                                                       ggml_tensor* pe,
+                                                                       ggml_tensor* mask,
+                                                                       int64_t d_head,
+                                                                       const std::string& name_prefix) {
+        ggml_tensor* prepared_pe = flux_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
+                                                                     pe,
+                                                                     name_prefix + "_pe_seq_major");
+        q = flux_sp_apply_rope_seq_major_work_layout(ctx->ggml_ctx, q, pe, d_head, prepared_pe);
+        k = flux_sp_apply_rope_seq_major_work_layout(ctx->ggml_ctx, k, pe, d_head, prepared_pe);
+        GGML_ASSERT(pe->ne[3] == q->ne[1]);
+        return flux_sp_attention_prepared_qk(ctx, q, k, v, mask, name_prefix);
     }
 
 #ifdef ED_DEBUG_SP_COMM
@@ -751,13 +843,10 @@ namespace Flux {
             return {q, k, v};
         }
 
-        SPQKV pre_attention_sp(GGMLRunnerContext* ctx,
-                               ggml_tensor* x_local,
-                               const std::string& name_prefix) {
+        SPQKV pre_attention_sp_local_qkv(GGMLRunnerContext* ctx,
+                                         ggml_tensor* x_local) {
             auto qkv_proj = std::dynamic_pointer_cast<Linear>(blocks["qkv"]);
             auto norm     = std::dynamic_pointer_cast<QKNorm>(blocks["norm"]);
-
-            const int world_size = flux_sp_world_size(ctx);
 
             ggml_tensor* qkv = qkv_proj->forward(ctx, x_local);
             int64_t head_dim = qkv->ne[0] / 3 / num_heads;
@@ -793,6 +882,25 @@ namespace Flux {
                                           qkv->nb[2],
                                           qkv->nb[0] * 2 * qkv->ne[0] / 3);
 
+            const bool pre_qk_norm = flux_sp_pre_qk_norm_enabled();
+            if (pre_qk_norm) {
+                q = norm->query_norm(ctx, q);
+                k = norm->key_norm(ctx, k);
+            }
+            return {q, k, v};
+        }
+
+        SPQKV pre_attention_sp(GGMLRunnerContext* ctx,
+                               ggml_tensor* x_local,
+                               const std::string& name_prefix) {
+            auto norm = std::dynamic_pointer_cast<QKNorm>(blocks["norm"]);
+            const int world_size = flux_sp_world_size(ctx);
+            SPQKV local_qkv = pre_attention_sp_local_qkv(ctx, x_local);
+            ggml_tensor* q = local_qkv.q;
+            ggml_tensor* k = local_qkv.k;
+            ggml_tensor* v = local_qkv.v;
+            const bool pre_qk_norm = flux_sp_pre_qk_norm_enabled();
+
             auto qkv_head = flux_sp_qk_seq_major_enabled() ?
                                 edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched_mixed(ctx->ggml_ctx,
                                                                                               {q, k, v},
@@ -805,10 +913,36 @@ namespace Flux {
                                                                                         name_prefix + "_qkv_seq_to_head");
             GGML_ASSERT(qkv_head.outputs.size() == 3);
 
-            q = norm->query_norm(ctx, qkv_head.outputs[0]);
-            k = norm->key_norm(ctx, qkv_head.outputs[1]);
+            q = pre_qk_norm ? qkv_head.outputs[0] : norm->query_norm(ctx, qkv_head.outputs[0]);
+            k = pre_qk_norm ? qkv_head.outputs[1] : norm->key_norm(ctx, qkv_head.outputs[1]);
             v = qkv_head.outputs[2];
             return {q, k, v};
+        }
+
+        SPQKV pre_attention_sp_rope_work_qk(GGMLRunnerContext* ctx,
+                                            ggml_tensor* x_local,
+                                            const std::string& name_prefix) {
+            const int world_size = flux_sp_world_size(ctx);
+            SPQKV local_qkv = pre_attention_sp_local_qkv(ctx, x_local);
+            ggml_tensor* q = local_qkv.q;
+            ggml_tensor* k = local_qkv.k;
+            ggml_tensor* v = local_qkv.v;
+            GGML_ASSERT(flux_sp_pre_qk_norm_enabled());
+
+            auto qkv_head =
+                edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched_layouts(
+                    ctx->ggml_ctx,
+                    {q, k, v},
+                    {edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajorRopeInterleaved,
+                     edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajorRopeInterleaved,
+                     flux_sp_flash_v_seq_major_enabled(ctx) ?
+                         edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajor :
+                         edgedit::parallel::SPSeqToHeadOutputLayout::HeadMajor},
+                    world_size,
+                    name_prefix + "_qkv_seq_to_head");
+            GGML_ASSERT(qkv_head.outputs.size() == 3);
+
+            return {qkv_head.outputs[0], qkv_head.outputs[1], qkv_head.outputs[2]};
         }
 
         ggml_tensor* post_attention(GGMLRunnerContext* ctx, ggml_tensor* x) {
@@ -1148,13 +1282,18 @@ namespace Flux {
 
             ggml_tensor* img_modulated = img_norm1->forward(ctx, img);
             img_modulated              = dit::modulate(ctx->ggml_ctx, img_modulated, img_mod1.shift, img_mod1.scale);
-            auto img_qkv               = img_attn->pre_attention_sp(ctx, img_modulated, prefix + "_img");
 
             ggml_tensor* txt_modulated = txt_norm1->forward(ctx, txt);
             txt_modulated              = dit::modulate(ctx->ggml_ctx, txt_modulated, txt_mod1.shift, txt_mod1.scale);
-            auto txt_qkv               = txt_attn->pre_attention_sp(ctx, txt_modulated, prefix + "_txt");
-
             const bool qk_seq_major = flux_sp_qk_seq_major_enabled();
+            const bool qk_rope_work = qk_seq_major && flux_sp_pre_qk_norm_enabled();
+            auto img_qkv = qk_rope_work ?
+                               img_attn->pre_attention_sp_rope_work_qk(ctx, img_modulated, prefix + "_img") :
+                               img_attn->pre_attention_sp(ctx, img_modulated, prefix + "_img");
+            auto txt_qkv = qk_rope_work ?
+                               txt_attn->pre_attention_sp_rope_work_qk(ctx, txt_modulated, prefix + "_txt") :
+                               txt_attn->pre_attention_sp(ctx, txt_modulated, prefix + "_txt");
+
             ggml_tensor* q = ggml_concat(ctx->ggml_ctx, txt_qkv.q, img_qkv.q, qk_seq_major ? 1 : 2);
             ggml_tensor* k = ggml_concat(ctx->ggml_ctx, txt_qkv.k, img_qkv.k, qk_seq_major ? 1 : 2);
             ggml_tensor* v = ggml_concat(ctx->ggml_ctx,
@@ -1165,12 +1304,14 @@ namespace Flux {
             ggml_set_name(k, (prefix + "_k_attn").c_str());
             ggml_set_name(v, (prefix + "_v_attn").c_str());
 
-            ggml_tensor* attn = flux_sp_attention(ctx, q, k, v, pe, mask, prefix);
+            const int64_t head_dim = qk_rope_work ? q->ne[0] * 2 : q->ne[0];
+            ggml_tensor* attn = qk_rope_work ?
+                                    flux_sp_attention_from_rope_work_layout(ctx, q, k, v, pe, mask, head_dim, prefix) :
+                                    flux_sp_attention(ctx, q, k, v, pe, mask, prefix);
             if (flux_sp_strict_barrier_enabled()) {
                 sd::ggml_graph_cut::mark_graph_cut(attn, prefix + ".sp_attention", "attn");
             }
 
-            const int64_t head_dim     = q->ne[0];
             const int64_t shard_heads  = qk_seq_major ? q->ne[2] : q->ne[1];
             const int64_t txt_full_seq = qk_seq_major ? txt_qkv.q->ne[1] : txt_qkv.q->ne[2];
             const int64_t img_full_seq = qk_seq_major ? img_qkv.q->ne[1] : img_qkv.q->ne[2];
@@ -1964,25 +2105,37 @@ namespace Flux {
             auto v = ggml_view_4d(ctx->ggml_ctx, qkv_mlp, head_dim, num_heads, qkv_mlp->ne[1], qkv_mlp->ne[2],
                                   qkv_mlp->nb[0] * head_dim, qkv_mlp->nb[1], qkv_mlp->nb[2], qkv_mlp->nb[0] * 2 * hidden_size);
 
+            const bool pre_qk_norm = flux_sp_pre_qk_norm_enabled();
+            if (pre_qk_norm) {
+                q = norm->query_norm(ctx, q);
+                k = norm->key_norm(ctx, k);
+            }
+
             auto qkv_head = flux_sp_qk_seq_major_enabled() ?
-                                edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched_mixed(ctx->ggml_ctx,
-                                                                                              {q, k, v},
-                                                                                              {true, true, flux_sp_flash_v_seq_major_enabled(ctx)},
-                                                                                              world_size,
-                                                                                              prefix + "_qkv_seq_to_head") :
+                                edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched_layouts(ctx->ggml_ctx,
+                                                                                                {q, k, v},
+                                                                                                {edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajorRopeInterleaved,
+                                                                                                 edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajorRopeInterleaved,
+                                                                                                 flux_sp_flash_v_seq_major_enabled(ctx) ?
+                                                                                                     edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajor :
+                                                                                                     edgedit::parallel::SPSeqToHeadOutputLayout::HeadMajor},
+                                                                                                world_size,
+                                                                                                prefix + "_qkv_seq_to_head") :
                                 edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched(ctx->ggml_ctx,
                                                                                         {q, k, v},
                                                                                         world_size,
                                                                                         prefix + "_qkv_seq_to_head");
             GGML_ASSERT(qkv_head.outputs.size() == 3);
 
-            q = norm->query_norm(ctx, qkv_head.outputs[0]);
-            k = norm->key_norm(ctx, qkv_head.outputs[1]);
+            q = pre_qk_norm ? qkv_head.outputs[0] : norm->query_norm(ctx, qkv_head.outputs[0]);
+            k = pre_qk_norm ? qkv_head.outputs[1] : norm->key_norm(ctx, qkv_head.outputs[1]);
             v = qkv_head.outputs[2];
             ggml_set_name(q, (prefix + "_q_attn").c_str());
             ggml_set_name(k, (prefix + "_k_attn").c_str());
             ggml_set_name(v, (prefix + "_v_attn").c_str());
-            auto attn = flux_sp_attention(ctx, q, k, v, pe, mask, prefix);
+            auto attn = flux_sp_qk_seq_major_enabled() ?
+                            flux_sp_attention_from_rope_work_layout(ctx, q, k, v, pe, mask, head_dim, prefix) :
+                            flux_sp_attention(ctx, q, k, v, pe, mask, prefix);
             if (flux_sp_strict_barrier_enabled()) {
                 sd::ggml_graph_cut::mark_graph_cut(attn, prefix + ".sp_attention", "attn");
             }

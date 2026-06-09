@@ -6390,7 +6390,15 @@ public:
             v = v_proj->forward(ctx, x);
         }
 
-        x = ggml_ext_attention_ext(ctx->ggml_ctx, ctx->backend, q, k, v, n_head, mask, false);  // [N, n_token, embed_dim]
+        x = ggml_ext_attention_ext(ctx->ggml_ctx,
+                                   ctx->backend,
+                                   q,
+                                   k,
+                                   v,
+                                   n_head,
+                                   mask,
+                                   false,
+                                   ctx->flash_attn_enabled);  // [N, n_token, embed_dim]
 
         x = out_proj->forward(ctx, x);  // [N, n_token, embed_dim]
         return x;

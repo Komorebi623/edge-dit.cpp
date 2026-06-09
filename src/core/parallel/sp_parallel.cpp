@@ -522,12 +522,30 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_mixed(ggml_context*
                                                                    const std::vector<bool>& output_seq_major,
                                                                    int world_size,
                                                                    const std::string& name) {
+    std::vector<SPSeqToHeadOutputLayout> output_layouts;
+    output_layouts.reserve(output_seq_major.size());
+    for (bool seq_major : output_seq_major) {
+        output_layouts.push_back(seq_major ? SPSeqToHeadOutputLayout::SeqMajor :
+                                             SPSeqToHeadOutputLayout::HeadMajor);
+    }
+    return sp_all_to_all_4d_seq_to_head_batched_layouts(ctx,
+                                                        inputs,
+                                                        output_layouts,
+                                                        world_size,
+                                                        name);
+}
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_layouts(ggml_context* ctx,
+                                                                     const std::vector<ggml_tensor*>& inputs,
+                                                                     const std::vector<SPSeqToHeadOutputLayout>& output_layouts,
+                                                                     int world_size,
+                                                                     const std::string& name) {
     check_world_size(world_size, "sp_all_to_all_4d_seq_to_head_batched");
     if (inputs.empty()) {
         throw std::invalid_argument("sp_all_to_all_4d_seq_to_head_batched inputs must not be empty");
     }
-    if (output_seq_major.size() != inputs.size()) {
-        throw std::invalid_argument("sp_all_to_all_4d_seq_to_head_batched_mixed output_seq_major size mismatch");
+    if (output_layouts.size() != inputs.size()) {
+        throw std::invalid_argument("sp_all_to_all_4d_seq_to_head_batched_layouts output_layouts size mismatch");
     }
 
     ggml_tensor* first = inputs.front();
@@ -634,7 +652,7 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_mixed(ggml_context*
                                                 mid->nb[3],
                                                 offset);
         ggml_tensor* output = nullptr;
-        if (output_seq_major[i]) {
+        if (output_layouts[i] == SPSeqToHeadOutputLayout::SeqMajor) {
             ggml_tensor* seq_before_heads = ggml_permute(ctx, output_view, 0, 3, 1, 2);
             output = cont_4d_if_needed(ctx,
                                        seq_before_heads,
@@ -642,6 +660,35 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_mixed(ggml_context*
                                        layout.sequence,
                                        layout.shard_heads,
                                        layout.batch);
+        } else if (output_layouts[i] == SPSeqToHeadOutputLayout::SeqMajorRopeInterleaved) {
+            if (head_dim % 2 != 0) {
+                throw std::invalid_argument("sp_all_to_all_4d_seq_to_head_batched_layouts rope-interleaved output requires even head_dim");
+            }
+            if (layout.batch != 1) {
+                throw std::invalid_argument("sp_all_to_all_4d_seq_to_head_batched_layouts rope-interleaved output supports batch == 1 only");
+            }
+            ggml_tensor* interleaved_view = ggml_view_4d(ctx,
+                                                         output_view,
+                                                         2,
+                                                         head_dim / 2,
+                                                         layout.sequence,
+                                                         layout.shard_heads,
+                                                         output_view->nb[0] * 2,
+                                                         output_view->nb[2],
+                                                         output_view->nb[1],
+                                                         0);
+            ggml_tensor* half_seq_heads_interleaved = ggml_permute(ctx,
+                                                                   interleaved_view,
+                                                                   3,
+                                                                   0,
+                                                                   1,
+                                                                   2);
+            output = cont_4d_if_needed(ctx,
+                                       half_seq_heads_interleaved,
+                                       head_dim / 2,
+                                       layout.sequence,
+                                       layout.shard_heads,
+                                       2);
         } else {
             output = cont_4d_if_needed(ctx,
                                        output_view,

@@ -807,6 +807,29 @@ std::vector<float> make_seq_to_head_seq_major_expected(int rank,
     return expected;
 }
 
+std::vector<float> make_seq_to_head_rope_interleaved_expected(int rank,
+                                                              int world_size,
+                                                              int hidden,
+                                                              int shard_heads,
+                                                              int shard_seq) {
+    std::vector<float> expected;
+    expected.reserve(static_cast<size_t>(hidden * shard_heads * shard_seq * world_size));
+    for (int interleave = 0; interleave < 2; ++interleave) {
+        for (int local_head = 0; local_head < shard_heads; ++local_head) {
+            const int full_head = rank * shard_heads + local_head;
+            for (int src = 0; src < world_size; ++src) {
+                for (int seq = 0; seq < shard_seq; ++seq) {
+                    for (int half = 0; half < hidden / 2; ++half) {
+                        const int h = interleave + 2 * half;
+                        expected.push_back(a2a_seq_to_head_value(src, seq, full_head, h));
+                    }
+                }
+            }
+        }
+    }
+    return expected;
+}
+
 void run_seq_to_head_test(edgedit::parallel::ProcessGroup& group,
                           ggml_backend_t backend) {
     const int rank = group.rank();
@@ -1156,6 +1179,161 @@ void run_seq_to_head_batched_mixed_layout_test(edgedit::parallel::ProcessGroup& 
     check_close(tensor_get_f32(layout.outputs[2]),
                 v_expected,
                 "sp seq_to_head batched mixed v output");
+
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+}
+
+void run_seq_to_head_batched_rope_interleaved_layout_test(edgedit::parallel::ProcessGroup& group,
+                                                          ggml_backend_t backend) {
+    const int rank = group.rank();
+    const int world_size = group.size();
+    if (world_size != 2) {
+        throw std::runtime_error("run_seq_to_head_batched_rope_interleaved_layout_test expects world_size == 2");
+    }
+
+    ggml_context* ctx = new_test_context();
+
+    const int hidden = 4;
+    const int heads = 4;
+    const int shard_heads = heads / world_size;
+    const int shard_seq = 3;
+    ggml_tensor* q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hidden, heads, shard_seq, 1);
+    ggml_tensor* k = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hidden, heads, shard_seq, 1);
+    ggml_tensor* v = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hidden, heads, shard_seq, 1);
+    ggml_set_name(q, "sp_seq_to_head_batched_rope_q");
+    ggml_set_name(k, "sp_seq_to_head_batched_rope_k");
+    ggml_set_name(v, "sp_seq_to_head_batched_rope_v");
+
+    sd::ggml_graph_cut::clear_comm_marks();
+    edgedit::parallel::SPAllToAll4DBatchLayout layout =
+        edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched_layouts(
+            ctx,
+            {q, k, v},
+            {edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajorRopeInterleaved,
+             edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajorRopeInterleaved,
+             edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajor},
+            world_size,
+            "sp_test_seq_to_head_batched_rope");
+
+    if (layout.outputs.size() != 3 ||
+        layout.outputs[0]->ne[0] != hidden / 2 ||
+        layout.outputs[0]->ne[1] != shard_seq * world_size ||
+        layout.outputs[0]->ne[2] != shard_heads ||
+        layout.outputs[0]->ne[3] != 2 ||
+        layout.outputs[1]->ne[0] != hidden / 2 ||
+        layout.outputs[1]->ne[1] != shard_seq * world_size ||
+        layout.outputs[1]->ne[2] != shard_heads ||
+        layout.outputs[1]->ne[3] != 2 ||
+        layout.outputs[2]->ne[0] != hidden ||
+        layout.outputs[2]->ne[1] != shard_seq * world_size ||
+        layout.outputs[2]->ne[2] != shard_heads ||
+        layout.count_per_peer != static_cast<size_t>(hidden * 3 * shard_heads * shard_seq)) {
+        throw std::runtime_error("sp_all_to_all_4d_seq_to_head_batched_layouts rope output returned wrong metadata or shape");
+    }
+
+    ggml_cgraph* pre_graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(pre_graph, layout.send_flat);
+    ggml_build_forward_expand(pre_graph, layout.recv_flat);
+
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (buffer == nullptr) {
+        ggml_free(ctx);
+        throw std::runtime_error("alloc ctx tensors failed in seq_to_head batched rope layout test");
+    }
+
+    std::vector<float> q_values = make_seq_to_head_input(rank, hidden, heads, shard_seq);
+    std::vector<float> k_values = q_values;
+    std::vector<float> v_values = q_values;
+    for (float& value : k_values) {
+        value += 10000.0f;
+    }
+    for (float& value : v_values) {
+        value += 20000.0f;
+    }
+    tensor_set_f32(q, q_values);
+    tensor_set_f32(k, k_values);
+    tensor_set_f32(v, v_values);
+    tensor_set_f32(layout.recv_flat->src[0],
+                   std::vector<float>(static_cast<size_t>(ggml_nelements(layout.recv_flat)), 0.0f));
+
+    run_graph(backend, pre_graph);
+
+    const int send_idx = find_node_index(pre_graph, layout.send_flat, "seq_to_head_batched_rope.send_flat");
+    const int recv_idx = find_node_index(pre_graph, layout.recv_flat, "seq_to_head_batched_rope.recv_flat");
+    sd::ggml_graph_cut::Plan base_plan =
+        make_single_segment_plan(pre_graph, {send_idx, recv_idx}, {recv_idx});
+    sd::ggml_graph_cut::Segment segment =
+        attach_one_comm_or_throw(pre_graph, base_plan, "sp_seq_to_head_batched_rope");
+
+    if (segment.comm_ops.front().kind != sd::ggml_graph_cut::Segment::CommKind::ALL_TO_ALL ||
+        segment.comm_ops.front().count_per_peer != layout.count_per_peer) {
+        throw std::runtime_error("sp_seq_to_head_batched_rope expected one ALL_TO_ALL comm op with layout count_per_peer");
+    }
+
+    execute_segment_comm_or_throw(group, pre_graph, segment, "sp_seq_to_head_batched_rope");
+
+    std::vector<float> q_expected =
+        make_seq_to_head_expected(rank, world_size, hidden, shard_heads, shard_seq);
+    std::vector<float> k_expected = q_expected;
+    std::vector<float> v_expected = q_expected;
+    for (float& value : k_expected) {
+        value += 10000.0f;
+    }
+    for (float& value : v_expected) {
+        value += 20000.0f;
+    }
+
+    std::vector<float> expected_flat;
+    expected_flat.reserve(q_expected.size() + k_expected.size() + v_expected.size());
+    for (int src = 0; src < world_size; ++src) {
+        for (int seq = 0; seq < shard_seq; ++seq) {
+            for (int local_head = 0; local_head < shard_heads; ++local_head) {
+                const int full_head = rank * shard_heads + local_head;
+                for (int h = 0; h < hidden; ++h) {
+                    expected_flat.push_back(a2a_seq_to_head_value(src, seq, full_head, h));
+                }
+                for (int h = 0; h < hidden; ++h) {
+                    expected_flat.push_back(a2a_seq_to_head_value(src, seq, full_head, h) + 10000.0f);
+                }
+                for (int h = 0; h < hidden; ++h) {
+                    expected_flat.push_back(a2a_seq_to_head_value(src, seq, full_head, h) + 20000.0f);
+                }
+            }
+        }
+    }
+    check_close(tensor_get_f32(layout.recv_flat),
+                expected_flat,
+                "sp seq_to_head batched rope flat recv");
+
+    tensor_set_f32(layout.recv_flat->src[0], expected_flat);
+    ggml_cgraph* post_graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(post_graph, layout.outputs[0]);
+    ggml_build_forward_expand(post_graph, layout.outputs[1]);
+    ggml_build_forward_expand(post_graph, layout.outputs[2]);
+    run_graph(backend, post_graph);
+
+    std::vector<float> q_rope_expected =
+        make_seq_to_head_rope_interleaved_expected(rank, world_size, hidden, shard_heads, shard_seq);
+    std::vector<float> k_rope_expected = q_rope_expected;
+    for (float& value : k_rope_expected) {
+        value += 10000.0f;
+    }
+    std::vector<float> v_seq_major_expected =
+        make_seq_to_head_seq_major_expected(rank, world_size, hidden, shard_heads, shard_seq);
+    for (float& value : v_seq_major_expected) {
+        value += 20000.0f;
+    }
+
+    check_close(tensor_get_f32(layout.outputs[0]),
+                q_rope_expected,
+                "sp seq_to_head batched rope q output");
+    check_close(tensor_get_f32(layout.outputs[1]),
+                k_rope_expected,
+                "sp seq_to_head batched rope k output");
+    check_close(tensor_get_f32(layout.outputs[2]),
+                v_seq_major_expected,
+                "sp seq_to_head batched rope v output");
 
     ggml_backend_buffer_free(buffer);
     ggml_free(ctx);
@@ -1978,6 +2156,7 @@ void run_sp_parallel_tests(edgedit::parallel::ProcessGroup& group,
     run_seq_to_head_test(group, backend);
     run_seq_to_head_batched_test(group, backend);
     run_seq_to_head_batched_mixed_layout_test(group, backend);
+    run_seq_to_head_batched_rope_interleaved_layout_test(group, backend);
     run_seq_to_head_batched_packed_view_input_test(group, backend);
     run_head_to_seq_test(group, backend);
     run_head_to_seq_batched_test(group, backend);

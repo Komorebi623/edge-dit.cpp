@@ -189,6 +189,18 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched(ggml_context* ctx,
                                                              int world_size,
                                                              const std::string& name = "sp_all_to_all_4d_seq_to_head_batched");
 
+enum class SPSeqToHeadOutputLayout {
+    HeadMajor,
+    SeqMajor,
+    SeqMajorRopeInterleaved,
+};
+
+SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_layouts(ggml_context* ctx,
+                                                                     const std::vector<ggml_tensor*>& inputs,
+                                                                     const std::vector<SPSeqToHeadOutputLayout>& output_layouts,
+                                                                     int world_size,
+                                                                     const std::string& name = "sp_all_to_all_4d_seq_to_head_batched");
+
 // Same communication/layout contract as sp_all_to_all_4d_seq_to_head_batched,
 // but selected outputs can be materialized as [head_dim, sequence, shard_heads, batch].
 // This is useful when the immediate consumer wants sequence-major q/k tensors.

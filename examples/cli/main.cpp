@@ -72,9 +72,12 @@ static void print_usage(const char* prog) {
         "  --backend <name>          Backend: auto, cpu, cuda, gpu. Default: auto\n"
         "  --gpu                     Alias for --backend gpu\n"
         "  --devices <csv>           GPU devices for parallel workers, e.g. 0,1,2,3\n"
-        "  --flash-attention         Enable flash attention for text and diffusion models\n"
+        "  --flash-attention         Enable flash attention for text and diffusion models, default: on\n"
+        "  --no-flash-attention      Disable flash attention for text and diffusion models\n"
         "  --diffusion-flash-attention\n"
-        "                            Enable flash attention for the diffusion/transformer model only\n"
+        "                            Enable flash attention for the diffusion/transformer model only, default: on\n"
+        "  --no-diffusion-flash-attention\n"
+        "                            Disable diffusion/transformer flash attention\n"
         "  --cfg-parallel-size <n>   Split CFG cond/uncond branches across n GPUs, currently supports 1 or 2\n"
         "  --cfg-size <n>            Alias for --cfg-parallel-size\n"
         "  --tp-size <n>             Reserved tensor parallel size, default: 1\n"
@@ -789,8 +792,8 @@ struct FluxCliArgs {
     bool video = false;
     bool profile_graph_cuts = false;
     bool profile_graph_cuts_all_ranks = false;
-    bool flash_attention = false;
-    bool diffusion_flash_attention = false;
+    bool flash_attention = true;
+    bool diffusion_flash_attention = true;
     int width = 1024;
     int height = 1024;
     int frames = 1;
@@ -993,9 +996,17 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         } else if (std::strcmp(key, "--flash-attention") == 0 ||
                    std::strcmp(key, "--flash-attn") == 0) {
             args->flash_attention = true;
+            args->diffusion_flash_attention = true;
+        } else if (std::strcmp(key, "--no-flash-attention") == 0 ||
+                   std::strcmp(key, "--no-flash-attn") == 0) {
+            args->flash_attention = false;
+            args->diffusion_flash_attention = false;
         } else if (std::strcmp(key, "--diffusion-flash-attention") == 0 ||
                    std::strcmp(key, "--diffusion-flash-attn") == 0) {
             args->diffusion_flash_attention = true;
+        } else if (std::strcmp(key, "--no-diffusion-flash-attention") == 0 ||
+                   std::strcmp(key, "--no-diffusion-flash-attn") == 0) {
+            args->diffusion_flash_attention = false;
         } else if (std::strcmp(key, "--cfg-parallel-size") == 0 ||
                    std::strcmp(key, "--cfg-size") == 0) {
             const char* v = require_value(key);

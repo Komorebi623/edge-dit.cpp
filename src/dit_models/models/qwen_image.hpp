@@ -65,7 +65,7 @@ namespace Qwen {
                                                    n_head,
                                                    nullptr,
                                                    true,
-                                                   false,
+                                                   ctx->flash_attn_enabled,
                                                    kv_scale);
         return attn;
     }
