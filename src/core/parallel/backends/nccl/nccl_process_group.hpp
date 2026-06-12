@@ -26,6 +26,7 @@ public:
     int local_rank() const override;
     bool enabled() const override;
 
+    void warmup() override;
     void barrier() override;
 
     // async API

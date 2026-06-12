@@ -68,6 +68,7 @@ public:
     virtual int local_rank() const  = 0;
     virtual bool enabled() const    = 0;
 
+    virtual void warmup();
     virtual void barrier() = 0;
     
     virtual std::unique_ptr<Work> all_reduce_async(const Buffer& input,

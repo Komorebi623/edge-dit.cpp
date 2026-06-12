@@ -338,7 +338,6 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
         }
         return false;
     }
-
     SDCondition uncond;
     const float cfg_scale = params->sample.cfg_scale > 0.0f ? params->sample.cfg_scale : 1.0f;
     if (cfg_scale != 1.0f) {
@@ -420,9 +419,13 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
             cache_runtime.begin_step(cache_step);
         }
 
+        const auto* parallel_context = runtime_->parallel_context();
+        const bool use_sequence_parallel = parallel_context != nullptr &&
+                                           parallel_context->sp_parallel_size() > 1;
         const bool use_cfg_parallel = !uncond.empty() &&
-                                      parallel::cfg_parallel_available(runtime_->parallel_context());
-        const int cfg_rank = parallel::cfg_parallel_rank(runtime_->parallel_context());
+                                      !use_sequence_parallel &&
+                                      parallel::cfg_parallel_available(parallel_context);
+        const int cfg_rank = parallel::cfg_parallel_rank(parallel_context);
 
         DiffusionParams diffusion_params;
         diffusion_params.x = &x;

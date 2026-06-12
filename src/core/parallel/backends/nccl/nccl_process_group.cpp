@@ -226,6 +226,37 @@ bool NcclProcessGroup::enabled() const {
     return config_.world_size > 1;
 }
 
+void NcclProcessGroup::warmup() {
+    if (!enabled()) {
+        return;
+    }
+
+    set_device();
+
+    const size_t count_per_peer = 1;
+    const size_t world_count = static_cast<size_t>(config_.world_size) * count_per_peer;
+    float* d_in = nullptr;
+    float* d_out = nullptr;
+
+    check_cuda(cudaMalloc(&d_in, world_count * sizeof(float)), "cudaMalloc");
+    check_cuda(cudaMalloc(&d_out, world_count * sizeof(float)), "cudaMalloc");
+    check_cuda(cudaMemsetAsync(d_in, 0, world_count * sizeof(float), stream_), "cudaMemsetAsync");
+    check_cuda(cudaMemsetAsync(d_out, 0, world_count * sizeof(float), stream_), "cudaMemsetAsync");
+
+    Buffer one_in{d_in, count_per_peer, DataType::kFloat32, config_.device};
+    Buffer one_out{d_out, count_per_peer, DataType::kFloat32, config_.device};
+    Buffer many_in{d_in, world_count, DataType::kFloat32, config_.device};
+    Buffer many_out{d_out, world_count, DataType::kFloat32, config_.device};
+
+    all_reduce(one_in, one_out, ReduceOp::kSum);
+    all_gather(one_in, many_out);
+    all_to_all(many_in, many_out, count_per_peer);
+    broadcast(many_in, 0);
+
+    check_cuda(cudaFree(d_in), "cudaFree");
+    check_cuda(cudaFree(d_out), "cudaFree");
+}
+
 void NcclProcessGroup::barrier() {
     set_device();
     int send = config_.rank;

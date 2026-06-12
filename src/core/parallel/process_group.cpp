@@ -50,6 +50,8 @@ std::unique_ptr<Work> ProcessGroup::broadcast_async(const Buffer& buffer,
     return std::make_unique<CompletedWork>();
 }
 
+void ProcessGroup::warmup() {}
+
 const char* backend_name(Backend backend) {
     switch (backend) {
         case Backend::kNone:

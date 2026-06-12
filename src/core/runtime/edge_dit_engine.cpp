@@ -200,6 +200,7 @@ bool EdgeDitEngine::init(const ed_ctx_params_t* params) {
     model_loader_->log_weight_stats();
     dit_pipeline_->mark_ready();
     if (parallel_context_ != nullptr && parallel_context_->enabled()) {
+        parallel_context_->world_group().warmup();
         parallel_context_->world_group().barrier();
     }
 

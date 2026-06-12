@@ -1135,4 +1135,82 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_packed_recv_only(ggml_conte
     return layout;
 }
 
+SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_packed_recv_only_f16(ggml_context* ctx,
+                                                                          ggml_tensor* send_flat,
+                                                                          int64_t head_dim,
+                                                                          int64_t shard_heads,
+                                                                          const std::vector<int64_t>& sequences,
+                                                                          int world_size,
+                                                                          const std::string& name) {
+    check_world_size(world_size, "sp_all_to_all_4d_head_to_seq_packed_recv_only_f16");
+    check_context_tensor(ctx, send_flat, "sp_all_to_all_4d_head_to_seq_packed_recv_only_f16");
+    if (send_flat->type != GGML_TYPE_F16) {
+        throw std::invalid_argument("sp_all_to_all_4d_head_to_seq_packed_recv_only_f16 send_flat must be F16");
+    }
+    if (sequences.empty()) {
+        throw std::invalid_argument("sp_all_to_all_4d_head_to_seq_packed_recv_only_f16 sequences must not be empty");
+    }
+    if (head_dim <= 0 || shard_heads <= 0) {
+        throw std::invalid_argument("sp_all_to_all_4d_head_to_seq_packed_recv_only_f16 invalid head shape");
+    }
+
+    SPAllToAll4DBatchLayout layout;
+    layout.direction = SPAllToAll4DDirection::kHeadToSeq;
+    layout.world_size = world_size;
+    layout.batch = 1;
+    layout.head_dim = head_dim;
+    layout.shard_heads = shard_heads;
+    layout.heads = shard_heads * world_size;
+    layout.outputs.reserve(sequences.size());
+    layout.sequences.reserve(sequences.size());
+    layout.shard_sequences.reserve(sequences.size());
+
+    int64_t expected_ne = 0;
+    for (size_t i = 0; i < sequences.size(); ++i) {
+        const int64_t sequence = sequences[i];
+        if (sequence <= 0 || sequence % world_size != 0) {
+            std::ostringstream oss;
+            oss << "sp_all_to_all_4d_head_to_seq_packed_recv_only_f16 sequence " << i
+                << " must be positive and divisible by world_size: sequence="
+                << sequence << " world_size=" << world_size;
+            throw std::invalid_argument(oss.str());
+        }
+        const int64_t shard_sequence = sequence / world_size;
+        layout.sequences.push_back(sequence);
+        layout.shard_sequences.push_back(shard_sequence);
+        layout.sequence += sequence;
+        layout.shard_sequence += shard_sequence;
+        expected_ne += head_dim * shard_heads * shard_sequence * world_size;
+    }
+
+    if (ggml_nelements(send_flat) != expected_ne) {
+        std::ostringstream oss;
+        oss << "sp_all_to_all_4d_head_to_seq_packed_recv_only_f16 send_flat size mismatch: got="
+            << ggml_nelements(send_flat) << " expected=" << expected_ne;
+        throw std::invalid_argument(oss.str());
+    }
+
+    layout.send_flat = send_flat;
+    if (!name.empty()) {
+        ggml_set_name(layout.send_flat, (name + "_send_flat").c_str());
+    }
+    layout.count_per_peer = static_cast<size_t>(expected_ne) / static_cast<size_t>(world_size);
+    layout.recv_flat = new_recv_placeholder(ctx,
+                                            layout.send_flat,
+                                            layout.send_flat,
+                                            expected_ne,
+                                            1,
+                                            1,
+                                            1,
+                                            name + "_flat");
+    mark_all_to_all_flat(layout.send_flat,
+                         layout.recv_flat,
+                         layout.count_per_peer,
+                         name);
+    sd::ggml_graph_cut::mark_graph_cut(layout.recv_flat,
+                                       graph_cut_group_name(name),
+                                       name + "_recv_flat");
+    return layout;
+}
+
 } // namespace edgedit::parallel
