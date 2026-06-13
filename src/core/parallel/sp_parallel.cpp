@@ -3,12 +3,64 @@
 #include "backend/ggml/ggml_graph_cut.h"
 
 #include <climits>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
 
 namespace edgedit::parallel {
 namespace {
+
+struct SPRecvPlaceholderParams {
+    uint64_t magic;
+    int64_t txt_real_seq;
+    int64_t img_real_seq;
+    int64_t mode;
+    int64_t txt_padded_seq;
+    int64_t img_padded_seq;
+    int64_t world_size;
+    int64_t stream_index;
+};
+
+constexpr uint64_t SP_RECV_PLACEHOLDER_MAGIC = 0x5157454e46514b56ULL;
+constexpr int64_t SP_RECV_PLACEHOLDER_NOOP_MODE = 42;
+
+std::mutex& sp_recv_placeholder_params_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::vector<std::unique_ptr<SPRecvPlaceholderParams>>& sp_recv_placeholder_params_store() {
+    static std::vector<std::unique_ptr<SPRecvPlaceholderParams>> store;
+    return store;
+}
+
+SPRecvPlaceholderParams* sp_recv_placeholder_make_params(int64_t world_size) {
+    auto params             = std::make_unique<SPRecvPlaceholderParams>();
+    params->magic           = SP_RECV_PLACEHOLDER_MAGIC;
+    params->txt_real_seq    = 0;
+    params->img_real_seq    = 0;
+    params->mode            = SP_RECV_PLACEHOLDER_NOOP_MODE;
+    params->txt_padded_seq  = 0;
+    params->img_padded_seq  = 0;
+    params->world_size      = world_size;
+    params->stream_index    = 0;
+    SPRecvPlaceholderParams* raw = params.get();
+    std::lock_guard<std::mutex> lock(sp_recv_placeholder_params_mutex());
+    sp_recv_placeholder_params_store().push_back(std::move(params));
+    return raw;
+}
+
+void sp_recv_placeholder_noop_cpu(ggml_tensor* dst, int ith, int nth, void* userdata) {
+    (void)dst;
+    (void)ith;
+    (void)nth;
+    auto* params = static_cast<const SPRecvPlaceholderParams*>(userdata);
+    GGML_ASSERT(params != nullptr);
+    GGML_ASSERT(params->magic == SP_RECV_PLACEHOLDER_MAGIC);
+    GGML_ASSERT(params->mode == SP_RECV_PLACEHOLDER_NOOP_MODE);
+}
 
 void check_context_tensor(ggml_context* ctx,
                           ggml_tensor* tensor,
@@ -96,12 +148,29 @@ ggml_tensor* new_recv_placeholder(ggml_context* ctx,
                                   int64_t ne1,
                                   int64_t ne2,
                                   int64_t ne3,
-                                  const std::string& name) {
+                                  const std::string& name,
+                                  int world_size) {
     ggml_tensor* leaf = ggml_new_tensor_4d(ctx, like->type, ne0, ne1, ne2, ne3);
     if (!name.empty()) {
         ggml_set_name(leaf, (name + "_recv_leaf").c_str());
     }
-    ggml_tensor* recv = ggml_dup(ctx, leaf);
+    ggml_tensor* recv = nullptr;
+    if (world_size > 1) {
+        ggml_tensor* args[] = {leaf, dependency};
+        recv = ggml_custom_4d(ctx,
+                              like->type,
+                              ne0,
+                              ne1,
+                              ne2,
+                              ne3,
+                              args,
+                              2,
+                              sp_recv_placeholder_noop_cpu,
+                              1,
+                              sp_recv_placeholder_make_params(world_size));
+    } else {
+        recv = ggml_dup(ctx, leaf);
+    }
     recv->src[1] = dependency;
     if (!name.empty()) {
         ggml_set_name(recv, (name + "_recv").c_str());
@@ -263,7 +332,8 @@ SPSequenceGather sp_mark_gather_sequence(ggml_context* ctx,
                                        gather.padded_seq_len,
                                        local->ne[2],
                                        local->ne[3],
-                                       name);
+                                       name,
+                                       world_size);
 
     sd::ggml_graph_cut::mark_comm_op(local,
                                      gather.recv,
@@ -369,7 +439,8 @@ SPSequenceGatherBatch sp_mark_gather_sequence_batched(ggml_context* ctx,
                                             1,
                                             1,
                                             1,
-                                            name + "_flat");
+                                            name + "_flat",
+                                            world_size);
 
     sd::ggml_graph_cut::mark_comm_op(gather.send_flat,
                                      gather.recv_flat,
@@ -478,7 +549,8 @@ SPAllToAll4DLayout sp_all_to_all_4d_seq_to_head(ggml_context* ctx,
                                             1,
                                             1,
                                             1,
-                                            name + "_flat");
+                                            name + "_flat",
+                                            world_size);
 
     mark_all_to_all_flat(layout.send_flat,
                          layout.recv_flat,
@@ -621,7 +693,8 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_batched_layouts(ggml_contex
                                             1,
                                             1,
                                             1,
-                                            name + "_flat");
+                                            name + "_flat",
+                                            world_size);
 
     mark_all_to_all_flat(layout.send_flat,
                          layout.recv_flat,
@@ -760,7 +833,8 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_seq_to_head_packed_recv_only(ggml_conte
                                             1,
                                             1,
                                             1,
-                                            name + "_flat");
+                                            name + "_flat",
+                                            world_size);
 
     mark_all_to_all_flat(layout.send_flat,
                          layout.recv_flat,
@@ -821,7 +895,8 @@ SPAllToAll4DLayout sp_all_to_all_4d_head_to_seq(ggml_context* ctx,
                                             1,
                                             1,
                                             1,
-                                            name + "_flat");
+                                            name + "_flat",
+                                            world_size);
 
     mark_all_to_all_flat(layout.send_flat,
                          layout.recv_flat,
@@ -956,7 +1031,8 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_batched(ggml_context* ctx,
                                             1,
                                             1,
                                             1,
-                                            name + "_flat");
+                                            name + "_flat",
+                                            world_size);
 
     mark_all_to_all_flat(layout.send_flat,
                          layout.recv_flat,
@@ -1080,7 +1156,8 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_packed_recv_only(ggml_conte
                                             1,
                                             1,
                                             1,
-                                            name + "_flat");
+                                            name + "_flat",
+                                            world_size);
     mark_all_to_all_flat(layout.send_flat,
                          layout.recv_flat,
                          layout.count_per_peer,
@@ -1202,7 +1279,8 @@ SPAllToAll4DBatchLayout sp_all_to_all_4d_head_to_seq_packed_recv_only_f16(ggml_c
                                             1,
                                             1,
                                             1,
-                                            name + "_flat");
+                                            name + "_flat",
+                                            world_size);
     mark_all_to_all_flat(layout.send_flat,
                          layout.recv_flat,
                          layout.count_per_peer,

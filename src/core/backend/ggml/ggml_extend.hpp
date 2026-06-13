@@ -1400,7 +1400,9 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
         if (kv_scale != 1.0f) {
             k_in = ggml_ext_scale(ctx, k_in, kv_scale);
         }
-        k_in = ggml_cast(ctx, k_in, GGML_TYPE_F16);
+        if (k_in->type != GGML_TYPE_F16 || !ggml_is_contiguous(k_in)) {
+            k_in = ggml_cast(ctx, k_in, GGML_TYPE_F16);
+        }
 
         if (!v_is_seq_major) {
             v_in = ggml_ext_cont(ctx, ggml_permute(ctx, v_in, 0, 2, 1, 3));
@@ -1412,7 +1414,9 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
         if (kv_scale != 1.0f) {
             v_in = ggml_ext_scale(ctx, v_in, kv_scale);
         }
-        v_in = ggml_cast(ctx, v_in, GGML_TYPE_F16);
+        if (v_in->type != GGML_TYPE_F16 || !ggml_is_contiguous(v_in)) {
+            v_in = ggml_cast(ctx, v_in, GGML_TYPE_F16);
+        }
 
         if (mask_in != nullptr) {
             mask_in = ggml_transpose(ctx, mask_in);
