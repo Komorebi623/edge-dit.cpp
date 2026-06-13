@@ -48,6 +48,18 @@ bash ./scripts/build_cpu.sh
   -o output.png
 ```
 
+使用 Sequence Parallel 在多张 GPU 上按 token/sequence 维切分 DiT 主干：
+
+```bash
+./build-cuda/bin/ed-cli --backend cuda \
+  --model /path/to/diffusers-model-dir \
+  -p "prompt text" \
+  -W 1024 -H 1024 --steps 50 -s 0 \
+  --devices 0,1 \
+  --sp-size 2 \
+  -o output.png
+```
+
 使用组件式路径加载模型：
 
 ```bash
@@ -172,15 +184,109 @@ root  -> uncond + cfg_scale * (cond - uncond)
 
 CFG parallel 可以和已有 cache 参数一起使用；cond/uncond 仍然按原有 `CacheBranch::Cond` 和 `CacheBranch::Uncond` 分支维护 cache。cache 命中只跳过本地 diffusion forward，每一步仍会参与 all-gather，以保持多卡通信同步。
 
+## SP 并行推理
+
+`edge-dit.cpp` 也支持 Sequence Parallel。SP 会把 diffusion transformer 的 sequence/token 维拆到多个 GPU worker 上，attention 前后通过 Ulysses 风格的 all-to-all 在 sequence/head 布局之间转换：
+
+```text
+rank i -> local sequence shard
+q/k/v  -> seq-to-head all-to-all
+attn   -> local head shard over gathered sequence layout
+out    -> head-to-seq all-to-all, then restore sequence shard/full output
+```
+
+用户侧通过 `--sp-size` 开启 SP，通过 `--devices` 指定参与 worker。`--devices` 的数量必须和 `--sp-size` 一致：
+
+```bash
+./build-cuda/bin/ed-cli --backend cuda \
+  --model /export/home/liuyiming54/models/stable-diffusion-3-medium-diffusers \
+  -p "a cute cat holding a white sign with the exact text 'sd3.cpp' written clearly on it" \
+  -W 1024 -H 1024 --steps 50 -s 0 \
+  --cfg-scale 5.0 --flow-shift 3.0 \
+  --devices 3,5 \
+  --sp-size 2 \
+  -o sd3_sp.png
+```
+
+Flux 示例：
+
+```bash
+./build-cuda/bin/ed-cli --backend cuda \
+  --model /mnt/cfs/9n-das-admin/llm_models/flux-dev/ \
+  -p "a cinematic photo of a glass teapot on a wooden table, soft morning light" \
+  -W 1024 -H 1024 --steps 50 -s 0 \
+  --guidance 3.5 \
+  --devices 3,5 \
+  --sp-size 2 \
+  -o flux_sp.png
+```
+
+Qwen-Image 示例：
+
+```bash
+./build-cuda/bin/ed-cli --backend cuda \
+  --model /export/home/liuyiming54/models/Qwen-Image \
+  -p "a cute cat holding a white sign with the exact text 'qwen image' written clearly on it" \
+  -W 1024 -H 1024 --steps 50 -s 0 \
+  --devices 3,5 \
+  --sp-size 2 \
+  -o qwen_image_sp.png
+```
+
+Wan 示例：
+
+```bash
+./build-cuda/bin/ed-cli --backend cuda \
+  --video \
+  --model /export/home/liuyiming54/models/Wan2.1-T2V-1.3B-Diffusers \
+  -p "a small robot walking through a rainy neon street, cinematic lighting" \
+  -W 832 -H 480 --frames 40 --fps 16 --steps 10 -s 0 \
+  --cfg-scale 5.0 --flow-shift 5.0 \
+  --devices 3,5 \
+  --sp-size 2 \
+  -o wan_sp.mp4
+```
+
+参数语义：
+
+```text
+--sp-size 2            开启 2-way sequence parallel
+--sp-size 4            开启 4-way sequence parallel
+--devices 3,5          选择参与 SP 的 GPU worker，数量需要和 sp size 一致
+```
+
+注意事项：
+
+```text
+1. SP 主要加速 diffusion transformer sampling hot path；模型加载、文本编码、VAE decode、图片/视频保存仍会影响端到端 wall time。
+2. 小分辨率/短序列时，通信和 layout 转换开销可能抵消收益；分辨率越高、视频序列越长，SP 收益通常越明显。
+3. Wan 的分辨率需要满足模型 latent/patch 对齐要求；报告中使用 416x240、640x384、832x480。
+```
+
+统一测试脚本：
+
+```bash
+python3 scripts/benchmark_sp_matrix.py \
+  --models sd3,flux,qwen,wan \
+  --image-resolutions 512x512,1024x1024,2048x2048 \
+  --video-resolutions 416x240,640x384,832x480 \
+  --gpu-groups '1:3;2:3,5;4:3,4,5,6' \
+  --image-steps 2 \
+  --video-steps 2 \
+  --video-frames 40 \
+  --out-dir /tmp/edge_dit_sp_benchmark \
+  --report docs/sp_benchmark_report.md
+```
+
 当前状态：
 
 ```text
 CFG parallel: 已支持 SD3 / Flux / Wan / Qwen-Image
 TP parallel: 预留 CLI 参数，尚未实现
-SP parallel: 预留 CLI 参数，尚未实现
+SP parallel: 已支持 SD3 / Flux / Wan / Qwen-Image
 ```
 
-更多验证结果见 `result.md`。在已测试的 SD3、Flux、Wan、Qwen-Image 上，CFG parallel 的 sampling / denoise hot path 接近 2x 加速，并且图片模型输出与单卡逐像素对齐。
+更多性能结果见 `docs/sp_benchmark_report.md`。在已测试的 SD3、Flux、Wan、Qwen-Image 上，SP 对高分辨率图片和长序列视频的 sampling hot path 有明显加速。
 
 ## 常用参数
 
@@ -204,7 +310,8 @@ SP parallel: 预留 CLI 参数，尚未实现
 --cfg-parallel-size     CFG 并行规模，当前支持 1 或 2
 --cfg-size              --cfg-parallel-size 的短别名
 --tp-size               Tensor parallel 规模，预留参数，当前必须为 1
---sp-size               Sequence parallel 规模，预留参数，当前必须为 1
+--sp-size               Sequence parallel 规模，支持 1 / 2 / 4 等与 --devices 数量一致的配置
+--profile-graph-cuts    打印 graph-cut compute/communication timing summary
 --video                 生成视频
 --frames                视频帧数
 --fps                   视频帧率
