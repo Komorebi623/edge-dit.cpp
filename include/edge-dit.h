@@ -155,7 +155,6 @@ typedef struct ed_context_params_t {
     bool keep_vae_on_cpu;
 
     bool flash_attention;
-    bool diffusion_flash_attention;
 
     float max_vram_gb;
 

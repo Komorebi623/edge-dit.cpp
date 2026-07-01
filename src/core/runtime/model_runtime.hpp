@@ -80,7 +80,6 @@ public:
     float max_vram() const { return max_vram_; }
     size_t max_graph_vram_bytes() const { return max_graph_vram_bytes_; }
     bool flash_attention() const { return flash_attention_; }
-    bool diffusion_flash_attention() const { return diffusion_flash_attention_; }
     bool circular_x() const { return circular_x_; }
     bool circular_y() const { return circular_y_; }
     bool parallel_enabled() const { return parallel_context_ != nullptr && parallel_context_->enabled(); }
@@ -118,7 +117,6 @@ private:
     size_t max_graph_vram_bytes_ = 0;
 
     bool flash_attention_ = false;
-    bool diffusion_flash_attention_ = false;
     bool circular_x_ = false;
     bool circular_y_ = false;
 
