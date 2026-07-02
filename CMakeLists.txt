@@ -29,6 +29,7 @@ option(ED_BUILD_CUDNN_BENCHMARKS "Build standalone cuDNN benchmark tools" OFF)
 option(ED_BUILD_SHARED_LIBS "Build edge-dit as a shared library" OFF)
 option(ED_ENABLE_CUDNN_SDPA "Enable experimental cuDNN SDPA backend for CUDA flash attention" OFF)
 option(ED_ENABLE_CUDA_NORM "Enable edge CUDA norm fast paths for ggml CUDA backend" ON)
+option(ED_ENABLE_CUDA_ROPE "Enable edge CUDA RoPE fast paths for ggml CUDA backend" ON)
 option(ED_ENABLE_PARALLEL "Enable edge-dit lightweight parallel runtime" ON)
 option(ED_ENABLE_NCCL "Enable NCCL communication backend" OFF)
 option(ED_ENABLE_MPI "Enable MPI bootstrap for distributed process groups" OFF)
@@ -80,7 +81,7 @@ if(ED_ENABLE_MPI)
     find_package(MPI REQUIRED COMPONENTS CXX)
 endif()
 
-if(ED_ENABLE_CUDNN_SDPA OR (ED_ENABLE_CUDA_NORM AND ED_GGML_CUDA) OR ED_BUILD_CUDNN_BENCHMARKS)
+if(ED_ENABLE_CUDNN_SDPA OR ((ED_ENABLE_CUDA_NORM OR ED_ENABLE_CUDA_ROPE) AND ED_GGML_CUDA) OR ED_BUILD_CUDNN_BENCHMARKS)
     enable_language(CUDA)
 endif()
 
@@ -179,6 +180,22 @@ if(ED_ENABLE_CUDA_NORM AND ED_GGML_CUDA)
     target_compile_definitions(ggml-cuda PRIVATE ED_ENABLE_CUDA_NORM)
     target_include_directories(ggml-cuda
         PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cuda
+    )
+endif()
+
+if(ED_ENABLE_CUDA_ROPE AND ED_GGML_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    target_sources(ggml-cuda
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda/ed_cuda_rope.cu
+    )
+    target_compile_definitions(ggml-cuda PRIVATE ED_ENABLE_CUDA_ROPE)
+    target_include_directories(ggml-cuda
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cuda
     )
