@@ -82,6 +82,7 @@ public:
     bool flash_attention() const { return flash_attention_; }
     bool circular_x() const { return circular_x_; }
     bool circular_y() const { return circular_y_; }
+    const ed_tiling_params_t& vae_tiling() const { return vae_tiling_; }
     bool parallel_enabled() const { return parallel_context_ != nullptr && parallel_context_->enabled(); }
 
     ggml_backend_t backend() const { return backends_.backend; }
@@ -119,6 +120,7 @@ private:
     bool flash_attention_ = false;
     bool circular_x_ = false;
     bool circular_y_ = false;
+    ed_tiling_params_t vae_tiling_ = {};
 
     RuntimeBackends backends_;
     parallel::ParallelContext* parallel_context_ = nullptr;

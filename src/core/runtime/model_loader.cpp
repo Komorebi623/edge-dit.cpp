@@ -540,6 +540,7 @@ void ModelLoader::clear() {
     use_tae_ = false;
     tae_preview_only_ = false;
     use_pmid_ = false;
+    skip_t5_ = false;
 }
 
 void ModelLoader::reset() {
@@ -592,6 +593,7 @@ bool ModelLoader::load_optional_file(const char* path,
 bool ModelLoader::load_model_files(const ed_context_params_t& params,
                                    std::string* error) {
     bool loaded_any = false;
+    skip_t5_ = params.skip_t5;
     auto load_user_component = [&](const char* path,
                                    const std::string& prefix,
                                    const char* label) -> bool {
@@ -661,10 +663,12 @@ bool ModelLoader::load_model_files(const ed_context_params_t& params,
         return false;
     }
 
-    if (!load_user_component(params.t5xxl_path,
-                             "text_encoders.t5xxl.transformer.",
-                             "t5xxl")) {
-        return false;
+    if (!params.skip_t5) {
+        if (!load_user_component(params.t5xxl_path,
+                                 "text_encoders.t5xxl.transformer.",
+                                 "t5xxl")) {
+            return false;
+        }
     }
 
     if (!load_user_component(params.llm_path,
@@ -745,8 +749,10 @@ bool ModelLoader::apply_dtype_policy(const ed_context_params_t& params,
     (void)error;
 
     const ggml_type wtype = ed_dtype_to_ggml(params.weight_type);
-    if (wtype != GGML_TYPE_COUNT) {
-        set_wtype_override(wtype);
+    const std::string tensor_type_rules =
+        params.tensor_type_rules != nullptr ? params.tensor_type_rules : "";
+    if (wtype != GGML_TYPE_COUNT || !tensor_type_rules.empty()) {
+        set_wtype_override(wtype, tensor_type_rules);
     }
 
     return true;
@@ -1017,6 +1023,9 @@ bool ModelLoader::init_from_diffusers_directory(const std::string& dir_path, con
 
     size_t before_all = tensor_storage_map_.size();
     for (const Component& component : components) {
+        if (skip_t5_ && std::strcmp(component.dir, "text_encoder_3") == 0) {
+            continue;
+        }
         const std::string component_dir = path_join(dir_path, component.dir);
         if (!is_directory(component_dir)) {
             if (component.required_for_flux && version_ == VERSION_FLUX) {
@@ -1185,7 +1194,10 @@ static std::map<ggml_type, uint32_t> collect_wtype_stat(const String2TensorStora
         if (is_unused_tensor(tensor_storage.name) || !predicate(tensor_storage.name)) {
             continue;
         }
-        stat[tensor_storage.type]++;
+        const ggml_type effective_type = tensor_storage.expected_type != GGML_TYPE_COUNT
+                                             ? tensor_storage.expected_type
+                                             : tensor_storage.type;
+        stat[effective_type]++;
     }
     return stat;
 }
@@ -1260,19 +1272,38 @@ TensorTypeRules parse_tensor_type_rules(const std::string& tensor_type_rules) {
 
 void ModelLoader::set_wtype_override(ggml_type wtype, std::string tensor_type_rules) {
     const TensorTypeRules map_rules = parse_tensor_type_rules(tensor_type_rules);
+
+    // Precompile regex patterns once to avoid repeated compilation in the inner loop
+    std::vector<std::pair<std::regex, ggml_type>> compiled_rules;
+    compiled_rules.reserve(map_rules.size());
+    for (const auto& rule : map_rules) {
+        try {
+            compiled_rules.emplace_back(std::regex(rule.first), rule.second);
+        } catch (const std::regex_error& e) {
+            LOG_WARN("invalid regex in tensor-type-rules: \"%s\" (%s)", rule.first.c_str(), e.what());
+            continue;
+        }
+    }
+
+    size_t converted = 0;
     for (auto& item : tensor_storage_map_) {
         ggml_type dst_type = wtype;
-        for (const auto& tensor_type_rule : map_rules) {
-            std::regex pattern(tensor_type_rule.first);
-            if (std::regex_search(item.first, pattern)) {
-                dst_type = tensor_type_rule.second;
+        for (const auto& compiled_rule : compiled_rules) {
+            if (std::regex_search(item.first, compiled_rule.first)) {
+                dst_type = compiled_rule.second;
                 break;
             }
         }
         if (dst_type != GGML_TYPE_COUNT && tensor_should_be_converted(item.second, dst_type)) {
             item.second.expected_type = dst_type;
+            ++converted;
         }
     }
+    LOG_INFO("set_wtype_override: wtype=%s rules='%s' marked %zu/%zu tensors for conversion",
+             wtype == GGML_TYPE_COUNT ? "auto" : ggml_type_name(wtype),
+             tensor_type_rules.c_str(),
+             converted,
+             tensor_storage_map_.size());
 }
 
 bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_threads_p, bool enable_mmap) {

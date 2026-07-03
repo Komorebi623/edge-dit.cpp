@@ -1031,8 +1031,7 @@ ed_status_t WanPipeline::generate_video(const ed_video_generation_params_t* para
         return ED_STATUS_GENERATION_FAILED;
     }
 
-    ed_tiling_params_t tiling{};
-    return decode_video_latent(final_latent, tiling, out, error);
+    return decode_video_latent(final_latent, runtime_->vae_tiling(), out, error);
 }
 
 ed_scheduler_t WanPipeline::default_scheduler(ed_sampler_t method) const {

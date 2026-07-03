@@ -612,10 +612,9 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
     }
 
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
-    ed_tiling_params_t tiling_params{};
     sd::Tensor<float> decoded = vae_->decode(n_threads,
                                              vae_latents,
-                                             tiling_params,
+                                             runtime_->vae_tiling(),
                                              false,
                                              false,
                                              false);

@@ -24,7 +24,7 @@ static void print_usage(const char* prog) {
     std::fprintf(stderr,
         "Usage:\n"
         "  %s --model <model-or-diffusers-dir> --prompt <text> [options]\n"
-        "  %s --diffusion-model <path> --vae <path> --clip_l <path> [--clip_g <path>] --t5xxl <path> --prompt <text> [options]\n\n"
+        "  %s --diffusion-model <path> --vae <path> --clip_l <path> [--clip_g <path>] (--t5xxl <path> | --no-t5) --prompt <text> [options]\n"
         "Options:\n"
         "  --video                   Generate video frames instead of an image\n"
         "  --video-format <fmt>      Video format: auto, avi, mp4, mov, mkv, webm. Default: auto\n"
@@ -72,6 +72,17 @@ static void print_usage(const char* prog) {
         "  --backend <name>          Backend: auto, cpu, cuda, gpu. Default: auto\n"
         "  --gpu                     Alias for --backend gpu\n"
         "  --devices <csv>           GPU devices for parallel workers, e.g. 0,1,2,3\n"
+        "  --type <dtype>            Weight type / on-the-fly quantization when loading safetensors:\n"
+        "                            f32, f16, bf16, q4_0, q4_1, q5_0, q5_1, q8_0, q2_k, q3_k, q4_k, q5_k, q6_k. Default: auto\n"
+        "  --tensor-type-rules <csv> Per-tensor quant overrides (mixed quant), e.g. \"attn=q4_0,norm=f16\"\n"
+        "                            Each rule is <name-regex>=<ggml-type-name>, comma-separated\n"
+        "  --no-t5                   Skip loading T5XXL text encoder (SD3 only; reduces memory, degrades prompt adherence)\n"
+        "  --vae-tiling              Enable VAE tiled decode (reduces VRAM, default: off)\n"
+        "  --vae-tile-size <float>   VAE tile relative size, default: 2.0 (2x2 grid). Larger = finer tiles = less VRAM\n"
+        "  --offload-to-cpu          Keep model weights on CPU, copy to GPU per-compute (saves VRAM)\n"
+        "  --keep-text-encoder-on-cpu  Run text encoder on CPU backend\n"
+        "  --keep-vae-on-cpu         Run VAE on CPU backend\n"
+        "  --max-vram <GB>           Limit VRAM usage for compute graphs (e.g. 8.0)\n"
         "  --flash-attention         Enable flash attention, default: on\n"
         "  --no-flash-attention      Disable flash attention\n"
         "  --cfg-parallel-size <n>   Split CFG cond/uncond branches across n GPUs, currently supports 1 or 2\n"
@@ -320,6 +331,66 @@ static ed_cache_mode_t parse_cache_mode(const char* text, bool* ok) {
         *ok = false;
     }
     return ED_CACHE_DISABLED;
+}
+
+static ed_dtype_t parse_weight_type(const char* text, bool* ok) {
+    if (ok != nullptr) {
+        *ok = true;
+    }
+    std::string type = lowercase(text != nullptr ? text : "");
+    for (char& c : type) {
+        if (c == '-' || c == '.') {
+            c = '_';
+        }
+    }
+
+    if (type == "auto" || type.empty()) {
+        return ED_DTYPE_AUTO;
+    }
+    if (type == "f32" || type == "fp32") {
+        return ED_DTYPE_F32;
+    }
+    if (type == "f16" || type == "fp16") {
+        return ED_DTYPE_F16;
+    }
+    if (type == "bf16") {
+        return ED_DTYPE_BF16;
+    }
+    if (type == "q4_0") {
+        return ED_DTYPE_Q4_0;
+    }
+    if (type == "q4_1") {
+        return ED_DTYPE_Q4_1;
+    }
+    if (type == "q5_0") {
+        return ED_DTYPE_Q5_0;
+    }
+    if (type == "q5_1") {
+        return ED_DTYPE_Q5_1;
+    }
+    if (type == "q8_0") {
+        return ED_DTYPE_Q8_0;
+    }
+    if (type == "q2_k") {
+        return ED_DTYPE_Q2_K;
+    }
+    if (type == "q3_k") {
+        return ED_DTYPE_Q3_K;
+    }
+    if (type == "q4_k") {
+        return ED_DTYPE_Q4_K;
+    }
+    if (type == "q5_k") {
+        return ED_DTYPE_Q5_K;
+    }
+    if (type == "q6_k") {
+        return ED_DTYPE_Q6_K;
+    }
+
+    if (ok != nullptr) {
+        *ok = false;
+    }
+    return ED_DTYPE_AUTO;
 }
 
 static std::string path_extension(const std::string& path) {
@@ -780,6 +851,8 @@ struct FluxCliArgs {
     const char* video_format = nullptr;
     const char* backend = nullptr;
     const char* devices = nullptr;
+    const char* weight_type = nullptr;
+    const char* tensor_type_rules = nullptr;
     int cfg_parallel_size = 1;
     int tp_parallel_size = 1;
     int sp_parallel_size = 1;
@@ -819,6 +892,13 @@ struct FluxCliArgs {
     int cache_taylorseer_skip_interval = 1;
     const char* cache_scm_mask = nullptr;
     bool cache_scm_policy_dynamic = true;
+    bool no_t5 = false;
+    int vae_tiling = -1;  // -1=default(off), 1=on
+    float vae_tile_size = 0.0f;
+    bool offload_to_cpu = false;
+    bool keep_text_encoder_on_cpu = false;
+    bool keep_vae_on_cpu = false;
+    float max_vram = 0.0f;
 };
 
 static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
@@ -988,6 +1068,29 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         } else if (std::strcmp(key, "--devices") == 0 ||
                    std::strcmp(key, "--gpus") == 0) {
             args->devices = require_value(key);
+        } else if (std::strcmp(key, "--type") == 0 ||
+                   std::strcmp(key, "--weight-type") == 0) {
+            args->weight_type = require_value(key);
+        } else if (std::strcmp(key, "--tensor-type-rules") == 0) {
+            args->tensor_type_rules = require_value(key);
+        } else if (std::strcmp(key, "--no-t5") == 0) {
+            args->no_t5 = true;
+        } else if (std::strcmp(key, "--vae-tiling") == 0) {
+            args->vae_tiling = 1;
+        } else if (std::strcmp(key, "--vae-tile-size") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->vae_tile_size = parse_float_value(v, 0.0f);
+        } else if (std::strcmp(key, "--offload-to-cpu") == 0) {
+            args->offload_to_cpu = true;
+        } else if (std::strcmp(key, "--keep-text-encoder-on-cpu") == 0) {
+            args->keep_text_encoder_on_cpu = true;
+        } else if (std::strcmp(key, "--keep-vae-on-cpu") == 0) {
+            args->keep_vae_on_cpu = true;
+        } else if (std::strcmp(key, "--max-vram") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->max_vram = parse_float_value(v, 0.0f);
         } else if (std::strcmp(key, "--flash-attention") == 0 ||
                    std::strcmp(key, "--flash-attn") == 0) {
             args->flash_attention = true;
@@ -1031,9 +1134,10 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         args->diffusion_model_path != nullptr && std::strlen(args->diffusion_model_path) > 0 &&
         args->vae_path != nullptr && std::strlen(args->vae_path) > 0 &&
         args->clip_l_path != nullptr && std::strlen(args->clip_l_path) > 0 &&
-        args->t5xxl_path != nullptr && std::strlen(args->t5xxl_path) > 0;
+        (args->no_t5 || (args->t5xxl_path != nullptr && std::strlen(args->t5xxl_path) > 0));
+
     if (!has_full_model && !has_components) {
-        std::fprintf(stderr, "--model or the full --diffusion-model/--vae/--clip_l/--t5xxl set is required\n");
+        std::fprintf(stderr, "--model or the full --diffusion-model/--vae/--clip_l/(--t5xxl or --no-t5) set is required\n");
         return false;
     }
 
@@ -1140,6 +1244,15 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         return false;
     }
 
+    if (args->weight_type != nullptr) {
+        bool ok = false;
+        parse_weight_type(args->weight_type, &ok);
+        if (!ok) {
+            std::fprintf(stderr, "unsupported weight type: %s\n", args->weight_type);
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -1208,8 +1321,8 @@ static int launch_distributed_cli(int argc, char** argv, const FluxCliArgs& args
     }
     return status == 0 ? 0 : 1;
 }
-
 int main(int argc, char** argv) {
+
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
@@ -1266,6 +1379,12 @@ int main(int argc, char** argv) {
     ctx_params.tp_parallel_size = args.tp_parallel_size;
     ctx_params.sp_parallel_size = args.sp_parallel_size;
     ctx_params.flash_attention = args.flash_attention;
+    ctx_params.offload_params_to_cpu = args.offload_to_cpu;
+    ctx_params.keep_text_encoder_on_cpu = args.keep_text_encoder_on_cpu;
+    ctx_params.keep_vae_on_cpu = args.keep_vae_on_cpu;
+    if (args.max_vram > 0.0f) {
+        ctx_params.max_vram_gb = args.max_vram;
+    }
 
     if (args.threads > 0) {
         ctx_params.n_threads = args.threads;
@@ -1275,8 +1394,22 @@ int main(int argc, char** argv) {
      * Flux 测试阶段先让内部自动识别 dtype / sampler / scheduler。
      * 如果你的模型是量化 GGUF，也可以在这里手动指定：
      *   ctx_params.weight_type = ED_DTYPE_Q8_0;
+     * 命令行 --type / --tensor-type-rules 会覆盖这里的默认值，
+     * 并在加载 safetensors 时触发在线量化。
      */
-    ctx_params.weight_type = ED_DTYPE_AUTO;
+    ctx_params.weight_type = args.weight_type != nullptr
+                                 ? parse_weight_type(args.weight_type, nullptr)
+                                 : ED_DTYPE_AUTO;
+    ctx_params.tensor_type_rules = args.tensor_type_rules;
+    ctx_params.skip_t5 = args.no_t5;
+    if (args.vae_tiling == 1) {
+        ctx_params.vae_tiling.enabled = true;
+    }
+    if (args.vae_tile_size > 0.0f) {
+        ctx_params.vae_tiling.enabled = true;
+        ctx_params.vae_tiling.rel_size_x = args.vae_tile_size;
+        ctx_params.vae_tiling.rel_size_y = args.vae_tile_size;
+    }
 
     ed_context_t* ctx = ed_create_context(&ctx_params);
     if (ctx == nullptr) {
