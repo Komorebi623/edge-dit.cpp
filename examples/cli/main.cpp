@@ -1150,7 +1150,7 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         (args->no_t5 || (args->t5xxl_path != nullptr && std::strlen(args->t5xxl_path) > 0));
 
     if (!has_full_model && !has_components) {
-        std::fprintf(stderr, "--model or the full --diffusion-model/--vae/--clip_l/--t5xxl set is required\n");
+        std::fprintf(stderr, "--model or the full --diffusion-model/--vae/--clip_l/(--t5xxl or --no-t5) set is required\n");
         return false;
     }
 

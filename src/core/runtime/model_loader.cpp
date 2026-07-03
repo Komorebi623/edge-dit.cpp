@@ -1272,13 +1272,25 @@ TensorTypeRules parse_tensor_type_rules(const std::string& tensor_type_rules) {
 
 void ModelLoader::set_wtype_override(ggml_type wtype, std::string tensor_type_rules) {
     const TensorTypeRules map_rules = parse_tensor_type_rules(tensor_type_rules);
+
+    // Precompile regex patterns once to avoid repeated compilation in the inner loop
+    std::vector<std::pair<std::regex, ggml_type>> compiled_rules;
+    compiled_rules.reserve(map_rules.size());
+    for (const auto& rule : map_rules) {
+        try {
+            compiled_rules.emplace_back(std::regex(rule.first), rule.second);
+        } catch (const std::regex_error& e) {
+            LOG_WARN("invalid regex in tensor-type-rules: \"%s\" (%s)", rule.first.c_str(), e.what());
+            continue;
+        }
+    }
+
     size_t converted = 0;
     for (auto& item : tensor_storage_map_) {
         ggml_type dst_type = wtype;
-        for (const auto& tensor_type_rule : map_rules) {
-            std::regex pattern(tensor_type_rule.first);
-            if (std::regex_search(item.first, pattern)) {
-                dst_type = tensor_type_rule.second;
+        for (const auto& compiled_rule : compiled_rules) {
+            if (std::regex_search(item.first, compiled_rule.first)) {
+                dst_type = compiled_rule.second;
                 break;
             }
         }
