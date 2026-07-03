@@ -24,7 +24,7 @@ static void print_usage(const char* prog) {
     std::fprintf(stderr,
         "Usage:\n"
         "  %s --model <model-or-diffusers-dir> --prompt <text> [options]\n"
-        "  %s --diffusion-model <path> --vae <path> --clip_l <path> [--clip_g <path>] --t5xxl <path> --prompt <text> [options]\n"
+        "  %s --diffusion-model <path> --vae <path> --clip_l <path> [--clip_g <path>] (--t5xxl <path> | --no-t5) --prompt <text> [options]\n"
         "Options:\n"
         "  --video                   Generate video frames instead of an image\n"
         "  --video-format <fmt>      Video format: auto, avi, mp4, mov, mkv, webm. Default: auto\n"
@@ -76,7 +76,7 @@ static void print_usage(const char* prog) {
         "                            f32, f16, bf16, q4_0, q4_1, q5_0, q5_1, q8_0, q2_k, q3_k, q4_k, q5_k, q6_k. Default: auto\n"
         "  --tensor-type-rules <csv> Per-tensor quant overrides (mixed quant), e.g. \"attn=q4_0,norm=f16\"\n"
         "                            Each rule is <name-regex>=<ggml-type-name>, comma-separated\n"
-        "  --no-t5                   Skip loading T5XXL text encoder (reduces memory, degrades prompt adherence)\n"
+        "  --no-t5                   Skip loading T5XXL text encoder (SD3 only; reduces memory, degrades prompt adherence)\n"
         "  --vae-tiling              Enable VAE tiled decode (reduces VRAM, default: off)\n"
         "  --vae-tile-size <float>   VAE tile relative size, default: 2.0 (2x2 grid). Larger = finer tiles = less VRAM\n"
         "  --offload-to-cpu          Keep model weights on CPU, copy to GPU per-compute (saves VRAM)\n"

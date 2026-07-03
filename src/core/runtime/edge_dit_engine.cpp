@@ -163,6 +163,12 @@ bool EdgeDitEngine::init(const ed_ctx_params_t* params) {
         return false;
     }
 
+    if (ctx_params_.skip_t5 && !ed_version_is_sd3(model_loader_->version())) {
+        set_error("--no-t5 is only supported for SD3 models");
+        cleanup();
+        return false;
+    }
+
     if (!model_loader_->apply_dtype_policy(ctx_params_, &last_error_)) {
         set_error(last_error_.empty() ? "ModelLoader::apply_dtype_policy failed" : last_error_);
         cleanup();
