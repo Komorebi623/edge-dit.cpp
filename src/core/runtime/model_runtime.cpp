@@ -161,6 +161,7 @@ bool ModelRuntime::init_flags(const ed_context_params_t& params, std::string* er
     diffusion_flash_attention_ = params.diffusion_flash_attention;
     circular_x_ = false;
     circular_y_ = false;
+    vae_tiling_ = params.vae_tiling;
     return true;
 }
 

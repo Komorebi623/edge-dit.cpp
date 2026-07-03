@@ -147,17 +147,21 @@ typedef struct ed_context_params_t {
 
     int n_threads;
     ed_dtype_t weight_type;
+    const char * tensor_type_rules;
 
     bool use_mmap;
     bool offload_params_to_cpu;
     bool keep_text_encoder_on_cpu;
     bool keep_control_net_on_cpu;
     bool keep_vae_on_cpu;
+    bool skip_t5;
 
     bool flash_attention;
     bool diffusion_flash_attention;
 
     float max_vram_gb;
+
+    ed_tiling_params_t vae_tiling;
 
     int cfg_parallel_size;
     int tp_parallel_size;

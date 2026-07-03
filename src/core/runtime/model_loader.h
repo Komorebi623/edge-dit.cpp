@@ -256,6 +256,7 @@ private:
     bool use_tae_ = false;
     bool tae_preview_only_ = false;
     bool use_pmid_ = false;
+    bool skip_t5_ = false;
 };
 
 #endif
