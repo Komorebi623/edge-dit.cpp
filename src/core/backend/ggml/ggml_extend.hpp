@@ -1344,6 +1344,43 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_cast_f32(ggml_context* ctx, ggml_backend
     }
 }
 
+__STATIC_INLINE__ bool ggml_ext_env_flag_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+    return std::strcmp(value, "0") != 0 &&
+           std::strcmp(value, "false") != 0 &&
+           std::strcmp(value, "FALSE") != 0 &&
+           std::strcmp(value, "off") != 0 &&
+           std::strcmp(value, "OFF") != 0;
+}
+
+__STATIC_INLINE__ bool ggml_ext_prefer_cudnn_sdpa_unpadded(ggml_backend_t backend,
+                                                          int64_t L_q,
+                                                          int64_t L_k,
+                                                          int64_t d_head,
+                                                          ggml_tensor* mask) {
+#ifdef ED_ENABLE_CUDNN_SDPA
+    if (mask != nullptr ||
+        !sd_backend_is(backend, "CUDA") ||
+        ggml_ext_env_flag_enabled("ED_DISABLE_CUDNN_SDPA") ||
+        ggml_ext_env_flag_enabled("ED_DISABLE_CUDNN_SDPA_UNPAD")) {
+        return false;
+    }
+
+    const bool supported_head_dim = d_head == 64 || d_head == 128;
+    return supported_head_dim && L_q == L_k && L_q >= 4096;
+#else
+    ED_UNUSED(backend);
+    ED_UNUSED(L_q);
+    ED_UNUSED(L_k);
+    ED_UNUSED(d_head);
+    ED_UNUSED(mask);
+    return false;
+#endif
+}
+
 // q: [N, L_q, C(n_head*d_head)] or [N*n_head, L_q, d_head]
 // k: [N, L_k, n_kv_head*d_head] or [N*n_kv_head, L_k, d_head]
 // v: [N, L_k, n_kv_head*d_head] or [N, L_k, n_kv_head, d_head]
@@ -1466,7 +1503,8 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
     if (flash_attn) {
         // LOG_DEBUG("attention_ext L_q:%d L_k:%d n_head:%d C:%d d_head:%d N:%d", L_q, L_k, n_head, C, d_head, N);
         bool can_use_flash_attn = true;
-        if (pad_kv_for_flash_attn && can_use_flash_attn && L_k % 256 != 0) {
+        const bool prefer_cudnn_unpadded = ggml_ext_prefer_cudnn_sdpa_unpadded(backend, L_q, L_k, d_head, mask);
+        if (pad_kv_for_flash_attn && can_use_flash_attn && !prefer_cudnn_unpadded && L_k % 256 != 0) {
             kv_pad = GGML_PAD(L_k, 256) - static_cast<int>(L_k);
         }
 
@@ -2123,6 +2161,10 @@ protected:
 
     bool graph_cut_profile_enabled() const {
         return env_flag_enabled("ED_PROFILE_GRAPH_CUTS");
+    }
+
+    bool runner_profile_enabled() const {
+        return env_flag_enabled("ED_PROFILE_RUNNER");
     }
 
     bool graph_cut_cache_compact_enabled() const {
@@ -5345,6 +5387,21 @@ protected:
         }
         if (profile_out != nullptr) {
             profile_out->total_ms = ggml_time_ms() - t_execute_begin;
+            if (runner_profile_enabled()) {
+                LOG_INFO("%s runner profile total=%lldms offload=%lldms alloc=%lldms copy=%lldms compute=%lldms post=%lldms cache=%lldms copied_tensors=%zu copied_bytes=%.2fMiB cache_live=%.2fMiB cache_buffer=%.2fMiB",
+                         get_desc().c_str(),
+                         (long long) profile_out->total_ms,
+                         (long long) profile_out->offload_ms,
+                         (long long) profile_out->alloc_ms,
+                         (long long) profile_out->copy_ms,
+                         (long long) profile_out->compute_ms,
+                         (long long) profile_out->post_ms,
+                         (long long) profile_out->cache_ms,
+                         profile_out->copy_detail.copied_tensors,
+                         profile_out->copy_detail.copied_bytes / 1024.0 / 1024.0,
+                         profile_out->cache_live_bytes / 1024.0 / 1024.0,
+                         profile_out->cache_buffer_bytes / 1024.0 / 1024.0);
+            }
         }
         return output;
     }
@@ -5779,12 +5836,17 @@ public:
             LOG_ERROR("%s alloc compute buffer failed", get_desc().c_str());
             return std::nullopt;
         }
+        GraphExecuteProfile runner_profile;
         return execute_graph<T>(gf,
                                 n_threads,
                                 free_compute_buffer_immediately,
                                 {},
                                 false,
-                                no_return);
+                                no_return,
+                                nullptr,
+                                nullptr,
+                                nullptr,
+                                runner_profile_enabled() ? &runner_profile : nullptr);
     }
 
     void set_flash_attention_enabled(bool enabled) {

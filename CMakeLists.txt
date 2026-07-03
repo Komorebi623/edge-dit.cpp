@@ -294,6 +294,10 @@ target_link_libraries(edgedit
         ggml
 )
 
+if(ED_ENABLE_CUDNN_SDPA)
+    target_compile_definitions(edgedit PRIVATE ED_ENABLE_CUDNN_SDPA)
+endif()
+
 if(ED_ENABLE_PARALLEL)
     target_compile_definitions(edgedit PUBLIC ED_ENABLE_PARALLEL)
 endif()

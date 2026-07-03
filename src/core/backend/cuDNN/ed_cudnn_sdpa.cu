@@ -252,7 +252,7 @@ static void log_unsupported_shape(const char * reason, const ggml_tensor * q, co
                   mask != nullptr ? "present" : "null");
 }
 
-static bool make_key(ggml_tensor * dst, ed_cudnn_sdpa_key & key) {
+static bool make_key(const ggml_tensor * dst, ed_cudnn_sdpa_key & key, int device) {
     const ggml_tensor * q = dst->src[0];
     const ggml_tensor * k = dst->src[1];
     const ggml_tensor * v = dst->src[2];
@@ -262,7 +262,10 @@ static bool make_key(ggml_tensor * dst, ed_cudnn_sdpa_key & key) {
         log_unsupported_shape("null_tensor", q, k, v, dst, mask);
         return false;
     }
-    if (q->type != GGML_TYPE_F32 || k->type != GGML_TYPE_F16 || v->type != GGML_TYPE_F16 || dst->type != GGML_TYPE_F32) {
+    if ((q->type != GGML_TYPE_F32 && q->type != GGML_TYPE_F16) ||
+        k->type != GGML_TYPE_F16 ||
+        v->type != GGML_TYPE_F16 ||
+        dst->type != GGML_TYPE_F32) {
         log_unsupported_shape("type", q, k, v, dst, mask);
         return false;
     }
@@ -292,7 +295,7 @@ static bool make_key(ggml_tensor * dst, ed_cudnn_sdpa_key & key) {
         log_unsupported_shape("rank_or_dim", q, k, v, dst, mask);
         return false;
     }
-    if (!supports_tensor_shape(q, GGML_TYPE_F32, d, sq, h) ||
+    if (!supports_tensor_shape(q, q->type, d, sq, h) ||
         !supports_tensor_shape(k, GGML_TYPE_F16, d, sk, h) ||
         !supports_tensor_shape(v, GGML_TYPE_F16, d, sk, h)) {
         log_unsupported_shape("input_layout", q, k, v, dst, mask);
@@ -303,9 +306,6 @@ static bool make_key(ggml_tensor * dst, ed_cudnn_sdpa_key & key) {
         log_unsupported_shape("dst_shape", q, k, v, dst, mask);
         return false;
     }
-
-    int device = 0;
-    CUDA_CHECK(cudaGetDevice(&device));
 
     key = {};
     key.device = device;
@@ -338,7 +338,24 @@ static bool make_key(ggml_tensor * dst, ed_cudnn_sdpa_key & key) {
 }
 
 static bool should_use_cudnn_sdpa(const ed_cudnn_sdpa_key & key) {
-    return key.d == 128 && key.sq == key.sk && key.sq >= MIN_CUDNN_SDPA_FAST_SEQ && !key.padding_mask;
+    const bool supported_head_dim = key.d == 64 || key.d == 128;
+    const bool supported_sequence = key.sq >= MIN_CUDNN_SDPA_FAST_SEQ &&
+                                    ((key.sq == key.sk && !key.padding_mask) ||
+                                     (key.padding_mask && key.sk_actual == key.sq && key.sk >= key.sq));
+    const bool use_cudnn = supported_head_dim && supported_sequence;
+
+    if (!use_cudnn && profile_enabled()) {
+        GGML_LOG_INFO("ED_CUDNN_SDPA unsupported: gate d=%lld sq=%lld sk=%lld sk_actual=%lld padding_mask=%d supported_head_dim=%d supported_sequence=%d\n",
+                      (long long) key.d,
+                      (long long) key.sq,
+                      (long long) key.sk,
+                      (long long) key.sk_actual,
+                      key.padding_mask ? 1 : 0,
+                      supported_head_dim ? 1 : 0,
+                      supported_sequence ? 1 : 0);
+    }
+
+    return use_cudnn;
 }
 
 static std::shared_ptr<fe::graph::Graph> create_graph(const ed_cudnn_sdpa_key & key) {
@@ -522,13 +539,24 @@ static bool can_use_vec2_output_convert(const void * src, const void * dst, int6
 
 } // namespace
 
-ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_stream_t stream_ptr) {
+bool ed_cudnn_sdpa_supported(const ggml_tensor * dst, int device) {
     if (cudnn_sdpa_disabled()) {
-        return ED_CUDNN_SDPA_UNSUPPORTED;
+        return false;
     }
 
     ed_cudnn_sdpa_key key;
-    if (!make_key(dst, key)) {
+    return make_key(dst, key, device) && should_use_cudnn_sdpa(key);
+}
+
+ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_stream_t stream_ptr) {
+    if (cudnn_sdpa_disabled()) {
+        return ED_CUDNN_SDPA_DISABLED;
+    }
+
+    ed_cudnn_sdpa_key key;
+    int device = 0;
+    CUDA_CHECK(cudaGetDevice(&device));
+    if (!make_key(dst, key, device)) {
         return ED_CUDNN_SDPA_UNSUPPORTED;
     }
     if (!should_use_cudnn_sdpa(key)) {
@@ -549,16 +577,22 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
 
     const int threads = 256;
     const int blocks = (int) ((n + threads - 1) / threads);
-    if (can_use_vec2_convert(q->data, plan->q_f16)) {
-        const int blocks_vec = (int) (((n + 1) / 2 + threads - 1) / threads);
-        f32_to_f16_vec2_kernel<<<blocks_vec, threads, 0, stream>>>((const float *) q->data, plan->q_f16, n);
+    const void * q_data = q->data;
+    if (q->type == GGML_TYPE_F32) {
+        if (can_use_vec2_convert(q->data, plan->q_f16)) {
+            const int blocks_vec = (int) (((n + 1) / 2 + threads - 1) / threads);
+            f32_to_f16_vec2_kernel<<<blocks_vec, threads, 0, stream>>>((const float *) q->data, plan->q_f16, n);
+        } else {
+            f32_to_f16_kernel<<<blocks, threads, 0, stream>>>((const float *) q->data, plan->q_f16, n);
+        }
+        CUDA_CHECK(cudaGetLastError());
+        q_data = plan->q_f16;
     } else {
-        f32_to_f16_kernel<<<blocks, threads, 0, stream>>>((const float *) q->data, plan->q_f16, n);
+        GGML_ASSERT(q->type == GGML_TYPE_F16);
     }
-    CUDA_CHECK(cudaGetLastError());
 
     std::unordered_map<fe::graph::Tensor_attributes::uid_t, void *> variant_pack = {
-        {Q_UID, plan->q_f16},
+        {Q_UID, const_cast<void *>(q_data)},
         {K_UID, k->data},
         {V_UID, v->data},
         {O_UID, plan->o_f16},
@@ -608,6 +642,8 @@ const char * ed_cudnn_sdpa_result_name(ed_cudnn_sdpa_result_t result) {
     switch (result) {
         case ED_CUDNN_SDPA_SUCCESS:
             return "success";
+        case ED_CUDNN_SDPA_DISABLED:
+            return "disabled";
         case ED_CUDNN_SDPA_UNSUPPORTED:
             return "unsupported";
         case ED_CUDNN_SDPA_BUILD_FAILED:

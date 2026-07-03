@@ -1587,6 +1587,73 @@ static inline ggml_tensor* mmdit_attention(GGMLRunnerContext* ctx,
                                   true);
 }
 
+static inline bool mmdit_cudnn_unpadded_attention_enabled(GGMLRunnerContext* ctx,
+                                                          int64_t total_seq,
+                                                          int64_t head_dim) {
+#ifdef ED_ENABLE_CUDNN_SDPA
+    return ctx != nullptr &&
+           ctx->flash_attn_enabled &&
+           total_seq >= 4096 &&
+           (head_dim == 64 || head_dim == 128) &&
+           sd_backend_is(ctx->backend, "CUDA") &&
+           !ggml_ext_env_flag_enabled("ED_DISABLE_CUDNN_SDPA") &&
+           !ggml_ext_env_flag_enabled("ED_DISABLE_CUDNN_SDPA_UNPAD");
+#else
+    ED_UNUSED(ctx);
+    ED_UNUSED(total_seq);
+    ED_UNUSED(head_dim);
+    return false;
+#endif
+}
+
+static inline ggml_tensor* mmdit_fused_pair_pack_attention(GGMLRunnerContext* ctx,
+                                                           const std::vector<ggml_tensor*>& context_qkv,
+                                                           const std::vector<ggml_tensor*>& x_qkv,
+                                                           int64_t n_head) {
+    GGML_ASSERT(context_qkv.size() == 3 && x_qkv.size() == 3);
+    GGML_ASSERT(context_qkv[0] != nullptr && context_qkv[1] != nullptr && context_qkv[2] != nullptr);
+    GGML_ASSERT(x_qkv[0] != nullptr && x_qkv[1] != nullptr && x_qkv[2] != nullptr);
+    const int64_t total_seq = context_qkv[0]->ne[1] + x_qkv[0]->ne[1];
+    const int64_t head_dim = context_qkv[0]->ne[0] / n_head;
+    if (!mmdit_cudnn_unpadded_attention_enabled(ctx, total_seq, head_dim)) {
+        return nullptr;
+    }
+
+    ggml_tensor* q = nullptr;
+    ggml_tensor* k = nullptr;
+    ggml_tensor* v = nullptr;
+
+    if (auto qkv_pack = edgedit::ggml_ext::attention_qkv_pair_pack_custom_f16(ctx->ggml_ctx,
+                                                                              context_qkv[0],
+                                                                              context_qkv[1],
+                                                                              context_qkv[2],
+                                                                              x_qkv[0],
+                                                                              x_qkv[1],
+                                                                              x_qkv[2],
+                                                                              n_head)) {
+        q = ggml_view_3d(ctx->ggml_ctx, qkv_pack, head_dim, total_seq, n_head, qkv_pack->nb[1], qkv_pack->nb[2], 0);
+        k = ggml_view_3d(ctx->ggml_ctx, qkv_pack, head_dim, total_seq, n_head, qkv_pack->nb[1], qkv_pack->nb[2], qkv_pack->nb[3]);
+        v = ggml_view_3d(ctx->ggml_ctx, qkv_pack, head_dim, total_seq, n_head, qkv_pack->nb[1], qkv_pack->nb[2], qkv_pack->nb[3] * 2);
+    } else {
+        auto pack = [&](ggml_tensor* first, ggml_tensor* second) -> ggml_tensor* {
+            return edgedit::ggml_ext::attention_pair_pack_custom_f16(ctx->ggml_ctx, first, second, n_head);
+        };
+
+        q = pack(context_qkv[0], x_qkv[0]);
+        k = pack(context_qkv[1], x_qkv[1]);
+        v = pack(context_qkv[2], x_qkv[2]);
+    }
+    if (q == nullptr || k == nullptr || v == nullptr) {
+        return nullptr;
+    }
+
+    auto out = ggml_flash_attn_ext(ctx->ggml_ctx, q, k, v, nullptr, 1.0f / sqrt((float) head_dim), 0, 0);
+    ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);
+    out = ggml_view_3d(ctx->ggml_ctx, out, head_dim, n_head, total_seq, out->nb[1], out->nb[2], 0);
+    out = ggml_reshape_3d(ctx->ggml_ctx, out, head_dim * n_head, total_seq, 1);
+    return out;
+}
+
 static inline ggml_tensor* mmdit_sp_attention_seq_major(GGMLRunnerContext* ctx,
                                                         ggml_tensor* q,
                                                         ggml_tensor* k,
@@ -2200,12 +2267,15 @@ block_mixing(GGMLRunnerContext* ctx,
         x_qkv                    = x_qkv_intermediates.first;
         x_intermediates          = x_qkv_intermediates.second;
     }
-    std::vector<ggml_tensor*> qkv;
-    for (int i = 0; i < 3; i++) {
-        qkv.push_back(ggml_concat(ctx->ggml_ctx, context_qkv[i], x_qkv[i], 1));
-    }
+    auto attn = mmdit_fused_pair_pack_attention(ctx, context_qkv, x_qkv, x_block->num_heads);
+    if (attn == nullptr) {
+        std::vector<ggml_tensor*> qkv;
+        for (int i = 0; i < 3; i++) {
+            qkv.push_back(ggml_concat(ctx->ggml_ctx, context_qkv[i], x_qkv[i], 1));
+        }
 
-    auto attn = mmdit_attention(ctx, qkv[0], qkv[1], qkv[2], x_block->num_heads, false);  // [N, n_context + n_token, hidden_size]
+        attn = mmdit_attention(ctx, qkv[0], qkv[1], qkv[2], x_block->num_heads, false);  // [N, n_context + n_token, hidden_size]
+    }
 
     auto context_attn = ggml_view_3d(ctx->ggml_ctx,
                                      attn,

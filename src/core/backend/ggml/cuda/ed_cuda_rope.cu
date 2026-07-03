@@ -134,7 +134,7 @@ __global__ void rope_kernel(const float* x,
 
 } // namespace
 
-bool ed_cuda_rope_custom_compute(ggml_tensor * dst, ed_cuda_rope_stream_t stream) {
+bool ed_cuda_rope_custom_supported(const ggml_tensor * dst) {
     if (dst == nullptr || dst->op != GGML_OP_CUSTOM || dst->src[0] == nullptr || dst->src[1] == nullptr) {
         return false;
     }
@@ -163,6 +163,43 @@ bool ed_cuda_rope_custom_compute(ggml_tensor * dst, ed_cuda_rope_stream_t stream
         return false;
     }
 
+    const int d_head = params.d_head;
+    const int half = d_head / 2;
+    int seq = 0;
+    if (layout == RopeInputLayout::NSeqHeadDim) {
+        seq = static_cast<int>(x->ne[2]);
+    } else if (layout == RopeInputLayout::SeqHeadDim) {
+        seq = static_cast<int>(x->ne[1]);
+    } else {
+        seq = static_cast<int>(x->ne[1]);
+    }
+
+    const bool pe_prepared = pe_is_prepared_layout(pe, seq, half);
+    return pe_prepared || pe_is_matrix_layout(pe, seq, half);
+}
+
+bool ed_cuda_rope_custom_compute(ggml_tensor * dst, ed_cuda_rope_stream_t stream) {
+    if (!ed_cuda_rope_custom_supported(dst)) {
+        return false;
+    }
+
+    struct ggml_custom_op_params {
+        ggml_custom_op_t fun;
+        int n_tasks;
+        void* userdata;
+    };
+    ggml_custom_op_params op_params{};
+    static_assert(sizeof(op_params) <= GGML_MAX_OP_PARAMS, "custom op params do not fit");
+    memcpy(&op_params, dst->op_params, sizeof(op_params));
+
+    const RopeCustomParams params = edgedit::ggml_ext::rope_params_from_userdata(op_params.userdata);
+    if (!edgedit::ggml_ext::rope_params_valid(params)) {
+        return false;
+    }
+
+    const ggml_tensor* x = dst->src[0];
+    const ggml_tensor* pe = dst->src[1];
+    const auto layout = static_cast<RopeInputLayout>(params.input_layout);
     const int d_head = params.d_head;
     const int half = d_head / 2;
     int seq = 0;
