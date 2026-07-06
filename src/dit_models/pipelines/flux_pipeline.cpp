@@ -680,6 +680,10 @@ ed_status_t FluxPipeline::generate_image(const ed_image_generation_params_t* par
     }
 
     const int count = params->batch_count > 0 ? params->batch_count : 1;
+    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    if (GenerationControl* control = runtime_->generation_control()) {
+        control->start(count * steps);
+    }
     ed_image_t* images = static_cast<ed_image_t*>(std::calloc(static_cast<size_t>(count), sizeof(ed_image_t)));
     if (images == nullptr) {
         if (error != nullptr) {
@@ -856,7 +860,16 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
     cache::CacheRuntime cache_runtime;
     const bool cache_enabled = cache_runtime.init(params->sample, version_, sigmas);
     const int64_t sample_start_ms = ggml_time_ms();
+    GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {
+        if (control != nullptr && control->should_cancel()) {
+            control->mark_cancelled();
+            if (error != nullptr && error->empty()) {
+                *error = "generation cancelled";
+            }
+            flux_runner_->free_compute_buffer();
+            return false;
+        }
         const float sigma = sigmas[static_cast<size_t>(step)];
         const float sigma_next = sigmas[static_cast<size_t>(step + 1)];
         const float c_skip = 1.0f;
@@ -992,6 +1005,9 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         LOG_INFO("flux step %d/%d sigma=%.6f next=%.6f", step + 1, steps, sigma, sigma_next);
         if (cache_enabled) {
             cache_runtime.end_step(cache_step);
+        }
+        if (control != nullptr) {
+            control->step_done();
         }
     }
     if (cache_enabled) {

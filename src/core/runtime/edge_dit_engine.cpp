@@ -12,6 +12,14 @@
 namespace edgedit {
 namespace {
 
+struct GenerationResetGuard {
+    GenerationControl& control;
+
+    ~GenerationResetGuard() {
+        control.reset_idle();
+    }
+};
+
 std::string lower_copy(const char* value) {
     std::string out = value != nullptr ? value : "";
     std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
@@ -131,6 +139,7 @@ bool EdgeDitEngine::init(const ed_ctx_params_t* params) {
         model_loader_.reset();
         runtime_.reset();
         parallel_context_.reset();
+        generation_control_.reset_idle();
     };
 
     try {
@@ -144,6 +153,7 @@ bool EdgeDitEngine::init(const ed_ctx_params_t* params) {
     }
 
     runtime_->set_parallel_context(parallel_context_.get());
+    runtime_->set_generation_control(&generation_control_);
 
     if (!runtime_->init(ctx_params_, &last_error_)) {
         set_error(last_error_.empty() ? "ModelRuntime::init failed" : last_error_);
@@ -223,6 +233,8 @@ bool EdgeDitEngine::init(const ed_ctx_params_t* params) {
 ed_status_t EdgeDitEngine::generate_image(const ed_image_generation_params_t* params,
                                            ed_image_batch_t* out) {
     last_error_.clear();
+    generation_control_.reset_idle();
+    GenerationResetGuard guard{generation_control_};
     if (out != nullptr) {
         out->images = nullptr;
         out->count = 0;
@@ -243,6 +255,13 @@ ed_status_t EdgeDitEngine::generate_image(const ed_image_generation_params_t* pa
 
     ed_status_t status = dit_pipeline_->generate_image(params, out, &last_error_);
     if (status != ED_STATUS_OK) {
+        if (generation_control_.was_cancelled()) {
+            set_error(last_error_.empty() ? "generation cancelled" : last_error_);
+            if (out != nullptr) {
+                ed_free_image_batch(out);
+            }
+            return ED_STATUS_CANCELLED;
+        }
         if (last_error_.empty()) {
             set_error("image generation failed");
         } else {
@@ -270,6 +289,8 @@ ed_status_t EdgeDitEngine::generate_image(const ed_image_generation_params_t* pa
 ed_status_t EdgeDitEngine::generate_video(const ed_video_generation_params_t* params,
                                            ed_video_t* out) {
     last_error_.clear();
+    generation_control_.reset_idle();
+    GenerationResetGuard guard{generation_control_};
     if (out != nullptr) {
         out->frames = nullptr;
         out->frame_count = 0;
@@ -290,6 +311,13 @@ ed_status_t EdgeDitEngine::generate_video(const ed_video_generation_params_t* pa
 
     ed_status_t status = dit_pipeline_->generate_video(params, out, &last_error_);
     if (status != ED_STATUS_OK) {
+        if (generation_control_.was_cancelled()) {
+            set_error(last_error_.empty() ? "generation cancelled" : last_error_);
+            if (out != nullptr) {
+                ed_free_video(out);
+            }
+            return ED_STATUS_CANCELLED;
+        }
         if (last_error_.empty()) {
             set_error("video generation failed");
         } else {
@@ -330,6 +358,14 @@ scheduler_t EdgeDitEngine::get_default_scheduler(sample_method_t method) const {
     return dit_pipeline_ != nullptr ? dit_pipeline_->default_scheduler(method) : DISCRETE_SCHEDULER;
 }
 
+const char* EdgeDitEngine::pipeline_name() const {
+    return dit_pipeline_ != nullptr ? dit_pipeline_->name() : nullptr;
+}
+
+const char* EdgeDitEngine::version_name() const {
+    return dit_pipeline_ != nullptr ? ed_version_name(dit_pipeline_->version()) : nullptr;
+}
+
 bool EdgeDitEngine::parallel_enabled() const {
     return parallel_context_ != nullptr && parallel_context_->enabled();
 }
@@ -348,6 +384,18 @@ int EdgeDitEngine::parallel_world_size() const {
 
 int EdgeDitEngine::parallel_local_rank() const {
     return parallel_context_ != nullptr ? parallel_context_->local_rank() : 0;
+}
+
+void EdgeDitEngine::request_cancel() {
+    generation_control_.request_cancel();
+}
+
+int EdgeDitEngine::progress_current_step() const {
+    return generation_control_.current_step.load(std::memory_order_relaxed);
+}
+
+int EdgeDitEngine::progress_total_steps() const {
+    return generation_control_.total_steps.load(std::memory_order_relaxed);
 }
 
 void EdgeDitEngine::set_error(const std::string& msg) {

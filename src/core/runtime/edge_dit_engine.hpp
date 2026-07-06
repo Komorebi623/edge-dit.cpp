@@ -36,11 +36,16 @@ public:
 
     sample_method_t get_default_sample_method() const;
     scheduler_t get_default_scheduler(sample_method_t method) const;
+    const char* pipeline_name() const;
+    const char* version_name() const;
     bool parallel_enabled() const;
     bool parallel_is_root() const;
     int parallel_rank() const;
     int parallel_world_size() const;
     int parallel_local_rank() const;
+    void request_cancel();
+    int progress_current_step() const;
+    int progress_total_steps() const;
 
     SDVersion version() const {
         return dit_pipeline_ ? dit_pipeline_->version() : VERSION_COUNT;
@@ -56,6 +61,7 @@ private:
     std::unique_ptr<ModelRuntime> runtime_;
     std::unique_ptr<ModelLoader> model_loader_;
     std::unique_ptr<DiTPipeline> dit_pipeline_;
+    GenerationControl generation_control_;
 
     std::string last_error_;
     void set_error(const std::string& msg);

@@ -35,7 +35,8 @@ typedef enum ed_status_t {
     ED_STATUS_MODEL_LOAD_FAILED,
     ED_STATUS_GENERATION_FAILED,
     ED_STATUS_OUT_OF_MEMORY,
-    ED_STATUS_UNSUPPORTED
+    ED_STATUS_UNSUPPORTED,
+    ED_STATUS_CANCELLED
 } ed_status_t;
 
 typedef enum ed_dtype_t {
@@ -274,6 +275,15 @@ ED_API void ed_free_image_batch(ed_image_batch_t * batch);
 ED_API void ed_free_video(ed_video_t * video);
 
 ED_API const char * ed_get_last_error(const ed_context_t * ctx);
+ED_API const char * ed_context_pipeline_name(const ed_context_t * ctx);
+ED_API const char * ed_context_version_name(const ed_context_t * ctx);
+ED_API bool ed_context_supports_image(const ed_context_t * ctx);
+ED_API bool ed_context_supports_video(const ed_context_t * ctx);
+ED_API ed_sampler_t ed_context_default_sampler(const ed_context_t * ctx);
+ED_API ed_scheduler_t ed_context_default_scheduler(const ed_context_t * ctx, ed_sampler_t sampler);
+ED_API void ed_context_request_cancel(ed_context_t * ctx);
+ED_API int ed_context_progress_current_step(const ed_context_t * ctx);
+ED_API int ed_context_progress_total_steps(const ed_context_t * ctx);
 ED_API int ed_context_parallel_rank(const ed_context_t * ctx);
 ED_API int ed_context_parallel_world_size(const ed_context_t * ctx);
 ED_API bool ed_context_parallel_is_root(const ed_context_t * ctx);

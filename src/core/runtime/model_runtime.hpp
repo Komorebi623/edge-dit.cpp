@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -57,6 +58,51 @@ struct RuntimeBackends {
     bool control_net_owns_backend = false;
 };
 
+struct GenerationControl {
+    std::atomic<bool> active{false};
+    std::atomic<bool> cancel_requested{false};
+    std::atomic<bool> cancelled{false};
+    std::atomic<int> current_step{0};
+    std::atomic<int> total_steps{0};
+
+    void reset_idle() {
+        active.store(false, std::memory_order_relaxed);
+        cancel_requested.store(false, std::memory_order_relaxed);
+        cancelled.store(false, std::memory_order_relaxed);
+        current_step.store(0, std::memory_order_relaxed);
+        total_steps.store(0, std::memory_order_relaxed);
+    }
+
+    void start(int total) {
+        current_step.store(0, std::memory_order_relaxed);
+        total_steps.store(total > 0 ? total : 0, std::memory_order_relaxed);
+        cancel_requested.store(false, std::memory_order_relaxed);
+        cancelled.store(false, std::memory_order_relaxed);
+        active.store(true, std::memory_order_relaxed);
+    }
+
+    void request_cancel() {
+        cancel_requested.store(true, std::memory_order_relaxed);
+    }
+
+    bool should_cancel() const {
+        return active.load(std::memory_order_relaxed) &&
+               cancel_requested.load(std::memory_order_relaxed);
+    }
+
+    void mark_cancelled() {
+        cancelled.store(true, std::memory_order_relaxed);
+    }
+
+    bool was_cancelled() const {
+        return cancelled.load(std::memory_order_relaxed);
+    }
+
+    void step_done() {
+        current_step.fetch_add(1, std::memory_order_relaxed);
+    }
+};
+
 class ModelRuntime final {
 public:
     ModelRuntime() = default;
@@ -69,6 +115,7 @@ public:
     bool init(const ed_context_params_t* params, std::string* error);
     void reset();
     void set_parallel_context(parallel::ParallelContext* context) { parallel_context_ = context; }
+    void set_generation_control(GenerationControl* control) { generation_control_ = control; }
 
     bool ready() const { return ready_; }
     bool is_ready() const { return ready_; }
@@ -95,6 +142,7 @@ public:
     std::shared_ptr<RNG> rng_ptr() const { return rng_; }
     std::shared_ptr<RNG> sampler_rng_ptr() const { return sampler_rng_; }
     parallel::ParallelContext* parallel_context() const { return parallel_context_; }
+    GenerationControl* generation_control() const { return generation_control_; }
     std::shared_ptr<parallel::ProcessGroup> process_group_ref() const {
         if (parallel_context_ == nullptr || !parallel_context_->enabled()) {
             return nullptr;
@@ -124,6 +172,7 @@ private:
 
     RuntimeBackends backends_;
     parallel::ParallelContext* parallel_context_ = nullptr;
+    GenerationControl* generation_control_ = nullptr;
 
     std::shared_ptr<RNG> rng_;
     std::shared_ptr<RNG> sampler_rng_;
