@@ -203,6 +203,33 @@ def bind_api(lib: object) -> object:
     lib.ed_get_last_error.argtypes = [EdContextHandle]
     lib.ed_get_last_error.restype = c_char_p
 
+    lib.ed_context_pipeline_name.argtypes = [EdContextHandle]
+    lib.ed_context_pipeline_name.restype = c_char_p
+
+    lib.ed_context_version_name.argtypes = [EdContextHandle]
+    lib.ed_context_version_name.restype = c_char_p
+
+    lib.ed_context_supports_image.argtypes = [EdContextHandle]
+    lib.ed_context_supports_image.restype = c_bool
+
+    lib.ed_context_supports_video.argtypes = [EdContextHandle]
+    lib.ed_context_supports_video.restype = c_bool
+
+    lib.ed_context_default_sampler.argtypes = [EdContextHandle]
+    lib.ed_context_default_sampler.restype = c_int
+
+    lib.ed_context_default_scheduler.argtypes = [EdContextHandle, c_int]
+    lib.ed_context_default_scheduler.restype = c_int
+
+    lib.ed_context_request_cancel.argtypes = [EdContextHandle]
+    lib.ed_context_request_cancel.restype = None
+
+    lib.ed_context_progress_current_step.argtypes = [EdContextHandle]
+    lib.ed_context_progress_current_step.restype = c_int
+
+    lib.ed_context_progress_total_steps.argtypes = [EdContextHandle]
+    lib.ed_context_progress_total_steps.restype = c_int
+
     lib.ed_context_parallel_is_root.argtypes = [EdContextHandle]
     lib.ed_context_parallel_is_root.restype = c_bool
 

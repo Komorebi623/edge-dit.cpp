@@ -188,6 +188,48 @@ class Engine:
         except Exception:
             pass
 
+    @property
+    def pipeline_name(self) -> str | None:
+        self._ensure_open()
+        raw = self._api.ed_context_pipeline_name(self._ctx)
+        return raw.decode("utf-8", errors="replace") if raw else None
+
+    @property
+    def version_name(self) -> str | None:
+        self._ensure_open()
+        raw = self._api.ed_context_version_name(self._ctx)
+        return raw.decode("utf-8", errors="replace") if raw else None
+
+    @property
+    def supports_image(self) -> bool:
+        self._ensure_open()
+        return bool(self._api.ed_context_supports_image(self._ctx))
+
+    @property
+    def supports_video(self) -> bool:
+        self._ensure_open()
+        return bool(self._api.ed_context_supports_video(self._ctx))
+
+    @property
+    def default_sampler(self) -> int:
+        self._ensure_open()
+        return int(self._api.ed_context_default_sampler(self._ctx))
+
+    def default_scheduler(self, sampler: int | str | None = None) -> int:
+        self._ensure_open()
+        resolved_sampler = -1 if sampler is None else resolve_sampler(sampler)
+        return int(self._api.ed_context_default_scheduler(self._ctx, resolved_sampler))
+
+    def request_cancel(self) -> None:
+        self._ensure_open()
+        self._api.ed_context_request_cancel(self._ctx)
+
+    def progress_steps(self) -> tuple[int, int]:
+        self._ensure_open()
+        current = int(self._api.ed_context_progress_current_step(self._ctx))
+        total = int(self._api.ed_context_progress_total_steps(self._ctx))
+        return current, total
+
     def generate_image(
         self,
         request: ImageRequest | None = None,
