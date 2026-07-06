@@ -1,0 +1,21 @@
+{
+  "engine": {
+    "model_path": "${EDGE_DIT_MODEL_PATH}",
+    "backend": "cuda",
+    "offload_params_to_cpu": true,
+    "keep_text_encoder_on_cpu": true,
+    "keep_vae_on_cpu": true,
+    "max_vram_gb": 8.0
+  },
+  "request": {
+    "prompt": "a small robot walking through a rainy neon street, cinematic lighting",
+    "width": 416,
+    "height": 240,
+    "frames": 9,
+    "steps": 1,
+    "cfg_scale": 5.0,
+    "flow_shift": 5.0,
+    "seed": 42
+  },
+  "output": "/tmp/edge_dit_python_wan_smoke.gif"
+}
