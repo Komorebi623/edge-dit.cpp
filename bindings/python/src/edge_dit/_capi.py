@@ -139,6 +139,28 @@ class EdImageGenerationParams(ctypes.Structure):
     ]
 
 
+class EdVideoGenerationParams(ctypes.Structure):
+    _fields_ = [
+        ("prompt", c_char_p),
+        ("negative_prompt", c_char_p),
+        ("width", c_int),
+        ("height", c_int),
+        ("frames", c_int),
+        ("seed", c_int64),
+        ("init_image", POINTER(EdImage)),
+        ("end_image", POINTER(EdImage)),
+        ("control_frames", POINTER(EdImage)),
+        ("control_frame_count", c_int),
+        ("strength", c_float),
+        ("vace_strength", c_float),
+        ("moe_boundary", c_float),
+        ("sample", EdSampleParams),
+        ("high_noise_sample", EdSampleParams),
+        ("loras", POINTER(EdLora)),
+        ("lora_count", c_uint32),
+    ]
+
+
 def bind_api(lib: object) -> object:
     lib.ed_context_params_init.argtypes = [POINTER(EdContextParams)]
     lib.ed_context_params_init.restype = None
@@ -148,6 +170,9 @@ def bind_api(lib: object) -> object:
 
     lib.ed_image_generation_params_init.argtypes = [POINTER(EdImageGenerationParams)]
     lib.ed_image_generation_params_init.restype = None
+
+    lib.ed_video_generation_params_init.argtypes = [POINTER(EdVideoGenerationParams)]
+    lib.ed_video_generation_params_init.restype = None
 
     lib.ed_create_context.argtypes = [POINTER(EdContextParams)]
     lib.ed_create_context.restype = EdContextHandle
@@ -162,8 +187,18 @@ def bind_api(lib: object) -> object:
     ]
     lib.ed_generate_image.restype = c_int
 
+    lib.ed_generate_video.argtypes = [
+        EdContextHandle,
+        POINTER(EdVideoGenerationParams),
+        POINTER(EdVideo),
+    ]
+    lib.ed_generate_video.restype = c_int
+
     lib.ed_free_image_batch.argtypes = [POINTER(EdImageBatch)]
     lib.ed_free_image_batch.restype = None
+
+    lib.ed_free_video.argtypes = [POINTER(EdVideo)]
+    lib.ed_free_video.restype = None
 
     lib.ed_get_last_error.argtypes = [EdContextHandle]
     lib.ed_get_last_error.restype = c_char_p
@@ -192,6 +227,7 @@ __all__ = [
     "EdLora",
     "EdSampleParams",
     "EdTilingParams",
+    "EdVideo",
+    "EdVideoGenerationParams",
     "load_capi",
 ]
-

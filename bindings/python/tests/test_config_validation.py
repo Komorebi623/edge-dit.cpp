@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from edge_dit import EngineConfig, ImageRequest, InvalidArgumentError
+from edge_dit import EngineConfig, ImageRequest, InvalidArgumentError, VideoRequest
 
 
 class ConfigValidationTests(unittest.TestCase):
@@ -38,6 +38,14 @@ class ConfigValidationTests(unittest.TestCase):
     def test_image_request_rejects_unknown_output_type(self) -> None:
         with self.assertRaises(InvalidArgumentError):
             ImageRequest(prompt="hello", output_type="tensor")
+
+    def test_video_request_requires_frames_to_be_positive(self) -> None:
+        with self.assertRaises(InvalidArgumentError):
+            VideoRequest(prompt="hello", frames=0)
+
+    def test_video_request_rejects_unknown_output_type(self) -> None:
+        with self.assertRaises(InvalidArgumentError):
+            VideoRequest(prompt="hello", output_type="tensor")
 
 
 if __name__ == "__main__":

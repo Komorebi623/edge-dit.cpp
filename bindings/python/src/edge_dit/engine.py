@@ -6,9 +6,16 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-from ._capi import EdContextParams, EdImageBatch, EdImageGenerationParams, load_capi
+from ._capi import (
+    EdContextParams,
+    EdImageBatch,
+    EdImageGenerationParams,
+    EdVideo,
+    EdVideoGenerationParams,
+    load_capi,
+)
 from ._strings import CStringPool
-from .config import EngineConfig, ImageRequest
+from .config import EngineConfig, ImageRequest, VideoRequest
 from .enums import resolve_cache_mode, resolve_dtype, resolve_sampler, resolve_scheduler
 from .errors import (
     EdgeDitError,
@@ -18,7 +25,12 @@ from .errors import (
     ModelLoadError,
     raise_for_status,
 )
-from .image import batch_to_numpy_images, batch_to_pil_images
+from .image import (
+    batch_to_numpy_images,
+    batch_to_pil_images,
+    video_to_numpy_frames,
+    video_to_pil_frames,
+)
 
 
 @contextmanager
@@ -64,6 +76,25 @@ def _summarize_request(request: ImageRequest) -> list[str]:
     lines.append(f"prompt={prompt!r}")
     if request.width is not None or request.height is not None:
         lines.append(f"size={request.width or '?'}x{request.height or '?'}")
+    if request.steps is not None:
+        lines.append(f"steps={request.steps}")
+    if request.seed is not None:
+        lines.append(f"seed={request.seed}")
+    if request.output_type is not None:
+        lines.append(f"output_type={request.output_type!r}")
+    return lines
+
+
+def _summarize_video_request(request: VideoRequest) -> list[str]:
+    lines: list[str] = []
+    prompt = request.prompt.strip()
+    if len(prompt) > 80:
+        prompt = prompt[:77] + "..."
+    lines.append(f"prompt={prompt!r}")
+    if request.width is not None or request.height is not None:
+        lines.append(f"size={request.width or '?'}x{request.height or '?'}")
+    if request.frames is not None:
+        lines.append(f"frames={request.frames}")
     if request.steps is not None:
         lines.append(f"steps={request.steps}")
     if request.seed is not None:
@@ -177,6 +208,26 @@ class Engine:
             self._ensure_open()
             return self._generate_image_locked(request)
 
+    def generate_video(
+        self,
+        request: VideoRequest | None = None,
+        /,
+        **kwargs: object,
+    ) -> list[object]:
+        self._ensure_open()
+
+        if request is not None and kwargs:
+            raise TypeError("pass either a VideoRequest or keyword arguments, not both")
+
+        if request is None:
+            request = VideoRequest.from_kwargs(**kwargs)
+        elif kwargs:
+            raise TypeError("unexpected keyword arguments")
+
+        with self._lock:
+            self._ensure_open()
+            return self._generate_video_locked(request)
+
     def _generate_image_locked(self, request: ImageRequest) -> list[object]:
         params = EdImageGenerationParams()
         batch = EdImageBatch()
@@ -220,6 +271,50 @@ class Engine:
             return images
         finally:
             self._api.ed_free_image_batch(ctypes.byref(batch))
+
+    def _generate_video_locked(self, request: VideoRequest) -> list[object]:
+        params = EdVideoGenerationParams()
+        video = EdVideo()
+        strings = CStringPool()
+
+        self._api.ed_video_generation_params_init(ctypes.byref(params))
+        self._apply_video_request(params, request, strings)
+
+        status = self._api.ed_generate_video(self._ctx, ctypes.byref(params), ctypes.byref(video))
+
+        try:
+            try:
+                raise_for_status(
+                    status,
+                    lib=self._api,
+                    ctx=self._ctx,
+                    default_message="video generation failed",
+                )
+            except EdgeDitError as exc:
+                raise type(exc)(
+                    _append_context(
+                        str(exc),
+                        [
+                            _describe_path(self._config.model_path, "model_path"),
+                            f"backend={self._config.backend!r}" if self._config.backend else None,
+                            *_summarize_video_request(request),
+                        ],
+                    )
+                ) from exc
+
+            if not self._api.ed_context_parallel_is_root(self._ctx):
+                return []
+
+            output_type = request.output_type or "pil"
+            if output_type == "numpy":
+                frames = video_to_numpy_frames(video)
+            else:
+                frames = video_to_pil_frames(video)
+            if not frames:
+                raise GenerationError("generation succeeded but output is empty")
+            return frames
+        finally:
+            self._api.ed_free_video(ctypes.byref(video))
 
     def _ensure_open(self) -> None:
         if self._closed or self._ctx is None:
@@ -348,3 +443,36 @@ class Engine:
             params.sample.cache_scm_mask = strings.add_optional(request.cache_scm_mask)
         if request.cache_scm_policy_dynamic is not None:
             params.sample.cache_scm_policy_dynamic = request.cache_scm_policy_dynamic
+
+    @staticmethod
+    def _apply_video_request(
+        params: EdVideoGenerationParams,
+        request: VideoRequest,
+        strings: CStringPool,
+    ) -> None:
+        params.prompt = strings.add_optional(request.prompt)
+        params.negative_prompt = strings.add_optional(request.negative_prompt or "")
+
+        if request.width is not None:
+            params.width = request.width
+        if request.height is not None:
+            params.height = request.height
+        if request.frames is not None:
+            params.frames = request.frames
+        if request.seed is not None:
+            params.seed = request.seed
+
+        if request.steps is not None:
+            params.sample.steps = request.steps
+        if request.cfg_scale is not None:
+            params.sample.cfg_scale = request.cfg_scale
+        if request.effective_guidance is not None:
+            params.sample.distilled_guidance = request.effective_guidance
+        if request.eta is not None:
+            params.sample.eta = request.eta
+        if request.flow_shift is not None:
+            params.sample.flow_shift = request.flow_shift
+        if request.sampler is not None:
+            params.sample.sampler = resolve_sampler(request.sampler)
+        if request.scheduler is not None:
+            params.sample.scheduler = resolve_scheduler(request.scheduler)

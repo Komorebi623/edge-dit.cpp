@@ -17,8 +17,11 @@ Current implemented scope:
 
 - create an engine from the public C API
 - generate images synchronously
+- generate videos synchronously
 - return `PIL.Image.Image` by default
 - optionally return `numpy.ndarray` with `output_type="numpy"`
+- return video frames as `list[PIL.Image.Image]` by default
+- optionally return video frames as `list[numpy.ndarray]` with `output_type="numpy"`
 - release native resources explicitly with `close()` or a context manager
 - expose the full current `ed_sample_params_t` cache tuning surface
 - provide copyable helper scripts for shared-library build and Python smoke test
@@ -47,6 +50,7 @@ The main Python API is:
 - `Engine`
 - `EngineConfig`
 - `ImageRequest`
+- `VideoRequest`
 
 Common failure modes now include extra Python-side context, for example:
 
@@ -128,6 +132,34 @@ with Engine(model_path="/mnt/data/yangminghong/FLUX.1-dev", backend="cuda") as e
         )
     )
     print(images[0].shape)
+```
+
+Minimal video usage:
+
+```python
+from edge_dit import Engine, VideoRequest
+
+with Engine(
+    model_path="/path/to/Wan2.1-T2V-1.3B-Diffusers",
+    backend="cuda",
+    offload_params_to_cpu=True,
+    keep_text_encoder_on_cpu=True,
+    keep_vae_on_cpu=True,
+    max_vram_gb=8.0,
+) as engine:
+    frames = engine.generate_video(
+        VideoRequest(
+            prompt="a small robot walking through a rainy neon street",
+            width=416,
+            height=240,
+            frames=9,
+            steps=1,
+            cfg_scale=5.0,
+            flow_shift=5.0,
+            seed=42,
+        )
+    )
+    frames[0].save("/tmp/wan_first_frame.png")
 ```
 
 ## Build a shared library
@@ -212,6 +244,17 @@ The sample config lives at:
 
 That file is useful as a stable base for team-shared smoke tests.
 
+There is also a matching video example:
+
+```bash
+PYTHONPATH=bindings/python/src \
+EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so \
+EDGE_DIT_MODEL_PATH=/path/to/Wan2.1-T2V-1.3B-Diffusers \
+/usr/bin/python3 bindings/python/examples/configured_txt2vid.py \
+  --config bindings/python/examples/wan_t2v_smoke_config.json \
+  --output /tmp/edge_dit_python_wan_smoke.gif
+```
+
 ## Scripted smoke test
 
 For the current verified FLUX.1-dev setup:
@@ -220,6 +263,14 @@ For the current verified FLUX.1-dev setup:
 export EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so
 export EDGE_DIT_MODEL_PATH=/mnt/data/yangminghong/FLUX.1-dev
 bindings/python/scripts/run_python_smoke_test.sh
+```
+
+For Wan video smoke tests:
+
+```bash
+export EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so
+export EDGE_DIT_MODEL_PATH=/path/to/Wan2.1-T2V-1.3B-Diffusers
+bindings/python/scripts/run_python_video_smoke_test.sh
 ```
 
 ## Conda note
@@ -273,6 +324,29 @@ EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so \
 
 This exact CLI path was validated end to end against `/mnt/data/yangminghong/FLUX.1-dev` in this
 workspace.
+
+Additional validation completed in this workspace on `2026-07-06`:
+
+- `stable-diffusion-3-medium-diffusers`
+  - worked with `backend="cuda"`, `offload_params_to_cpu=True`,
+    `keep_text_encoder_on_cpu=True`, `skip_t5=True`, `max_vram_gb=8.0`,
+    `width=256`, `height=256`, `steps=1`
+  - sample config: `bindings/python/examples/sd3_smoke_config.json`
+- `Qwen-Image`
+  - default bf16 single-GPU loading on a 24 GiB RTX 3090 failed because the runtime diffusion
+    weights allocation requested about `38.98 GiB`
+  - worked after setting `weight_type="q4_k"` plus `offload_params_to_cpu=True`,
+    `keep_text_encoder_on_cpu=True`, `keep_vae_on_cpu=True`, `max_vram_gb=8.0`,
+    `width=512`, `height=512`, `steps=1`
+  - sample config: `bindings/python/examples/qwen_image_smoke_config.json`
+- `Wan2.1-T2V-1.3B`
+  - worked with `backend="cuda"`, `offload_params_to_cpu=True`,
+    `keep_text_encoder_on_cpu=True`, `keep_vae_on_cpu=True`, `max_vram_gb=8.0`,
+    `width=416`, `height=240`, `frames=9`, `steps=1`, `cfg_scale=5.0`, `flow_shift=5.0`
+  - validated against `/mnt/data/yangminghong/Wan2.1-T2V-1.3B-Diffusers`
+  - note that the raw non-diffusers release directory with top-level `.pth` files still did not
+    initialize directly in this workspace; the verified path is the diffusers export
+  - sample config: `bindings/python/examples/wan_t2v_smoke_config.json`
 
 ## Optional integration test
 
