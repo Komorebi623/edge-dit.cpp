@@ -198,3 +198,53 @@ class ImageRequest:
 
         if self.output_type is not None and self.output_type not in {"pil", "numpy"}:
             raise InvalidArgumentError("output_type must be one of: pil, numpy")
+
+
+@dataclass(slots=True)
+class VideoRequest:
+    prompt: str | None = None
+    negative_prompt: str | None = None
+    width: int | None = None
+    height: int | None = None
+    frames: int | None = None
+    seed: int | None = None
+    steps: int | None = None
+    cfg_scale: float | None = None
+    guidance: float | None = None
+    distilled_guidance: float | None = None
+    eta: float | None = None
+    flow_shift: float | None = None
+    sampler: int | str | None = None
+    scheduler: int | str | None = None
+    output_type: str | None = None
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: object) -> "VideoRequest":
+        return cls(**kwargs)
+
+    @property
+    def effective_guidance(self) -> float | None:
+        if self.guidance is not None:
+            return self.guidance
+        return self.distilled_guidance
+
+    def validate(self) -> None:
+        if not isinstance(self.prompt, str) or not self.prompt.strip():
+            raise InvalidArgumentError("prompt is required")
+
+        for field_name in ("width", "height", "frames", "steps"):
+            value = getattr(self, field_name)
+            if value is not None and value <= 0:
+                raise InvalidArgumentError(f"{field_name} must be > 0")
+
+        if self.guidance is not None and self.distilled_guidance is not None:
+            if self.guidance != self.distilled_guidance:
+                raise InvalidArgumentError(
+                    "guidance and distilled_guidance must match when both are provided"
+                )
+
+        if self.output_type is not None and self.output_type not in {"pil", "numpy"}:
+            raise InvalidArgumentError("output_type must be one of: pil, numpy")

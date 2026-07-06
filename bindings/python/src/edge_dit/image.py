@@ -4,7 +4,7 @@ import ctypes
 
 from PIL import Image
 
-from ._capi import EdImage, EdImageBatch
+from ._capi import EdImage, EdImageBatch, EdVideo
 from .errors import EdgeDitError, GenerationError, UnsupportedImageFormatError
 
 _PIL_MODE_BY_CHANNELS = {
@@ -66,3 +66,15 @@ def batch_to_numpy_images(batch: EdImageBatch) -> list[object]:
     if not batch.images or batch.count <= 0:
         return []
     return [image_to_numpy(batch.images[index]) for index in range(int(batch.count))]
+
+
+def video_to_pil_frames(video: EdVideo) -> list[Image.Image]:
+    if not video.frames or video.frame_count <= 0:
+        return []
+    return [image_to_pil(video.frames[index]) for index in range(int(video.frame_count))]
+
+
+def video_to_numpy_frames(video: EdVideo) -> list[object]:
+    if not video.frames or video.frame_count <= 0:
+        return []
+    return [image_to_numpy(video.frames[index]) for index in range(int(video.frame_count))]

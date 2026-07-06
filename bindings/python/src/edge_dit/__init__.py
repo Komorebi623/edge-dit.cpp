@@ -1,4 +1,4 @@
-from .config import EngineConfig, ImageRequest
+from .config import EngineConfig, ImageRequest, VideoRequest
 from .engine import Engine
 from .errors import (
     EdgeDitClosedError,
@@ -23,7 +23,7 @@ __all__ = [
     "ModelLoadError",
     "UnsupportedError",
     "UnsupportedImageFormatError",
+    "VideoRequest",
 ]
 
 __version__ = "0.1.0a0"
-

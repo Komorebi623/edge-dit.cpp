@@ -4,8 +4,22 @@ import ctypes
 import unittest
 from unittest.mock import patch
 
-from edge_dit import EdgeDitClosedError, Engine, GenerationError, ImageRequest, ModelLoadError
-from edge_dit._capi import EdContext, EdImage, EdImageBatch, EdImageGenerationParams
+from edge_dit import (
+    EdgeDitClosedError,
+    Engine,
+    GenerationError,
+    ImageRequest,
+    ModelLoadError,
+    VideoRequest,
+)
+from edge_dit._capi import (
+    EdContext,
+    EdImage,
+    EdImageBatch,
+    EdImageGenerationParams,
+    EdVideo,
+    EdVideoGenerationParams,
+)
 
 
 class FakeLib:
@@ -24,7 +38,9 @@ class FakeLib:
         self.create_calls = 0
         self.free_context_calls = 0
         self.free_batch_calls = 0
+        self.free_video_calls = 0
         self.generated_prompts: list[str] = []
+        self.generated_video_prompts: list[str] = []
         self._ctx = ctypes.pointer(EdContext()) if create_ok else None
         self._keepalive: list[object] = []
 
@@ -32,6 +48,9 @@ class FakeLib:
         return None
 
     def ed_image_generation_params_init(self, params) -> None:
+        return None
+
+    def ed_video_generation_params_init(self, params) -> None:
         return None
 
     def ed_create_context(self, params):
@@ -68,6 +87,40 @@ class FakeLib:
         native_batch.images = ctypes.POINTER(EdImage)()
         native_batch.count = 0
 
+    def ed_generate_video(self, ctx, params, out) -> int:
+        request = ctypes.cast(params, ctypes.POINTER(EdVideoGenerationParams)).contents
+        self.generated_video_prompts.append(request.prompt.decode("utf-8"))
+        if self.generate_status != 0:
+            return self.generate_status
+
+        raw_a = (ctypes.c_uint8 * 3)(255, 0, 0)
+        raw_b = (ctypes.c_uint8 * 3)(0, 255, 0)
+        frame_a = EdImage(
+            width=1,
+            height=1,
+            channels=3,
+            data=ctypes.cast(raw_a, ctypes.POINTER(ctypes.c_uint8)),
+        )
+        frame_b = EdImage(
+            width=1,
+            height=1,
+            channels=3,
+            data=ctypes.cast(raw_b, ctypes.POINTER(ctypes.c_uint8)),
+        )
+        frames = (EdImage * 2)(frame_a, frame_b)
+        self._keepalive.extend([raw_a, raw_b, frames])
+
+        video = ctypes.cast(out, ctypes.POINTER(EdVideo)).contents
+        video.frames = ctypes.cast(frames, ctypes.POINTER(EdImage))
+        video.frame_count = 2
+        return 0
+
+    def ed_free_video(self, video) -> None:
+        self.free_video_calls += 1
+        native_video = ctypes.cast(video, ctypes.POINTER(EdVideo)).contents
+        native_video.frames = ctypes.POINTER(EdImage)()
+        native_video.frame_count = 0
+
     def ed_get_last_error(self, ctx):
         return self.last_error
 
@@ -102,6 +155,27 @@ class EngineLifecycleTests(unittest.TestCase):
         self.assertEqual(len(images), 1)
         self.assertEqual(images[0].shape, (1, 1, 3))
         self.assertEqual(images[0].tolist(), [[[255, 0, 0]]])
+
+    def test_generate_video_returns_pil_frames(self) -> None:
+        fake = FakeLib()
+        with patch("edge_dit.engine.load_capi", return_value=fake):
+            with Engine(model_path="demo-model") as engine:
+                frames = engine.generate_video(VideoRequest(prompt="robot", frames=2))
+        self.assertEqual(len(frames), 2)
+        self.assertEqual(frames[0].size, (1, 1))
+        self.assertEqual(fake.generated_video_prompts, ["robot"])
+        self.assertEqual(fake.free_video_calls, 1)
+
+    def test_generate_video_supports_numpy_output(self) -> None:
+        fake = FakeLib()
+        with patch("edge_dit.engine.load_capi", return_value=fake):
+            with Engine(model_path="demo-model") as engine:
+                frames = engine.generate_video(
+                    VideoRequest(prompt="robot", frames=2, output_type="numpy")
+                )
+        self.assertEqual(len(frames), 2)
+        self.assertEqual(frames[0].shape, (1, 1, 3))
+        self.assertEqual(frames[1].tolist(), [[[0, 255, 0]]])
 
     def test_cache_fields_are_forwarded_to_native_request(self) -> None:
         fake = FakeLib()
@@ -193,6 +267,8 @@ class EngineLifecycleTests(unittest.TestCase):
             engine.close()
             with self.assertRaises(EdgeDitClosedError):
                 engine.generate_image(prompt="teapot")
+            with self.assertRaises(EdgeDitClosedError):
+                engine.generate_video(prompt="robot", frames=2)
 
     def test_create_context_failure_raises_model_load_error(self) -> None:
         fake = FakeLib(create_ok=False)
@@ -235,6 +311,29 @@ class EngineLifecycleTests(unittest.TestCase):
         self.assertIn("image width and height must be positive", message)
         self.assertIn("backend='cuda'", message)
         self.assertIn("size=256x256", message)
+        self.assertIn("steps=1", message)
+        self.assertIn("output_type='numpy'", message)
+
+    def test_video_generation_error_includes_request_context(self) -> None:
+        fake = FakeLib(generate_status=4, last_error=b"video width, height, and frames must be positive")
+        with patch("edge_dit.engine.load_capi", return_value=fake):
+            with Engine(model_path="demo-model", backend="cuda") as engine:
+                with self.assertRaises(GenerationError) as ctx:
+                    engine.generate_video(
+                        VideoRequest(
+                            prompt="robot",
+                            width=416,
+                            height=240,
+                            frames=9,
+                            steps=1,
+                            output_type="numpy",
+                        )
+                    )
+        message = str(ctx.exception)
+        self.assertIn("video width, height, and frames must be positive", message)
+        self.assertIn("backend='cuda'", message)
+        self.assertIn("size=416x240", message)
+        self.assertIn("frames=9", message)
         self.assertIn("steps=1", message)
         self.assertIn("output_type='numpy'", message)
 

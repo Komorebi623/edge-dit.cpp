@@ -27,7 +27,13 @@ class CApiLayoutTests(unittest.TestCase):
         self.assertIn("cache_reuse_threshold", field_names)
         self.assertIn("cache_scm_mask", field_names)
 
+    def test_video_generation_params_contains_expected_fields(self) -> None:
+        field_names = [name for name, _ctype in _capi.EdVideoGenerationParams._fields_]
+        self.assertEqual(field_names[0], "prompt")
+        self.assertIn("frames", field_names)
+        self.assertIn("sample", field_names)
+        self.assertIn("high_noise_sample", field_names)
+
 
 if __name__ == "__main__":
     unittest.main()
-
