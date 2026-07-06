@@ -159,6 +159,8 @@ typedef struct ed_context_params_t {
 
     bool flash_attention;
 
+    bool qwen_image_zero_cond_t;
+
     float max_vram_gb;
 
     ed_tiling_params_t vae_tiling;

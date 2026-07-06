@@ -16,6 +16,9 @@
 
 namespace fs = std::filesystem;
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "ggml/examples/stb_image.h"
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_STATIC
 #include "stb_image_write.h"
@@ -28,11 +31,13 @@ static void print_usage(const char* prog) {
         "Options:\n"
         "  --video                   Generate video frames instead of an image\n"
         "  --video-format <fmt>      Video format: auto, avi, mp4, mov, mkv, webm. Default: auto\n"
+        "  -i, --image <path>        Input image for image-edit models such as Qwen-Image-Edit\n"
         "  --diffusion-model <path>  Standalone DiT transformer weights\n"
         "  --vae <path>              Standalone VAE weights\n"
         "  --clip_l <path>           CLIP-L text encoder weights\n"
         "  --clip_g <path>           CLIP-G text encoder weights\n"
         "  --t5xxl <path>            T5XXL text encoder weights\n"
+        "  --negative-prompt <text>  Negative prompt text, default: empty\n"
         "  -o, --output <path>       Output image/video path, default: output.png\n"
         "  -W, --width <int>         Image width, default: 1024\n"
         "  -H, --height <int>        Image height, default: 1024\n"
@@ -44,6 +49,7 @@ static void print_usage(const char* prog) {
         "  --guidance <float>        Flux distilled guidance, default: 3.5\n"
         "  --cfg-scale <float>       Classifier-free guidance scale, default: 1.0\n"
         "  --flow-shift <float>      Flow scheduler shift, default: model default\n"
+        "  --qwen-image-zero-cond-t  Enable Qwen-Image zero_cond_t, required by some edit checkpoints\n"
         "  --cache <mode>            Cache mode: off, easycache, ucache, dbcache, taylorseer, cache-dit\n"
         "  --cache-threshold <float> EasyCache/UCache reuse threshold\n"
         "  --cache-start <float>     Cache active window start percent, default: 0.15\n"
@@ -121,6 +127,42 @@ static bool save_png(const char* path, const ed_image_t& image) {
     ) != 0;
 }
 
+static bool load_image(const char* path, ed_image_t* image) {
+    if (path == nullptr || image == nullptr) {
+        return false;
+    }
+
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    unsigned char* data = stbi_load(path, &width, &height, &channels, 3);
+    if (data == nullptr || width <= 0 || height <= 0) {
+        std::fprintf(stderr, "failed to load input image '%s': %s\n",
+                     path,
+                     stbi_failure_reason() != nullptr ? stbi_failure_reason() : "unknown error");
+        if (data != nullptr) {
+            stbi_image_free(data);
+        }
+        return false;
+    }
+
+    const size_t nbytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 3;
+    uint8_t* owned = static_cast<uint8_t*>(std::malloc(nbytes));
+    if (owned == nullptr) {
+        stbi_image_free(data);
+        std::fprintf(stderr, "failed to allocate input image buffer\n");
+        return false;
+    }
+    std::memcpy(owned, data, nbytes);
+    stbi_image_free(data);
+
+    image->width = static_cast<uint32_t>(width);
+    image->height = static_cast<uint32_t>(height);
+    image->channels = 3;
+    image->data = owned;
+    return true;
+}
+
 static std::string shell_quote(const char* value) {
     std::string quoted = "'";
     const char* text = value != nullptr ? value : "";
@@ -186,6 +228,41 @@ static int count_csv_values(const char* csv) {
         }
     }
     return in_value ? count + 1 : count;
+}
+
+static std::vector<std::string> split_csv_values(const char* csv) {
+    std::vector<std::string> values;
+    if (csv == nullptr || csv[0] == '\0') {
+        return values;
+    }
+
+    std::string current;
+    auto flush = [&]() {
+        size_t begin = 0;
+        while (begin < current.size() &&
+               std::isspace(static_cast<unsigned char>(current[begin]))) {
+            ++begin;
+        }
+        size_t end = current.size();
+        while (end > begin &&
+               std::isspace(static_cast<unsigned char>(current[end - 1]))) {
+            --end;
+        }
+        if (end > begin) {
+            values.emplace_back(current.substr(begin, end - begin));
+        }
+        current.clear();
+    };
+
+    for (const char* p = csv; *p != '\0'; ++p) {
+        if (*p == ',') {
+            flush();
+        } else {
+            current.push_back(*p);
+        }
+    }
+    flush();
+    return values;
 }
 
 static bool is_cpu_backend_name(const char* backend) {
@@ -847,6 +924,8 @@ struct FluxCliArgs {
     const char* clip_g_path = nullptr;
     const char* t5xxl_path = nullptr;
     const char* prompt = nullptr;
+    const char* negative_prompt = nullptr;
+    const char* image_path = nullptr;
     const char* output_path = "output.png";
     const char* video_format = nullptr;
     const char* backend = nullptr;
@@ -862,6 +941,7 @@ struct FluxCliArgs {
     bool profile_graph_cuts = false;
     bool profile_graph_cuts_all_ranks = false;
     bool flash_attention = true;
+    bool qwen_image_zero_cond_t = false;
     int width = 1024;
     int height = 1024;
     int frames = 1;
@@ -935,6 +1015,12 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->t5xxl_path = require_value(key);
         } else if (std::strcmp(key, "--prompt") == 0 || std::strcmp(key, "-p") == 0) {
             args->prompt = require_value(key);
+        } else if (std::strcmp(key, "--negative-prompt") == 0) {
+            args->negative_prompt = require_value(key);
+            if (!args->negative_prompt) return false;
+        } else if (std::strcmp(key, "--image") == 0 || std::strcmp(key, "-i") == 0) {
+            args->image_path = require_value(key);
+            if (!args->image_path) return false;
         } else if (std::strcmp(key, "--output") == 0 || std::strcmp(key, "-o") == 0) {
             args->output_path = require_value(key);
         } else if (std::strcmp(key, "--width") == 0 || std::strcmp(key, "-W") == 0) {
@@ -977,6 +1063,8 @@ static bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             const char* v = require_value(key);
             if (!v) return false;
             args->flow_shift = parse_float_value(v, args->flow_shift);
+        } else if (std::strcmp(key, "--qwen-image-zero-cond-t") == 0) {
+            args->qwen_image_zero_cond_t = true;
         } else if (std::strcmp(key, "--cache") == 0 || std::strcmp(key, "--cache-mode") == 0) {
             const char* v = require_value(key);
             if (!v) return false;
@@ -1303,11 +1391,29 @@ static int launch_distributed_cli(int argc, char** argv, const FluxCliArgs& args
         return 1;
     }
 
-    std::string cmd = "CUDA_VISIBLE_DEVICES=" + shell_quote(args.devices) +
-                      " ED_CLI_LAUNCHED=1 mpirun -np " + std::to_string(parallel_size);
+    const std::vector<std::string> devices = split_csv_values(args.devices);
+    if (static_cast<int>(devices.size()) != parallel_size) {
+        std::fprintf(stderr,
+                     "parallel size (%d) must match parsed --devices count (%zu)\n",
+                     parallel_size,
+                     devices.size());
+        return 1;
+    }
+
+    std::string argv_cmd;
     for (int i = 0; i < argc; ++i) {
-        cmd += " ";
-        cmd += shell_quote(argv[i]);
+        argv_cmd += " ";
+        argv_cmd += shell_quote(argv[i]);
+    }
+
+    std::string cmd = "mpirun";
+    for (int rank = 0; rank < parallel_size; ++rank) {
+        if (rank > 0) {
+            cmd += " :";
+        }
+        cmd += " -np 1 env ED_CLI_LAUNCHED=1 ED_CLI_SINGLE_VISIBLE_DEVICE=1 CUDA_VISIBLE_DEVICES=";
+        cmd += shell_quote(devices[static_cast<size_t>(rank)].c_str());
+        cmd += argv_cmd;
     }
 
     std::fprintf(stderr,
@@ -1342,7 +1448,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "--devices requires a GPU backend, but --backend cpu was requested\n");
         return 1;
     }
-    if (args.devices != nullptr && std::strlen(args.devices) > 0) {
+    if (args.devices != nullptr && std::strlen(args.devices) > 0 && !is_distributed_process()) {
         setenv("CUDA_VISIBLE_DEVICES", args.devices, 1);
         if (args.backend == nullptr || std::strlen(args.backend) == 0) {
             args.backend = "gpu";
@@ -1385,6 +1491,7 @@ int main(int argc, char** argv) {
     if (args.max_vram > 0.0f) {
         ctx_params.max_vram_gb = args.max_vram;
     }
+    ctx_params.qwen_image_zero_cond_t = args.qwen_image_zero_cond_t;
 
     if (args.threads > 0) {
         ctx_params.n_threads = args.threads;
@@ -1422,7 +1529,7 @@ int main(int argc, char** argv) {
         ed_video_generation_params_init(&gen_params);
 
         gen_params.prompt = args.prompt;
-        gen_params.negative_prompt = "";
+        gen_params.negative_prompt = args.negative_prompt;
         gen_params.width = args.width;
         gen_params.height = args.height;
         gen_params.frames = args.frames;
@@ -1474,9 +1581,19 @@ int main(int argc, char** argv) {
     } else {
         ed_image_generation_params_t gen_params;
         ed_image_generation_params_init(&gen_params);
+        ed_image_t input_image = {};
+        bool has_input_image = false;
+        if (args.image_path != nullptr && std::strlen(args.image_path) > 0) {
+            if (!load_image(args.image_path, &input_image)) {
+                ed_free_context(ctx);
+                return 6;
+            }
+            has_input_image = true;
+            gen_params.init_image = &input_image;
+        }
 
         gen_params.prompt = args.prompt;
-        gen_params.negative_prompt = "";
+        gen_params.negative_prompt = args.negative_prompt;
 
         gen_params.width = args.width;
         gen_params.height = args.height;
@@ -1510,18 +1627,27 @@ int main(int argc, char** argv) {
             }
 
             ed_free_context(ctx);
+            if (has_input_image) {
+                ed_free_image(&input_image);
+            }
             return 3;
         }
 
         if (!ed_context_parallel_is_root(ctx)) {
             ed_free_image_batch(&output);
             ed_free_context(ctx);
+            if (has_input_image) {
+                ed_free_image(&input_image);
+            }
             return 0;
         }
 
         if (output.count <= 0 || output.images == nullptr) {
             std::fprintf(stderr, "generation succeeded but output is empty\n");
             ed_free_context(ctx);
+            if (has_input_image) {
+                ed_free_image(&input_image);
+            }
             return 4;
         }
 
@@ -1529,12 +1655,18 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "failed to save output image: %s\n", args.output_path);
             ed_free_image_batch(&output);
             ed_free_context(ctx);
+            if (has_input_image) {
+                ed_free_image(&input_image);
+            }
             return 5;
         }
 
         std::printf("saved image to %s\n", args.output_path);
 
         ed_free_image_batch(&output);
+        if (has_input_image) {
+            ed_free_image(&input_image);
+        }
     }
     ed_free_context(ctx);
 

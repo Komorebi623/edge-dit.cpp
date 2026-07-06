@@ -12,6 +12,9 @@
 #include "dit_models/components/common/modulation.hpp"
 #include "dit_models/components/common/rope.hpp"
 #include "parallel/sp_parallel.hpp"
+#ifdef ED_ENABLE_CUDA_MODULATION
+#include "backend/ggml/ed_ggml_modulation_ext.hpp"
+#endif
 
 namespace Qwen {
 // Qwen SP custom ops: the CUDA backend intercepts these ggml custom nodes and
@@ -1850,6 +1853,23 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
             return mod_results;
         }
 
+        // residual + x * gate, fused into one CUDA kernel when shapes allow.
+        // gate is [dim, N] (2D) on the normal path or [dim, token, N] (3D) on the
+        // modulate_index path; reshape the 2D case to [dim, 1, N] so it broadcasts
+        // over the token axis exactly like the ggml_mul fallback below.
+        static ggml_tensor* residual_gate(ggml_context* ctx, ggml_tensor* residual, ggml_tensor* x, ggml_tensor* gate) {
+#ifdef ED_ENABLE_CUDA_MODULATION
+            ggml_tensor* gate_b = gate;
+            if (ggml_n_dims(gate) == 2) {
+                gate_b = ggml_reshape_3d(ctx, gate, gate->ne[0], 1, gate->ne[1]);
+            }
+            if (auto fused = edgedit::ggml_ext::fused_residual_gate_custom(ctx, residual, x, gate_b)) {
+                return fused;
+            }
+#endif
+            return ggml_add(ctx, residual, ggml_mul(ctx, x, gate));
+        }
+
         virtual std::pair<ggml_tensor*, ggml_tensor*> forward(GGMLRunnerContext* ctx,
                                                               ggml_tensor* img,
                                                               ggml_tensor* txt,
@@ -1895,8 +1915,8 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
 
             auto [img_attn_output, txt_attn_output] = attn->forward(ctx, img_modulated, txt_modulated, pe);
 
-            img = ggml_add(ctx->ggml_ctx, img, ggml_mul(ctx->ggml_ctx, img_attn_output, img_gate1));
-            txt = ggml_add(ctx->ggml_ctx, txt, ggml_mul(ctx->ggml_ctx, txt_attn_output, txt_gate1));
+            img = residual_gate(ctx->ggml_ctx, img, img_attn_output, img_gate1);
+            txt = residual_gate(ctx->ggml_ctx, txt, txt_attn_output, txt_gate1);
 
             auto img_normed2    = img_norm2->forward(ctx, img);
             auto img_modulated2 = dit::modulate(ctx->ggml_ctx, img_normed2, img_mod_param_vec[3], img_mod_param_vec[4], modulate_index != nullptr);
@@ -1909,8 +1929,8 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
             auto img_mlp_out = img_mlp->forward(ctx, img_modulated2);
             auto txt_mlp_out = txt_mlp->forward(ctx, txt_modulated2);
 
-            img = ggml_add(ctx->ggml_ctx, img, ggml_mul(ctx->ggml_ctx, img_mlp_out, img_gate2));
-            txt = ggml_add(ctx->ggml_ctx, txt, ggml_mul(ctx->ggml_ctx, txt_mlp_out, txt_gate2));
+            img = residual_gate(ctx->ggml_ctx, img, img_mlp_out, img_gate2);
+            txt = residual_gate(ctx->ggml_ctx, txt, txt_mlp_out, txt_gate2);
 
             return {img, txt};
         }

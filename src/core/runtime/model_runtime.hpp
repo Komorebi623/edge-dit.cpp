@@ -147,6 +147,14 @@ public:
         if (parallel_context_ == nullptr || !parallel_context_->enabled()) {
             return nullptr;
         }
+        const bool graph_parallel = parallel_context_->tp_parallel_size() > 1 ||
+                                    parallel_context_->sp_parallel_size() > 1;
+        if (!graph_parallel) {
+            return nullptr;
+        }
+        // Pure CFG parallelism communicates at the pipeline level. Graph-level
+        // runners should only see the model-parallel group; once CFG+SP is
+        // supported this must return the SP/TP subgroup, not the world group.
 
         return std::shared_ptr<parallel::ProcessGroup>(
             &parallel_context_->world_group(),

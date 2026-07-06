@@ -15,12 +15,12 @@ struct QwenImageRunner;
 
 namespace edgedit {
 
-class QwenImagePipeline final : public DiTPipeline {
+class QwenImageEditPipeline final : public DiTPipeline {
 public:
-    explicit QwenImagePipeline(SDVersion version = VERSION_QWEN_IMAGE);
-    ~QwenImagePipeline() override;
+    explicit QwenImageEditPipeline(SDVersion version = VERSION_QWEN_IMAGE_EDIT);
+    ~QwenImageEditPipeline() override;
 
-    const char* name() const override { return "qwen-image"; }
+    const char* name() const override { return "qwen-image-edit"; }
 
     bool prepare(const ed_context_params_t& params,
                  ModelRuntime& runtime,
@@ -41,25 +41,23 @@ public:
     SDVersion version() const override { return version_; }
     bool ready() const override { return ready_; }
 
-    bool supports_image_generation() const override;
-    bool supports_video_generation() const override;
+    bool supports_image_generation() const override { return ready_; }
+    bool supports_video_generation() const override { return false; }
 
-    ed_sampler_t default_sample_method() const override;
+    ed_sampler_t default_sample_method() const override { return ED_SAMPLER_EULER; }
     ed_scheduler_t default_scheduler(ed_sampler_t method) const override;
 
 private:
     bool ready_ = false;
     bool runtime_weights_loaded_ = false;
-    bool diffusion_bf16_ = false;
     ModelRuntime* runtime_ = nullptr;
-    SDVersion version_ = VERSION_QWEN_IMAGE;
+    SDVersion version_ = VERSION_QWEN_IMAGE_EDIT;
 
     std::shared_ptr<Conditioner> conditioner_;
     std::shared_ptr<VAE> vae_;
     std::unique_ptr<Qwen::QwenImageRunner> diffusion_;
 
     void reset();
-    bool has_prefix(const ModelLoader& loader, const std::string& prefix) const;
     bool build_components(const ed_context_params_t& params,
                           const ModelLoader& loader,
                           std::string* error);
