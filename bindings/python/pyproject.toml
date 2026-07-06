@@ -12,6 +12,9 @@ dependencies = [
   "Pillow>=10.0",
 ]
 
+[project.scripts]
+edge-dit-server-v2 = "edge_dit.server_v2:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=7.0",
