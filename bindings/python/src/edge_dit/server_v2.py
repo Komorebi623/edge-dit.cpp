@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, fields
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
@@ -47,8 +47,40 @@ def _base64_png(image: Image.Image) -> str:
     return base64.b64encode(_png_bytes(image)).decode("ascii")
 
 
-def _clean_dict(values: dict[str, object]) -> dict[str, object]:
-    return {key: value for key, value in values.items() if value is not None}
+def _load_pil_image(raw: bytes, *, field_name: str) -> Image.Image:
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+            return image.copy()
+    except Exception as exc:
+        raise InvalidArgumentError(f"{field_name} must decode to a valid image: {exc}") from exc
+
+
+def _decode_image_b64(value: object, *, field_name: str) -> Image.Image:
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidArgumentError(f"{field_name} must be a non-empty base64 string")
+
+    payload = value.strip()
+    if payload.startswith("data:"):
+        header, separator, encoded = payload.partition(",")
+        if separator != "," or ";base64" not in header:
+            raise InvalidArgumentError(f"{field_name} must use a valid data URL when prefixed with data:")
+        payload = encoded
+
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except Exception as exc:
+        raise InvalidArgumentError(f"{field_name} must be valid base64-encoded image data: {exc}") from exc
+    return _load_pil_image(raw, field_name=field_name)
+
+
+def _image_metadata(image: Image.Image) -> dict[str, object]:
+    return {
+        "width": image.width,
+        "height": image.height,
+        "mode": image.mode,
+        "channels": len(image.getbands()),
+    }
 
 
 def _normalize_image_payload(body: dict[str, object]) -> ImageRequest:
@@ -82,20 +114,55 @@ def _normalize_image_payload(body: dict[str, object]) -> ImageRequest:
             if source in cache and target not in payload:
                 payload[target] = cache[source]
 
+    for source, target in (
+        ("init_image_b64", "init_image"),
+        ("mask_image_b64", "mask_image"),
+        ("control_image_b64", "control_image"),
+    ):
+        if source in payload:
+            payload[target] = _decode_image_b64(payload.pop(source), field_name=source)
+
+    if "ref_images_b64" in payload:
+        ref_images_b64 = payload.pop("ref_images_b64")
+        if not isinstance(ref_images_b64, list):
+            raise InvalidArgumentError("ref_images_b64 must be a JSON array of base64 image strings")
+        payload["ref_images"] = [
+            _decode_image_b64(item, field_name=f"ref_images_b64[{index}]")
+            for index, item in enumerate(ref_images_b64)
+        ]
+
     payload["output_type"] = "pil"
-    return ImageRequest.from_kwargs(**payload)
+    try:
+        return ImageRequest.from_kwargs(**payload)
+    except TypeError as exc:
+        raise InvalidArgumentError(str(exc)) from exc
 
 
 def _normalize_video_payload(body: dict[str, object]) -> VideoRequest:
     payload = dict(body)
     payload["output_type"] = "pil"
-    return VideoRequest.from_kwargs(**payload)
+    try:
+        return VideoRequest.from_kwargs(**payload)
+    except TypeError as exc:
+        raise InvalidArgumentError(str(exc)) from exc
 
 
 def _request_parameters(request: ImageRequest | VideoRequest) -> dict[str, object]:
-    parameters = asdict(request)
-    parameters.pop("output_type", None)
-    return _clean_dict(parameters)
+    parameters: dict[str, object] = {}
+    for entry in fields(request):
+        if entry.name == "output_type":
+            continue
+        value = getattr(request, entry.name)
+        if value is None:
+            continue
+        if entry.name in {"init_image", "mask_image", "control_image"}:
+            parameters[entry.name] = _image_metadata(value)
+            continue
+        if entry.name == "ref_images":
+            parameters[entry.name] = [_image_metadata(image) for image in value]
+            continue
+        parameters[entry.name] = value
+    return parameters
 
 
 @dataclass(slots=True)

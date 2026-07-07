@@ -107,6 +107,12 @@ class FakeEngine:
 
 
 class ServerV2HTTPTests(unittest.TestCase):
+    @staticmethod
+    def encode_image(image: Image.Image) -> str:
+        buf = BytesIO()
+        image.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
     def start_server(self, engine: FakeEngine) -> None:
         self.engine = engine
         self.service = ImageJobService(engine, model_name="fake-model", job_ttl_seconds=3600)
@@ -190,6 +196,68 @@ class ServerV2HTTPTests(unittest.TestCase):
         decoded = base64.b64decode(result["data"][0]["b64_png"])
         image = Image.open(BytesIO(decoded))
         self.assertEqual(image.size, (16, 12))
+
+    def test_create_image_job_with_init_image(self) -> None:
+        self.start_server(FakeEngine(["success"]))
+
+        status_code, body = self.request_json(
+            "POST",
+            "/ed/v2/images/generations",
+            {
+                "prompt": "edit this scene",
+                "width": 16,
+                "height": 16,
+                "steps": 1,
+                "init_image_b64": self.encode_image(Image.new("RGB", (4, 5), color=(1, 2, 3))),
+            },
+        )
+        self.assertEqual(status_code, 202)
+        self.assertEqual(body["parameters"]["init_image"]["width"], 4)
+        self.assertEqual(body["parameters"]["init_image"]["height"], 5)
+
+        self.wait_for_status(body["status_url"], "succeeded")
+        self.assertEqual(self.engine.requests[0].init_image.size, (4, 5))
+
+    def test_create_image_job_with_ref_images(self) -> None:
+        self.start_server(FakeEngine(["success"]))
+
+        status_code, body = self.request_json(
+            "POST",
+            "/ed/v2/images/generations",
+            {
+                "prompt": "restyle this photo",
+                "width": 16,
+                "height": 16,
+                "steps": 1,
+                "ref_images_b64": [
+                    self.encode_image(Image.new("RGB", (6, 7), color=(3, 2, 1))),
+                    self.encode_image(Image.new("RGB", (8, 9), color=(4, 5, 6))),
+                ],
+            },
+        )
+        self.assertEqual(status_code, 202)
+        self.assertEqual(len(body["parameters"]["ref_images"]), 2)
+        self.assertEqual(body["parameters"]["ref_images"][1]["width"], 8)
+
+        self.wait_for_status(body["status_url"], "succeeded")
+        self.assertEqual([image.size for image in self.engine.requests[0].ref_images], [(6, 7), (8, 9)])
+
+    def test_invalid_image_payload_returns_structured_error(self) -> None:
+        self.start_server(FakeEngine(["success"]))
+
+        status_code, body = self.request_json(
+            "POST",
+            "/ed/v2/images/generations",
+            {
+                "prompt": "broken",
+                "width": 16,
+                "height": 16,
+                "steps": 1,
+                "init_image_b64": "not-base64",
+            },
+        )
+        self.assertEqual(status_code, 400)
+        self.assertEqual(body["error"]["code"], "invalid_request")
 
     def test_create_video_job_and_fetch_frame_result(self) -> None:
         self.start_server(FakeEngine(["success"]))

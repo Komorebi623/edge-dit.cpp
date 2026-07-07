@@ -79,6 +79,7 @@ class EdContextParams(ctypes.Structure):
         ("keep_vae_on_cpu", c_bool),
         ("skip_t5", c_bool),
         ("flash_attention", c_bool),
+        ("qwen_image_zero_cond_t", c_bool),
         ("max_vram_gb", c_float),
         ("vae_tiling", EdTilingParams),
         ("cfg_parallel_size", c_int),

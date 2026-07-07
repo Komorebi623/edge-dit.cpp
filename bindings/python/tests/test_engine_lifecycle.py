@@ -4,6 +4,8 @@ import ctypes
 import unittest
 from unittest.mock import patch
 
+from PIL import Image
+
 from edge_dit import (
     EdgeDitClosedError,
     Engine,
@@ -296,6 +298,50 @@ class EngineLifecycleTests(unittest.TestCase):
         self.assertEqual(captured["cache_taylorseer_skip_interval"], 1)
         self.assertEqual(captured["cache_scm_mask"], "0011")
         self.assertFalse(captured["cache_scm_policy_dynamic"])
+
+    def test_image_inputs_are_forwarded_to_native_request(self) -> None:
+        fake = FakeLib()
+        captured: dict[str, object] = {}
+
+        original_generate = fake.ed_generate_image
+
+        def wrapped_generate(ctx, params, out) -> int:
+            request = ctypes.cast(params, ctypes.POINTER(EdImageGenerationParams)).contents
+            self.assertIsNotNone(request.init_image)
+            self.assertIsNotNone(request.mask_image)
+            self.assertIsNotNone(request.control_image)
+            captured["init_size"] = (request.init_image.contents.width, request.init_image.contents.height)
+            captured["mask_channels"] = request.mask_image.contents.channels
+            captured["control_size"] = (
+                request.control_image.contents.width,
+                request.control_image.contents.height,
+            )
+            captured["ref_count"] = request.ref_image_count
+            captured["ref_sizes"] = [
+                (request.ref_images[index].width, request.ref_images[index].height)
+                for index in range(request.ref_image_count)
+            ]
+            return original_generate(ctx, params, out)
+
+        fake.ed_generate_image = wrapped_generate
+
+        with patch("edge_dit.engine.load_capi", return_value=fake):
+            with Engine(model_path="demo-model") as engine:
+                engine.generate_image(
+                    ImageRequest(
+                        prompt="teapot",
+                        init_image=Image.new("RGB", (3, 2)),
+                        mask_image=Image.new("L", (3, 2)),
+                        control_image=Image.new("RGBA", (5, 4)),
+                        ref_images=[Image.new("RGB", (6, 7)), Image.new("RGB", (8, 9))],
+                    )
+                )
+
+        self.assertEqual(captured["init_size"], (3, 2))
+        self.assertEqual(captured["mask_channels"], 1)
+        self.assertEqual(captured["control_size"], (5, 4))
+        self.assertEqual(captured["ref_count"], 2)
+        self.assertEqual(captured["ref_sizes"], [(6, 7), (8, 9)])
 
     def test_generate_after_close_raises(self) -> None:
         fake = FakeLib()
