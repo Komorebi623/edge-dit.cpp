@@ -121,11 +121,15 @@ inline void rope_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdat
         heads_total = x->ne[2];
     }
 
-    // Parallelize over the outermost head dimension: each (h,s,p) writes an
-    // independent dst location, so a static ith/nth split over h is race-free.
-    // (Previously only ith==0 ran — single-threaded scalar, ~34% of the DiT graph.)
-    for (int64_t h = ith; h < heads_total; h += nth) {
-        for (int64_t s = 0; s < seq; ++s) {
+    // Parallelize over the flattened (head, seq) index space: each (h,s,p) writes
+    // an independent dst location, so a static ith/nth split is race-free. Flattening
+    // h*seq (vs h alone) gives heads_total*seq tasks — enough to fill many cores even
+    // when heads_total is small (Flux has only 24 heads; seq ~1536 → ~37k tasks).
+    const int64_t work_total = heads_total * seq;
+    for (int64_t idx = ith; idx < work_total; idx += nth) {
+        const int64_t h = idx / seq;
+        const int64_t s = idx % seq;
+        {
             for (int64_t p = 0; p < half; ++p) {
                 float x0 = 0.0f;
                 float x1 = 0.0f;
