@@ -485,7 +485,7 @@ bool FluxKontextPipeline::initialize_flux_transformer_spec(const ModelLoader& lo
             flux_runner_->set_max_graph_vram_bytes(runtime_->max_graph_vram_bytes());
             flux_runner_->set_flash_attention_enabled(runtime_->flash_attention());
 
-            auto process_group = runtime_->process_group_ref();
+            auto process_group = runtime_->graph_process_group_ref();
             if (process_group != nullptr) {
                 flux_runner_->set_process_group(process_group);
                 LOG_INFO("flux-kontext transformer process group attached: backend=%s rank=%d world_size=%d",

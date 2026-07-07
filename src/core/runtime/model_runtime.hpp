@@ -143,7 +143,7 @@ public:
     std::shared_ptr<RNG> sampler_rng_ptr() const { return sampler_rng_; }
     parallel::ParallelContext* parallel_context() const { return parallel_context_; }
     GenerationControl* generation_control() const { return generation_control_; }
-    std::shared_ptr<parallel::ProcessGroup> process_group_ref() const {
+    std::shared_ptr<parallel::ProcessGroup> graph_process_group_ref() const {
         if (parallel_context_ == nullptr || !parallel_context_->enabled()) {
             return nullptr;
         }
