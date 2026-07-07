@@ -95,11 +95,6 @@ inline float rope_pe_at(const ggml_tensor* pe, int64_t seq, int64_t pair, int64_
 }
 
 inline void rope_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdata) {
-    if (ith != 0) {
-        return;
-    }
-    GGML_UNUSED(nth);
-
     const RopeCustomParams params = rope_params_from_userdata(userdata);
     GGML_ASSERT(rope_params_valid(params));
     GGML_ASSERT(dst->src[0] != nullptr && dst->src[1] != nullptr);
@@ -126,7 +121,10 @@ inline void rope_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdat
         heads_total = x->ne[2];
     }
 
-    for (int64_t h = 0; h < heads_total; ++h) {
+    // Parallelize over the outermost head dimension: each (h,s,p) writes an
+    // independent dst location, so a static ith/nth split over h is race-free.
+    // (Previously only ith==0 ran — single-threaded scalar, ~34% of the DiT graph.)
+    for (int64_t h = ith; h < heads_total; h += nth) {
         for (int64_t s = 0; s < seq; ++s) {
             for (int64_t p = 0; p < half; ++p) {
                 float x0 = 0.0f;
