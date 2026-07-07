@@ -69,6 +69,40 @@ static inline std::vector<ggml_tensor*> mmdit_sp_split_qkv_qk_cont_v_view(ggml_c
     return {q, k, v_view};
 }
 
+static inline std::vector<ggml_tensor*> mmdit_split_qkv_qk_head_v_seq_view(ggml_context* ctx,
+                                                                           ggml_tensor* qkv,
+                                                                           int64_t num_heads) {
+    GGML_ASSERT(qkv != nullptr);
+    GGML_ASSERT(qkv->ne[0] % 3 == 0);
+    const int64_t qkv_dim = qkv->ne[0] / 3;
+    GGML_ASSERT(qkv_dim % num_heads == 0);
+    const int64_t head_dim = qkv_dim / num_heads;
+    const int64_t seq      = qkv->ne[1];
+    const int64_t batch    = qkv->ne[2];
+    const size_t plane_stride = qkv_dim * qkv->nb[0];
+    const size_t head_stride  = head_dim * qkv->nb[0];
+
+    auto q_head = ggml_view_4d(ctx, qkv, head_dim, num_heads, seq, batch, head_stride, qkv->nb[1], qkv->nb[2], plane_stride * 0);
+    auto k_head = ggml_view_4d(ctx, qkv, head_dim, num_heads, seq, batch, head_stride, qkv->nb[1], qkv->nb[2], plane_stride * 1);
+    auto v_seq  = ggml_view_3d(ctx, qkv, qkv_dim, seq, batch, qkv->nb[1], qkv->nb[2], plane_stride * 2);
+    return {q_head, k_head, v_seq};
+}
+
+static inline std::vector<ggml_tensor*> mmdit_split_qkv_plane_views(ggml_context* ctx,
+                                                                    ggml_tensor* qkv) {
+    GGML_ASSERT(qkv != nullptr);
+    GGML_ASSERT(qkv->ne[0] % 3 == 0);
+    const int64_t qkv_dim = qkv->ne[0] / 3;
+    const int64_t seq     = qkv->ne[1];
+    const int64_t batch   = qkv->ne[2];
+    const size_t plane_stride = qkv_dim * qkv->nb[0];
+
+    auto q = ggml_view_3d(ctx, qkv, qkv_dim, seq, batch, qkv->nb[1], qkv->nb[2], plane_stride * 0);
+    auto k = ggml_view_3d(ctx, qkv, qkv_dim, seq, batch, qkv->nb[1], qkv->nb[2], plane_stride * 1);
+    auto v = ggml_view_3d(ctx, qkv, qkv_dim, seq, batch, qkv->nb[1], qkv->nb[2], plane_stride * 2);
+    return {q, k, v};
+}
+
 static std::mutex& mmdit_fused_qkv_pack_params_mutex() {
     static std::mutex mutex;
     return mutex;
@@ -1587,6 +1621,73 @@ static inline ggml_tensor* mmdit_attention(GGMLRunnerContext* ctx,
                                   true);
 }
 
+static inline bool mmdit_cudnn_unpadded_attention_enabled(GGMLRunnerContext* ctx,
+                                                          int64_t total_seq,
+                                                          int64_t head_dim) {
+#ifdef ED_ENABLE_CUDNN_SDPA
+    return ctx != nullptr &&
+           ctx->flash_attn_enabled &&
+           total_seq >= 4096 &&
+           (head_dim == 64 || head_dim == 128) &&
+           sd_backend_is(ctx->backend, "CUDA") &&
+           !ggml_ext_env_flag_enabled("ED_DISABLE_CUDNN_SDPA") &&
+           !ggml_ext_env_flag_enabled("ED_DISABLE_CUDNN_SDPA_UNPAD");
+#else
+    ED_UNUSED(ctx);
+    ED_UNUSED(total_seq);
+    ED_UNUSED(head_dim);
+    return false;
+#endif
+}
+
+static inline ggml_tensor* mmdit_fused_pair_pack_attention(GGMLRunnerContext* ctx,
+                                                           const std::vector<ggml_tensor*>& context_qkv,
+                                                           const std::vector<ggml_tensor*>& x_qkv,
+                                                           int64_t n_head) {
+    GGML_ASSERT(context_qkv.size() == 3 && x_qkv.size() == 3);
+    GGML_ASSERT(context_qkv[0] != nullptr && context_qkv[1] != nullptr && context_qkv[2] != nullptr);
+    GGML_ASSERT(x_qkv[0] != nullptr && x_qkv[1] != nullptr && x_qkv[2] != nullptr);
+    const int64_t total_seq = context_qkv[0]->ne[1] + x_qkv[0]->ne[1];
+    const int64_t head_dim = context_qkv[0]->ne[0] / n_head;
+    if (!mmdit_cudnn_unpadded_attention_enabled(ctx, total_seq, head_dim)) {
+        return nullptr;
+    }
+
+    ggml_tensor* q = nullptr;
+    ggml_tensor* k = nullptr;
+    ggml_tensor* v = nullptr;
+
+    if (auto qkv_pack = edgedit::ggml_ext::attention_qkv_pair_pack_custom_f16(ctx->ggml_ctx,
+                                                                              context_qkv[0],
+                                                                              context_qkv[1],
+                                                                              context_qkv[2],
+                                                                              x_qkv[0],
+                                                                              x_qkv[1],
+                                                                              x_qkv[2],
+                                                                              n_head)) {
+        q = ggml_view_3d(ctx->ggml_ctx, qkv_pack, head_dim, total_seq, n_head, qkv_pack->nb[1], qkv_pack->nb[2], 0);
+        k = ggml_view_3d(ctx->ggml_ctx, qkv_pack, head_dim, total_seq, n_head, qkv_pack->nb[1], qkv_pack->nb[2], qkv_pack->nb[3]);
+        v = ggml_view_3d(ctx->ggml_ctx, qkv_pack, head_dim, total_seq, n_head, qkv_pack->nb[1], qkv_pack->nb[2], qkv_pack->nb[3] * 2);
+    } else {
+        auto pack = [&](ggml_tensor* first, ggml_tensor* second) -> ggml_tensor* {
+            return edgedit::ggml_ext::attention_pair_pack_custom_f16(ctx->ggml_ctx, first, second, n_head);
+        };
+
+        q = pack(context_qkv[0], x_qkv[0]);
+        k = pack(context_qkv[1], x_qkv[1]);
+        v = pack(context_qkv[2], x_qkv[2]);
+    }
+    if (q == nullptr || k == nullptr || v == nullptr) {
+        return nullptr;
+    }
+
+    auto out = ggml_flash_attn_ext(ctx->ggml_ctx, q, k, v, nullptr, 1.0f / sqrt((float) head_dim), 0, 0);
+    ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);
+    out = ggml_view_3d(ctx->ggml_ctx, out, head_dim, n_head, total_seq, out->nb[1], out->nb[2], 0);
+    out = ggml_reshape_3d(ctx->ggml_ctx, out, head_dim * n_head, total_seq, 1);
+    return out;
+}
+
 static inline ggml_tensor* mmdit_sp_attention_seq_major(GGMLRunnerContext* ctx,
                                                         ggml_tensor* q,
                                                         ggml_tensor* k,
@@ -1671,21 +1772,30 @@ public:
         }
     }
 
-    std::vector<ggml_tensor*> pre_attention(GGMLRunnerContext* ctx, ggml_tensor* x) {
+    std::vector<ggml_tensor*> pre_attention(GGMLRunnerContext* ctx,
+                                            ggml_tensor* x,
+                                            bool pair_pack_plane_views = false) {
         auto qkv_proj = std::dynamic_pointer_cast<Linear>(blocks["qkv"]);
 
-        auto qkv         = qkv_proj->forward(ctx, x);
-        auto qkv_vec     = split_qkv(ctx->ggml_ctx, qkv);
-        int64_t head_dim = qkv_vec[0]->ne[0] / num_heads;
-        auto q           = ggml_reshape_4d(ctx->ggml_ctx, qkv_vec[0], head_dim, num_heads, qkv_vec[0]->ne[1], qkv_vec[0]->ne[2]);  // [N, n_token, n_head, d_head]
-        auto k           = ggml_reshape_4d(ctx->ggml_ctx, qkv_vec[1], head_dim, num_heads, qkv_vec[1]->ne[1], qkv_vec[1]->ne[2]);  // [N, n_token, n_head, d_head]
-        auto v           = qkv_vec[2];                                                                                             // [N, n_token, n_head*d_head]
+        auto qkv = qkv_proj->forward(ctx, x);
+        if (pair_pack_plane_views && qk_norm.empty()) {
+            return mmdit_split_qkv_plane_views(ctx->ggml_ctx, qkv);
+        }
+
+        auto qkv_vec     = mmdit_split_qkv_qk_head_v_seq_view(ctx->ggml_ctx, qkv, num_heads);
+        int64_t head_dim = qkv_vec[0]->ne[0];
+        auto q           = qkv_vec[0];  // [N, n_token, n_head, d_head]
+        auto k           = qkv_vec[1];  // [N, n_token, n_head, d_head]
+        auto v           = qkv_vec[2];  // [N, n_token, n_head*d_head]
 
         if (qk_norm == "rms" || qk_norm == "ln") {
             auto ln_q = std::dynamic_pointer_cast<UnaryBlock>(blocks["ln_q"]);
             auto ln_k = std::dynamic_pointer_cast<UnaryBlock>(blocks["ln_k"]);
             q         = ln_q->forward(ctx, q);
             k         = ln_k->forward(ctx, k);
+        } else {
+            q = ggml_cont(ctx->ggml_ctx, q);
+            k = ggml_cont(ctx->ggml_ctx, k);
         }
 
         q = ggml_reshape_3d(ctx->ggml_ctx, q, q->ne[0] * q->ne[1], q->ne[2], q->ne[3]);  // [N, n_token, n_head*d_head]
@@ -1840,7 +1950,8 @@ public:
 
     std::tuple<std::vector<ggml_tensor*>, std::vector<ggml_tensor*>, std::vector<ggml_tensor*>> pre_attention_x(GGMLRunnerContext* ctx,
                                                                                                                 ggml_tensor* x,
-                                                                                                                ggml_tensor* c) {
+                                                                                                                ggml_tensor* c,
+                                                                                                                bool pair_pack_plane_views = false) {
         GGML_ASSERT(self_attn);
         // x: [N, n_token, hidden_size]
         // c: [N, hidden_size]
@@ -1851,7 +1962,7 @@ public:
 
         int n_mods = 9;
         auto m     = adaLN_modulation_1->forward(ctx, ggml_silu(ctx->ggml_ctx, c));  // [N, n_mods * hidden_size]
-        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, n_mods, 0);
+        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, n_mods, 0, false);
 
         auto shift_msa  = m_vec[0];  // [N, hidden_size]
         auto scale_msa  = m_vec[1];  // [N, hidden_size]
@@ -1866,7 +1977,7 @@ public:
         auto x_norm = norm1->forward(ctx, x);
 
         auto attn_in = modulate(ctx->ggml_ctx, x_norm, shift_msa, scale_msa);
-        auto qkv     = attn->pre_attention(ctx, attn_in);
+        auto qkv     = attn->pre_attention(ctx, attn_in, pair_pack_plane_views);
 
         auto attn2_in = modulate(ctx->ggml_ctx, x_norm, shift_msa2, scale_msa2);
         auto qkv2     = attn2->pre_attention(ctx, attn2_in);
@@ -1886,7 +1997,7 @@ public:
 
         int n_mods = 9;
         auto m     = adaLN_modulation_1->forward(ctx, ggml_silu(ctx->ggml_ctx, c));
-        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, n_mods, 0);
+        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, n_mods, 0, false);
 
         auto shift_msa  = m_vec[0];
         auto scale_msa  = m_vec[1];
@@ -1921,7 +2032,7 @@ public:
 
         int n_mods = 9;
         auto m     = adaLN_modulation_1->forward(ctx, ggml_silu(ctx->ggml_ctx, c));
-        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, n_mods, 0);
+        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, n_mods, 0, false);
 
         auto shift_msa  = m_vec[0];
         auto scale_msa  = m_vec[1];
@@ -1946,7 +2057,8 @@ public:
 
     std::pair<std::vector<ggml_tensor*>, std::vector<ggml_tensor*>> pre_attention(GGMLRunnerContext* ctx,
                                                                                   ggml_tensor* x,
-                                                                                  ggml_tensor* c) {
+                                                                                  ggml_tensor* c,
+                                                                                  bool pair_pack_plane_views = false) {
         // x: [N, n_token, hidden_size]
         // c: [N, hidden_size]
         auto norm1              = std::dynamic_pointer_cast<LayerNorm>(blocks["norm1"]);
@@ -1958,7 +2070,7 @@ public:
             n_mods = 2;
         }
         auto m     = adaLN_modulation_1->forward(ctx, ggml_silu(ctx->ggml_ctx, c));  // [N, n_mods * hidden_size]
-        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, n_mods, 0);
+        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, n_mods, 0, false);
 
         if (!pre_only) {
             auto shift_msa = m_vec[0];  // [N, hidden_size]
@@ -1970,14 +2082,14 @@ public:
 
             auto attn_in = modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
 
-            auto qkv = attn->pre_attention(ctx, attn_in);
+            auto qkv = attn->pre_attention(ctx, attn_in, pair_pack_plane_views);
 
             return {qkv, {x, gate_msa, shift_mlp, scale_mlp, gate_mlp}};
         } else {
             auto scale_msa = m_vec[0];  // [N, hidden_size]
             auto shift_msa = m_vec[1];  // [N, hidden_size]
             auto attn_in = modulate(ctx->ggml_ctx, norm1->forward(ctx, x), shift_msa, scale_msa);
-            auto qkv     = attn->pre_attention(ctx, attn_in);
+            auto qkv     = attn->pre_attention(ctx, attn_in, pair_pack_plane_views);
 
             return {qkv, {nullptr, nullptr, nullptr, nullptr, nullptr}};
         }
@@ -1996,7 +2108,7 @@ public:
             n_mods = 2;
         }
         auto m     = adaLN_modulation_1->forward(ctx, ggml_silu(ctx->ggml_ctx, c));
-        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, n_mods, 0);
+        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, n_mods, 0, false);
 
         if (!pre_only) {
             auto shift_msa = m_vec[0];
@@ -2033,7 +2145,7 @@ public:
             n_mods = 2;
         }
         auto m     = adaLN_modulation_1->forward(ctx, ggml_silu(ctx->ggml_ctx, c));
-        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, n_mods, 0);
+        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, n_mods, 0, false);
 
         if (!pre_only) {
             auto shift_msa = m_vec[0];
@@ -2184,28 +2296,31 @@ block_mixing(GGMLRunnerContext* ctx,
     // context: [N, n_context, hidden_size]
     // x: [N, n_token, hidden_size]
     // c: [N, hidden_size]
-    auto context_qkv_intermediates = context_block->pre_attention(ctx, context, c);
+    auto context_qkv_intermediates = context_block->pre_attention(ctx, context, c, true);
     auto context_qkv               = context_qkv_intermediates.first;
     auto context_intermediates     = context_qkv_intermediates.second;
 
     std::vector<ggml_tensor*> x_qkv, x_qkv2, x_intermediates;
 
     if (x_block->self_attn) {
-        auto x_qkv_intermediates = x_block->pre_attention_x(ctx, x, c);
+        auto x_qkv_intermediates = x_block->pre_attention_x(ctx, x, c, true);
         x_qkv                    = std::get<0>(x_qkv_intermediates);
         x_qkv2                   = std::get<1>(x_qkv_intermediates);
         x_intermediates          = std::get<2>(x_qkv_intermediates);
     } else {
-        auto x_qkv_intermediates = x_block->pre_attention(ctx, x, c);
+        auto x_qkv_intermediates = x_block->pre_attention(ctx, x, c, true);
         x_qkv                    = x_qkv_intermediates.first;
         x_intermediates          = x_qkv_intermediates.second;
     }
-    std::vector<ggml_tensor*> qkv;
-    for (int i = 0; i < 3; i++) {
-        qkv.push_back(ggml_concat(ctx->ggml_ctx, context_qkv[i], x_qkv[i], 1));
-    }
+    auto attn = mmdit_fused_pair_pack_attention(ctx, context_qkv, x_qkv, x_block->num_heads);
+    if (attn == nullptr) {
+        std::vector<ggml_tensor*> qkv;
+        for (int i = 0; i < 3; i++) {
+            qkv.push_back(ggml_concat(ctx->ggml_ctx, context_qkv[i], x_qkv[i], 1));
+        }
 
-    auto attn = mmdit_attention(ctx, qkv[0], qkv[1], qkv[2], x_block->num_heads, false);  // [N, n_context + n_token, hidden_size]
+        attn = mmdit_attention(ctx, qkv[0], qkv[1], qkv[2], x_block->num_heads, false);  // [N, n_context + n_token, hidden_size]
+    }
 
     auto context_attn = ggml_view_3d(ctx->ggml_ctx,
                                      attn,
@@ -2573,7 +2688,7 @@ public:
         auto adaLN_modulation_1 = std::dynamic_pointer_cast<Linear>(blocks["adaLN_modulation.1"]);
 
         auto m     = adaLN_modulation_1->forward(ctx, ggml_silu(ctx->ggml_ctx, c));  // [N, 2 * hidden_size]
-        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, 2, 0);
+        auto m_vec = ggml_ext_chunk(ctx->ggml_ctx, m, 2, 0, false);
         auto scale = m_vec[0];  // [N, hidden_size]
         auto shift = m_vec[1];  // [N, hidden_size]
 
@@ -2736,10 +2851,30 @@ public:
         // return: [N, N*W, patch_size * patch_size * out_channels]
         auto final_layer = std::dynamic_pointer_cast<FinalLayer>(blocks["final_layer"]);
 
+        // Cache seam: the joint block stack transforms the image stream `x`.
+        // Disabled under SP (block-loop tensors are sequence-sharded). The cached
+        // region is blocks [region_start, region_end); the default whole-stack
+        // region matches the pre-region behaviour. See cache_graph_scope.hpp.
+        sd::CacheGraphScope* cache_scope = use_sp_mainline ? nullptr : ctx->cache_scope;
+        const bool cache_inject = cache_scope != nullptr && cache_scope->inject_mode();
+
         for (int i = 0; i < depth; i++) {
             // skip iteration if i is in skip_layers
             if (skip_layers.size() > 0 && std::find(skip_layers.begin(), skip_layers.end(), i) != skip_layers.end()) {
                 continue;
+            }
+
+            // Inject: at the region start, collapse the region to a residual add
+            // and jump past its blocks (blocks before region_start still run).
+            if (cache_inject) {
+                if (ggml_tensor* injected = cache_scope->step_inject_region(ctx->ggml_ctx, i, x)) {
+                    x = injected;
+                    i = cache_scope->inject_resume_index(depth) - 1;  // ++ lands at resume
+                    continue;
+                }
+            }
+            if (cache_scope != nullptr) {
+                cache_scope->begin_region(i, x);
             }
 
             auto block = std::dynamic_pointer_cast<JointBlock>(blocks["joint_blocks." + std::to_string(i)]);
@@ -2761,6 +2896,13 @@ public:
             x              = context_x.second;
             sd::ggml_graph_cut::mark_graph_cut(context, "mmdit.joint_blocks." + std::to_string(i), "context");
             sd::ggml_graph_cut::mark_graph_cut(x, "mmdit.joint_blocks." + std::to_string(i), "x");
+            if (cache_scope != nullptr) {
+                cache_scope->end_region(ctx->ggml_ctx, i, depth, x);
+                if (cache_scope->stop_after_block(i)) {
+                    cache_scope->on_probe(x);
+                    return x;
+                }
+            }
         }
 
         x = final_layer->forward(ctx, x, c_mod);  // (N, T, patch_size ** 2 * out_channels)
@@ -2866,6 +3008,7 @@ public:
 };
 struct MMDiTRunner : public GGMLRunner {
     MMDiT mmdit;
+    sd::Tensor<float> inject_feature_host_;  // kept alive across cache inject build
 
     MMDiTRunner(ggml_backend_t backend,
                 bool offload_params_to_cpu,
@@ -2923,6 +3066,64 @@ struct MMDiTRunner : public GGMLRunner {
         };
 
         return restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), x.dim());
+    }
+
+    // ---- Cache seam passes (Feature/Probe policies). ----
+    sd::DiffusionCacheResult compute_capture(int n_threads,
+                                         const sd::Tensor<float>& x,
+                                         const sd::Tensor<float>& timesteps,
+                                         const sd::Tensor<float>& context,
+                                         const sd::Tensor<float>& y,
+                                         int region_start = 0,
+                                         int region_end = -1) {
+        sd::CacheGraphScope scope;
+        scope.mode = sd::CacheGraphScope::Mode::Capture;
+        scope.region_start = region_start;
+        scope.region_end = region_end;
+        auto get_graph = [&]() -> ggml_cgraph* { return build_graph(x, timesteps, context, y, {}); };
+        auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+        sd::DiffusionCacheResult out;
+        out.output = std::move(pass.output);
+        out.feature = std::move(pass.feature);
+        return out;
+    }
+
+    sd::Tensor<float> compute_inject(int n_threads,
+                                     const sd::Tensor<float>& x,
+                                     const sd::Tensor<float>& timesteps,
+                                     const sd::Tensor<float>& context,
+                                     const sd::Tensor<float>& y,
+                                     const sd::Tensor<float>& feature,
+                                     int region_start = 0,
+                                     int region_end = -1) {
+        sd::CacheGraphScope scope;
+        scope.mode = sd::CacheGraphScope::Mode::Inject;
+        scope.region_start = region_start;
+        scope.region_end = region_end;
+        inject_feature_host_ = feature;
+        auto get_graph = [&]() -> ggml_cgraph* {
+            scope.inject_feature = make_input(inject_feature_host_);
+            return build_graph(x, timesteps, context, y, {});
+        };
+        auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+        return std::move(pass.output);
+    }
+
+    sd::DiffusionCacheResult compute_probe(int n_threads,
+                                       const sd::Tensor<float>& x,
+                                       const sd::Tensor<float>& timesteps,
+                                       const sd::Tensor<float>& context,
+                                       const sd::Tensor<float>& y,
+                                       int probe_depth) {
+        sd::CacheGraphScope scope;
+        scope.mode = sd::CacheGraphScope::Mode::Probe;
+        scope.probe_depth = probe_depth;
+        auto get_graph = [&]() -> ggml_cgraph* { return build_graph(x, timesteps, context, y, {}); };
+        auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+        sd::DiffusionCacheResult out;
+        out.probe = std::move(pass.output);
+        out.before = std::move(pass.before);
+        return out;
     }
 
     void test() {

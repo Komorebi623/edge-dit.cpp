@@ -383,12 +383,12 @@ namespace Rope {
                                                                          bool increase_ref_index) {
         int h_len        = (h + (patch_size / 2)) / patch_size;
         int w_len        = (w + (patch_size / 2)) / patch_size;
-        int txt_id_start = std::max(h_len, w_len);
-        auto txt_ids     = linspace<float>(1.f * txt_id_start, 1.f * context_len + txt_id_start, context_len);
+        int txt_id_start = std::max(h_len / 2, w_len / 2);
         std::vector<std::vector<float>> txt_ids_repeated(bs * context_len, std::vector<float>(3));
         for (int i = 0; i < bs; ++i) {
-            for (int j = 0; j < txt_ids.size(); ++j) {
-                txt_ids_repeated[i * txt_ids.size() + j] = {txt_ids[j], txt_ids[j], txt_ids[j]};
+            for (int j = 0; j < context_len; ++j) {
+                const float txt_id = static_cast<float>(txt_id_start + j);
+                txt_ids_repeated[i * context_len + j] = {txt_id, txt_id, txt_id};
             }
         }
         int axes_dim_num = 3;
@@ -753,8 +753,14 @@ namespace Rope {
         // q,k,v: [N, L, n_head, d_head]
         // pe: [L, d_head/2, 2, 2]
         // return: [N, L, n_head*d_head]
+
+        const bool will_pad_kv_for_flash_attn =
+            mask == nullptr &&
+            ctx->flash_attn_enabled &&
+            k->ne[2] % 256 != 0;
+
         q = apply_rope(ctx->ggml_ctx, q, pe, rope_interleaved, ctx->backend);  // [N*n_head, L, d_head]
-        if (k_rope_f16_for_flash && ctx->flash_attn_enabled) {
+        if (k_rope_f16_for_flash && ctx->flash_attn_enabled && !will_pad_kv_for_flash_attn) {
             ggml_tensor* k_f16 = edgedit::ggml_ext::apply_rope_f16(ctx->ggml_ctx, k, pe, rope_interleaved);
             if (k_f16 != nullptr && ggml_backend_supports_op(ctx->backend, k_f16)) {
                 k = k_f16;  // flash attention consumes K as F16, so avoid a separate cast node

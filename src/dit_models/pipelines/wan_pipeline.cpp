@@ -10,6 +10,7 @@
 #include <utility>
 #include "parallel/process_group.hpp"
 #include "backend/ggml/ggml_extend.hpp"
+#include "core/optimization/cache/cache_runtime.hpp"
 #include "dit_models/components/scheduler/denoiser.hpp"
 #include "dit_models/components/autoencoders/tae.hpp"
 #include "dit_models/components/autoencoders/vae.hpp"
@@ -360,7 +361,7 @@ void WanPipeline::configure_runtime_flags() {
     }
 
     if (runtime_ != nullptr) {
-        auto process_group = runtime_->process_group_ref();
+        auto process_group = runtime_->graph_process_group_ref();
         if (process_group != nullptr) {
             diffusion_->set_process_group(process_group);
             LOG_INFO("wan diffusion process group attached: backend=%s rank=%d world_size=%d",
@@ -662,8 +663,23 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
     (void)eta;  // Euler deterministic update does not use eta.
     constexpr int shifted_timestep = 0;
 
+    // One cache controller per stage (per euler_denoise call) so high/low-noise
+    // schedules never leak across the stage boundary. Feature/Probe caching is
+    // additionally disabled whenever a VACE context is active (the model gates
+    // its seam off, so hooks fall back to full compute).
+    cache::CacheController cache_runtime;
+    const bool cache_enabled = cache_runtime.init(sample_params, version_, sigmas);
+    const bool cache_vace_ok = vace_context.empty();
+
     sd::Tensor<float> x = x_start;
+    GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (size_t i = 0; i + 1 < sigmas.size(); ++i) {
+        if (control != nullptr && control->should_cancel()) {
+            control->mark_cancelled();
+            set_error(error, "generation cancelled");
+            model->free_compute_buffer();
+            return {};
+        }
         const float sigma = sigmas[i];
         const float sigma_next = sigmas[i + 1];
         const int step = static_cast<int>(i + 1);
@@ -708,14 +724,65 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                                       parallel::cfg_parallel_available(runtime_->parallel_context());
         const int cfg_rank = parallel::cfg_parallel_rank(runtime_->parallel_context());
 
+        if (cache_enabled) {
+            cache::CacheStepInfo cache_step;
+            cache_step.step_index = static_cast<int>(i);
+            cache_step.num_steps = static_cast<int>(sigmas.size() - 1);
+            cache_step.sigma = sigma;
+            cache_step.sigma_next = sigma_next;
+            cache_runtime.begin_step(cache_step);
+        }
+
+        // Cache hooks for one Wan condition. full() preserves the exact
+        // run_condition semantics (c_concat / img-cond overrides); the seam is
+        // used only for the plain cond/uncond streams, off under CFG-parallel
+        // and VACE.
+        auto make_hooks = [&](const SDCondition& cond_in,
+                              const sd::Tensor<float>* c_concat_override) {
+            cache::CacheRunnerHooks hooks;
+            hooks.input = &noised_input;
+            hooks.full = [&, cond_in, c_concat_override]() {
+                return run_condition(model, &diffusion_params, cond_in, c_concat_override, nullptr, error);
+            };
+            const bool seam_ok = !use_cfg_parallel && cache_vace_ok &&
+                                 c_concat_override == nullptr &&
+                                 model->supports_feature_cache() &&
+                                 model->feature_cache_available();
+            hooks.feature_supported = seam_ok;
+            if (seam_ok) {
+                auto set_params = [&, cond_in]() {
+                    diffusion_params.context = cond_in.c_crossattn.empty() ? nullptr : &cond_in.c_crossattn;
+                    diffusion_params.c_concat = cond_in.c_concat.empty() ? nullptr : &cond_in.c_concat;
+                    diffusion_params.y = cond_in.c_vector.empty() ? nullptr : &cond_in.c_vector;
+                    diffusion_params.t5_ids = cond_in.c_t5_ids.empty() ? nullptr : &cond_in.c_t5_ids;
+                    diffusion_params.t5_weights = cond_in.c_t5_weights.empty() ? nullptr : &cond_in.c_t5_weights;
+                    diffusion_params.skip_layers = nullptr;
+                };
+                hooks.capture = [&, set_params](int region_start, int region_end) {
+                    set_params();
+                    return model->compute_capture(runtime_->n_threads(), diffusion_params, region_start, region_end);
+                };
+                hooks.inject = [&, set_params](const sd::Tensor<float>& feat, int region_start, int region_end) {
+                    set_params();
+                    return model->compute_inject(runtime_->n_threads(), diffusion_params, feat, region_start, region_end);
+                };
+                if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
+                    hooks.probe = [&, set_params](int depth) {
+                        set_params();
+                        return model->compute_probe(runtime_->n_threads(), diffusion_params, depth);
+                    };
+                }
+            }
+            return hooks;
+        };
+
         sd::Tensor<float> cond_out;
         if (!use_cfg_parallel) {
-            cond_out = run_condition(model,
-                                     &diffusion_params,
-                                     conditions.cond,
-                                     nullptr,
-                                     nullptr,
-                                     error);
+            cond_out = cache_enabled
+                ? cache_runtime.run_branch(cache::CacheBranch::Cond,
+                                           static_cast<const void*>(&conditions.cond),
+                                           make_hooks(conditions.cond, nullptr))
+                : run_condition(model, &diffusion_params, conditions.cond, nullptr, nullptr, error);
             if (cond_out.empty()) {
                 return {};
             }
@@ -743,12 +810,11 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                 uncond_out = std::move(gathered[0]);
                 cond_out = std::move(gathered[1]);
             } else {
-                uncond_out = run_condition(model,
-                                           &diffusion_params,
-                                           conditions.uncond,
-                                           nullptr,
-                                           nullptr,
-                                           error);
+                uncond_out = cache_enabled
+                    ? cache_runtime.run_branch(cache::CacheBranch::Uncond,
+                                               static_cast<const void*>(&conditions.uncond),
+                                               make_hooks(conditions.uncond, nullptr))
+                    : run_condition(model, &diffusion_params, conditions.uncond, nullptr, nullptr, error);
                 if (uncond_out.empty()) {
                     return {};
                 }
@@ -797,8 +863,22 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                   sigmas.size() - 1,
                   sigma,
                   sigma_next);
+        if (cache_enabled) {
+            cache::CacheStepInfo cache_step;
+            cache_step.step_index = static_cast<int>(i);
+            cache_step.num_steps = static_cast<int>(sigmas.size() - 1);
+            cache_step.sigma = sigma;
+            cache_step.sigma_next = sigma_next;
+            cache_runtime.end_step(cache_step);
+        }
+        if (control != nullptr) {
+            control->step_done();
+        }
     }
 
+    if (cache_enabled) {
+        cache_runtime.log_summary(sigmas.size() - 1);
+    }
     model->free_compute_buffer();
     return denoiser_->inverse_noise_scaling(sigmas.back(), x);
 }
@@ -982,6 +1062,13 @@ ed_status_t WanPipeline::generate_video(const ed_video_generation_params_t* para
     rng_->manual_seed(seed);
     sampler_rng_->manual_seed(seed);
     set_flow_shift(params->sample.flow_shift);
+
+    const int low_steps = resolve_steps(params->sample.steps);
+    const int high_steps = high_noise_diffusion_ != nullptr ? params->high_noise_sample.steps : 0;
+    const int total_steps = low_steps + std::max(0, high_steps);
+    if (GenerationControl* control = runtime_->generation_control()) {
+        control->start(total_steps);
+    }
 
     LOG_INFO("wan generate_video %dx%d frames=%d latent_frames=%d seed=%" PRId64,
              params->width,

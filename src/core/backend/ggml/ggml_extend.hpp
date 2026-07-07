@@ -31,6 +31,7 @@
 #include "backend/ggml/ed_ggml_attention_ext.hpp"
 #include "backend/ggml/ggml_extend_backend.hpp"
 #include "backend/ggml/ggml_graph_cut.h"
+#include "optimization/cache/cache_graph_scope.hpp"
 
 #include "edge-dit.h"
 #include "core/runtime/model_loader.h"
@@ -1220,12 +1221,20 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_conv_3d(ggml_context* ctx,
                                                 int p2 = 0,
                                                 int d0 = 1,
                                                 int d1 = 1,
-                                                int d2 = 1) {
+                                                int d2 = 1,
+                                                bool direct = false) {
     int64_t OC = w->ne[3] / IC;
     int64_t N  = x->ne[3] / IC;
-    x          = ggml_conv_3d(ctx, w, x, IC, s0, s1, s2, p0, p1, p2, d0, d1, d2);
+    x          = direct ? ggml_conv_3d_direct(ctx, w, x, s0, s1, s2, p0, p1, p2, d0, d1, d2, (int)IC, (int)N, (int)OC)
+                        : ggml_conv_3d(ctx, w, x, IC, s0, s1, s2, p0, p1, p2, d0, d1, d2);
 
     if (b != nullptr) {
+#if defined(ED_ENABLE_CUDNN_CONV3D)
+        if (direct && b->type == GGML_TYPE_F32 && ggml_nelements(b) == OC) {
+            x->src[2] = b;
+            return x;
+        }
+#endif
         b = ggml_reshape_4d(ctx, b, 1, 1, 1, b->ne[0]);  // [OC, 1, 1, 1]
         x = ggml_add_inplace(ctx, x, b);
     }
@@ -1344,6 +1353,43 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_cast_f32(ggml_context* ctx, ggml_backend
     }
 }
 
+__STATIC_INLINE__ bool ggml_ext_env_flag_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+    return std::strcmp(value, "0") != 0 &&
+           std::strcmp(value, "false") != 0 &&
+           std::strcmp(value, "FALSE") != 0 &&
+           std::strcmp(value, "off") != 0 &&
+           std::strcmp(value, "OFF") != 0;
+}
+
+__STATIC_INLINE__ bool ggml_ext_prefer_cudnn_sdpa_unpadded(ggml_backend_t backend,
+                                                          int64_t L_q,
+                                                          int64_t L_k,
+                                                          int64_t d_head,
+                                                          ggml_tensor* mask) {
+#ifdef ED_ENABLE_CUDNN_SDPA
+    if (mask != nullptr ||
+        !sd_backend_is(backend, "CUDA") ||
+        ggml_ext_env_flag_enabled("ED_DISABLE_CUDNN_SDPA") ||
+        ggml_ext_env_flag_enabled("ED_DISABLE_CUDNN_SDPA_UNPAD")) {
+        return false;
+    }
+
+    const bool supported_head_dim = d_head == 64 || d_head == 128;
+    return supported_head_dim && L_q == L_k && L_q >= 4096;
+#else
+    ED_UNUSED(backend);
+    ED_UNUSED(L_q);
+    ED_UNUSED(L_k);
+    ED_UNUSED(d_head);
+    ED_UNUSED(mask);
+    return false;
+#endif
+}
+
 // q: [N, L_q, C(n_head*d_head)] or [N*n_head, L_q, d_head]
 // k: [N, L_k, n_kv_head*d_head] or [N*n_kv_head, L_k, d_head]
 // v: [N, L_k, n_kv_head*d_head] or [N, L_k, n_kv_head, d_head]
@@ -1379,9 +1425,22 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
         q = ggml_ext_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));  // [N, n_head, L_q, d_head]
         q = ggml_reshape_3d(ctx, q, d_head, L_q, n_head * N);      // [N * n_head, L_q, d_head]
 
-        k = ggml_reshape_4d(ctx, k, d_head, n_kv_head, L_k, N);    // [N, L_k, n_kv_head, d_head]
-        k = ggml_ext_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));  // [N, n_kv_head, L_k, d_head]
-        k = ggml_reshape_3d(ctx, k, d_head, L_k, n_kv_head * N);   // [N * n_kv_head, L_k, d_head]
+        k = ggml_reshape_4d(ctx, k, d_head, n_kv_head, L_k, N);  // [N, L_k, n_kv_head, d_head]
+        const bool will_pad_kv_for_flash_attn =
+            pad_kv_for_flash_attn &&
+            !ggml_ext_prefer_cudnn_sdpa_unpadded(backend, L_q, L_k, d_head, mask) &&
+            L_k % 256 != 0;
+        if (flash_attn && mask == nullptr && sd_backend_is(backend, "CUDA") && !will_pad_kv_for_flash_attn) {
+            if (auto k_f16 = edgedit::ggml_ext::attention_v_prep_custom_f16(ctx, k, false)) {
+                k = k_f16;
+            } else {
+                k = ggml_ext_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));  // [N, n_kv_head, L_k, d_head]
+                k = ggml_reshape_3d(ctx, k, d_head, L_k, n_kv_head * N);   // [N * n_kv_head, L_k, d_head]
+            }
+        } else {
+            k = ggml_ext_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));  // [N, n_kv_head, L_k, d_head]
+            k = ggml_reshape_3d(ctx, k, d_head, L_k, n_kv_head * N);   // [N * n_kv_head, L_k, d_head]
+        }
 
         v = ggml_reshape_4d(ctx, v, d_head, n_kv_head, L_k, N);  // [N, L_k, n_kv_head, d_head]
     } else {
@@ -1468,7 +1527,8 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
     if (flash_attn) {
         // LOG_DEBUG("attention_ext L_q:%d L_k:%d n_head:%d C:%d d_head:%d N:%d", L_q, L_k, n_head, C, d_head, N);
         bool can_use_flash_attn = true;
-        if (pad_kv_for_flash_attn && can_use_flash_attn && L_k % 256 != 0) {
+        const bool prefer_cudnn_unpadded = ggml_ext_prefer_cudnn_sdpa_unpadded(backend, L_q, L_k, d_head, mask);
+        if (pad_kv_for_flash_attn && can_use_flash_attn && !prefer_cudnn_unpadded && L_k % 256 != 0) {
             kv_pad = GGML_PAD(L_k, 256) - static_cast<int>(L_k);
         }
 
@@ -1733,9 +1793,13 @@ struct GGMLRunnerContext {
     edgedit::parallel::ProcessGroup* process_group = nullptr;
     bool flash_attn_enabled                       = false;
     bool conv2d_direct_enabled                    = false;
+    bool conv2d_auto_direct_enabled               = false;
+    bool conv3d_auto_direct_enabled               = false;
     bool circular_x_enabled                       = false;
     bool circular_y_enabled                       = false;
     std::shared_ptr<WeightAdapter> weight_adapter = nullptr;
+    // Build-time cache seam; null on the uncached path (graph is then identical).
+    sd::CacheGraphScope* cache_scope              = nullptr;
 };
 
 struct GGMLRunner {
@@ -2067,6 +2131,11 @@ protected:
     bool circular_x_enabled    = false;
     bool circular_y_enabled    = false;
 
+    // Non-owning; set by the CacheController before a cache pass, cleared after.
+    // When null, get_context() leaves ctx.cache_scope null and the model graph
+    // is byte-identical to the uncached path.
+    sd::CacheGraphScope* cache_scope_ = nullptr;
+
     sd::ggml_graph_cut::PlanCache graph_cut_plan_cache_;
     std::unordered_set<const ggml_tensor*> params_tensor_set_;
     std::shared_ptr<edgedit::parallel::ProcessGroup> process_group_ = nullptr;
@@ -2125,6 +2194,10 @@ protected:
 
     bool graph_cut_profile_enabled() const {
         return env_flag_enabled("ED_PROFILE_GRAPH_CUTS");
+    }
+
+    bool runner_profile_enabled() const {
+        return env_flag_enabled("ED_PROFILE_RUNNER");
     }
 
     bool graph_cut_cache_compact_enabled() const {
@@ -4348,12 +4421,43 @@ protected:
     ggml_cgraph* get_compute_graph(get_graph_cb_t get_graph) {
         prepare_build_in_tensor_before();
         ggml_cgraph* gf = get_graph();
+        // The model result is the last node get_graph expanded. execute_graph
+        // reads it back BY NAME (final_result_name), not by position, so name it
+        // first — then the cache seam can append aux capture branches without
+        // stealing the result slot.
         if (ggml_graph_n_nodes(gf) > 0) {
             auto result = ggml_graph_node(gf, -1);
             ggml_set_name(result, final_result_name.c_str());
         }
+        if (cache_scope_ != nullptr && ggml_graph_n_nodes(gf) > 0) {
+            expand_cache_scope_nodes(gf);
+        }
         prepare_build_in_tensor_after(gf);
         return gf;
+    }
+
+    // Names used to read back the cache seam's aux tensors post-compute.
+    static constexpr const char* kCacheFeatureName = "ed_cache_feature";
+    static constexpr const char* kCacheBeforeName  = "ed_cache_before";
+    static constexpr const char* kCacheProbeName   = "ed_cache_probe";
+
+    void expand_cache_scope_nodes(ggml_cgraph* gf) {
+        auto expand_named = [&](ggml_tensor* node, const char* name) {
+            if (node == nullptr) {
+                return;
+            }
+            ggml_set_name(node, name);
+            ggml_set_output(node);  // keep the allocator from reusing its buffer
+            cache(name, node);
+            ggml_build_forward_expand(gf, node);
+        };
+        if (cache_scope_->capture_mode()) {
+            expand_named(cache_scope_->feature_node, kCacheFeatureName);
+        } else if (cache_scope_->probe_mode()) {
+            // On probe the model returns the probe state as `out`, so it becomes
+            // the final result node; only the block-stack input needs a name.
+            expand_named(cache_scope_->before_node, kCacheBeforeName);
+        }
     }
 
     bool prepare_compute_graph(get_graph_cb_t get_graph,
@@ -5347,6 +5451,21 @@ protected:
         }
         if (profile_out != nullptr) {
             profile_out->total_ms = ggml_time_ms() - t_execute_begin;
+            if (runner_profile_enabled()) {
+                LOG_INFO("%s runner profile total=%lldms offload=%lldms alloc=%lldms copy=%lldms compute=%lldms post=%lldms cache=%lldms copied_tensors=%zu copied_bytes=%.2fMiB cache_live=%.2fMiB cache_buffer=%.2fMiB",
+                         get_desc().c_str(),
+                         (long long) profile_out->total_ms,
+                         (long long) profile_out->offload_ms,
+                         (long long) profile_out->alloc_ms,
+                         (long long) profile_out->copy_ms,
+                         (long long) profile_out->compute_ms,
+                         (long long) profile_out->post_ms,
+                         (long long) profile_out->cache_ms,
+                         profile_out->copy_detail.copied_tensors,
+                         profile_out->copy_detail.copied_bytes / 1024.0 / 1024.0,
+                         profile_out->cache_live_bytes / 1024.0 / 1024.0,
+                         profile_out->cache_buffer_bytes / 1024.0 / 1024.0);
+            }
         }
         return output;
     }
@@ -5617,11 +5736,45 @@ public:
         runner_ctx.backend               = runtime_backend;
         runner_ctx.process_group         = process_group_.get();
         runner_ctx.flash_attn_enabled    = flash_attn_enabled;
-        runner_ctx.conv2d_direct_enabled = conv2d_direct_enabled;
+        runner_ctx.conv2d_direct_enabled      = conv2d_direct_enabled;
+        runner_ctx.conv3d_auto_direct_enabled = false;
         runner_ctx.circular_x_enabled    = circular_x_enabled;
         runner_ctx.circular_y_enabled    = circular_y_enabled;
         runner_ctx.weight_adapter        = weight_adapter;
+        runner_ctx.cache_scope           = cache_scope_;
         return runner_ctx;
+    }
+
+    bool should_use_cuda_auto_conv2d() const {
+#if defined(ED_ENABLE_CUDNN_CONV2D)
+        if (runtime_backend == nullptr) {
+            return false;
+        }
+        ggml_backend_dev_t device = ggml_backend_get_device(runtime_backend);
+        if (device == nullptr) {
+            return false;
+        }
+        const char* name = ggml_backend_dev_name(device);
+        return name != nullptr && std::string(name).find("CUDA") != std::string::npos;
+#else
+        return false;
+#endif
+    }
+
+    bool should_use_cuda_auto_conv3d() const {
+#if defined(ED_ENABLE_CUDNN_CONV3D)
+        if (runtime_backend == nullptr) {
+            return false;
+        }
+        ggml_backend_dev_t device = ggml_backend_get_device(runtime_backend);
+        if (device == nullptr) {
+            return false;
+        }
+        const char* name = ggml_backend_dev_name(device);
+        return name != nullptr && std::string(name).find("CUDA") != std::string::npos;
+#else
+        return false;
+#endif
     }
 
     void reset_compute_ctx() {
@@ -5746,6 +5899,44 @@ public:
         return iter->second;
     }
 
+    // Run one cache-aware compute pass with `scope` attached. Builds the graph
+    // via `get_graph` (whose model forward() consults the scope), executes on
+    // the plain path (feature caching is gated off the segmented path by the
+    // pipeline), and reads the seam's aux tensors back to host. `expected_dim`
+    // restores trailing singleton dims on the main result like compute() does.
+    // The compute buffer is kept alive (not freed) so the named aux nodes are
+    // readable; the caller frees it as usual after the step.
+    struct CachePassResult {
+        sd::Tensor<float> output;
+        sd::Tensor<float> feature;
+        sd::Tensor<float> before;
+    };
+    CachePassResult run_cache_pass(get_graph_cb_t get_graph,
+                                   int n_threads,
+                                   sd::CacheGraphScope* scope,
+                                   size_t expected_dim) {
+        CachePassResult result;
+        set_cache_scope(scope);
+        auto out = GGMLRunner::compute<float>(get_graph, n_threads, /*free=*/false);
+        result.output = restore_trailing_singleton_dims(std::move(out), expected_dim);
+
+        if (scope != nullptr) {
+            if (scope->capture_mode()) {
+                ggml_tensor* feat = get_cache_tensor_by_name(kCacheFeatureName);
+                if (feat != nullptr) {
+                    result.feature = sd::make_sd_tensor_from_ggml<float>(feat);
+                }
+            } else if (scope->probe_mode()) {
+                ggml_tensor* before = get_cache_tensor_by_name(kCacheBeforeName);
+                if (before != nullptr) {
+                    result.before = sd::make_sd_tensor_from_ggml<float>(before);
+                }
+            }
+        }
+        set_cache_scope(nullptr);
+        return result;
+    }
+
     template <typename T>
     std::optional<sd::Tensor<T>> compute(get_graph_cb_t get_graph,
                                          int n_threads,
@@ -5781,16 +5972,35 @@ public:
             LOG_ERROR("%s alloc compute buffer failed", get_desc().c_str());
             return std::nullopt;
         }
+        GraphExecuteProfile runner_profile;
         return execute_graph<T>(gf,
                                 n_threads,
                                 free_compute_buffer_immediately,
                                 {},
                                 false,
-                                no_return);
+                                no_return,
+                                nullptr,
+                                nullptr,
+                                nullptr,
+                                runner_profile_enabled() ? &runner_profile : nullptr);
     }
 
     void set_flash_attention_enabled(bool enabled) {
         flash_attn_enabled = enabled;
+    }
+
+    // Attach/detach the build-time cache seam consulted by model forward().
+    void set_cache_scope(sd::CacheGraphScope* scope) {
+        cache_scope_ = scope;
+    }
+    sd::CacheGraphScope* cache_scope() const {
+        return cache_scope_;
+    }
+    // True when the block-stack feature seam can run: only on the plain compute
+    // path (no process-group comm, no VRAM-budgeted segmented execution), since
+    // mid-graph capture is not preserved across segments.
+    bool feature_cache_available() const {
+        return !can_attempt_graph_cut_segmented_compute();
     }
 
     void set_conv2d_direct_enabled(bool enabled) {
@@ -6117,12 +6327,47 @@ public:
         return "Conv2d";
     }
 
+    bool should_use_auto_direct(ggml_tensor* x, ggml_tensor* w) const {
+#if defined(ED_ENABLE_CUDNN_CONV2D)
+        if (x == nullptr || w == nullptr) {
+            return false;
+        }
+        if (x->type != GGML_TYPE_F32 || w->type != GGML_TYPE_F16) {
+            return false;
+        }
+        const bool is_1x1 = kernel_size.first == 1 && kernel_size.second == 1;
+        const bool is_3x3 = kernel_size.first == 3 && kernel_size.second == 3;
+        if (!is_1x1 && !is_3x3) {
+            return false;
+        }
+        if (dilation.first != 1 || dilation.second != 1) {
+            return false;
+        }
+        if (stride.first != stride.second || (stride.first != 1 && stride.first != 2)) {
+            return false;
+        }
+        if (in_channels < 64 || out_channels < 64 || x->ne[0] < 32 || x->ne[1] < 32) {
+            return false;
+        }
+        if (is_1x1 && (stride.first != 1 || x->ne[0] * x->ne[1] < 4096)) {
+            return false;
+        }
+        return true;
+#else
+        GGML_UNUSED(x);
+        GGML_UNUSED(w);
+        return false;
+#endif
+    }
+
     ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
         ggml_tensor* w = params["weight"];
         ggml_tensor* b = nullptr;
         if (bias) {
             b = params["bias"];
         }
+        const bool use_direct = ctx->conv2d_direct_enabled ||
+                                (ctx->conv2d_auto_direct_enabled && should_use_auto_direct(x, w));
         if (ctx->weight_adapter) {
             WeightAdapter::ForwardParams forward_params;
             forward_params.op_type           = WeightAdapter::ForwardParams::op_type_t::OP_CONV2D;
@@ -6132,7 +6377,7 @@ public:
             forward_params.conv2d.p1         = padding.first;
             forward_params.conv2d.d0         = dilation.second;
             forward_params.conv2d.d1         = dilation.first;
-            forward_params.conv2d.direct     = ctx->conv2d_direct_enabled;
+            forward_params.conv2d.direct     = use_direct;
             forward_params.conv2d.circular_x = ctx->circular_x_enabled;
             forward_params.conv2d.circular_y = ctx->circular_y_enabled;
             forward_params.conv2d.scale      = scale;
@@ -6148,7 +6393,7 @@ public:
                                 padding.first,
                                 dilation.second,
                                 dilation.first,
-                                ctx->conv2d_direct_enabled,
+                                use_direct,
                                 ctx->circular_x_enabled,
                                 ctx->circular_y_enabled,
                                 scale);
@@ -6211,10 +6456,24 @@ public:
                 b = ctx->weight_adapter->patch_weight(ctx->ggml_ctx, ctx->backend, b, prefix + "bias");
             }
         }
+        const bool use_direct = ctx->conv3d_auto_direct_enabled &&
+                                x != nullptr &&
+                                w != nullptr &&
+                                x->type == GGML_TYPE_F32 &&
+                                w->type == GGML_TYPE_F16 &&
+                                std::get<0>(kernel_size) == 3 &&
+                                std::get<1>(kernel_size) == 3 &&
+                                std::get<2>(kernel_size) == 3 &&
+                                in_channels >= 64 &&
+                                x->ne[0] >= 128 &&
+                                x->ne[1] >= 128 &&
+                                ggml_is_contiguous(x) &&
+                                ggml_is_contiguous(w);
         return ggml_ext_conv_3d(ctx->ggml_ctx, x, w, b, in_channels,
                                 std::get<2>(stride), std::get<1>(stride), std::get<0>(stride),
                                 std::get<2>(padding), std::get<1>(padding), std::get<0>(padding),
-                                std::get<2>(dilation), std::get<1>(dilation), std::get<0>(dilation));
+                                std::get<2>(dilation), std::get<1>(dilation), std::get<0>(dilation),
+                                use_direct);
     }
 };
 

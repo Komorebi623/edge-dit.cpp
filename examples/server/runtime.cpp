@@ -211,6 +211,7 @@ std::string ed_status_to_string(ed_status_t status) {
         case ED_STATUS_GENERATION_FAILED: return "generation_failed";
         case ED_STATUS_OUT_OF_MEMORY: return "out_of_memory";
         case ED_STATUS_UNSUPPORTED: return "unsupported";
+        case ED_STATUS_CANCELLED: return "cancelled";
     }
     return "unknown";
 }
@@ -223,6 +224,8 @@ std::string ed_cache_mode_to_string(ed_cache_mode_t mode) {
         case ED_CACHE_DBCACHE: return "dbcache";
         case ED_CACHE_TAYLORSEER: return "taylorseer";
         case ED_CACHE_CACHE_DIT: return "cache-dit";
+        case ED_CACHE_MAGCACHE: return "magcache";
+        case ED_CACHE_DICACHE: return "dicache";
     }
     return "disabled";
 }
@@ -262,6 +265,18 @@ bool ed_cache_mode_from_string(const std::string& text, ed_cache_mode_t* mode) {
     if (value == "cache-dit" || value == "cachedit") {
         if (mode != nullptr) {
             *mode = ED_CACHE_CACHE_DIT;
+        }
+        return true;
+    }
+    if (value == "magcache" || value == "mag") {
+        if (mode != nullptr) {
+            *mode = ED_CACHE_MAGCACHE;
+        }
+        return true;
+    }
+    if (value == "dicache" || value == "di") {
+        if (mode != nullptr) {
+            *mode = ED_CACHE_DICACHE;
         }
         return true;
     }
@@ -393,10 +408,11 @@ bool build_image_request(const json& body,
     ed_image_generation_params_init(&request->params);
 
     request->prompt = json_get_string(body, "prompt");
+    const bool has_negative_prompt = body.contains("negative_prompt") && !body.at("negative_prompt").is_null();
     request->negative_prompt = json_get_string(body, "negative_prompt");
 
     request->params.prompt = request->prompt.c_str();
-    request->params.negative_prompt = request->negative_prompt.c_str();
+    request->params.negative_prompt = has_negative_prompt ? request->negative_prompt.c_str() : nullptr;
     request->params.width = json_get_number(body, "width", runtime.defaults->width);
     request->params.height = json_get_number(body, "height", runtime.defaults->height);
     request->params.seed = json_get_number<int64_t>(body, "seed", runtime.defaults->seed);

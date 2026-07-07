@@ -130,7 +130,7 @@ void SD3Pipeline::configure_runtime_flags() {
     diffusion_->set_circular_axes(runtime_->circular_x(), runtime_->circular_y());
 
     if (runtime_ != nullptr) {
-        auto process_group = runtime_->process_group_ref();
+        auto process_group = runtime_->graph_process_group_ref();
         if (process_group != nullptr) {
             diffusion_->set_process_group(process_group);
             LOG_INFO("sd3 diffusion process group attached: backend=%s rank=%d world_size=%d",
@@ -212,6 +212,10 @@ ed_status_t SD3Pipeline::generate_image(const ed_image_generation_params_t* para
     }
 
     const int count = params->batch_count > 0 ? params->batch_count : 1;
+    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    if (GenerationControl* control = runtime_->generation_control()) {
+        control->start(count * steps);
+    }
     ed_image_t* images = static_cast<ed_image_t*>(std::calloc(static_cast<size_t>(count), sizeof(ed_image_t)));
     if (images == nullptr) {
         if (error != nullptr) {
@@ -405,7 +409,16 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
     cache::CacheRuntime cache_runtime;
     const bool cache_enabled = cache_runtime.init(params->sample, version_, sigmas);
     const int64_t sample_start_ms = ggml_time_ms();
+    GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {
+        if (control != nullptr && control->should_cancel()) {
+            control->mark_cancelled();
+            if (error != nullptr && error->empty()) {
+                *error = "generation cancelled";
+            }
+            diffusion_->free_compute_buffer();
+            return false;
+        }
         const float sigma = sigmas[static_cast<size_t>(step)];
         const float sigma_next = sigmas[static_cast<size_t>(step + 1)];
         sd::Tensor<float> timesteps({1}, std::vector<float>{sigma * 1000.0f});
@@ -430,24 +443,52 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
         DiffusionParams diffusion_params;
         diffusion_params.x = &x;
         diffusion_params.timesteps = &timesteps;
+
+        const int n_threads = runtime_->n_threads();
+        // Build cache hooks for one condition. Feature/Probe seam is gated to
+        // the plain path and disabled under CFG-parallel (see flux_pipeline).
+        auto make_hooks = [&](const SDCondition& cond_in) {
+            cache::CacheRunnerHooks hooks;
+            hooks.input = &x;
+            hooks.full = [&, cond_in]() {
+                DiffusionParams p = diffusion_params;
+                p.context = &cond_in.c_crossattn;
+                p.y = &cond_in.c_vector;
+                return diffusion_->compute(n_threads, p);
+            };
+            const bool seam_ok = !use_cfg_parallel && diffusion_->supports_feature_cache();
+            hooks.feature_supported = seam_ok;
+            if (seam_ok) {
+                hooks.capture = [&, cond_in](int region_start, int region_end) {
+                    DiffusionParams p = diffusion_params;
+                    p.context = &cond_in.c_crossattn;
+                    p.y = &cond_in.c_vector;
+                    return diffusion_->compute_capture(n_threads, p, region_start, region_end);
+                };
+                hooks.inject = [&, cond_in](const sd::Tensor<float>& feat, int region_start, int region_end) {
+                    DiffusionParams p = diffusion_params;
+                    p.context = &cond_in.c_crossattn;
+                    p.y = &cond_in.c_vector;
+                    return diffusion_->compute_inject(n_threads, p, feat, region_start, region_end);
+                };
+                if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
+                    hooks.probe = [&, cond_in](int depth) {
+                        DiffusionParams p = diffusion_params;
+                        p.context = &cond_in.c_crossattn;
+                        p.y = &cond_in.c_vector;
+                        return diffusion_->compute_probe(n_threads, p, depth);
+                    };
+                }
+            }
+            return hooks;
+        };
+
         sd::Tensor<float> cond_out;
         const void* cond_key = static_cast<const void*>(&cond);
-        const bool cond_cache_hit = !use_cfg_parallel &&
-                                    cache_enabled &&
-                                    cache_runtime.before_forward(cache::CacheBranch::Cond,
-                                                                 cond_key,
-                                                                 x,
-                                                                 &cond_out);
-        if (!use_cfg_parallel && !cond_cache_hit) {
-            diffusion_params.context = &cond.c_crossattn;
-            diffusion_params.y = &cond.c_vector;
-            cond_out = diffusion_->compute(runtime_->n_threads(), diffusion_params);
-            if (!cond_out.empty() && cache_enabled) {
-                cache_runtime.after_forward(cache::CacheBranch::Cond,
-                                            cond_key,
-                                            x,
-                                            cond_out);
-            }
+        if (!use_cfg_parallel) {
+            cond_out = cache_enabled
+                ? cache_runtime.run_branch(cache::CacheBranch::Cond, cond_key, make_hooks(cond))
+                : make_hooks(cond).full();
         }
         if (!use_cfg_parallel && cond_out.empty()) {
             if (error != nullptr) {
@@ -461,35 +502,15 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
         if (!uncond.empty()) {
             sd::Tensor<float> uncond_out;
             const void* uncond_key = static_cast<const void*>(&uncond);
-            const bool uncond_cache_hit = !use_cfg_parallel &&
-                                          cache_enabled &&
-                                          cache_runtime.before_forward(cache::CacheBranch::Uncond,
-                                                                       uncond_key,
-                                                                       x,
-                                                                       &uncond_out);
             if (use_cfg_parallel) {
                 const bool local_is_uncond = cfg_rank == 0;
                 const SDCondition& local_condition = local_is_uncond ? uncond : cond;
                 const cache::CacheBranch local_branch = local_is_uncond ? cache::CacheBranch::Uncond
                                                                         : cache::CacheBranch::Cond;
                 const void* local_key = static_cast<const void*>(&local_condition);
-                sd::Tensor<float> local_out;
-                const bool local_cache_hit = cache_enabled &&
-                                             cache_runtime.before_forward(local_branch,
-                                                                          local_key,
-                                                                          x,
-                                                                          &local_out);
-                if (!local_cache_hit) {
-                    diffusion_params.context = &local_condition.c_crossattn;
-                    diffusion_params.y = &local_condition.c_vector;
-                    local_out = diffusion_->compute(runtime_->n_threads(), diffusion_params);
-                    if (!local_out.empty() && cache_enabled) {
-                        cache_runtime.after_forward(local_branch,
-                                                    local_key,
-                                                    x,
-                                                    local_out);
-                    }
-                }
+                sd::Tensor<float> local_out = cache_enabled
+                    ? cache_runtime.run_branch(local_branch, local_key, make_hooks(local_condition))
+                    : make_hooks(local_condition).full();
                 std::vector<sd::Tensor<float>> gathered;
                 if (local_out.empty() ||
                     !parallel::cfg_all_gather(*runtime_->parallel_context(), local_out, &gathered, error) ||
@@ -502,16 +523,10 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
                 }
                 uncond_out = std::move(gathered[0]);
                 cond_out = std::move(gathered[1]);
-            } else if (!uncond_cache_hit) {
-                diffusion_params.context = &uncond.c_crossattn;
-                diffusion_params.y = &uncond.c_vector;
-                uncond_out = diffusion_->compute(runtime_->n_threads(), diffusion_params);
-                if (!uncond_out.empty() && cache_enabled) {
-                    cache_runtime.after_forward(cache::CacheBranch::Uncond,
-                                                uncond_key,
-                                                x,
-                                                uncond_out);
-                }
+            } else {
+                uncond_out = cache_enabled
+                    ? cache_runtime.run_branch(cache::CacheBranch::Uncond, uncond_key, make_hooks(uncond))
+                    : make_hooks(uncond).full();
             }
             if (uncond_out.empty()) {
                 if (error != nullptr) {
@@ -529,6 +544,9 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
         LOG_INFO("sd3 step %d/%d sigma=%.6f next=%.6f", step + 1, steps, sigma, sigma_next);
         if (cache_enabled) {
             cache_runtime.end_step(cache_step);
+        }
+        if (control != nullptr) {
+            control->step_done();
         }
     }
     if (cache_enabled) {

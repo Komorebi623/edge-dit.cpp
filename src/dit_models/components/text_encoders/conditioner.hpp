@@ -1,6 +1,7 @@
 #ifndef __CONDITIONER_HPP__
 #define __CONDITIONER_HPP__
 
+#include <cmath>
 #include <optional>
 
 #include "dit_models/components/text_encoders/clip.hpp"
@@ -1832,7 +1833,7 @@ struct LLMEmbedder : public Conditioner {
 
         int64_t t0 = ggml_time_ms();
 
-        if (ed_version_is_qwen_image(version)) {
+        if (ed_version_is_qwen_image(version) || ed_version_is_qwen_image_edit(version)) {
             if (llm->enable_vision && conditioner_params.ref_images != nullptr && !conditioner_params.ref_images->empty()) {
                 LOG_INFO("QwenImageEditPlusPipeline");
                 prompt_template_encode_start_idx = 64;

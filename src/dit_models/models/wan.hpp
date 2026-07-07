@@ -14,6 +14,8 @@
 #include "dit_models/components/common/common_block.hpp"
 #include "dit_models/components/autoencoders/vae.hpp"
 #include "dit_models/components/common/rope.hpp"
+#include "backend/ggml/ed_ggml_modulation_ext.hpp"
+#include "backend/ggml/ed_ggml_norm_ext.hpp"
 #include "parallel/sp_parallel.hpp"
 
 namespace WAN {
@@ -1795,17 +1797,40 @@ namespace WAN {
             int rp1 = std::get<1>(padding);
             int lp2 = 2 * std::get<0>(padding);
             int rp2 = 0;
+            int conv_p0 = 0;
+            int conv_p1 = 0;
 
             if (cache_x != nullptr && lp2 > 0) {
                 x = ggml_concat(ctx->ggml_ctx, cache_x, x, 2);
                 lp2 -= (int)cache_x->ne[2];
             }
 
+            if (!ctx->circular_x_enabled && !ctx->circular_y_enabled) {
+                conv_p0 = lp0;
+                conv_p1 = lp1;
+                lp0 = rp0 = 0;
+                lp1 = rp1 = 0;
+            }
+
             x = ggml_ext_pad_ext(ctx->ggml_ctx, x, lp0, rp0, lp1, rp1, lp2, rp2, 0, 0, ctx->circular_x_enabled, ctx->circular_y_enabled);
+            const bool cudnn_kernel_supported =
+                (std::get<0>(kernel_size) == 3 && std::get<1>(kernel_size) == 3 && std::get<2>(kernel_size) == 3) ||
+                (std::get<0>(kernel_size) == 3 && std::get<1>(kernel_size) == 1 && std::get<2>(kernel_size) == 1) ||
+                (std::get<0>(kernel_size) == 1 && std::get<1>(kernel_size) == 1 && std::get<2>(kernel_size) == 1);
+            const bool use_direct = ctx->conv3d_auto_direct_enabled &&
+                                    x != nullptr &&
+                                    w != nullptr &&
+                                    x->type == GGML_TYPE_F32 &&
+                                    w->type == GGML_TYPE_F16 &&
+                                    cudnn_kernel_supported &&
+                                    in_channels >= 16 &&
+                                    ggml_is_contiguous(x) &&
+                                    ggml_is_contiguous(w);
             return ggml_ext_conv_3d(ctx->ggml_ctx, x, w, b, in_channels,
                                     std::get<2>(stride), std::get<1>(stride), std::get<0>(stride),
-                                    0, 0, 0,
-                                    std::get<2>(dilation), std::get<1>(dilation), std::get<0>(dilation));
+                                    conv_p0, conv_p1, 0,
+                                    std::get<2>(dilation), std::get<1>(dilation), std::get<0>(dilation),
+                                    use_direct);
         }
     };
 
@@ -1833,6 +1858,9 @@ namespace WAN {
 
             ggml_tensor* w = params["gamma"];
             w              = ggml_reshape_1d(ctx->ggml_ctx, w, ggml_nelements(w));
+            if (auto h = edgedit::ggml_ext::channel_rms_norm_custom(ctx->ggml_ctx, x, w)) {
+                return h;
+            }
             auto h         = ggml_ext_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, x, 3, 0, 1, 2));  // [ID, IH, IW, N*IC]
             h              = ggml_rms_norm(ctx->ggml_ctx, h, 1e-12f);
             h              = ggml_mul(ctx->ggml_ctx, h, w);
@@ -2932,6 +2960,8 @@ namespace WAN {
             ggml_tensor* z  = make_input(z_tensor);
 
             auto runner_ctx = get_context();
+            runner_ctx.conv2d_auto_direct_enabled = decode_graph && should_use_cuda_auto_conv2d();
+            runner_ctx.conv3d_auto_direct_enabled = decode_graph && should_use_cuda_auto_conv3d();
 
             ggml_tensor* out = decode_graph ? ae.decode(&runner_ctx, z) : ae.encode(&runner_ctx, z);
 
@@ -2953,6 +2983,8 @@ namespace WAN {
             ggml_tensor* z = make_input(z_tensor);
 
             auto runner_ctx = get_context();
+            runner_ctx.conv2d_auto_direct_enabled = decode_graph && should_use_cuda_auto_conv2d();
+            runner_ctx.conv3d_auto_direct_enabled = decode_graph && should_use_cuda_auto_conv3d();
 
             ggml_tensor* out = decode_graph ? ae.decode_partial(&runner_ctx, z, i) : ae.encode(&runner_ctx, z);
 
@@ -3136,7 +3168,7 @@ namespace WAN {
             k = ggml_reshape_4d(ctx->ggml_ctx, k, head_dim, num_heads, n_token, N);  // [N, n_token, n_head, d_head]
             v = ggml_reshape_4d(ctx->ggml_ctx, v, head_dim, num_heads, n_token, N);  // [N, n_token, n_head, d_head]
 
-            x = Rope::attention(ctx, q, k, v, pe, mask);  // [N, n_token, dim]
+            x = Rope::attention(ctx, q, k, v, pe, mask, 1.0f, true, true);  // [N, n_token, dim]
 
             x = o_proj->forward(ctx, x);  // [N, n_token, dim]
             return x;
@@ -3516,6 +3548,37 @@ namespace WAN {
         return x;
     }
 
+    static ggml_tensor* modulate_shift_scale(ggml_context* ctx, ggml_tensor* x, ggml_tensor* shift, ggml_tensor* scale) {
+        // Equivalent to: modulate_add(x + modulate_mul(x, scale), shift).
+#ifdef ED_ENABLE_CUDA_MODULATION
+        if (ggml_n_dims(shift) == 3 && ggml_n_dims(scale) == 3 && shift->ne[2] == scale->ne[2]) {
+            const int64_t T = shift->ne[2];
+            if (T > 0 && x->ne[1] % T == 0) {
+                ggml_tensor* x4 = ggml_reshape_4d(ctx, x, x->ne[0], x->ne[1] / T, T, x->ne[2]);
+                if (auto fused = edgedit::ggml_ext::fused_modulate_custom(ctx, x4, shift, scale)) {
+                    return ggml_reshape_3d(ctx, fused, fused->ne[0], fused->ne[1] * fused->ne[2], fused->ne[3]);
+                }
+            }
+        } else if (ggml_n_dims(shift) != 3 && ggml_n_dims(scale) != 3) {
+            if (auto fused = edgedit::ggml_ext::fused_modulate_custom(ctx, x, shift, scale)) {
+                return fused;
+            }
+        }
+#endif
+
+        ggml_tensor* y = ggml_add(ctx, x, modulate_mul(ctx, x, scale));
+        return modulate_add(ctx, y, shift);
+    }
+
+    static ggml_tensor* residual_gate(ggml_context* ctx, ggml_tensor* residual, ggml_tensor* x, ggml_tensor* gate) {
+#ifdef ED_ENABLE_CUDA_MODULATION
+        if (auto fused = edgedit::ggml_ext::fused_residual_gate_custom(ctx, residual, x, gate)) {
+            return fused;
+        }
+#endif
+        return ggml_add(ctx, residual, modulate_mul(ctx, x, gate));
+    }
+
     class WanAttentionBlock : public GGMLBlock {
     protected:
         int64_t dim;
@@ -3579,11 +3642,10 @@ namespace WAN {
 
             // self-attention
             auto y = norm1->forward(ctx, x);
-            y      = ggml_add(ctx->ggml_ctx, y, modulate_mul(ctx->ggml_ctx, y, es[1]));
-            y      = modulate_add(ctx->ggml_ctx, y, es[0]);
+            y      = modulate_shift_scale(ctx->ggml_ctx, y, es[0], es[1]);
             y      = self_attn->forward(ctx, y, pe);
 
-            x = ggml_add(ctx->ggml_ctx, x, modulate_mul(ctx->ggml_ctx, y, es[2]));
+            x = residual_gate(ctx->ggml_ctx, x, y, es[2]);
 
             // cross-attention
             x = ggml_add(ctx->ggml_ctx,
@@ -3592,14 +3654,13 @@ namespace WAN {
 
             // ffn
             y = norm2->forward(ctx, x);
-            y = ggml_add(ctx->ggml_ctx, y, modulate_mul(ctx->ggml_ctx, y, es[4]));
-            y = modulate_add(ctx->ggml_ctx, y, es[3]);
+            y = modulate_shift_scale(ctx->ggml_ctx, y, es[3], es[4]);
 
             y = ffn_0->forward(ctx, y);
             y = ggml_ext_gelu(ctx->ggml_ctx, y, true);
             y = ffn_2->forward(ctx, y);
 
-            x = ggml_add(ctx->ggml_ctx, x, modulate_mul(ctx->ggml_ctx, y, es[5]));
+            x = residual_gate(ctx->ggml_ctx, x, y, es[5]);
 
             return x;
         }
@@ -3626,11 +3687,10 @@ namespace WAN {
             auto ffn_2      = std::dynamic_pointer_cast<Linear>(blocks["ffn.2"]);
 
             auto y = norm1->forward(ctx, x);
-            y      = ggml_add(ctx->ggml_ctx, y, modulate_mul(ctx->ggml_ctx, y, es[1]));
-            y      = modulate_add(ctx->ggml_ctx, y, es[0]);
+            y      = modulate_shift_scale(ctx->ggml_ctx, y, es[0], es[1]);
             y      = self_attn->forward_sp(ctx, y, pe, x_pad, name_prefix + "_self", prepared_pe);
 
-            x = ggml_add(ctx->ggml_ctx, x, modulate_mul(ctx->ggml_ctx, y, es[2]));
+            x = residual_gate(ctx->ggml_ctx, x, y, es[2]);
 
             x = ggml_add(ctx->ggml_ctx,
                          x,
@@ -3641,14 +3701,13 @@ namespace WAN {
                                                 name_prefix + "_cross"));
 
             y = norm2->forward(ctx, x);
-            y = ggml_add(ctx->ggml_ctx, y, modulate_mul(ctx->ggml_ctx, y, es[4]));
-            y = modulate_add(ctx->ggml_ctx, y, es[3]);
+            y = modulate_shift_scale(ctx->ggml_ctx, y, es[3], es[4]);
 
             y = ffn_0->forward(ctx, y);
             y = ggml_ext_gelu(ctx->ggml_ctx, y, true);
             y = ffn_2->forward(ctx, y);
 
-            x = ggml_add(ctx->ggml_ctx, x, modulate_mul(ctx->ggml_ctx, y, es[5]));
+            x = residual_gate(ctx->ggml_ctx, x, y, es[5]);
 
             return x;
         }
@@ -3744,8 +3803,7 @@ namespace WAN {
             auto head = std::dynamic_pointer_cast<Linear>(blocks["head"]);
 
             x = norm->forward(ctx, x);
-            x = ggml_add(ctx->ggml_ctx, x, modulate_mul(ctx->ggml_ctx, x, es[1]));
-            x = modulate_add(ctx->ggml_ctx, x, es[0]);
+            x = modulate_shift_scale(ctx->ggml_ctx, x, es[0], es[1]);
             x = head->forward(ctx, x);
             return x;
         }
@@ -4057,6 +4115,14 @@ namespace WAN {
             }
 
             auto x_orig = x;
+            // Cache seam: the block stack transforms the single stream `x`.
+            // Disabled under SP (sequence-sharded) and under VACE (the `c` stream
+            // is folded into `x` inside the loop; a skip would leave it stale).
+            // The cached region is blocks [region_start, region_end); the default
+            // whole-stack region matches the pre-region behaviour.
+            sd::CacheGraphScope* cache_scope =
+                (use_sp_mainline || c != nullptr) ? nullptr : ctx->cache_scope;
+            const bool cache_inject = cache_scope != nullptr && cache_scope->inject_mode();
             ggml_tensor* sp_prepared_pe = nullptr;
             if (use_sp_mainline) {
                 sp_prepared_pe = wan_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
@@ -4066,6 +4132,17 @@ namespace WAN {
             }
 
             for (int i = 0; i < params.num_layers; i++) {
+                if (cache_inject) {
+                    if (ggml_tensor* injected = cache_scope->step_inject_region(ctx->ggml_ctx, i, x)) {
+                        x = injected;
+                        i = cache_scope->inject_resume_index(params.num_layers) - 1;
+                        continue;
+                    }
+                }
+                if (cache_scope != nullptr) {
+                    cache_scope->begin_region(i, x);
+                }
+
                 auto block = std::dynamic_pointer_cast<WanAttentionBlock>(blocks["blocks." + std::to_string(i)]);
 
                 if (use_sp_mainline) {
@@ -4098,6 +4175,13 @@ namespace WAN {
                 sd::ggml_graph_cut::mark_graph_cut(x, "wan.blocks." + std::to_string(i), "x");
                 if (c != nullptr) {
                     sd::ggml_graph_cut::mark_graph_cut(c, "wan.blocks." + std::to_string(i), "c");
+                }
+                if (cache_scope != nullptr) {
+                    cache_scope->end_region(ctx->ggml_ctx, i, params.num_layers, x);
+                    if (cache_scope->stop_after_block(i)) {
+                        cache_scope->on_probe(x);
+                        return x;
+                    }
                 }
             }
 
@@ -4174,6 +4258,7 @@ namespace WAN {
         Wan wan;
         std::vector<float> pe_vec;
         SDVersion version;
+        sd::Tensor<float> inject_feature_host_;  // kept alive across cache inject build
 
         WanRunner(ggml_backend_t backend,
                   bool offload_params_to_cpu,
@@ -4364,6 +4449,72 @@ namespace WAN {
             };
 
             return restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), x.dim());
+        }
+
+        // ---- Cache seam passes (Feature/Probe policies). VACE never active on
+        // these passes (the model gates the seam off when a VACE stream exists). ----
+        sd::DiffusionCacheResult compute_capture(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& clip_fea,
+                                             const sd::Tensor<float>& c_concat,
+                                             int region_start = 0,
+                                             int region_end = -1) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Capture;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            sd::DiffusionCacheResult out;
+            out.output = std::move(pass.output);
+            out.feature = std::move(pass.feature);
+            return out;
+        }
+
+        sd::Tensor<float> compute_inject(int n_threads,
+                                         const sd::Tensor<float>& x,
+                                         const sd::Tensor<float>& timesteps,
+                                         const sd::Tensor<float>& context,
+                                         const sd::Tensor<float>& clip_fea,
+                                         const sd::Tensor<float>& c_concat,
+                                         const sd::Tensor<float>& feature,
+                                         int region_start = 0,
+                                         int region_end = -1) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Inject;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            inject_feature_host_ = feature;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                scope.inject_feature = make_input(inject_feature_host_);
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            return std::move(pass.output);
+        }
+
+        sd::DiffusionCacheResult compute_probe(int n_threads,
+                                           const sd::Tensor<float>& x,
+                                           const sd::Tensor<float>& timesteps,
+                                           const sd::Tensor<float>& context,
+                                           const sd::Tensor<float>& clip_fea,
+                                           const sd::Tensor<float>& c_concat,
+                                           int probe_depth) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Probe;
+            scope.probe_depth = probe_depth;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            sd::DiffusionCacheResult out;
+            out.probe = std::move(pass.output);
+            out.before = std::move(pass.before);
+            return out;
         }
 
         void test() {
