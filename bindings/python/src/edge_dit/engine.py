@@ -6,8 +6,11 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
+from PIL import Image
+
 from ._capi import (
     EdContextParams,
+    EdImage,
     EdImageBatch,
     EdImageGenerationParams,
     EdVideo,
@@ -80,9 +83,34 @@ def _summarize_request(request: ImageRequest) -> list[str]:
         lines.append(f"steps={request.steps}")
     if request.seed is not None:
         lines.append(f"seed={request.seed}")
+    if request.init_image is not None:
+        lines.append(f"init_image={request.init_image.width}x{request.init_image.height}")
+    if request.ref_images is not None:
+        lines.append(f"ref_images={len(request.ref_images)}")
     if request.output_type is not None:
         lines.append(f"output_type={request.output_type!r}")
     return lines
+
+
+def _coerce_native_input_image(image: Image.Image, *, field_name: str) -> Image.Image:
+    if not isinstance(image, Image.Image):
+        raise InvalidArgumentError(f"{field_name} must be a PIL.Image.Image")
+    if image.mode in {"L", "RGB", "RGBA"}:
+        return image
+    return image.convert("RGBA" if "A" in image.getbands() else "RGB")
+
+
+def _build_native_image(image: Image.Image, *, field_name: str) -> tuple[EdImage, object]:
+    normalized = _coerce_native_input_image(image, field_name=field_name)
+    raw = normalized.tobytes()
+    buffer = (ctypes.c_uint8 * len(raw)).from_buffer_copy(raw)
+    native = EdImage(
+        width=normalized.width,
+        height=normalized.height,
+        channels=len(normalized.getbands()),
+        data=ctypes.cast(buffer, ctypes.POINTER(ctypes.c_uint8)),
+    )
+    return native, buffer
 
 
 def _summarize_video_request(request: VideoRequest) -> list[str]:
@@ -188,6 +216,48 @@ class Engine:
         except Exception:
             pass
 
+    @property
+    def pipeline_name(self) -> str | None:
+        self._ensure_open()
+        raw = self._api.ed_context_pipeline_name(self._ctx)
+        return raw.decode("utf-8", errors="replace") if raw else None
+
+    @property
+    def version_name(self) -> str | None:
+        self._ensure_open()
+        raw = self._api.ed_context_version_name(self._ctx)
+        return raw.decode("utf-8", errors="replace") if raw else None
+
+    @property
+    def supports_image(self) -> bool:
+        self._ensure_open()
+        return bool(self._api.ed_context_supports_image(self._ctx))
+
+    @property
+    def supports_video(self) -> bool:
+        self._ensure_open()
+        return bool(self._api.ed_context_supports_video(self._ctx))
+
+    @property
+    def default_sampler(self) -> int:
+        self._ensure_open()
+        return int(self._api.ed_context_default_sampler(self._ctx))
+
+    def default_scheduler(self, sampler: int | str | None = None) -> int:
+        self._ensure_open()
+        resolved_sampler = -1 if sampler is None else resolve_sampler(sampler)
+        return int(self._api.ed_context_default_scheduler(self._ctx, resolved_sampler))
+
+    def request_cancel(self) -> None:
+        self._ensure_open()
+        self._api.ed_context_request_cancel(self._ctx)
+
+    def progress_steps(self) -> tuple[int, int]:
+        self._ensure_open()
+        current = int(self._api.ed_context_progress_current_step(self._ctx))
+        total = int(self._api.ed_context_progress_total_steps(self._ctx))
+        return current, total
+
     def generate_image(
         self,
         request: ImageRequest | None = None,
@@ -232,9 +302,10 @@ class Engine:
         params = EdImageGenerationParams()
         batch = EdImageBatch()
         strings = CStringPool()
+        keepalive: list[object] = []
 
         self._api.ed_image_generation_params_init(ctypes.byref(params))
-        self._apply_request(params, request, strings)
+        self._apply_request(params, request, strings, keepalive)
 
         status = self._api.ed_generate_image(self._ctx, ctypes.byref(params), ctypes.byref(batch))
 
@@ -376,6 +447,7 @@ class Engine:
         params: EdImageGenerationParams,
         request: ImageRequest,
         strings: CStringPool,
+        keepalive: list[object],
     ) -> None:
         params.prompt = strings.add_optional(request.prompt)
         params.negative_prompt = strings.add_optional(request.negative_prompt)
@@ -388,6 +460,43 @@ class Engine:
             params.seed = request.seed
         if request.batch_count is not None:
             params.batch_count = request.batch_count
+        if request.init_image is not None:
+            native_image, raw_buffer = _build_native_image(
+                request.init_image,
+                field_name="init_image",
+            )
+            native_image_ptr = ctypes.pointer(native_image)
+            params.init_image = native_image_ptr
+            keepalive.extend([raw_buffer, native_image, native_image_ptr])
+        if request.mask_image is not None:
+            native_image, raw_buffer = _build_native_image(
+                request.mask_image,
+                field_name="mask_image",
+            )
+            native_image_ptr = ctypes.pointer(native_image)
+            params.mask_image = native_image_ptr
+            keepalive.extend([raw_buffer, native_image, native_image_ptr])
+        if request.control_image is not None:
+            native_image, raw_buffer = _build_native_image(
+                request.control_image,
+                field_name="control_image",
+            )
+            native_image_ptr = ctypes.pointer(native_image)
+            params.control_image = native_image_ptr
+            keepalive.extend([raw_buffer, native_image, native_image_ptr])
+        if request.ref_images is not None:
+            native_ref_images: list[EdImage] = []
+            for index, image in enumerate(request.ref_images):
+                native_image, raw_buffer = _build_native_image(
+                    image,
+                    field_name=f"ref_images[{index}]",
+                )
+                native_ref_images.append(native_image)
+                keepalive.extend([raw_buffer, native_image])
+            native_array = (EdImage * len(native_ref_images))(*native_ref_images)
+            params.ref_images = ctypes.cast(native_array, ctypes.POINTER(EdImage))
+            params.ref_image_count = len(native_ref_images)
+            keepalive.append(native_array)
 
         if request.steps is not None:
             params.sample.steps = request.steps

@@ -4,6 +4,7 @@ from .errors import (
     EdgeDitClosedError,
     EdgeDitError,
     EdgeDitLibraryError,
+    GenerationCancelledError,
     GenerationError,
     InvalidArgumentError,
     ModelLoadError,
@@ -11,12 +12,15 @@ from .errors import (
     UnsupportedImageFormatError,
 )
 
+__version__ = "0.1.0a0"
+
 __all__ = [
     "EdgeDitClosedError",
     "EdgeDitError",
     "EdgeDitLibraryError",
     "Engine",
     "EngineConfig",
+    "GenerationCancelledError",
     "GenerationError",
     "ImageRequest",
     "InvalidArgumentError",
@@ -25,5 +29,3 @@ __all__ = [
     "UnsupportedImageFormatError",
     "VideoRequest",
 ]
-
-__version__ = "0.1.0a0"

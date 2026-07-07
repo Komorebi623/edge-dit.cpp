@@ -672,7 +672,14 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
     const bool cache_vace_ok = vace_context.empty();
 
     sd::Tensor<float> x = x_start;
+    GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (size_t i = 0; i + 1 < sigmas.size(); ++i) {
+        if (control != nullptr && control->should_cancel()) {
+            control->mark_cancelled();
+            set_error(error, "generation cancelled");
+            model->free_compute_buffer();
+            return {};
+        }
         const float sigma = sigmas[i];
         const float sigma_next = sigmas[i + 1];
         const int step = static_cast<int>(i + 1);
@@ -864,6 +871,9 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
             cache_step.sigma_next = sigma_next;
             cache_runtime.end_step(cache_step);
         }
+        if (control != nullptr) {
+            control->step_done();
+        }
     }
 
     if (cache_enabled) {
@@ -1052,6 +1062,13 @@ ed_status_t WanPipeline::generate_video(const ed_video_generation_params_t* para
     rng_->manual_seed(seed);
     sampler_rng_->manual_seed(seed);
     set_flow_shift(params->sample.flow_shift);
+
+    const int low_steps = resolve_steps(params->sample.steps);
+    const int high_steps = high_noise_diffusion_ != nullptr ? params->high_noise_sample.steps : 0;
+    const int total_steps = low_steps + std::max(0, high_steps);
+    if (GenerationControl* control = runtime_->generation_control()) {
+        control->start(total_steps);
+    }
 
     LOG_INFO("wan generate_video %dx%d frames=%d latent_frames=%d seed=%" PRId64,
              params->width,

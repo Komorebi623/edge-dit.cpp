@@ -321,6 +321,66 @@ const char * ed_get_last_error(const ed_context_t * ctx) {
     return ctx->last_error.c_str();
 }
 
+const char* ed_context_pipeline_name(const ed_context_t* ctx) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return nullptr;
+    }
+    return ctx->engine->pipeline_name();
+}
+
+const char* ed_context_version_name(const ed_context_t* ctx) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return nullptr;
+    }
+    return ctx->engine->version_name();
+}
+
+bool ed_context_supports_image(const ed_context_t* ctx) {
+    return ctx != nullptr && ctx->engine != nullptr && ctx->engine->supports_image_generation();
+}
+
+bool ed_context_supports_video(const ed_context_t* ctx) {
+    return ctx != nullptr && ctx->engine != nullptr && ctx->engine->supports_video_generation();
+}
+
+ed_sampler_t ed_context_default_sampler(const ed_context_t* ctx) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return ED_SAMPLER_AUTO;
+    }
+    return ctx->engine->get_default_sample_method();
+}
+
+ed_scheduler_t ed_context_default_scheduler(const ed_context_t* ctx, ed_sampler_t sampler) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return ED_SCHEDULER_AUTO;
+    }
+    const ed_sampler_t resolved = sampler == ED_SAMPLER_AUTO
+                                      ? ctx->engine->get_default_sample_method()
+                                      : sampler;
+    return ctx->engine->get_default_scheduler(resolved);
+}
+
+void ed_context_request_cancel(ed_context_t* ctx) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return;
+    }
+    ctx->engine->request_cancel();
+}
+
+int ed_context_progress_current_step(const ed_context_t* ctx) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return 0;
+    }
+    return ctx->engine->progress_current_step();
+}
+
+int ed_context_progress_total_steps(const ed_context_t* ctx) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return 0;
+    }
+    return ctx->engine->progress_total_steps();
+}
+
 int ed_context_parallel_rank(const ed_context_t* ctx) {
     if (ctx == nullptr || ctx->engine == nullptr) {
         return 0;

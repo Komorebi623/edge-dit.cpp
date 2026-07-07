@@ -4,9 +4,12 @@ import ctypes
 import unittest
 from unittest.mock import patch
 
+from PIL import Image
+
 from edge_dit import (
     EdgeDitClosedError,
     Engine,
+    GenerationCancelledError,
     GenerationError,
     ImageRequest,
     ModelLoadError,
@@ -39,8 +42,17 @@ class FakeLib:
         self.free_context_calls = 0
         self.free_batch_calls = 0
         self.free_video_calls = 0
+        self.cancel_requests = 0
         self.generated_prompts: list[str] = []
         self.generated_video_prompts: list[str] = []
+        self.pipeline_name = b"flux"
+        self.version_name = b"VERSION_FLUX"
+        self.supports_image = True
+        self.supports_video = False
+        self.default_sampler = 0
+        self.default_scheduler = 0
+        self.progress_current_step = 0
+        self.progress_total_steps = 0
         self._ctx = ctypes.pointer(EdContext()) if create_ok else None
         self._keepalive: list[object] = []
 
@@ -123,6 +135,33 @@ class FakeLib:
 
     def ed_get_last_error(self, ctx):
         return self.last_error
+
+    def ed_context_pipeline_name(self, ctx):
+        return self.pipeline_name
+
+    def ed_context_version_name(self, ctx):
+        return self.version_name
+
+    def ed_context_supports_image(self, ctx) -> bool:
+        return self.supports_image
+
+    def ed_context_supports_video(self, ctx) -> bool:
+        return self.supports_video
+
+    def ed_context_default_sampler(self, ctx) -> int:
+        return self.default_sampler
+
+    def ed_context_default_scheduler(self, ctx, sampler) -> int:
+        return self.default_scheduler
+
+    def ed_context_request_cancel(self, ctx) -> None:
+        self.cancel_requests += 1
+
+    def ed_context_progress_current_step(self, ctx) -> int:
+        return self.progress_current_step
+
+    def ed_context_progress_total_steps(self, ctx) -> int:
+        return self.progress_total_steps
 
     def ed_context_parallel_is_root(self, ctx) -> bool:
         return self.root
@@ -260,6 +299,50 @@ class EngineLifecycleTests(unittest.TestCase):
         self.assertEqual(captured["cache_scm_mask"], "0011")
         self.assertFalse(captured["cache_scm_policy_dynamic"])
 
+    def test_image_inputs_are_forwarded_to_native_request(self) -> None:
+        fake = FakeLib()
+        captured: dict[str, object] = {}
+
+        original_generate = fake.ed_generate_image
+
+        def wrapped_generate(ctx, params, out) -> int:
+            request = ctypes.cast(params, ctypes.POINTER(EdImageGenerationParams)).contents
+            self.assertIsNotNone(request.init_image)
+            self.assertIsNotNone(request.mask_image)
+            self.assertIsNotNone(request.control_image)
+            captured["init_size"] = (request.init_image.contents.width, request.init_image.contents.height)
+            captured["mask_channels"] = request.mask_image.contents.channels
+            captured["control_size"] = (
+                request.control_image.contents.width,
+                request.control_image.contents.height,
+            )
+            captured["ref_count"] = request.ref_image_count
+            captured["ref_sizes"] = [
+                (request.ref_images[index].width, request.ref_images[index].height)
+                for index in range(request.ref_image_count)
+            ]
+            return original_generate(ctx, params, out)
+
+        fake.ed_generate_image = wrapped_generate
+
+        with patch("edge_dit.engine.load_capi", return_value=fake):
+            with Engine(model_path="demo-model") as engine:
+                engine.generate_image(
+                    ImageRequest(
+                        prompt="teapot",
+                        init_image=Image.new("RGB", (3, 2)),
+                        mask_image=Image.new("L", (3, 2)),
+                        control_image=Image.new("RGBA", (5, 4)),
+                        ref_images=[Image.new("RGB", (6, 7)), Image.new("RGB", (8, 9))],
+                    )
+                )
+
+        self.assertEqual(captured["init_size"], (3, 2))
+        self.assertEqual(captured["mask_channels"], 1)
+        self.assertEqual(captured["control_size"], (5, 4))
+        self.assertEqual(captured["ref_count"], 2)
+        self.assertEqual(captured["ref_sizes"], [(6, 7), (8, 9)])
+
     def test_generate_after_close_raises(self) -> None:
         fake = FakeLib()
         with patch("edge_dit.engine.load_capi", return_value=fake):
@@ -269,6 +352,33 @@ class EngineLifecycleTests(unittest.TestCase):
                 engine.generate_image(prompt="teapot")
             with self.assertRaises(EdgeDitClosedError):
                 engine.generate_video(prompt="robot", frames=2)
+
+    def test_engine_exposes_native_capabilities(self) -> None:
+        fake = FakeLib()
+        fake.pipeline_name = b"wan"
+        fake.version_name = b"VERSION_WAN2"
+        fake.supports_image = False
+        fake.supports_video = True
+        fake.default_sampler = 0
+        fake.default_scheduler = 9
+        with patch("edge_dit.engine.load_capi", return_value=fake):
+            with Engine(model_path="demo-model") as engine:
+                self.assertEqual(engine.pipeline_name, "wan")
+                self.assertEqual(engine.version_name, "VERSION_WAN2")
+                self.assertFalse(engine.supports_image)
+                self.assertTrue(engine.supports_video)
+                self.assertEqual(engine.default_sampler, 0)
+                self.assertEqual(engine.default_scheduler(), 9)
+
+    def test_request_cancel_and_progress_are_available_while_open(self) -> None:
+        fake = FakeLib()
+        fake.progress_current_step = 3
+        fake.progress_total_steps = 20
+        with patch("edge_dit.engine.load_capi", return_value=fake):
+            with Engine(model_path="demo-model") as engine:
+                self.assertEqual(engine.progress_steps(), (3, 20))
+                engine.request_cancel()
+        self.assertEqual(fake.cancel_requests, 1)
 
     def test_create_context_failure_raises_model_load_error(self) -> None:
         fake = FakeLib(create_ok=False)
@@ -336,6 +446,14 @@ class EngineLifecycleTests(unittest.TestCase):
         self.assertIn("frames=9", message)
         self.assertIn("steps=1", message)
         self.assertIn("output_type='numpy'", message)
+
+    def test_cancelled_generation_raises_cancelled_error(self) -> None:
+        fake = FakeLib(generate_status=7, last_error=b"generation cancelled")
+        with patch("edge_dit.engine.load_capi", return_value=fake):
+            with Engine(model_path="demo-model", backend="cuda") as engine:
+                with self.assertRaises(GenerationCancelledError) as ctx:
+                    engine.generate_image(ImageRequest(prompt="teapot", steps=20))
+        self.assertIn("generation cancelled", str(ctx.exception))
 
 
 if __name__ == "__main__":

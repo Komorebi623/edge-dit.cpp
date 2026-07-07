@@ -211,6 +211,7 @@ std::string ed_status_to_string(ed_status_t status) {
         case ED_STATUS_GENERATION_FAILED: return "generation_failed";
         case ED_STATUS_OUT_OF_MEMORY: return "out_of_memory";
         case ED_STATUS_UNSUPPORTED: return "unsupported";
+        case ED_STATUS_CANCELLED: return "cancelled";
     }
     return "unknown";
 }
