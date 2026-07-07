@@ -1046,8 +1046,8 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
         GGML_ASSERT(v != nullptr);
         GGML_ASSERT(pe != nullptr);
 
-        q = Rope::apply_rope(ctx->ggml_ctx, q, pe);
-        k = Rope::apply_rope(ctx->ggml_ctx, k, pe);
+        q = Rope::apply_rope(ctx->ggml_ctx, q, pe, true, ctx->backend);
+        k = Rope::apply_rope(ctx->ggml_ctx, k, pe, true, ctx->backend);
 
         const int64_t n_head = v->ne[1];
         GGML_ASSERT(q->ne[0] == k->ne[0]);
