@@ -728,6 +728,14 @@ struct AutoEncoderKL : public VAE {
 
         auto runner_ctx = get_context();
         runner_ctx.conv2d_auto_direct_enabled = decode_graph && should_use_cuda_auto_conv2d();
+#ifndef ED_ENABLE_CUDNN_CONV2D
+        // CPU backend (no cuDNN): VAE decode over large feature maps is memory-bandwidth
+        // bound in im2col+GEMM (the im2col buffer for a 512x512 3x3 conv is hundreds of MB).
+        // ggml's direct conv avoids materializing it (~2.75x faster VAE decode here).
+        if (decode_graph) {
+            runner_ctx.conv2d_direct_enabled = true;
+        }
+#endif
         ggml_tensor* out = decode_graph ? ae.decode(&runner_ctx, z) : ae.encode(&runner_ctx, z);
 
         ggml_build_forward_expand(gf, out);
