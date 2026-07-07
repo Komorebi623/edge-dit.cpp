@@ -643,7 +643,7 @@ namespace Flux {
                                                                          name_prefix + "_pe_seq_major") :
                                        nullptr;
         q = qk_seq_major ? flux_sp_apply_rope_seq_major(ctx->ggml_ctx, q, pe, true, prepared_pe) :
-                           Rope::apply_rope(ctx->ggml_ctx, q, pe);
+                           Rope::apply_rope(ctx->ggml_ctx, q, pe, true, ctx->backend);
         if (qk_seq_major) {
             k = flux_sp_apply_rope_seq_major(ctx->ggml_ctx,
                                              k,
@@ -652,13 +652,14 @@ namespace Flux {
                                              prepared_pe,
                                              flux_sp_flash_attn_enabled(ctx) ? GGML_TYPE_F16 : GGML_TYPE_F32);
         } else if (flux_sp_flash_attn_enabled(ctx)) {
-            if (auto k_f16 = edgedit::ggml_ext::apply_rope_f16(ctx->ggml_ctx, k, pe, true)) {
+            ggml_tensor* k_f16 = edgedit::ggml_ext::apply_rope_f16(ctx->ggml_ctx, k, pe, true);
+            if (k_f16 != nullptr && ggml_backend_supports_op(ctx->backend, k_f16)) {
                 k = k_f16;
             } else {
-                k = Rope::apply_rope(ctx->ggml_ctx, k, pe);
+                k = Rope::apply_rope(ctx->ggml_ctx, k, pe, true, ctx->backend);
             }
         } else {
-            k = Rope::apply_rope(ctx->ggml_ctx, k, pe);
+            k = Rope::apply_rope(ctx->ggml_ctx, k, pe, true, ctx->backend);
         }
 
         GGML_ASSERT(pe->ne[3] == q->ne[1]);

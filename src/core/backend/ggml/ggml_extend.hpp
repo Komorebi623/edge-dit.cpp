@@ -1411,7 +1411,9 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
 
         if (kv_pad == 0 && kv_scale == 1.0f) {
             if (auto v_f16 = edgedit::ggml_ext::attention_v_prep_custom_f16(ctx, v_in, v_is_seq_major)) {
-                v_in = v_f16;
+                if (ggml_backend_supports_op(backend, v_f16)) {
+                    v_in = v_f16;
+                }
             }
         }
         if (v_in->type != GGML_TYPE_F16 || !ggml_is_contiguous(v_in)) {
