@@ -2157,7 +2157,28 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
             sd::ggml_graph_cut::mark_graph_cut(txt, "qwen_image.prelude", "txt");
             // sd::ggml_graph_cut::mark_graph_cut(t_emb, "qwen_image.prelude", "t_emb");
 
+            // Cache seam: the transformer stack transforms the image stream
+            // `img`. Disabled under SP (block-loop tensors are sequence-sharded).
+            // The cached region is blocks [region_start, region_end); the default
+            // whole-stack region matches the pre-region behaviour. Capture builds
+            // the region residual in-loop at the region's last block, so the seam
+            // is only active on the non-SP path (SP is gated off above) where no
+            // post-loop gather rewrites `img`.
+            sd::CacheGraphScope* cache_scope = use_sp_mainline ? nullptr : ctx->cache_scope;
+            const bool cache_inject = cache_scope != nullptr && cache_scope->inject_mode();
+
             for (int i = 0; i < params.num_layers; i++) {
+                if (cache_inject) {
+                    if (ggml_tensor* injected = cache_scope->step_inject_region(ctx->ggml_ctx, i, img)) {
+                        img = injected;
+                        i = cache_scope->inject_resume_index(params.num_layers) - 1;
+                        continue;
+                    }
+                }
+                if (cache_scope != nullptr) {
+                    cache_scope->begin_region(i, img);
+                }
+
                 auto block = std::dynamic_pointer_cast<QwenImageTransformerBlock>(blocks["transformer_blocks." + std::to_string(i)]);
 
                 std::pair<ggml_tensor*, ggml_tensor*> result;
@@ -2180,6 +2201,13 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                 sd::ggml_graph_cut::mark_graph_cut(img, "qwen_image.transformer_blocks." + std::to_string(i), "img");
                 if (i + 1 < params.num_layers) {
                     sd::ggml_graph_cut::mark_graph_cut(txt, "qwen_image.transformer_blocks." + std::to_string(i), "txt");
+                }
+                if (cache_scope != nullptr) {
+                    cache_scope->end_region(ctx->ggml_ctx, i, params.num_layers, img);
+                    if (cache_scope->stop_after_block(i)) {
+                        cache_scope->on_probe(img);
+                        return img;
+                    }
                 }
             }
 
@@ -2253,6 +2281,7 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
         std::vector<float> pe_vec;
         std::vector<float> modulate_index_vec;
         SDVersion version;
+        sd::Tensor<float> inject_feature_host_;  // kept alive across cache inject build
 
         QwenImageRunner(ggml_backend_t backend,
                         bool offload_params_to_cpu,
@@ -2388,6 +2417,71 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
             };
 
             return restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), x.dim());
+        }
+
+        // ---- Cache seam passes (Feature/Probe policies). ----
+        sd::DiffusionCacheResult compute_capture(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             int region_start = 0,
+                                             int region_end = -1) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Capture;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, ref_latents, increase_ref_index);
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            sd::DiffusionCacheResult out;
+            out.output = std::move(pass.output);
+            out.feature = std::move(pass.feature);
+            return out;
+        }
+
+        sd::Tensor<float> compute_inject(int n_threads,
+                                         const sd::Tensor<float>& x,
+                                         const sd::Tensor<float>& timesteps,
+                                         const sd::Tensor<float>& context,
+                                         const std::vector<sd::Tensor<float>>& ref_latents,
+                                         bool increase_ref_index,
+                                         const sd::Tensor<float>& feature,
+                                         int region_start = 0,
+                                         int region_end = -1) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Inject;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            inject_feature_host_ = feature;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                scope.inject_feature = make_input(inject_feature_host_);
+                return build_graph(x, timesteps, context, ref_latents, increase_ref_index);
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            return std::move(pass.output);
+        }
+
+        sd::DiffusionCacheResult compute_probe(int n_threads,
+                                           const sd::Tensor<float>& x,
+                                           const sd::Tensor<float>& timesteps,
+                                           const sd::Tensor<float>& context,
+                                           const std::vector<sd::Tensor<float>>& ref_latents,
+                                           bool increase_ref_index,
+                                           int probe_depth) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Probe;
+            scope.probe_depth = probe_depth;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, ref_latents, increase_ref_index);
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            sd::DiffusionCacheResult out;
+            out.probe = std::move(pass.output);
+            out.before = std::move(pass.before);
+            return out;
         }
 
         void test() {

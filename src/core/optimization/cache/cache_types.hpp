@@ -16,6 +16,8 @@ enum class CacheMode {
     DBCache,
     TaylorSeer,
     CacheDiT,
+    MagCache,
+    DiCache,
 };
 
 enum class CacheExecType {
@@ -52,6 +54,17 @@ enum class CacheBranch {
     Uncond,
 };
 
+// Decision granularity of a cache policy. Determines which lifecycle hooks the
+// CacheController drives and whether it needs the model's build-time seam.
+//   Output  - operates on whole-model input latent / output noise (black box).
+//   Feature - operates on the block-stack residual captured via the model seam.
+//   Probe   - runs a shallow prefix of blocks, then decides skip vs. full.
+enum class CacheGranularity {
+    Output,
+    Feature,
+    Probe,
+};
+
 enum class CacheRegionPattern {
     HiddenOnly,
     HiddenContext,
@@ -85,6 +98,35 @@ struct CacheStepInfo {
     float sigma_next = 0.0f;
 };
 
+// Per-branch context handed to a policy hook. condition_key identifies the
+// SDCondition instance so the controller / policy can keep cond and uncond
+// cache histories isolated across a CFG-parallel or dual-pass step.
+struct CacheForwardContext {
+    CacheStepInfo step;
+    CacheBranch branch = CacheBranch::Main;
+    const void* condition_key = nullptr;
+};
+
+// What the CacheController must do this step for a Feature/Probe policy.
+//
+// The cached region is the block interval [region_start, region_end). The
+// defaults (0, -1) mean the whole block stack, which is what the current
+// whole-model methods (TaylorSeer / MagCache / DiCache) use. The bounds are
+// carried so a future policy can narrow the seam to a sub-interval (skip only
+// the middle blocks); such a policy fills them on both Full and SkipStackReuse
+// decisions so capture and inject agree on the same interval.
+struct CacheStepDecision {
+    enum class Kind {
+        Full,            // run the whole block stack; capture the region feature
+        SkipStackReuse,  // skip the region's blocks; inject a reconstructed feature
+        Probe,           // run only probe_depth blocks, then decide
+    };
+    Kind kind = Kind::Full;
+    int probe_depth = 0;   // meaningful only when kind == Probe
+    int region_start = 0;  // first block of the cached region
+    int region_end = -1;   // one past the last block; < 0 => to end of stack
+};
+
 struct CacheRegionFrame {
     CacheStepInfo step;
     CacheBranch branch = CacheBranch::Main;
@@ -111,6 +153,8 @@ inline CacheMode cache_mode_from_ld(ed_cache_mode_t mode) {
         case ED_CACHE_DBCACHE: return CacheMode::DBCache;
         case ED_CACHE_TAYLORSEER: return CacheMode::TaylorSeer;
         case ED_CACHE_CACHE_DIT: return CacheMode::CacheDiT;
+        case ED_CACHE_MAGCACHE: return CacheMode::MagCache;
+        case ED_CACHE_DICACHE: return CacheMode::DiCache;
         case ED_CACHE_DISABLED:
         default: return CacheMode::Disabled;
     }
