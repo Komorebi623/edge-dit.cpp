@@ -43,7 +43,7 @@ bool device_name_matches(ggml_backend_dev_t dev, const std::string& requested) {
 
     const std::string request = lowercase(requested);
     
-    if (is_generic_gpu_request(request)) {
+    if (request == "gpu") {
         const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
         return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
     }
