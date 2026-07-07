@@ -26,6 +26,7 @@ Current implemented scope:
 - optionally return `numpy.ndarray` with `output_type="numpy"`
 - return video frames as `list[PIL.Image.Image]` by default
 - optionally return video frames as `list[numpy.ndarray]` with `output_type="numpy"`
+- accept `PIL.Image.Image` inputs for `init_image` / `mask_image` / `control_image` / `ref_images`
 - release native resources explicitly with `close()` or a context manager
 - expose the full current `ed_sample_params_t` cache tuning surface
 - provide copyable helper scripts for shared-library build and Python smoke test
@@ -36,18 +37,10 @@ Current implemented scope:
 
 Current deferred scope:
 
-- `init_image`
-- `mask_image`
-- `control_image`
-- `ref_images`
 - `loras`
 - progress callback
 - pause / resume
 - preview callback
-
-Those deferred items are not all just Python work. In particular, input-image capabilities are
-being held for a later phase because the inference engine side is not yet ready to expose them as a
-stable phase-1 capability.
 
 ## Python API usage
 
@@ -218,6 +211,42 @@ The create response returns a job id plus stable `status_url`, `cancel_url`, and
 Image results return `data[].b64_png`; video results return `frames[].b64_png`
 where each frame is PNG-encoded.
 
+Image-conditioned pipelines can also provide embedded input images on the image
+job endpoint:
+
+- `init_image_b64`
+- `mask_image_b64`
+- `control_image_b64`
+- `ref_images_b64`
+
+These fields accept either raw base64 image bytes or `data:image/...;base64,...`
+URLs. `server_v2` decodes them to `PIL.Image.Image` before calling the Python
+engine.
+
+Qwen image edit example:
+
+```json
+{
+  "prompt": "replace the mug with a glass teapot",
+  "width": 1024,
+  "height": 1024,
+  "steps": 20,
+  "init_image_b64": "<base64 png or jpeg bytes>"
+}
+```
+
+FLUX Kontext example:
+
+```json
+{
+  "prompt": "turn this product photo into a studio catalog shot",
+  "width": 1024,
+  "height": 1024,
+  "steps": 20,
+  "ref_images_b64": ["<base64 png or jpeg bytes>"]
+}
+```
+
 Example with an explicit request id for upstream trace correlation:
 
 ```bash
@@ -292,6 +321,7 @@ capability queries, progress polling, and cooperative cancel APIs.
 
 - prompt / negative prompt
 - width / height / steps / seed / batch_count
+- `init_image` / `mask_image` / `control_image` / `ref_images`
 - guidance / cfg_scale / image_cfg_scale / eta / flow_shift
 - sampler / scheduler
 - full cache parameter set from `ed_sample_params_t`
@@ -562,6 +592,30 @@ Additional `server_v2` validation completed in this workspace on `2026-07-06`:
     moved to `1/1` during sampling/post-sampling work, and did not represent VAE decode or output
     encoding progress
 
+Additional `server_v2` validation completed in this workspace on `2026-07-07`:
+
+- `Qwen-Image-Edit`
+  - verified end to end through the real HTTP job API with
+    `EDGE_DIT_RUN_SERVER_V2_QWEN_IMAGE_EDIT=1 /usr/bin/python3 -m unittest ... test_generate_qwen_image_edit_through_real_server_v2_when_enabled`
+  - validated against `/mnt/data/yangminghong/Qwen-Image-Edit`
+  - the test generated a synthetic input image locally, submitted it as `init_image_b64`, and wrote the returned
+    edited PNG to `/tmp/edge_dit_server_v2_qwen_image_edit_integration.png`
+  - one observed run completed successfully in about `381.9s` end to end on this workspace
+- `FLUX.1-Kontext-dev`
+  - verified end to end through the real HTTP job API with
+    `EDGE_DIT_RUN_SERVER_V2_FLUX_KONTEXT=1 /usr/bin/python3 -m unittest ... test_generate_flux_kontext_through_real_server_v2_when_enabled`
+  - validated against `/mnt/data/yangminghong/FLUX.1-Kontext-dev`
+  - the test generated a synthetic reference image locally, submitted it as `ref_images_b64`, and wrote the returned
+    PNG to `/tmp/edge_dit_server_v2_flux_kontext_integration.png`
+  - one observed run completed successfully in about `78.4s` end to end on this workspace
+- full sequential `server_v2` matrix
+  - verified end to end through
+    `EDGE_DIT_RUN_SERVER_V2_MATRIX=1 /usr/bin/python3 -m unittest ... test_run_full_server_v2_model_matrix_when_enabled`
+  - covered this exact sequence in one process: `FLUX.1-dev` -> `stable-diffusion-3-medium-diffusers` -> `Qwen-Image` -> `Qwen-Image-Edit` -> `FLUX.1-Kontext-dev` -> `Wan2.1-T2V-1.3B-Diffusers`
+  - for each model the test started a fresh in-process `server_v2`, created one terminal-success job plus one queued-then-cancelled job, exercised `health`, `capabilities`, `jobs`, `result`, active-job delete rejection, `cleanup`, TTL expiry cleanup, then shut the service down before starting the next model
+  - one observed run completed successfully in about `1952.2s` end to end on this workspace
+  - wrote returned artifacts under `/tmp/edge_dit_server_v2_matrix/`
+
 ## Optional integration test
 
 There is also an optional real-library unit-test entrypoint:
@@ -597,6 +651,79 @@ EDGE_DIT_MODEL_PATH=/mnt/data/yangminghong/FLUX.1-dev \
 EDGE_DIT_VIDEO_MODEL_PATH=/mnt/data/yangminghong/Wan2.1-T2V-1.3B-Diffusers \
 /usr/bin/python3 -m unittest discover -s bindings/python/tests -p 'test_optional_real_server_v2_smoke.py' -v
 ```
+
+Optional real Qwen image-edit coverage through the same entrypoint can be enabled with:
+
+```bash
+PYTHONPATH=bindings/python/src \
+EDGE_DIT_RUN_INTEGRATION=1 \
+EDGE_DIT_RUN_SERVER_V2_QWEN_IMAGE_EDIT=1 \
+EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so \
+EDGE_DIT_QWEN_IMAGE_EDIT_MODEL_PATH=/mnt/data/yangminghong/Qwen-Image-Edit \
+/usr/bin/python3 -m unittest discover -s bindings/python/tests -p 'test_optional_real_server_v2_smoke.py' -v
+```
+
+That Qwen image-edit path generates a small synthetic input image inside the test
+process, submits it as `init_image_b64` over HTTP, polls the job resource, and
+writes the returned edited PNG artifact to `/tmp/edge_dit_server_v2_qwen_image_edit_integration.png`
+unless overridden with `EDGE_DIT_SERVER_V2_QWEN_IMAGE_EDIT_OUTPUT`.
+
+Optional real FLUX Kontext coverage through the same entrypoint can be enabled with:
+
+```bash
+PYTHONPATH=bindings/python/src \
+EDGE_DIT_RUN_INTEGRATION=1 \
+EDGE_DIT_RUN_SERVER_V2_FLUX_KONTEXT=1 \
+EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so \
+EDGE_DIT_FLUX_KONTEXT_MODEL_PATH=/mnt/data/yangminghong/FLUX.1-Kontext-dev \
+/usr/bin/python3 -m unittest discover -s bindings/python/tests -p 'test_optional_real_server_v2_smoke.py' -v
+```
+
+That FLUX Kontext path generates a small synthetic reference image inside the
+test process, submits it as `ref_images_b64`, polls the job resource, and writes
+the returned PNG artifact to `/tmp/edge_dit_server_v2_flux_kontext_integration.png`
+unless overridden with `EDGE_DIT_SERVER_V2_FLUX_KONTEXT_OUTPUT`.
+
+Optional full sequential `server_v2` matrix coverage across the currently
+validated local models can be enabled with:
+
+```bash
+PYTHONPATH=bindings/python/src \
+EDGE_DIT_RUN_INTEGRATION=1 \
+EDGE_DIT_RUN_SERVER_V2_MATRIX=1 \
+EDGE_DIT_LIBRARY=$PWD/build-cuda-shared/bin/libedgedit.so \
+/usr/bin/python3 -m unittest \
+  bindings.python.tests.test_optional_real_server_v2_smoke.OptionalRealServerV2SmokeTests.test_run_full_server_v2_model_matrix_when_enabled \
+  -v
+```
+
+By default that matrix test uses these local model-path env vars when present,
+otherwise it falls back to the validated workspace paths:
+
+- `EDGE_DIT_FLUX_MODEL_PATH`
+- `EDGE_DIT_SD3_MODEL_PATH`
+- `EDGE_DIT_QWEN_IMAGE_MODEL_PATH`
+- `EDGE_DIT_QWEN_IMAGE_EDIT_MODEL_PATH`
+- `EDGE_DIT_FLUX_KONTEXT_MODEL_PATH`
+- `EDGE_DIT_WAN_VIDEO_MODEL_PATH`
+
+Useful matrix-specific knobs:
+
+- `EDGE_DIT_SERVER_V2_MATRIX_MODELS=flux-dev,qwen-image-edit,wan-t2v`
+  runs only a comma-separated subset of scenario slugs
+- `EDGE_DIT_SERVER_V2_MATRIX_OUTPUT_DIR=/tmp/edge_dit_server_v2_matrix`
+  overrides the artifact directory for the per-scenario PNG/GIF outputs
+- `EDGE_DIT_SERVER_V2_MATRIX_TIMEOUT_SECONDS=1800`
+  overrides the per-scenario polling timeout globally
+
+That matrix path validates:
+
+- real `Engine` construction for every model in the sequence
+- per-model in-process `server_v2` startup and shutdown
+- live `health` and `capabilities` responses during each scenario
+- one successful job plus one queued cancellation per model
+- job listing, not-ready result handling, active delete rejection, explicit cleanup, and TTL-driven cleanup over HTTP
+- final image/video artifact write-out for every scenario
 
 That server-side integration path validates:
 
