@@ -109,6 +109,34 @@ def _wait_for_job_status(
     )
 
 
+def _wait_for_sampling_progress(
+    base_url: str,
+    status_url: str,
+    *,
+    expected_total_steps: int,
+    timeout_seconds: float,
+) -> dict[str, object]:
+    deadline = time.time() + timeout_seconds
+    last_body: dict[str, object] | None = None
+    while time.time() < deadline:
+        status_code, body = _request_json(base_url, "GET", status_url)
+        if status_code != 200:
+            raise AssertionError(f"unexpected HTTP {status_code} while polling job: {body}")
+        last_body = body
+        progress = body.get("progress") if isinstance(body.get("progress"), dict) else {}
+        current_step = int(progress.get("current_step", 0) or 0)
+        total_steps = int(progress.get("total_steps", 0) or 0)
+        if total_steps == expected_total_steps and current_step > 0:
+            return body
+        if body.get("status") in {"succeeded", "failed", "cancelled"}:
+            break
+        time.sleep(0.1)
+    raise AssertionError(
+        "did not observe non-zero sampling progress before the job reached a terminal state; "
+        f"expected total_steps={expected_total_steps}, last body was {last_body}"
+    )
+
+
 def _encode_png_base64(image: Image.Image) -> str:
     buffer = BytesIO()
     image.save(buffer, format="PNG")
@@ -706,6 +734,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 "/tmp/edge_dit_server_v2_qwen_image_edit_integration.png",
             )
         )
+        steps = int(os.environ.get("EDGE_DIT_QWEN_IMAGE_EDIT_STEPS", "2"))
 
         input_image = _build_qwen_edit_input_image(size)
         init_image_b64 = _encode_png_base64(input_image)
@@ -721,7 +750,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 ),
                 "width": size,
                 "height": size,
-                "steps": int(os.environ.get("EDGE_DIT_QWEN_IMAGE_EDIT_STEPS", "1")),
+                "steps": steps,
                 "seed": int(os.environ.get("EDGE_DIT_QWEN_IMAGE_EDIT_SEED", "42")),
                 "init_image_b64": init_image_b64,
             },
@@ -730,6 +759,14 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
         self.assertEqual(job["kind"], "image")
         self.assertEqual(job["parameters"]["init_image"]["width"], size)
         self.assertEqual(job["parameters"]["init_image"]["height"], size)
+        _wait_for_sampling_progress(
+            self.base_url,
+            str(job["status_url"]),
+            expected_total_steps=steps,
+            timeout_seconds=float(
+                os.environ.get("EDGE_DIT_SERVER_V2_QWEN_IMAGE_EDIT_TIMEOUT_SECONDS", "900")
+            ),
+        )
 
         terminal = _wait_for_terminal_job(
             self.base_url,
@@ -778,6 +815,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 "/tmp/edge_dit_server_v2_flux_kontext_integration.png",
             )
         )
+        steps = int(os.environ.get("EDGE_DIT_FLUX_KONTEXT_STEPS", "2"))
 
         ref_image_b64 = _encode_png_base64(_build_flux_kontext_ref_image(size))
 
@@ -792,7 +830,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 ),
                 "width": size,
                 "height": size,
-                "steps": int(os.environ.get("EDGE_DIT_FLUX_KONTEXT_STEPS", "1")),
+                "steps": steps,
                 "seed": int(os.environ.get("EDGE_DIT_FLUX_KONTEXT_SEED", "42")),
                 "guidance": float(os.environ.get("EDGE_DIT_FLUX_KONTEXT_GUIDANCE", "3.5")),
                 "ref_images_b64": [ref_image_b64],
@@ -803,6 +841,14 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
         self.assertEqual(len(job["parameters"]["ref_images"]), 1)
         self.assertEqual(job["parameters"]["ref_images"][0]["width"], size)
         self.assertEqual(job["parameters"]["ref_images"][0]["height"], size)
+        _wait_for_sampling_progress(
+            self.base_url,
+            str(job["status_url"]),
+            expected_total_steps=steps,
+            timeout_seconds=float(
+                os.environ.get("EDGE_DIT_SERVER_V2_FLUX_KONTEXT_TIMEOUT_SECONDS", "900")
+            ),
+        )
 
         terminal = _wait_for_terminal_job(
             self.base_url,
