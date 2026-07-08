@@ -1,0 +1,180 @@
+@import '@fontsource/instrument-sans/400.css';
+@import '@fontsource/instrument-sans/500.css';
+@import '@fontsource/instrument-sans/600.css';
+@import '@fontsource/instrument-sans/700.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+@import '@fontsource/ibm-plex-mono/600.css';
+@import 'tailwindcss';
+
+:root {
+  color-scheme: light;
+  --bg-app: #eef1ed;
+  --surface-shell: #fbfcf8;
+  --surface-card: #ffffff;
+  --surface-muted: #f2f4f0;
+  --surface-hover: #f7f9f6;
+  --surface-ink: #111827;
+  --ink-text: #f7faf8;
+  --ink-accent: #8fb7ff;
+  --border-subtle: rgba(31, 42, 56, 0.1);
+  --border-strong: rgba(31, 42, 56, 0.18);
+  --text-primary: #17202b;
+  --text-secondary: #5c6673;
+  --text-muted: #87909a;
+  --accent: #2a60dc;
+  --accent-2: #1b8c7c;
+  --accent-hover: #1f50c6;
+  --accent-soft: rgba(42, 96, 220, 0.1);
+  --accent-border: rgba(42, 96, 220, 0.22);
+  --accent-ring: rgba(42, 96, 220, 0.14);
+  --info: #2a60dc;
+  --info-soft: rgba(42, 96, 220, 0.1);
+  --info-border: rgba(42, 96, 220, 0.22);
+  --success: #14805f;
+  --success-soft: rgba(20, 128, 95, 0.1);
+  --success-border: rgba(20, 128, 95, 0.22);
+  --warning: #a96500;
+  --warning-soft: rgba(169, 101, 0, 0.1);
+  --warning-border: rgba(169, 101, 0, 0.24);
+  --error: #bd2c3c;
+  --error-soft: rgba(189, 44, 60, 0.1);
+  --error-border: rgba(189, 44, 60, 0.24);
+  --shadow-soft: 0 18px 60px rgba(30, 40, 54, 0.08), 0 2px 10px rgba(30, 40, 54, 0.04);
+
+  font-family: 'Instrument Sans', sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 360px;
+  background: var(--bg-app);
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background: var(--bg-app);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+::selection {
+  background: rgba(42, 96, 220, 0.18);
+}
+
+::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: rgba(31, 42, 56, 0.22);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.console-toast {
+  border-radius: 16px;
+  border-color: var(--border-subtle);
+  background: var(--surface-shell);
+  color: var(--text-primary);
+  font-family: 'Instrument Sans', sans-serif;
+}
+
+.console-toast[data-styled='true'] {
+  width: min(440px, calc(100vw - 32px));
+  gap: 10px;
+  padding: 18px 18px 18px 16px;
+  border-radius: 20px;
+  box-shadow: 0 18px 42px rgba(31, 42, 56, 0.14);
+}
+
+.console-toast[data-styled='true'] [data-content] {
+  gap: 4px;
+}
+
+.console-toast[data-styled='true'] [data-title] {
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.console-toast[data-styled='true'] [data-description] {
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+@media (max-width: 640px) {
+  .console-toast[data-styled='true'] {
+    width: calc(100vw - 24px);
+    padding: 16px;
+  }
+}
+
+.json-code-editor .cm-editor {
+  background: transparent;
+  font-family: 'IBM Plex Mono', monospace;
+}
+
+.json-code-editor .cm-focused {
+  outline: none;
+}
+
+.json-code-editor .cm-scroller {
+  font-family: 'IBM Plex Mono', monospace;
+  line-height: 1.6;
+}
+
+.json-code-editor .cm-content,
+.json-code-editor .cm-gutter {
+  min-height: inherit;
+  padding-block: 14px;
+}
+
+.json-code-editor .cm-content {
+  padding-inline: 14px 18px;
+}
+
+.json-code-editor .cm-gutters {
+  border-right: 1px solid rgba(31, 42, 56, 0.08);
+  background: rgba(244, 247, 244, 0.96);
+}
+
+.json-code-editor .cm-activeLine,
+.json-code-editor .cm-activeLineGutter {
+  background: rgba(42, 96, 220, 0.04);
+}
+
+.json-code-editor .cm-foldGutter .cm-gutterElement {
+  color: var(--text-muted);
+}
+
+@theme inline {
+  --font-sans: 'Instrument Sans', sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+}
