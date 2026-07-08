@@ -5893,7 +5893,9 @@ public:
             return std::nullopt;
         }
         GraphExecuteProfile runner_profile;
-        return execute_graph<T>(gf,
+        const bool rprof = runner_profile_enabled();
+        const int64_t t_rprof_begin = rprof ? ggml_time_ms() : 0;
+        auto rprof_result = execute_graph<T>(gf,
                                 n_threads,
                                 free_compute_buffer_immediately,
                                 {},
@@ -5902,7 +5904,24 @@ public:
                                 nullptr,
                                 nullptr,
                                 nullptr,
-                                runner_profile_enabled() ? &runner_profile : nullptr);
+                                rprof ? &runner_profile : nullptr);
+        if (rprof) {
+            const int64_t t_rprof_end = ggml_time_ms();
+            const int64_t wall = t_rprof_end - t_rprof_begin;
+            const int64_t known = runner_profile.offload_ms + runner_profile.alloc_ms +
+                                  runner_profile.copy_ms + runner_profile.compute_ms +
+                                  runner_profile.post_ms;
+            LOG_INFO("%s runner profile: wall=%lldms offload=%lldms alloc=%lldms copy=%lldms compute=%lldms post=%lldms other=%lldms",
+                     get_desc().c_str(),
+                     (long long) wall,
+                     (long long) runner_profile.offload_ms,
+                     (long long) runner_profile.alloc_ms,
+                     (long long) runner_profile.copy_ms,
+                     (long long) runner_profile.compute_ms,
+                     (long long) runner_profile.post_ms,
+                     (long long) (wall - known));
+        }
+        return rprof_result;
     }
 
     void set_flash_attention_enabled(bool enabled) {

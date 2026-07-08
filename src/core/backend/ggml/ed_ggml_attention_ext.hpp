@@ -177,11 +177,6 @@ inline bool attention_qkv_pair_pack_shape_supported(const ggml_tensor* q_first,
 }
 
 inline void attention_v_prep_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdata) {
-    if (ith != 0) {
-        return;
-    }
-    GGML_UNUSED(nth);
-
     const AttentionVPrepCustomParams params = attention_v_prep_params_from_userdata(userdata);
     GGML_ASSERT(attention_v_prep_params_valid(params));
     GGML_ASSERT(dst->src[0] != nullptr);
@@ -196,26 +191,24 @@ inline void attention_v_prep_cpu_custom_op(ggml_tensor* dst, int ith, int nth, v
     const int64_t batch = v->ne[3];
     GGML_ASSERT(dst->ne[0] == d_head && dst->ne[1] == seq && dst->ne[2] == n_head * batch);
 
-    for (int64_t b = 0; b < batch; ++b) {
-        for (int64_t h = 0; h < n_head; ++h) {
-            for (int64_t s = 0; s < seq; ++s) {
-                for (int64_t d = 0; d < d_head; ++d) {
-                    const float value = v_is_seq_major ?
-                                            attention_tensor_f32_at(v, d, s, h, b) :
-                                            attention_tensor_f32_at(v, d, h, s, b);
-                    attention_tensor_f16_set(dst, d, s, h + b * n_head, 0, value);
-                }
-            }
+    // Parallelize over flattened (batch, head, seq): each writes an independent dst
+    // row of d_head, so a static ith/nth split is race-free. Was single-threaded
+    // (ith!=0 return) — a CUDA-era no-op that cost ~1 of 96 cores on CPU.
+    const int64_t work = batch * n_head * seq;
+    for (int64_t idx = ith; idx < work; idx += nth) {
+        const int64_t s = idx % seq;
+        const int64_t h = (idx / seq) % n_head;
+        const int64_t b = idx / (seq * n_head);
+        for (int64_t d = 0; d < d_head; ++d) {
+            const float value = v_is_seq_major ?
+                                    attention_tensor_f32_at(v, d, s, h, b) :
+                                    attention_tensor_f32_at(v, d, h, s, b);
+            attention_tensor_f16_set(dst, d, s, h + b * n_head, 0, value);
         }
     }
 }
 
 inline void attention_pair_pack_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdata) {
-    if (ith != 0) {
-        return;
-    }
-    GGML_UNUSED(nth);
-
     const AttentionPairPackCustomParams params = attention_pair_pack_params_from_userdata(userdata);
     GGML_ASSERT(attention_pair_pack_params_valid(params));
     GGML_ASSERT(dst->src[0] != nullptr && dst->src[1] != nullptr);
@@ -232,26 +225,22 @@ inline void attention_pair_pack_cpu_custom_op(ggml_tensor* dst, int ith, int nth
     const int64_t batch = first->ne[2];
     GGML_ASSERT(dst->ne[0] == d_head && dst->ne[1] == total_seq && dst->ne[2] == n_head && dst->ne[3] == batch);
 
-    for (int64_t b = 0; b < batch; ++b) {
-        for (int64_t h = 0; h < n_head; ++h) {
-            for (int64_t s = 0; s < total_seq; ++s) {
-                const ggml_tensor* src = s < first_seq ? first : second;
-                const int64_t src_s = s < first_seq ? s : s - first_seq;
-                for (int64_t d = 0; d < d_head; ++d) {
-                    const float value = attention_tensor_f32_at(src, d + h * d_head, src_s, b, 0);
-                    attention_tensor_f16_set(dst, d, s, h, b, value);
-                }
-            }
+    // Parallelize over flattened (batch, head, total_seq); race-free per dst row.
+    const int64_t work = batch * n_head * total_seq;
+    for (int64_t idx = ith; idx < work; idx += nth) {
+        const int64_t s = idx % total_seq;
+        const int64_t h = (idx / total_seq) % n_head;
+        const int64_t b = idx / (total_seq * n_head);
+        const ggml_tensor* src = s < first_seq ? first : second;
+        const int64_t src_s = s < first_seq ? s : s - first_seq;
+        for (int64_t d = 0; d < d_head; ++d) {
+            const float value = attention_tensor_f32_at(src, d + h * d_head, src_s, b, 0);
+            attention_tensor_f16_set(dst, d, s, h, b, value);
         }
     }
 }
 
 inline void attention_qkv_pair_pack_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdata) {
-    if (ith != 0) {
-        return;
-    }
-    GGML_UNUSED(nth);
-
     const AttentionQKVPairPackCustomParams params = attention_qkv_pair_pack_params_from_userdata(userdata);
     GGML_ASSERT(attention_qkv_pair_pack_params_valid(params));
     GGML_ASSERT(dst->src[0] != nullptr && dst->src[1] != nullptr && dst->src[2] != nullptr);
@@ -274,16 +263,17 @@ inline void attention_qkv_pair_pack_cpu_custom_op(ggml_tensor* dst, int ith, int
 
     const ggml_tensor* firsts[3] = { q_first, k_first, v_first };
     const ggml_tensor* seconds[3] = { q_second, k_second, v_second };
-    for (int64_t plane = 0; plane < 3; ++plane) {
-        for (int64_t h = 0; h < n_head; ++h) {
-            for (int64_t s = 0; s < total_seq; ++s) {
-                const ggml_tensor* src = s < first_seq ? firsts[plane] : seconds[plane];
-                const int64_t src_s = s < first_seq ? s : s - first_seq;
-                for (int64_t d = 0; d < d_head; ++d) {
-                    const float value = attention_tensor_f32_at(src, d + h * d_head, src_s, 0, 0);
-                    attention_tensor_f16_set(dst, d, s, h, plane, value);
-                }
-            }
+    // Parallelize over flattened (plane=q/k/v, head, total_seq); race-free per dst row.
+    const int64_t work = 3 * n_head * total_seq;
+    for (int64_t idx = ith; idx < work; idx += nth) {
+        const int64_t s = idx % total_seq;
+        const int64_t h = (idx / total_seq) % n_head;
+        const int64_t plane = idx / (total_seq * n_head);
+        const ggml_tensor* src = s < first_seq ? firsts[plane] : seconds[plane];
+        const int64_t src_s = s < first_seq ? s : s - first_seq;
+        for (int64_t d = 0; d < d_head; ++d) {
+            const float value = attention_tensor_f32_at(src, d + h * d_head, src_s, 0, 0);
+            attention_tensor_f16_set(dst, d, s, h, plane, value);
         }
     }
 }

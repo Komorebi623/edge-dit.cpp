@@ -4,7 +4,10 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <set>
 #include <thread>
+#include <utility>
 
 #include "utils/rng_philox.hpp"
 #include "utils/util.h"
@@ -147,11 +150,48 @@ bool ModelRuntime::init(const ed_context_params_t& params, std::string* error) {
     return true;
 }
 
+namespace {
+// Physical core count (excludes SMT/hyperthreads). On this dual-socket Xeon,
+// running matmul-heavy graphs on all 192 logical cores is ~2x SLOWER than on the
+// 96 physical cores: hyperthreads contend for shared AVX-512/AMX vector units and
+// extra threads inflate per-node barrier sync. Parse /proc/cpuinfo for distinct
+// (physical id, core id) pairs; fall back to hardware_concurrency() if unavailable.
+static int detect_physical_cores() {
+    std::ifstream f("/proc/cpuinfo");
+    if (!f.is_open()) {
+        return 0;
+    }
+    std::set<std::pair<int, int>> cores;
+    int phys = -1;
+    int core = -1;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind("physical id", 0) == 0) {
+            auto pos = line.find(':');
+            if (pos != std::string::npos) { phys = std::atoi(line.c_str() + pos + 1); }
+        } else if (line.rfind("core id", 0) == 0) {
+            auto pos = line.find(':');
+            if (pos != std::string::npos) { core = std::atoi(line.c_str() + pos + 1); }
+        } else if (line.empty()) {
+            if (phys >= 0 && core >= 0) { cores.insert({phys, core}); }
+            phys = -1;
+            core = -1;
+        }
+    }
+    if (phys >= 0 && core >= 0) { cores.insert({phys, core}); }
+    return static_cast<int>(cores.size());
+}
+}  // namespace
+
 bool ModelRuntime::init_threads(const ed_context_params_t& params, std::string* error) {
     (void)error;
     n_threads_ = params.n_threads;
     if (n_threads_ <= 0) {
-        n_threads_ = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+        int physical = detect_physical_cores();
+        int logical  = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+        n_threads_   = physical > 0 ? physical : logical;
+        LOG_INFO("auto thread count: %d (physical cores=%d, logical=%d)",
+                 n_threads_, physical, logical);
     }
     return true;
 }

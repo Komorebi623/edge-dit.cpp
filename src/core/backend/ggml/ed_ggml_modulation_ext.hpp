@@ -120,11 +120,6 @@ inline void fused_modulate_tensor_f32_set(ggml_tensor* t,
 }
 
 inline void fused_modulate_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdata) {
-    if (ith != 0) {
-        return;
-    }
-    GGML_UNUSED(nth);
-
     const FusedModulateCustomParams params = fused_modulate_params_from_userdata(userdata);
     GGML_ASSERT(fused_modulate_params_valid(params));
     GGML_ASSERT(dst->src[0] != nullptr && dst->src[1] != nullptr && dst->src[2] != nullptr);
@@ -137,28 +132,26 @@ inline void fused_modulate_cpu_custom_op(ggml_tensor* dst, int ith, int nth, voi
         GGML_ASSERT(dst->ne[i] == x->ne[i]);
     }
 
-    for (int64_t i3 = 0; i3 < x->ne[3]; ++i3) {
-        for (int64_t i2 = 0; i2 < x->ne[2]; ++i2) {
-            for (int64_t i1 = 0; i1 < x->ne[1]; ++i1) {
-                for (int64_t i0 = 0; i0 < x->ne[0]; ++i0) {
-                    const float xv = fused_modulate_tensor_f32_at_broadcast(x, i0, i1, i2, i3);
-                    const float sv = fused_modulate_tensor_f32_at_broadcast(scale, i0, i1, i2, i3);
-                    const float bv = fused_modulate_tensor_f32_at_broadcast(shift, i0, i1, i2, i3);
-                    const float prod = xv * sv;
-                    const float y = xv + prod;
-                    fused_modulate_tensor_f32_set(dst, i0, i1, i2, i3, y + bv);
-                }
-            }
+    // Parallelize over flattened (i3,i2,i1) rows; each row writes independent dst.
+    // Was single-threaded (ith!=0 return): CUDA-era no-op, 1/96 cores on CPU.
+    const int64_t rows = x->ne[1] * x->ne[2] * x->ne[3];
+    const int64_t ne0 = x->ne[0];
+    for (int64_t r = ith; r < rows; r += nth) {
+        const int64_t i1 = r % x->ne[1];
+        const int64_t i2 = (r / x->ne[1]) % x->ne[2];
+        const int64_t i3 = r / (x->ne[1] * x->ne[2]);
+        for (int64_t i0 = 0; i0 < ne0; ++i0) {
+            const float xv = fused_modulate_tensor_f32_at_broadcast(x, i0, i1, i2, i3);
+            const float sv = fused_modulate_tensor_f32_at_broadcast(scale, i0, i1, i2, i3);
+            const float bv = fused_modulate_tensor_f32_at_broadcast(shift, i0, i1, i2, i3);
+            const float prod = xv * sv;
+            const float y = xv + prod;
+            fused_modulate_tensor_f32_set(dst, i0, i1, i2, i3, y + bv);
         }
     }
 }
 
 inline void fused_residual_gate_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdata) {
-    if (ith != 0) {
-        return;
-    }
-    GGML_UNUSED(nth);
-
     const FusedResidualGateCustomParams params = fused_residual_gate_params_from_userdata(userdata);
     GGML_ASSERT(fused_residual_gate_params_valid(params));
     GGML_ASSERT(dst->src[0] != nullptr && dst->src[1] != nullptr && dst->src[2] != nullptr);
@@ -171,17 +164,19 @@ inline void fused_residual_gate_cpu_custom_op(ggml_tensor* dst, int ith, int nth
         GGML_ASSERT(dst->ne[i] == x->ne[i]);
     }
 
-    for (int64_t i3 = 0; i3 < x->ne[3]; ++i3) {
-        for (int64_t i2 = 0; i2 < x->ne[2]; ++i2) {
-            for (int64_t i1 = 0; i1 < x->ne[1]; ++i1) {
-                for (int64_t i0 = 0; i0 < x->ne[0]; ++i0) {
-                    const float rv = fused_modulate_tensor_f32_at_broadcast(residual, i0, i1, i2, i3);
-                    const float xv = fused_modulate_tensor_f32_at_broadcast(x, i0, i1, i2, i3);
-                    const float gv = fused_modulate_tensor_f32_at_broadcast(gate, i0, i1, i2, i3);
-                    const float prod = xv * gv;
-                    fused_modulate_tensor_f32_set(dst, i0, i1, i2, i3, rv + prod);
-                }
-            }
+    // Parallelize over flattened (i3,i2,i1) rows; race-free per dst row.
+    const int64_t rows = x->ne[1] * x->ne[2] * x->ne[3];
+    const int64_t ne0 = x->ne[0];
+    for (int64_t r = ith; r < rows; r += nth) {
+        const int64_t i1 = r % x->ne[1];
+        const int64_t i2 = (r / x->ne[1]) % x->ne[2];
+        const int64_t i3 = r / (x->ne[1] * x->ne[2]);
+        for (int64_t i0 = 0; i0 < ne0; ++i0) {
+            const float rv = fused_modulate_tensor_f32_at_broadcast(residual, i0, i1, i2, i3);
+            const float xv = fused_modulate_tensor_f32_at_broadcast(x, i0, i1, i2, i3);
+            const float gv = fused_modulate_tensor_f32_at_broadcast(gate, i0, i1, i2, i3);
+            const float prod = xv * gv;
+            fused_modulate_tensor_f32_set(dst, i0, i1, i2, i3, rv + prod);
         }
     }
 }
