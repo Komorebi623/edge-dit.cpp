@@ -1,0 +1,28 @@
+{
+  "slug": "qwen-image-edit",
+  "name": "Qwen-Image-Edit",
+  "kind": "image",
+  "model_env": "EDGE_DIT_QWEN_IMAGE_EDIT_MODEL_PATH",
+  "description": "Validated local image-edit preset for Qwen-Image-Edit.",
+  "engine": {
+    "model_path": "/mnt/data/yangminghong/Qwen-Image-Edit",
+    "backend": "cuda",
+    "weight_type": "q4_k",
+    "offload_params_to_cpu": true,
+    "keep_text_encoder_on_cpu": true,
+    "keep_vae_on_cpu": true,
+    "max_vram_gb": 8.0
+  },
+  "request_example": {
+    "prompt": "turn this synthetic gradient into a polished product render",
+    "width": 256,
+    "height": 256,
+    "steps": 1,
+    "seed": 42,
+    "init_image_b64": "<supply via raw JSON editor or future upload control>"
+  },
+  "notes": [
+    "Validated locally through the real server_v2 HTTP path.",
+    "Use the raw JSON pane today for init_image_b64 payloads."
+  ]
+}

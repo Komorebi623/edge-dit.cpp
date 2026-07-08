@@ -124,6 +124,30 @@ with Engine(config) as engine:
     images[0].save("/tmp/output.png")
 ```
 
+`EngineConfig.weight_type` accepts either an integer enum value or a string alias.
+Supported string values are:
+
+- `auto`
+- `f32`
+- `f16`
+- `bf16`
+- `q4_0`
+- `q4_1`
+- `q5_0`
+- `q5_1`
+- `q8_0`
+- `q2_k`
+- `q3_k`
+- `q4_k`
+- `q5_k`
+- `q6_k`
+
+Additional aliases accepted by the Python bindings:
+
+- `fp32` -> `f32`
+- `fp16` -> `f16`
+- separators `-`, `_`, and `.` are normalized, so `q4-k`, `q4_k`, and `q4.k` all resolve to the same value
+
 Runtime query example:
 
 ```python
@@ -233,6 +257,12 @@ Qwen image edit example:
   "steps": 20,
   "init_image_b64": "<base64 png or jpeg bytes>"
 }
+```
+
+For the managed `server_v2` web console and cross-device runtime setup, see:
+
+```text
+bindings/python/frontend/server_v2-console/RUNTIME_CONFIGURATION.md
 ```
 
 FLUX Kontext example:
@@ -567,6 +597,8 @@ Additional validation completed in this workspace on `2026-07-06`:
   - worked after setting `weight_type="q4_k"` plus `offload_params_to_cpu=True`,
     `keep_text_encoder_on_cpu=True`, `keep_vae_on_cpu=True`, `max_vram_gb=8.0`,
     `width=512`, `height=512`, `steps=1`
+  - `weight_type` also accepts `f32`, `f16`, `bf16`, `q4_0`, `q4_1`, `q5_0`, `q5_1`, `q8_0`,
+    `q2_k`, `q3_k`, `q4_k`, `q5_k`, `q6_k`, and `auto`
   - sample config: `bindings/python/examples/qwen_image_smoke_config.json`
 - `Wan2.1-T2V-1.3B`
   - worked with `backend="cuda"`, `offload_params_to_cpu=True`,
