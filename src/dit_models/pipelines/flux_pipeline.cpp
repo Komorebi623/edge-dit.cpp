@@ -786,7 +786,10 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
     ConditionerParams cond_params;
     cond_params.text = params->prompt != nullptr ? params->prompt : "";
     cond_params.clip_skip = -1;
+    const int64_t ed_gen_t0 = ggml_time_ms();
+    const int64_t ed_enc_t0 = ed_gen_t0;
     SDCondition condition = conditioner_->get_learned_condition(n_threads, cond_params);
+    const int64_t ed_enc_ms = ggml_time_ms() - ed_enc_t0;
     if (condition.empty()) {
         if (error != nullptr) {
             *error = "Flux prompt encoding returned empty condition";
@@ -1005,6 +1008,7 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         return true;
     }
 
+    const int64_t ed_dec_t0 = ggml_time_ms();
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
     sd::Tensor<float> decoded = vae_->decode(n_threads,
                                              vae_latents,
@@ -1018,6 +1022,7 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         }
         return false;
     }
+    const int64_t ed_dec_ms = ggml_time_ms() - ed_dec_t0;
 
     const ed_status_t status = ed_tensor_to_image(decoded, image);
     if (status != ED_STATUS_OK) {
@@ -1026,6 +1031,11 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         }
         return false;
     }
+    const int64_t ed_total_ms = ggml_time_ms() - ed_gen_t0;
+    const int64_t ed_sample_ms = sample_end_ms - sample_start_ms;
+    LOG_INFO("flux generate breakdown: total=%.2fs | text_encode=%.2fs sampling=%.2fs vae_decode=%.2fs other=%.2fs",
+             ed_total_ms/1000.0f, ed_enc_ms/1000.0f, ed_sample_ms/1000.0f, ed_dec_ms/1000.0f,
+             (ed_total_ms - ed_enc_ms - ed_sample_ms - ed_dec_ms)/1000.0f);
     return true;
 }
 
