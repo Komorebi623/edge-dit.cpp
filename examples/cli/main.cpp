@@ -75,7 +75,7 @@ static void print_usage(const char* prog) {
         "  --cache-taylor-skip <int> TaylorSeer skip interval, default: 1\n"
         "  --cache-scm-mask <csv>    Steps computation mask, e.g. 1,0,0,1\n"
         "  --cache-static-scm        Use static SCM policy for methods that support it\n"
-        "  --backend <name>          Backend: auto, cpu, cuda, gpu. Default: auto\n"
+        "  --backend <name>          Backend: auto, cpu, cuda, vulkan, metal, gpu. Default: auto\n"
         "  --gpu                     Alias for --backend gpu\n"
         "  --devices <csv>           GPU devices for parallel workers, e.g. 0,1,2,3\n"
         "  --type <dtype>            Weight type / on-the-fly quantization when loading safetensors:\n"

@@ -1554,8 +1554,8 @@ namespace WAN {
         GGML_ASSERT(v != nullptr);
         GGML_ASSERT(pe != nullptr);
 
-        q = Rope::apply_rope(ctx->ggml_ctx, q, pe);
-        k = Rope::apply_rope(ctx->ggml_ctx, k, pe);
+        q = Rope::apply_rope(ctx->ggml_ctx, q, pe, true, ctx->backend);
+        k = Rope::apply_rope(ctx->ggml_ctx, k, pe, true, ctx->backend);
 
         q = ggml_cont(ctx->ggml_ctx, q);
         ggml_set_name(q, (name_prefix + "_q_rope").c_str());

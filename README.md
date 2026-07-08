@@ -13,8 +13,10 @@
 ## 编译
 
 ```bash
-bash ./scripts/build_cuda.sh
-bash ./scripts/build_cpu.sh
+bash ./scripts/build_cuda.sh      # NVIDIA CUDA
+bash ./scripts/build_cpu.sh       # 纯 CPU
+bash ./scripts/build_vulkan.sh    # Vulkan（跨平台 GPU）
+bash ./scripts/build_metal.sh     # Apple Metal（仅 macOS）
 ```
 
 CUDA 构建脚本默认会启用 cuDNN SDPA fast attention。脚本会先查找
@@ -38,11 +40,29 @@ ED_INSTALL_CUDNN=OFF bash ./scripts/build_cuda.sh
 ED_ENABLE_CUDNN_SDPA=OFF bash ./scripts/build_cuda.sh
 ```
 
+### Vulkan / Metal 后端
+
+除 CUDA 与 CPU 外，还可通过 ggml 使用 Vulkan（跨平台 GPU，含 NVIDIA/AMD/Intel）
+与 Metal（Apple GPU）后端。计算图会复用 ggml 内置算子，遇到不支持的算子自动回退，
+无需 CUDA 专用的快速算子。
+
+```bash
+# Vulkan：需要 Vulkan SDK（含 glslc/shaderc，用于在构建时把 GLSL 编译成 SPIR-V）
+# 与 Vulkan loader。若 SDK 装在非标准路径，设置 VULKAN_SDK 指向它。
+bash ./scripts/build_vulkan.sh
+VULKAN_SDK=/path/to/vulkan-sdk bash ./scripts/build_vulkan.sh
+
+# Metal：仅限 macOS，脚本在非 macOS 上会直接报错退出。
+bash ./scripts/build_metal.sh
+```
+
 编译完成后，命令行程序位于：
 
 ```bash
 ./build-cuda/bin/ed-cli   # GPU 推理
 ./build-cpu/bin/ed-cli    # CPU 推理
+./build-metal/bin/ed-cli  # Metal 推理
+./build-vulkan/bin/ed-cli # Vulkan 推理
 ```
 
 ## 基本用法
