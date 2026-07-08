@@ -1189,6 +1189,14 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_conv_2d(ggml_context* ctx,
     }
 
     if (direct) {
+        // On CPU with oneDNN, a bf16 conv kernel makes the internal im2col GEMM
+        // run on Intel AMX (this box has amx_bf16 but not amx_fp16), which is a
+        // large VAE-decode win. Cast the f16 kernel to bf16 once here; opt-in via
+        // ED_CONV_BF16 so non-AMX / non-oneDNN builds keep the f16 path.
+        const char* conv_bf16 = std::getenv("ED_CONV_BF16");
+        if (conv_bf16 && conv_bf16[0] && conv_bf16[0] != '0' && w->type == GGML_TYPE_F16) {
+            w = ggml_cast(ctx, w, GGML_TYPE_BF16);
+        }
         x = ggml_conv_2d_direct(ctx, w, x, s0, s1, p0, p1, d0, d1);
     } else {
         x = ggml_conv_2d(ctx, w, x, s0, s1, p0, p1, d0, d1);
