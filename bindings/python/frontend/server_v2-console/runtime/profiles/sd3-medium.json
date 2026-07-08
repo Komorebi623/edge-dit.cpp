@@ -1,0 +1,26 @@
+{
+  "slug": "sd3-medium",
+  "name": "stable-diffusion-3-medium-diffusers",
+  "kind": "image",
+  "model_env": "EDGE_DIT_SD3_MODEL_PATH",
+  "description": "Conservative SD3 preset for local smoke runs.",
+  "engine": {
+    "model_path": "/mnt/data/yangminghong/stable-diffusion-3-medium-diffusers",
+    "backend": "cuda",
+    "offload_params_to_cpu": true,
+    "keep_text_encoder_on_cpu": true,
+    "skip_t5": true,
+    "max_vram_gb": 8.0
+  },
+  "request_example": {
+    "prompt": "a studio photo of a glass teapot",
+    "width": 256,
+    "height": 256,
+    "steps": 1,
+    "seed": 42
+  },
+  "notes": [
+    "Validated locally with width 256, height 256, and steps 1.",
+    "Larger requests can destabilize the managed backend; use the smoke envelope first."
+  ]
+}
