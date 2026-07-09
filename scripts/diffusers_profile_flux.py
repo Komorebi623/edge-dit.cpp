@@ -77,6 +77,30 @@ def main():
     img.save(IMG)
     log(f"baseline wall (full pipe, {STEPS} steps): {wall:.2f}s")
 
+    # --- stage timing via hooks (same caliber as edge-dit's generate breakdown:
+    #     text_encode / sampling(transformer) / vae_decode; excludes model load) ---
+    stage = {"text": 0.0, "dit": 0.0, "vae": 0.0}
+    def wrap(mod, key):
+        orig = mod.forward
+        def timed(*a, **k):
+            t = time.time(); r = orig(*a, **k); stage[key] += time.time() - t
+            return r
+        mod.forward = timed
+        return orig
+    o_te  = wrap(pipe.text_encoder,  "text")
+    o_te2 = wrap(pipe.text_encoder_2,"text")
+    o_tf  = wrap(pipe.transformer,   "dit")
+    o_vae = wrap(pipe.vae.decoder,   "vae")
+    g = torch.Generator(device="cpu").manual_seed(42)
+    tS = time.time()
+    _ = pipe(generator=g, **common)
+    stage_wall = time.time() - tS
+    pipe.text_encoder.forward=o_te; pipe.text_encoder_2.forward=o_te2
+    pipe.transformer.forward=o_tf; pipe.vae.decoder.forward=o_vae
+    log(f"stage breakdown (excl. load): text_encode={stage['text']:.2f}s "
+        f"sampling={stage['dit']:.2f}s vae_decode={stage['vae']:.2f}s "
+        f"| stage_wall={stage_wall:.2f}s")
+
     # --- profiled run ---
     log("profiled run (torch.profiler CPU) ...")
     from torch.profiler import profile, ProfilerActivity
