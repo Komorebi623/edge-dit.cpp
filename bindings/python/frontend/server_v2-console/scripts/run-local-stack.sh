@@ -6,6 +6,8 @@ APP_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 
 source "${SCRIPT_DIR}/runtime-env.sh"
 
+FRONTEND_HOST=${EDGE_DIT_FRONTEND_HOST:-127.0.0.1}
+
 MANAGER_ARGS=("$@")
 if [[ " ${MANAGER_ARGS[*]} " != *" --auto-start-profile "* ]]; then
   MANAGER_ARGS=(--auto-start-profile "${EDGE_DIT_DEFAULT_PROFILE:-flux-dev}" "${MANAGER_ARGS[@]}")
@@ -44,7 +46,7 @@ trap cleanup EXIT INT TERM
 run_manager_loop &
 SUPERVISOR_PID=$!
 
-npm run dev -- --host 127.0.0.1 --port 5173
+npm run dev -- --host "${FRONTEND_HOST}" --port 5173
 VITE_EXIT_CODE=$?
 
 cleanup
