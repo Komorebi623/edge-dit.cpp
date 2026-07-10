@@ -50,6 +50,12 @@ Start the full managed local stack:
 npm run dev:managed
 ```
 
+Start the same managed stack on all interfaces so another device can open it through your machine IP:
+
+```bash
+npm run dev:managed:network
+```
+
 This launches:
 
 ```text
@@ -58,6 +64,8 @@ runtime manager:  http://127.0.0.1:8090
 managed backend:  http://127.0.0.1:8080
 managed prefix:   /ed/v2
 ```
+
+With `dev:managed:network`, the frontend, runtime manager, and managed backend all bind to `0.0.0.0`. Remote browsers can either stay on the Vite proxy at `:5173` or call the runtime/backend directly on `:8090` and `:8080`.
 
 The default managed profile is `flux-dev`. Override it by forwarding runtime-manager args:
 
