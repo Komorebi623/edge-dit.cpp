@@ -3561,7 +3561,19 @@ protected:
         // and then read by many SP graph-cut segments.  Caching the uploaded
         // device tensor fixes repeated runtime-input upload; it does not change
         // RoPE math or operator placement.
-        return name == "pe" && ggml_nbytes(tensor) >= 1024 * 1024;
+        const size_t nbytes = ggml_nbytes(tensor);
+        if (name == "pe" && nbytes >= 1024 * 1024) {
+            return true;
+        }
+
+        // Wan text context is the same external tensor for every transformer
+        // block in one SP graph-cut forward. Upload it once, then bind the
+        // later segment inputs to the cached device tensor.
+        if (name == "wan.context" && nbytes >= 1024 * 1024) {
+            return process_group_ != nullptr && process_group_->enabled();
+        }
+
+        return false;
     }
 
     std::string runtime_const_cache_key(const ggml_tensor* tensor,
@@ -3613,8 +3625,34 @@ protected:
         return runtime_const_cache_tensor_shape_matches(tensor, entry);
     }
 
+    size_t runtime_const_cache_slot_entry_limit(const ggml_tensor* tensor) const {
+        if (tensor == nullptr || tensor->name[0] == '\0') {
+            return 1;
+        }
+
+        // Wan alternates cond/uncond text contexts during CFG sampling. Both
+        // tensors are stable across denoise steps, so keep both device uploads
+        // instead of pruning one when the other branch runs.
+        if (std::strcmp(tensor->name, "wan.context") == 0) {
+            return 2;
+        }
+
+        return 1;
+    }
+
     void prune_stale_runtime_const_cache_entries(const ggml_tensor* tensor,
                                                  const void* data) {
+        const size_t slot_limit = runtime_const_cache_slot_entry_limit(tensor);
+        size_t slot_entries = 0;
+        for (const auto& entry : runtime_const_cache_) {
+            if (runtime_const_cache_entry_matches_tensor_slot(tensor, entry)) {
+                ++slot_entries;
+            }
+        }
+        if (slot_entries < slot_limit) {
+            return;
+        }
+
         runtime_const_cache_.erase(std::remove_if(runtime_const_cache_.begin(),
                                                   runtime_const_cache_.end(),
                                                   [&](const RuntimeConstCacheEntry& entry) {
@@ -6154,6 +6192,7 @@ protected:
     bool force_f32;
     bool force_prec_f32;
     float scale;
+    bool scale_quantized_only;
     std::string prefix;
 
     void init_params(ggml_context* ctx, const String2TensorStorage& tensor_storage_map = {}, const std::string prefix = "") override {
@@ -6175,13 +6214,15 @@ public:
            bool bias           = true,
            bool force_f32      = false,
            bool force_prec_f32 = false,
-           float scale         = 1.f)
+           float scale         = 1.f,
+           bool scale_quantized_only = false)
         : in_features(in_features),
           out_features(out_features),
           bias(bias),
           force_f32(force_f32),
           force_prec_f32(force_prec_f32),
-          scale(scale) {}
+          scale(scale),
+          scale_quantized_only(scale_quantized_only) {}
 
     void set_scale(float scale_) {
         scale = scale_;
@@ -6191,20 +6232,26 @@ public:
         force_prec_f32 = force_prec_f32_;
     }
 
+    bool weight_is_quantized() const {
+        auto it = params.find("weight");
+        return it != params.end() && ggml_is_quantized(it->second->type);
+    }
+
     ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
         ggml_tensor* w = params["weight"];
         ggml_tensor* b = nullptr;
         if (bias) {
             b = params["bias"];
         }
+        const float effective_scale = scale_quantized_only && !ggml_is_quantized(w->type) ? 1.f : scale;
         if (ctx->weight_adapter) {
             WeightAdapter::ForwardParams forward_params;
             forward_params.op_type               = WeightAdapter::ForwardParams::op_type_t::OP_LINEAR;
             forward_params.linear.force_prec_f32 = force_prec_f32;
-            forward_params.linear.scale          = scale;
+            forward_params.linear.scale          = effective_scale;
             return ctx->weight_adapter->forward_with_lora(ctx->ggml_ctx, ctx->backend, x, w, b, prefix, forward_params);
         }
-        return ggml_ext_linear(ctx->ggml_ctx, x, w, b, force_prec_f32, scale);
+        return ggml_ext_linear(ctx->ggml_ctx, x, w, b, force_prec_f32, effective_scale);
     }
 
     ggml_tensor* forward_output_slice(GGMLRunnerContext* ctx,
