@@ -2,6 +2,11 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'vitest/config'
 
+const localRuntimeProxy = {
+  changeOrigin: true,
+  xfwd: true,
+}
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
@@ -12,20 +17,20 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/runtime/v1': {
+        ...localRuntimeProxy,
         target: 'http://127.0.0.1:8090',
-        changeOrigin: true,
       },
       '/ed/v2': {
+        ...localRuntimeProxy,
         target: 'http://127.0.0.1:8080',
-        changeOrigin: true,
       },
       '/edgedit/v2': {
+        ...localRuntimeProxy,
         target: 'http://127.0.0.1:8080',
-        changeOrigin: true,
       },
       '/edge-dit/v2': {
+        ...localRuntimeProxy,
         target: 'http://127.0.0.1:8080',
-        changeOrigin: true,
       },
     },
   },

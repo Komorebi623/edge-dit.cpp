@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "dev:managed": "bash ./scripts/run-local-stack.sh",
+    "dev:managed:network": "EDGE_DIT_FRONTEND_HOST=0.0.0.0 EDGE_DIT_RUNTIME_MANAGER_HOST=0.0.0.0 EDGE_DIT_MANAGED_BACKEND_HOST=0.0.0.0 bash ./scripts/run-local-stack.sh",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",

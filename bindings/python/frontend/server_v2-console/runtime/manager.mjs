@@ -197,7 +197,71 @@ function pushEvent(level, type, message, detail = null) {
   })
 }
 
-function snapshotStatus() {
+function firstHeaderValue(value) {
+  if (Array.isArray(value)) {
+    return value[0] ?? null
+  }
+  return typeof value === 'string' ? value : null
+}
+
+function firstForwardedValue(value) {
+  if (!value) {
+    return null
+  }
+  const [first = ''] = value.split(',')
+  const trimmed = first.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function isWildcardHost(hostname) {
+  return hostname === '0.0.0.0' || hostname === '::' || hostname === '[::]'
+}
+
+function fallbackConnectionHost(hostname) {
+  if (hostname === '::' || hostname === '[::]') {
+    return '[::1]'
+  }
+  if (hostname === '0.0.0.0') {
+    return '127.0.0.1'
+  }
+  return hostname
+}
+
+function extractForwardedHostname(headers) {
+  const forwardedHost = firstForwardedValue(firstHeaderValue(headers['x-forwarded-host']))
+  const directHost = firstForwardedValue(firstHeaderValue(headers.host))
+  const candidate = forwardedHost ?? directHost
+  if (!candidate) {
+    return null
+  }
+
+  try {
+    return new URL(`http://${candidate}`).hostname
+  } catch {
+    return null
+  }
+}
+
+function extractForwardedProtocol(headers) {
+  const forwardedProto = firstForwardedValue(firstHeaderValue(headers['x-forwarded-proto']))
+  if (forwardedProto === 'http' || forwardedProto === 'https') {
+    return forwardedProto
+  }
+  return 'http'
+}
+
+function resolveRecommendedBackendBaseUrl(headers) {
+  const requestedHostname = headers ? extractForwardedHostname(headers) : null
+  const hostname =
+    requestedHostname && !isWildcardHost(requestedHostname)
+      ? requestedHostname
+      : fallbackConnectionHost(managedBackendHost)
+  const protocol = headers ? extractForwardedProtocol(headers) : 'http'
+  return `${protocol}://${hostname}:${managedBackendPort}`
+}
+
+function snapshotStatus(requestHeaders = null) {
+  const recommendedBackendBaseUrl = resolveRecommendedBackendBaseUrl(requestHeaders)
   return {
     backend: {
       auto_restart_enabled: true,
@@ -228,7 +292,7 @@ function snapshotStatus() {
     profiles: profiles.map((profile) => serializeProfile(profile)),
     recent_events: [...events.items],
     recommended_connection_target: {
-      baseUrl: `http://${managedBackendHost}:${managedBackendPort}`,
+      baseUrl: recommendedBackendBaseUrl,
       prefix: '/ed/v2',
     },
     log_tail: [...logTail.items],
@@ -687,7 +751,7 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method === 'GET' && url.pathname === '/runtime/v1/status') {
-    writeJson(response, 200, snapshotStatus())
+    writeJson(response, 200, snapshotStatus(request.headers))
     return
   }
 
@@ -707,7 +771,7 @@ const server = createServer(async (request, response) => {
         return
       }
       await enqueueControl(() => startProfile(profileSlug, 'manual_start'))
-      writeJson(response, 202, snapshotStatus())
+      writeJson(response, 202, snapshotStatus(request.headers))
     } catch (error) {
       writeJson(response, 500, {
         error: {
@@ -724,7 +788,7 @@ const server = createServer(async (request, response) => {
   if (request.method === 'POST' && url.pathname === '/runtime/v1/backend/restart') {
     try {
       await enqueueControl(() => restartProfile('manual_restart'))
-      writeJson(response, 202, snapshotStatus())
+      writeJson(response, 202, snapshotStatus(request.headers))
     } catch (error) {
       writeJson(response, 409, {
         error: {
@@ -740,7 +804,7 @@ const server = createServer(async (request, response) => {
 
   if (request.method === 'POST' && url.pathname === '/runtime/v1/backend/stop') {
     await enqueueControl(() => stopManagedBackend('manual_stop', { clearProfile: false }))
-    writeJson(response, 202, snapshotStatus())
+    writeJson(response, 202, snapshotStatus(request.headers))
     return
   }
 
