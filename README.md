@@ -229,7 +229,7 @@ Technical report citation coming soon. For now, cite the repository:
 
 ```bibtex
 @software{edge_dit_cpp,
-  title  = {edge-dit.cpp},
+  title  = {edge-dit.cpp: A Lightweight Native Runtime for Diffusion Transformers on Resource-Constrained Devices},
   author = {edge-dit.cpp contributors},
   url    = {https://github.com/THU-MIG/edge-dit.cpp},
   year   = {2026}
