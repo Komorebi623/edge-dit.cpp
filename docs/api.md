@@ -605,8 +605,46 @@ A development console is available at:
 bindings/python/frontend/server_v2-console/
 ```
 
+![server_v2 Web Console overview](assets/server-v2-web-console-overview.png)
+
+Example session with a managed local `FLUX.1-dev` image backend.
+
 It is intended for local development and demonstration. It is not a stable API
-contract. See
+contract.
+
+The console is organized into three working areas:
+
+- Left rail: `Connection` probes an existing `server_v2` target by base URL and
+  API prefix. `Local Runtime` manages a verified local profile, exposes runtime
+  health, and surfaces recent manager/backend events.
+- Center rail: `Generation Composer` is the main request editor. Select
+  `Image`, `Edit Image`, or `Video`, fill the request form, submit a job, then
+  watch `Progress` and inspect the decoded output in `Result Viewer`.
+- Right rail: `Task List` tracks queued and completed jobs. `Payload Preview`,
+  `Capabilities`, `JSON Inspector`, and `Activity Log` help compare the live
+  backend contract, the normalized request payload, and recent HTTP activity.
+
+Typical local workflow:
+
+1. Start the managed stack with `npm run dev:managed`, or launch the frontend
+   and backend separately.
+2. In `Connection`, point the console at the backend, typically
+   `http://127.0.0.1:8080` with the `/ed/v2` prefix, then refresh probes and
+   connect.
+3. If you are using the managed local runtime, choose a verified model profile
+   in `Local Runtime` and use the runtime controls to start, restart, or stop
+   the backend.
+4. In `Generation Composer`, choose the mode, enter the prompt and parameters,
+   and create a job.
+5. Watch `Task List` and `Progress` while the job runs. When it completes, use
+   `Result Viewer` to inspect the decoded image/video output and download the
+   rendered asset or raw result JSON.
+6. Use `Payload Preview`, `Capabilities`, `JSON Inspector`, and the runtime log
+   panels when you need to debug mismatched requests, unexpected server
+   behavior, or model-profile configuration issues.
+
+For setup and launch commands, see
+[README.md](../bindings/python/frontend/server_v2-console/README.md) and
 [RUNTIME_CONFIGURATION.md](../bindings/python/frontend/server_v2-console/RUNTIME_CONFIGURATION.md).
 
 ## API Stability
