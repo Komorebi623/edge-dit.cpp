@@ -39,3 +39,4 @@ outputs/
 *.jpg
 *.jpeg
 *.mp4
+!docs/assets/*.png
