@@ -174,6 +174,10 @@ The Python package lives under:
 bindings/python/src/edge_dit/
 ```
 
+The distribution metadata lives in `bindings/python/pyproject.toml`. The
+installed package name is `edge-dit-python`; the import package is
+`edge_dit`.
+
 Basic usage:
 
 ```python
@@ -193,6 +197,200 @@ with Engine(config) as engine:
     images[0].save("output.png")
 ```
 
+If you need NumPy outputs instead of Pillow images, install the optional extra:
+
+```bash
+pip install '.[numpy]'
+```
+
+### Public package surface
+
+The package currently re-exports the main configuration, request, engine, and
+error types:
+
+```python
+from edge_dit import (
+    EdgeDitClosedError,
+    EdgeDitError,
+    EdgeDitLibraryError,
+    Engine,
+    EngineConfig,
+    GenerationCancelledError,
+    GenerationError,
+    ImageRequest,
+    InvalidArgumentError,
+    ModelLoadError,
+    UnsupportedError,
+    UnsupportedImageFormatError,
+    VideoRequest,
+)
+```
+
+### Engine lifecycle
+
+`Engine` wraps a single native `ed_context_t`.
+
+- Construct it with an `EngineConfig` instance.
+- Or construct it directly from `model_path` plus keyword arguments.
+- Close it explicitly with `close()` or use it as a context manager.
+- After `close()`, any further operation raises `EdgeDitClosedError`.
+- Generation calls are serialized per engine instance by an internal lock.
+
+Runtime query and control methods:
+
+- `engine.pipeline_name -> str | None`
+- `engine.version_name -> str | None`
+- `engine.supports_image -> bool`
+- `engine.supports_video -> bool`
+- `engine.default_sampler -> int`
+- `engine.default_scheduler(sampler: int | str | None = None) -> int`
+- `engine.progress_steps() -> tuple[int, int]`
+- `engine.request_cancel() -> None`
+- `engine.generate_image(...) -> list[PIL.Image.Image] | list[numpy.ndarray]`
+- `engine.generate_video(...) -> list[PIL.Image.Image] | list[numpy.ndarray]`
+
+The polling and cancellation surface is intentionally narrow:
+
+- `progress_steps()` reports sampling-step progress only.
+- It does not include prompt encoding, VAE decode, or output encoding.
+- `request_cancel()` is cooperative and takes effect at native step boundaries.
+
+### EngineConfig
+
+`EngineConfig` validates inputs on construction. A configuration must provide
+either:
+
+- `model_path`
+- Or a component set containing `diffusion_model_path`, `vae_path`,
+  `clip_l_path`, and either `t5xxl_path` or `skip_t5=True`
+
+Important fields include:
+
+- Model/component paths:
+  `model_path`, `diffusion_model_path`, `high_noise_diffusion_model_path`,
+  `clip_l_path`, `clip_g_path`, `clip_vision_path`, `t5xxl_path`, `llm_path`,
+  `llm_vision_path`, `vae_path`, `taesd_path`, `control_net_path`
+- Runtime/backend:
+  `backend`, `n_threads`, `weight_type`, `tensor_type_rules`, `use_mmap`
+- Memory/offload:
+  `offload_params_to_cpu`, `keep_text_encoder_on_cpu`,
+  `keep_control_net_on_cpu`, `keep_vae_on_cpu`, `max_vram_gb`
+- Model/runtime options:
+  `skip_t5`, `flash_attention`, `vae_tiling`, `vae_tile_size`
+- Parallelism:
+  `cfg_parallel_size`, `tp_parallel_size`, `sp_parallel_size`
+
+`weight_type` accepts either an integer native enum value or a normalized string
+alias such as `auto`, `f16`, `bf16`, `q4_0`, or `q4_k`.
+
+### ImageRequest
+
+`ImageRequest` validates inputs on construction and requires a non-empty
+`prompt`.
+
+Common generation fields:
+
+- `prompt`, `negative_prompt`
+- `width`, `height`, `seed`
+- `steps`, `cfg_scale`, `guidance`, `distilled_guidance`, `eta`, `flow_shift`
+- `sampler`, `scheduler`
+
+Image-specific fields:
+
+- `batch_count`
+- `image_cfg_scale`
+- `init_image`, `mask_image`, `control_image`
+- `ref_images`
+- `output_type`
+
+Cache-tuning fields mirror the current native sample-parameter surface:
+
+- `cache_mode`
+- `cache_reuse_threshold`
+- `cache_start_percent`, `cache_end_percent`
+- `cache_error_decay_rate`
+- `cache_use_relative_threshold`
+- `cache_reset_error_on_compute`
+- `cache_Fn_compute_blocks`, `cache_Bn_compute_blocks`
+- `cache_residual_diff_threshold`
+- `cache_max_accumulated_residual_diff`
+- `cache_max_warmup_steps`
+- `cache_max_cached_steps`
+- `cache_max_continuous_cached_steps`
+- `cache_taylorseer_n_derivatives`
+- `cache_taylorseer_skip_interval`
+- `cache_scm_mask`
+- `cache_scm_policy_dynamic`
+
+Notes:
+
+- `init_image`, `mask_image`, `control_image`, and `ref_images` must be
+  `PIL.Image.Image` values.
+- `ref_images` must be a non-empty `list` or `tuple` when provided.
+- `output_type` may be `pil` or `numpy`.
+- `guidance` and `distilled_guidance` map to the same native field; if both are
+  provided they must match.
+- Keyword-style calls also accept `batch_size` as an alias for `batch_count`.
+
+### VideoRequest
+
+`VideoRequest` follows the same validation style as `ImageRequest` and requires
+a non-empty `prompt`.
+
+Fields:
+
+- `prompt`, `negative_prompt`
+- `width`, `height`, `frames`, `seed`
+- `steps`, `cfg_scale`, `guidance`, `distilled_guidance`, `eta`, `flow_shift`
+- `sampler`, `scheduler`
+- `output_type`
+
+`output_type` may be `pil` or `numpy`. As with `ImageRequest`, `guidance` and
+`distilled_guidance` must match when both are provided.
+
+### Output formats
+
+By default, image generation returns `list[PIL.Image.Image]` and video
+generation returns `list[PIL.Image.Image]` frames.
+
+If `output_type="numpy"` is requested and NumPy is installed:
+
+- grayscale outputs use shape `(height, width)`
+- RGB/RGBA outputs use shape `(height, width, channels)`
+
+### Enum arguments
+
+`weight_type`, `sampler`, `scheduler`, and `cache_mode` accept either integer
+native values or string aliases. String names are normalized across `-`, `_`,
+`.`, and spaces.
+
+Accepted aliases in the Python binding include:
+
+- Samplers: `euler`, `dpm++-2m`, `ddim`, `tcd`
+- Schedulers: `discrete`, `karras`, `simple`, `lcm`
+- Cache modes: `disabled`, `easycache`, `ucache`, `dbcache`, `taylorseer`,
+  `cache-dit`
+
+Successful alias resolution only means the Python binding can map the string to
+the corresponding native enum. It does not guarantee that every loaded model or
+pipeline implements identical behavior for that setting. For example, some
+pipelines restrict sampler choices or ignore unsupported overrides.
+
+### Exceptions
+
+The Python bindings raise typed runtime errors:
+
+- `EdgeDitLibraryError` when the shared library cannot be loaded
+- `ModelLoadError` when a native context cannot be created
+- `InvalidArgumentError` for request/config validation failures
+- `GenerationError` for generation failures and empty native outputs
+- `GenerationCancelledError` for cooperative cancellation
+- `UnsupportedError` for unsupported features or capability mismatches
+- `UnsupportedImageFormatError` when native output channels cannot be converted
+
+Generation and load failures are enriched with Python-side context such as model
+paths, backend, size, steps, seed, and selected output type.
+
 For local test runs from the repository root:
 
 ```bash
@@ -206,7 +404,11 @@ examples.
 
 ## Python server_v2
 
-The Python bindings include a job-style HTTP server:
+The Python bindings include a job-style HTTP server built directly on top of the
+Python `Engine`. The current runtime executes one job at a time and stores
+terminal job metadata/results in memory until TTL cleanup removes them.
+
+Start it from the repository root:
 
 ```bash
 PYTHONPATH=bindings/python/src \
@@ -217,8 +419,26 @@ python -m edge_dit.server_v2 \
   --port 8080
 ```
 
-Endpoints include:
+If the package is installed, the same entrypoint is also exposed as:
 
+```bash
+edge-dit-server-v2 --model /path/to/model --backend cuda
+```
+
+Useful CLI flags include:
+
+- `--model`
+- `--diffusion-model`, `--vae`, `--clip_l`, `--clip_g`, `--t5xxl`
+- `--backend`, `--threads`, `--max-vram`
+- `--offload-to-cpu`, `--keep-text-encoder-on-cpu`, `--keep-vae-on-cpu`
+- `--skip-t5`
+- `--job-ttl-seconds`
+
+Passing a negative `--job-ttl-seconds` disables automatic cleanup.
+
+Canonical endpoints:
+
+- `GET /`
 - `GET /ed/v2/health`
 - `GET /ed/v2/capabilities`
 - `POST /ed/v2/images/generations`
@@ -229,6 +449,153 @@ Endpoints include:
 - `POST /ed/v2/jobs/{job_id}/cancel`
 - `GET /ed/v2/jobs/{job_id}/result`
 - `DELETE /ed/v2/jobs/{job_id}`
+
+Aliases are also registered for `/edgedit/v2/...` and `/edge-dit/v2/...`.
+
+### Capabilities and health
+
+`GET /ed/v2/health` returns a lightweight health payload.
+
+`GET /ed/v2/capabilities` returns a runtime description including:
+
+- service and package version
+- configured model name
+- pipeline and version names from the loaded engine
+- `supports.image` and `supports.video`
+- default sampler and scheduler
+- endpoint aliases
+- server semantics such as progress granularity, cancellation mode, result
+  retention, and job TTL
+
+### Image job requests
+
+`POST /ed/v2/images/generations` accepts the `ImageRequest` surface as JSON,
+except that server-side results are always stored as PNG-encoded Pillow outputs.
+
+The endpoint additionally accepts:
+
+- `cache`, a nested JSON object that maps onto the `cache_*` request fields
+- `init_image_b64`
+- `mask_image_b64`
+- `control_image_b64`
+- `ref_images_b64`
+
+These image fields accept either raw base64 bytes or `data:image/...;base64,...`
+URLs. The server decodes them to `PIL.Image.Image` before calling the engine.
+
+Example:
+
+```bash
+curl -s http://127.0.0.1:8080/ed/v2/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "a cinematic photo of a glass teapot on a wooden table",
+    "width": 1024,
+    "height": 1024,
+    "steps": 20,
+    "guidance": 3.5,
+    "cache": {
+      "mode": "disabled"
+    }
+  }'
+```
+
+### Video job requests
+
+`POST /ed/v2/videos/generations` accepts the `VideoRequest` JSON surface.
+
+Example:
+
+```bash
+curl -s http://127.0.0.1:8080/ed/v2/videos/generations \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "a small robot walking through a rainy neon street",
+    "width": 416,
+    "height": 240,
+    "frames": 9,
+    "steps": 20,
+    "cfg_scale": 5.0,
+    "flow_shift": 5.0
+  }'
+```
+
+### Job lifecycle
+
+Create endpoints return HTTP `202 Accepted` plus a job object containing:
+
+- `id`
+- `kind`
+- `model`
+- `status`
+- `created_ms`, `started_ms`, `finished_ms`, `expires_ms`
+- `cancel_requested`
+- `progress`
+- normalized `parameters`
+- `error`
+- `status_url`, `cancel_url`, `result_url`
+
+Job statuses are:
+
+- `queued`
+- `running`
+- `cancelling`
+- `succeeded`
+- `failed`
+- `cancelled`
+
+Behavioral notes:
+
+- Progress is sampling-step only.
+- Cancellation is cooperative and forwarded to `engine.request_cancel()`.
+- `DELETE /ed/v2/jobs/{job_id}` is only allowed after the job reaches a
+  terminal state.
+- `GET /ed/v2/jobs` supports `status`, `kind`, and `limit` query parameters.
+- `POST /ed/v2/jobs/cleanup` optionally accepts `{"now_ms": ...}` and returns
+  the removed job ids.
+
+### Result payloads
+
+Successful image jobs return:
+
+- `object: "edge_dit.image_generation"`
+- `id`
+- `model`
+- `created_ms`, `completed_ms`
+- normalized `parameters`
+- `data[]`, where each item contains `b64_png` plus `metadata`
+
+Successful video jobs return:
+
+- `object: "edge_dit.video_generation"`
+- `id`
+- `model`
+- `created_ms`, `completed_ms`
+- normalized `parameters`
+- `frame_format: "png"`
+- `frames[]`, where each item contains `b64_png` plus `metadata`
+
+Both result forms currently PNG-encode every image/frame in memory before
+returning JSON.
+
+### Error format
+
+Structured errors use a JSON envelope:
+
+```json
+{
+  "error": {
+    "message": "prompt is required",
+    "type": "invalid_request_error",
+    "code": "invalid_request",
+    "status": 400,
+    "request_id": "..."
+  }
+}
+```
+
+The server also returns `X-Request-ID` in response headers and mirrors that id
+into successful JSON responses as `request_id`.
 
 ## Frontend Console
 
