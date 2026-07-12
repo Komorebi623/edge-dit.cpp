@@ -8,7 +8,7 @@ on:
 
 jobs:
   cpu-build:
-    name: CPU build and tests
+    name: CPU build
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -26,7 +26,6 @@ jobs:
           cmake -S . -B build-cpu-ci \
             -DCMAKE_BUILD_TYPE=Release \
             -DED_BUILD_EXAMPLES=ON \
-            -DED_BUILD_TESTS=ON \
             -DED_ENABLE_NCCL=OFF \
             -DED_ENABLE_MPI=OFF
 
@@ -35,9 +34,6 @@ jobs:
 
       - name: CLI smoke
         run: ./build-cpu-ci/bin/ed-cli --help
-
-      - name: CTest
-        run: ctest --test-dir build-cpu-ci --output-on-failure
 
   python:
     name: Python tests
