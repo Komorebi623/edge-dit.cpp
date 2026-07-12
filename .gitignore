@@ -18,6 +18,14 @@ __pycache__/
 
 # local benchmark outputs
 /test_outputs/
+/.wty_results/
+
+# local-only CPU profiling / benchmark tooling (not for commit)
+/scripts/run_image_cmp.sh
+/scripts/parse_stage_profile.py
+/scripts/build_onednn.sh
+/tools/bench_flash_isolate.cpp
+/tools/bench_sd3_matmul_m.cpp
 
 # optional dependency fetched by CMake when cuDNN SDPA is enabled
 /third_party/cudnn-frontend/
