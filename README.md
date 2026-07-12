@@ -15,16 +15,6 @@
 
 edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for local, edge, and resource-constrained deployment. Built on ggml, it provides a unified runtime for image generation, image editing, and video generation, with explicit control over model loading, memory usage, graph execution, and backend selection.
 
-
-## Development Status
-
-- Repository-ready: yes
-- Public preview-ready: yes
-- v0.1.0-alpha release sign-off: pending full CUDA performance validation
-
-The v0.x API, ABI, CLI flags, and HTTP schemas may change as the runtime
-interfaces settle.
-
 ## Latest News
 
 - **2026-07-11:** 🚀 **edge-dit.cpp v0.1.0-alpha** enters **public preview**.
