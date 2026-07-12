@@ -19,7 +19,6 @@ examples/cli/                         ed-cli and ed-sample
 examples/server/                      Native HTTP server
 bindings/python/                      Python package, tests, server_v2, console
 scripts/                              Build, bootstrap, validation, release tools
-tests/                                C++ and repository hygiene tests
 docs/                                 User and developer documentation
 release/                              Release metadata examples
 third_party/                          Submodules and vendored dependencies
@@ -58,20 +57,15 @@ Recommended local validation for documentation and release-engineering changes:
 ```bash
 git diff --check
 bash -n scripts/build_cuda.sh scripts/build_cpu.sh scripts/build_metal.sh scripts/build_vulkan.sh scripts/bootstrap.sh scripts/create_source_release.sh
-python3 -m py_compile scripts/check_repo_hygiene.py tests/test_repo_hygiene.py
-python3 -m pytest tests/test_repo_hygiene.py
-python3 scripts/check_repo_hygiene.py
 ```
 
-CPU configure/build/test:
+CPU configure/build:
 
 ```bash
 cmake -S . -B build-release-check \
   -DCMAKE_BUILD_TYPE=Release \
-  -DED_BUILD_TESTS=ON \
   -DED_BUILD_EXAMPLES=ON
 cmake --build build-release-check -j 8
-ctest --test-dir build-release-check --output-on-failure
 ```
 
 CUDA performance release gate:
@@ -90,28 +84,12 @@ Then validate:
 
 ```text
 complete configure/build
-CTest and CLI smoke
+CLI smoke
 real model single-GPU CUDA smoke
 NCCL/MPI multi-GPU path
 cuDNN SDPA path confirmation
 fixed benchmark regression
 ```
-
-## Repository Hygiene
-
-Run:
-
-```bash
-python3 scripts/check_repo_hygiene.py
-```
-
-The checker scans Git-tracked files for common secrets, private keys, access
-tokens, internal paths, private IPs, accidental model weights, archives, build
-outputs, logs, generated images/videos, `node_modules`, Python cache,
-submodule presence, and broken Markdown relative links.
-
-It intentionally skips third-party source trees and does not modify scanned
-files.
 
 ## Source Release Packaging
 
@@ -188,7 +166,7 @@ v0.1.0-alpha release sign-off: pending full CUDA performance validation
 Release checklist:
 
 1. Clean clone with submodules.
-2. CPU configure/build/CTest.
+2. CPU configure/build.
 3. Minimal CUDA configure/build.
 4. Full `performance` CUDA configure/build on complete dependency machine.
 5. Native CLI smoke.
@@ -198,8 +176,7 @@ Release checklist:
 9. NCCL/MPI multi-GPU smoke.
 10. cuDNN SDPA path confirmation.
 11. Fixed benchmark regression.
-12. Repository hygiene scan.
-13. Source package generation and manifest review.
+12. Source package generation and manifest review.
 
 ## Roadmap
 

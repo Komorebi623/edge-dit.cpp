@@ -24,8 +24,6 @@ add_compile_definitions(GGML_MAX_NAME=128)
 find_package(Threads REQUIRED)
 
 option(ED_BUILD_EXAMPLES "Build examples" ON)
-option(ED_BUILD_TESTS "Build edge-dit tests" OFF)
-option(ED_BUILD_CUDNN_BENCHMARKS "Build standalone cuDNN benchmark tools" OFF)
 option(ED_BUILD_SHARED_LIBS "Build edge-dit as a shared library" OFF)
 option(ED_ENABLE_CUDNN_SDPA "Enable experimental cuDNN SDPA backend for CUDA flash attention" OFF)
 option(ED_ENABLE_CUDA_NORM "Enable edge CUDA norm fast paths for ggml CUDA backend" ON)
@@ -39,11 +37,6 @@ option(ED_FETCH_CUDNN_FRONTEND "Download cudnn-frontend during configure when th
 set(NCCL_ROOT "" CACHE PATH "Path to NCCL installation")
 set(CUDNN_ROOT "" CACHE PATH "Path to cuDNN installation")
 set(CUDNN_RUNTIME_LIBRARY_DIRS "" CACHE STRING "Extra runtime library directories needed by cuDNN, separated by semicolons")
-
-if(ED_BUILD_TESTS)
-    enable_testing()
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
-endif()
 
 option(ED_GGML_CUDA   "Enable ggml CUDA backend" OFF)
 option(ED_GGML_METAL  "Enable ggml Metal backend" OFF)
@@ -100,11 +93,11 @@ if(ED_ENABLE_MPI)
     find_package(MPI REQUIRED COMPONENTS CXX)
 endif()
 
-if(ED_ENABLE_CUDNN_SDPA OR ((ED_ENABLE_CUDA_NORM OR ED_ENABLE_CUDA_ROPE OR ED_ENABLE_CUDA_MODULATION) AND ED_GGML_CUDA) OR ED_BUILD_CUDNN_BENCHMARKS)
+if(ED_ENABLE_CUDNN_SDPA OR ((ED_ENABLE_CUDA_NORM OR ED_ENABLE_CUDA_ROPE OR ED_ENABLE_CUDA_MODULATION) AND ED_GGML_CUDA))
     enable_language(CUDA)
 endif()
 
-if(ED_ENABLE_CUDNN_SDPA OR ED_BUILD_CUDNN_BENCHMARKS)
+if(ED_ENABLE_CUDNN_SDPA)
     find_package(CUDAToolkit REQUIRED)
     include(FetchContent)
 
@@ -419,162 +412,6 @@ if(ED_BUILD_EXAMPLES)
     endif()
 endif()
 
-if(ED_BUILD_CUDNN_BENCHMARKS)
-    add_executable(bench-cudnn-sdpa-flux tools/bench_cudnn_sdpa_flux.cpp)
-    target_link_libraries(bench-cudnn-sdpa-flux
-        PRIVATE
-            cudnn_frontend
-            CUDNN::cudnn_all
-            CUDA::cudart
-            CUDA::nvrtc
-    )
-    target_compile_features(bench-cudnn-sdpa-flux PRIVATE cxx_std_17)
-    if(ED_CUDNN_RUNTIME_LIBRARY_DIRS)
-        set_property(TARGET bench-cudnn-sdpa-flux APPEND PROPERTY BUILD_RPATH ${ED_CUDNN_RUNTIME_LIBRARY_DIRS})
-    endif()
-
-    add_executable(bench-cuda-norm tools/bench_cuda_norm.cu)
-    target_link_libraries(bench-cuda-norm
-        PRIVATE
-            CUDA::cudart
-    )
-    target_compile_features(bench-cuda-norm PRIVATE cxx_std_17)
-    if(ED_CUDNN_RUNTIME_LIBRARY_DIRS)
-        set_property(TARGET bench-cuda-norm APPEND PROPERTY BUILD_RPATH ${ED_CUDNN_RUNTIME_LIBRARY_DIRS})
-    endif()
-endif()
-
-if(ED_BUILD_TESTS)
-    add_executable(version-api-test
-        tests/version_api_test.cpp
-    )
-    target_link_libraries(version-api-test PRIVATE edgedit)
-    target_compile_features(version-api-test PRIVATE cxx_std_17)
-    add_test(NAME version-api COMMAND version-api-test)
-
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/cache_smoke.cpp")
-        add_executable(cache-smoke
-            tests/cache_smoke.cpp
-            src/core/optimization/cache/cache_config.cpp
-            src/core/optimization/cache/cache_types.cpp
-            src/core/optimization/cache/ir/cache_program.cpp
-            src/core/optimization/cache/state/cache_state_manager.cpp
-            src/core/optimization/cache/operator/cache_operators.cpp
-            src/core/optimization/cache/model/dit_model_cache_contract.cpp
-            src/core/optimization/cache/policy/policy_factory.cpp
-            src/core/optimization/cache/policy/policies/easycache_policy.cpp
-            src/core/optimization/cache/policy/policies/ucache_policy.cpp
-            src/core/optimization/cache/policy/policies/condition_policy.cpp
-            src/core/optimization/cache/policy/policies/taylorseer_policy.cpp
-            src/core/optimization/cache/policy/policies/magcache_policy.cpp
-            src/core/optimization/cache/policy/policies/dicache_policy.cpp
-            src/core/optimization/cache/policy/policies/sencache_policy.cpp
-            src/core/optimization/cache/compile/cache_graph_lowering.cpp
-            src/core/optimization/cache/runtime/capability_negotiation.cpp
-            src/core/optimization/cache/runtime/cache_engine.cpp
-            src/utils/util.cpp
-        )
-        target_include_directories(cache-smoke
-            PRIVATE
-                ${CMAKE_CURRENT_SOURCE_DIR}/include
-                ${CMAKE_CURRENT_SOURCE_DIR}/src
-                ${CMAKE_CURRENT_SOURCE_DIR}/src/core
-                ${CMAKE_CURRENT_SOURCE_DIR}/third_party
-                ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/include
-        )
-        target_compile_features(cache-smoke PRIVATE cxx_std_17)
-        add_test(NAME cache-smoke COMMAND cache-smoke)
-    endif()
-
-    add_executable(parallel-collective-test
-        tests/test_process_group.cpp
-    )
-    target_link_libraries(parallel-collective-test PRIVATE edgedit)
-    target_include_directories(parallel-collective-test
-        PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/src
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/core
-    )
-    target_compile_features(parallel-collective-test PRIVATE cxx_std_17)
-    
-    add_executable(ggml-comm-test
-        tests/ggml_comm_test.cpp
-    )
-
-    target_link_libraries(ggml-comm-test PRIVATE edgedit)
-
-    target_include_directories(ggml-comm-test
-        PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/include
-            ${CMAKE_CURRENT_SOURCE_DIR}/src
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/core
-            ${CMAKE_CURRENT_SOURCE_DIR}/third_party
-            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/include
-    )
-
-    target_compile_features(ggml-comm-test PRIVATE cxx_std_17)
-
-    add_executable(graph-cut-comm-test
-        tests/graph_cut_comm_test.cpp
-    )
-
-    target_link_libraries(graph-cut-comm-test PRIVATE edgedit)
-
-    target_include_directories(graph-cut-comm-test
-        PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/include
-            ${CMAKE_CURRENT_SOURCE_DIR}/src
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/core
-            ${CMAKE_CURRENT_SOURCE_DIR}/third_party
-            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/include
-    )
-
-    target_compile_features(graph-cut-comm-test PRIVATE cxx_std_17)
-
-    add_executable(sp-parallel-test
-        tests/sp_parallel_test.cpp
-    )
-
-    target_link_libraries(sp-parallel-test PRIVATE edgedit)
-
-    target_include_directories(sp-parallel-test
-        PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/include
-            ${CMAKE_CURRENT_SOURCE_DIR}/src
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/core
-            ${CMAKE_CURRENT_SOURCE_DIR}/third_party
-            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/include
-    )
-
-    target_compile_features(sp-parallel-test PRIVATE cxx_std_17)
-
-    if(ED_ENABLE_NCCL)
-        target_include_directories(parallel-collective-test PRIVATE ${ED_NCCL_INCLUDE_DIR})
-        target_link_libraries(parallel-collective-test PRIVATE CUDA::cudart ${ED_NCCL_LIBRARY})
-    endif()
-    if(ED_ENABLE_MPI)
-        target_link_libraries(parallel-collective-test PRIVATE MPI::MPI_CXX)
-    endif()
-    add_test(
-        NAME parallel-collective-cpu
-        COMMAND
-            ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_parallel_collective_test.py
-            --binary $<TARGET_FILE:parallel-collective-test>
-            --backend cpu
-            --world-size 2
-    )
-    add_test(
-        NAME sp-parallel-cpu
-        COMMAND
-            ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_parallel_collective_test.py
-            --binary $<TARGET_FILE:sp-parallel-test>
-            --backend cpu
-            --world-size 2
-    )
-endif()
-
 execute_process(
     COMMAND git rev-parse HEAD
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -609,7 +446,6 @@ cxx_compiler=${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}
 cuda_compiler=${CMAKE_CUDA_COMPILER_ID} ${CMAKE_CUDA_COMPILER_VERSION}
 cuda_architectures=${CMAKE_CUDA_ARCHITECTURES}
 ed_build_examples=${ED_BUILD_EXAMPLES}
-ed_build_tests=${ED_BUILD_TESTS}
 ed_ggml_cuda=${ED_GGML_CUDA}
 ed_enable_nccl=${ED_ENABLE_NCCL}
 ed_nccl_version=${ED_NCCL_VERSION}

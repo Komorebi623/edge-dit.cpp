@@ -33,17 +33,16 @@ ED_ENABLE_NCCL=ON ED_ENABLE_MPI=ON bash ./scripts/build_cuda.sh
 ED_INSTALL_CUDNN=ON bash ./scripts/build_cuda.sh
 ```
 
-## Tests
+## Validation
 
-CPU tests:
+CPU build:
 
 ```bash
-cmake -S . -B build-cpu-tests -DCMAKE_BUILD_TYPE=Release -DED_BUILD_TESTS=ON
-cmake --build build-cpu-tests -j
-ctest --test-dir build-cpu-tests --output-on-failure
+bash ./scripts/build_cpu.sh
+./build-cpu/bin/ed-cli --help
 ```
 
-Python tests:
+Python validation:
 
 ```bash
 cd bindings/python

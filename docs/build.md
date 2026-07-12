@@ -48,7 +48,7 @@ Optional backend-specific tools:
   profile.
 - Apple build tools and frameworks for Metal on macOS.
 - Vulkan SDK, `glslc`, Vulkan headers, and SPIRV-Headers for Vulkan.
-- Python 3 for tests, hygiene checks, and Python bindings.
+- Python 3 for Python bindings and release tooling.
 
 The build scripts honor standard overrides:
 
