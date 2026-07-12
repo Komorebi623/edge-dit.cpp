@@ -2,54 +2,36 @@
 
 [← Back to performance](../performance.md) | [← Back to README](../../README.md)
 
-This document covers cache-based reuse for repeated DiT computation across
-denoising steps.
+TODO: document cache-based computation reuse after model-specific validation is
+complete.
 
 ## Scope
 
-This optimization point covers:
+TODO:
 
-- timestep-level reuse;
-- block-level reuse;
-- output, feature, and probe cache policy granularity.
+- Timestep-level reuse.
+- Block-level reuse.
+- Output, feature, and probe policies.
+- Calibration-driven reuse policies.
 
-These are documented together because the cache mode, policy granularity, and
-quality-speed tradeoff are one runtime surface.
+## Public Interfaces
 
-## User Entry Points
+TODO:
 
-```bash
---cache off|easycache|ucache|dbcache|taylorseer|cache-dit|magcache|dicache|sencache
-```
+- CLI cache flags.
+- C API cache configuration.
+- Python binding configuration.
 
-Common tuning knobs include:
+## Validation Plan
 
-```bash
---cache-threshold <float>
---cache-start <float>
---cache-end <float>
---cache-fn-blocks <int>
---cache-bn-blocks <int>
---cache-max-cached-steps <int>
---cache-profile <path>
-```
+TODO:
 
-## Policy Granularity
-
-- Output policies operate on whole-model input latent / output noise.
-- Feature policies operate on block-stack residuals captured through model cache
-  seams.
-- Probe policies run a shallow prefix of blocks before deciding whether to
-  reuse or compute.
-
-## Notes
-
-- Cache methods are experimental unless a model-specific validation note says
-  otherwise.
-- Cache is a speed-quality tradeoff, not a free optimization.
-- Benchmark reports should include latency, skipped work, cache settings, and
-  quality metrics together.
+- Add speed and quality measurement procedure.
+- Add per-model compatibility notes.
+- Add calibration data requirements.
 
 ## Related Documentation
 
 - [Performance and optimization](../performance.md)
+- [Command line usage](../cli.md)
+- [Supported models and usage](../models.md)

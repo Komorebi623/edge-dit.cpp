@@ -2,61 +2,36 @@
 
 [← Back to performance](../performance.md) | [← Back to README](../../README.md)
 
-This document covers optimized graph lowering and backend operator paths used by
-edge-dit.cpp.
+TODO: document graph-level and operator-level optimization paths after release
+validation.
 
 ## Scope
 
-This optimization point covers:
+TODO:
 
-- cuDNN SDPA;
-- DiT-specific CUDA operators;
-- tensor-layout optimization around DiT graph regions.
+- cuDNN SDPA.
+- DiT-specific CUDA operators.
+- Tensor-layout optimization.
+- Graph lowering and graph-cut profiling.
 
-These features are grouped together because operator speedups and graph layout
-changes often interact.
+## Public Interfaces
 
-## Build Entry Points
+TODO:
 
-Important CUDA build options include:
+- Build options.
+- CLI flags.
+- Environment variables that are stable enough to document.
 
-```text
-ED_ENABLE_CUDNN_SDPA
-ED_ENABLE_CUDA_NORM
-ED_ENABLE_CUDA_ROPE
-ED_ENABLE_CUDA_MODULATION
-```
+## Validation Plan
 
-The official CUDA performance profile enables the optimized CUDA paths expected
-for performance work.
+TODO:
 
-## Runtime Entry Points
-
-```bash
---flash-attention
---no-flash-attention
-```
-
-## Current Operator Areas
-
-- cuDNN SDPA
-- CUDA Norm
-- CUDA RoPE
-- CUDA Modulation
-- Flux sequence-parallel helper kernels
-
-## Notes
-
-- cuDNN SDPA requires cuDNN and cudnn-frontend in the performance build.
-- Fused attention or CUDA helper kernels may change floating-point accumulation
-  order, so compare numerical and visual quality rather than assuming identical
-  hashes.
-- Tensor-layout work focuses on reducing avoidable copies, contiguous
-  materialization, reshapes, views, permutes, and concatenations.
+- Add correctness validation for optimized operators.
+- Add performance validation methodology.
+- Add fallback behavior notes.
 
 ## Related Documentation
 
 - [Performance and optimization](../performance.md)
-- [Build and installation](../build.md#cuda-build-profiles)
-- [Sequence-parallel benchmark report](../sp_benchmark_report.md)
-- [FLUX sequence-parallel profiling notes](../flux_sp_profile_root_cause.md)
+- [Build and installation](../build.md)
+- [Command line usage](../cli.md)

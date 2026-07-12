@@ -2,52 +2,37 @@
 
 [← Back to performance](../performance.md) | [← Back to README](../../README.md)
 
-This document covers runtime controls that reduce peak device memory or make a
-model fit under a constrained memory budget.
+TODO: document memory controls for running DiT models under constrained device
+memory.
 
 ## Scope
 
-This optimization point covers:
+TODO:
 
-- CPU offload;
-- graph VRAM control;
-- VAE tiling;
-- component placement for large text encoders and VAE modules.
+- CPU offload.
+- Graph VRAM control.
+- VAE tiling.
+- Component placement.
+- Latent chunking, if exposed publicly.
 
-These features interact with each other, so they are documented together as one
-memory execution strategy.
+## Public Interfaces
 
-## User Entry Points
+TODO:
 
-```bash
---offload-to-cpu
---keep-text-encoder-on-cpu
---keep-vae-on-cpu
---vae-tiling
---vae-tile-size <float>
---max-vram <GB>
-```
+- CLI flags.
+- C API fields.
+- Python binding configuration.
 
-The corresponding C API fields include:
+## Validation Plan
 
-```c
-ed_context_params_t::offload_params_to_cpu
-ed_context_params_t::keep_text_encoder_on_cpu
-ed_context_params_t::keep_vae_on_cpu
-ed_context_params_t::vae_tiling
-ed_context_params_t::max_vram_gb
-```
+TODO:
 
-## Notes
-
-- CPU offload and component placement can lower persistent VRAM usage but may
-  add host-device transfer overhead.
-- VAE tiling can reduce decode memory at the cost of additional tiled work.
-- `--max-vram` limits graph allocation pressure and should be validated for the
-  selected model, resolution, frame count, and backend.
-- Benchmark reports should record every memory-control flag used.
+- Add peak-memory measurement procedure.
+- Add latency tradeoff notes.
+- Add model-specific smoke tests.
 
 ## Related Documentation
 
 - [Performance and optimization](../performance.md)
-- [Supported models and usage](../models.md#quantization-and-memory-options)
+- [Command line usage](../cli.md)
+- [Supported models and usage](../models.md)
