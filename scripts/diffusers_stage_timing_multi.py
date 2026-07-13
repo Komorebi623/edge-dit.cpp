@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """Diffusers CPU 多模型 端到端 + 各阶段(text/DiT/VAE) 墙钟计时。
-口径与 edge-dit 的 `generate breakdown` 严格对齐:
-  - 端到端 = 纯生成(从 text encode 到 vae decode)，**不含模型加载 / import / warmup**
-  - 拆 text_encode / sampling(DiT) / vae_decode 三段
+
+两种口径(用户 2026-07-11 明确要求以"命令→拿图"完整墙钟为准):
+  - 进程墙钟 = 从 python 启动到存图退出的全过程,含 import + 模型加载 + 生成。
+    由外层 `/usr/bin/time -v` 抓取,与 edge-dit 的 `/usr/bin/time` wall 严格同口径。
+    NOWARMUP=1 关掉 warmup(单次冷出图才符合"命令→拿图"),默认已关。
+  - 分阶段(text/DiT/VAE) = 纯生成拆解,**不含加载**,仅用于定位瓶颈落在哪个板块。
+    这段与 edge-dit `generate breakdown` 对齐。
 用法:
   MODEL_KEY=sd3|flux|qwen-image|qwen-image-edit STEPS=4 W=512 H=512 python3 diffusers_stage_timing_multi.py
-默认 CPU + bf16。串行跑，跑前后自己看 load。
+默认 CPU + bf16 + 无 warmup。串行跑,跑前后自己看 load。
 """
 import os, sys, time
+_T_PROC_START = time.time()  # 尽量早地打点; 外层 /usr/bin/time 是权威进程墙钟, 这个用于自洽核对
 import torch
 
 MODELS = {
@@ -24,7 +29,7 @@ H = int(os.environ.get("H", "512"))
 SEED = int(os.environ.get("SEED", "42"))
 PROMPT = os.environ.get("PROMPT", "a cat")
 OUTDIR = os.environ.get("OUTDIR", "bench_results/diffusers")
-WARMUP = os.environ.get("NOWARMUP", "") == ""  # 默认做 warmup 拿稳态; NOWARMUP=1 关
+WARMUP = os.environ.get("WARMUP", "") == "1"  # 默认不 warmup(单次冷出图,符合"命令→拿图"口径); WARMUP=1 开
 
 def log(m): print(f"[cmp] {m}", flush=True)
 
@@ -98,7 +103,9 @@ def main():
 
     import numpy as np
     arr = np.asarray(img.convert("RGB")).astype(float)
-    log(f"END-TO-END WALL (generate, {STEPS} steps): {wall:.2f}s   [load(1m) after={loadavg()}]")
+    proc_wall = time.time() - _T_PROC_START  # import→save 的进程内墙钟(≈外层 /usr/bin/time)
+    log(f"PROCESS WALL (import→save, 含加载): {proc_wall:.2f}s   <- 与 edge /usr/bin/time 同口径")
+    log(f"END-TO-END WALL (generate only, {STEPS} steps): {wall:.2f}s   [load(1m) after={loadavg()}]")
     log(f"  text_encode : {timers['text']:.2f}s")
     log(f"  sampling(DiT): {timers['dit']:.2f}s")
     log(f"  vae_decode  : {timers['vae']:.2f}s")
