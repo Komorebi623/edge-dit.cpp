@@ -631,7 +631,15 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
 
     const int steps = params->sample.steps > 0 ? params->sample.steps : 50;
     const int image_seq_len = (latent_w / patch_size) * (latent_h / patch_size);
-    const bool diffusion_flash = runtime_->flash_attention() && image_seq_len >= 4096;
+    // The image_seq_len>=4096 gate is a CUDA-era heuristic; keep it for CUDA and
+    // any non-CPU backend (do not change their behavior). On CPU it forced the
+    // slow native f32 attention (512x512 -> seq 1024 < 4096); the shared
+    // QwenImageRunner + ggml_ext_attention_ext CPU flash (oneDNN AMX, KV-nopad)
+    // handles arbitrary seq/no-mask, so enable flash there whenever the runtime
+    // allows it — matching the t2i Qwen pipeline.
+    const bool is_cpu_backend = sd_backend_is(runtime_->backend(), "CPU");
+    const bool diffusion_flash = runtime_->flash_attention() &&
+                                 (is_cpu_backend || image_seq_len >= 4096);
     diffusion_->set_flash_attention_enabled(diffusion_flash);
     LOG_INFO("qwen-image-edit diffusion flash attention: %s (image_seq_len=%d)",
              diffusion_flash ? "on" : "off",
