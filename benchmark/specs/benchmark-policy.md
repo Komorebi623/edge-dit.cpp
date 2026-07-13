@@ -43,9 +43,9 @@ Unavailable metrics must be represented as `null` in JSON results. Do not write
 ## External Baselines
 
 External baseline repositories may be updated by the benchmark runner only when
-the suite explicitly requests it. For v0.1.0-alpha, stable-diffusion.cpp and
-xDiT are allowed to be force-synchronized to their latest `origin/main` during
-benchmark execution.
+the suite explicitly requests it. For v0.1.0-alpha, xDiT is the only baseline
+configured for force-synchronization to its latest `origin/main` during
+benchmark execution. stable-diffusion.cpp is treated as a fixed local checkout.
 
 The runner must record the resulting baseline commit and whether the checkout
 was force-updated.

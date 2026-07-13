@@ -1,0 +1,52 @@
+schema_version: 1
+suite_id: cache-matrix
+description: >
+  FLUX.1-dev cache-mode latency probe for edge-dit.cpp. This suite repeats each
+  public cache mode enough times to publish latency/VRAM probe numbers while
+  leaving quality evaluation to the separate metric pipeline.
+mode: official
+defaults:
+  warmup_runs: 1
+  measured_runs: 5
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux1-dev-t2i.yaml
+ablation_stacks:
+  - stack_id: cache_off
+    options:
+      cache: "off"
+  - stack_id: easycache
+    options:
+      cache: easycache
+  - stack_id: ucache
+    options:
+      cache: ucache
+  - stack_id: dbcache
+    options:
+      cache: dbcache
+  - stack_id: taylorseer
+    options:
+      cache: taylorseer
+  - stack_id: cache_dit
+    options:
+      cache: cache-dit
+  - stack_id: magcache
+    options:
+      cache: magcache
+  - stack_id: dicache
+    options:
+      cache: dicache
+  - stack_id: sencache
+    options:
+      cache: sencache
+      cache_profile_ref: flux_sencache_profile
+reporting:
+  table: cache_matrix
+  require_quality_reference: edge-dit-bf16-full-compute

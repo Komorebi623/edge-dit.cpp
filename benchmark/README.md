@@ -80,6 +80,19 @@ performance profile:
 bash scripts/build_cuda.sh
 ```
 
+Run the README main-table suite. This is the source for the root README
+Performance table and uses FLUX.1-dev, Stable Diffusion 3 Medium, and
+Qwen-Image with the same 1024x1024, 50-step, BF16, batch-1 setting:
+
+```bash
+BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
+python3 benchmark/orchestration/run_suite.py \
+  --suite benchmark/configs/suites/readme-main-table.yaml \
+  --site benchmark/configs/local/site-h200.yaml \
+  --execute \
+  --output-root benchmark/results/readme-main-table-YYYYMMDD
+```
+
 Run the reproducible FLUX.1-dev single-GPU e2e suite:
 
 ```bash
@@ -90,10 +103,86 @@ python3 benchmark/orchestration/run_suite.py \
   --output-root benchmark/results/nightly-YYYYMMDD
 ```
 
-The official FLUX main-table workload is `flux1-dev-t2i-1024-s50`:
+The README main-table workloads are the `*-1024-s50` text-to-image configs:
 1024x1024, 50 denoising steps, seed 0, batch 1, BF16. Shorter 20-step
-workloads are diagnostic only and must not be aggregated into README or
-main-table performance numbers.
+workloads are smoke or diagnostic only and must not be aggregated into README
+or main-table performance numbers. The local H200 config currently has Stable
+Diffusion 3 Medium, not a real SD3.5 Large checkpoint.
+
+Run the public model smoke suite across all locally configured public-preview
+model families:
+
+```bash
+BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
+python3 benchmark/orchestration/run_suite.py \
+  --suite benchmark/configs/suites/model-smoke.yaml \
+  --site benchmark/configs/local/site-h200.yaml \
+  --execute \
+  --systems edge-dit.cpp \
+  --output-root benchmark/results/model-smoke-YYYYMMDD
+```
+
+Run memory-constrained and optimization probe suites:
+
+```bash
+BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
+python3 benchmark/orchestration/run_suite.py \
+  --suite benchmark/configs/suites/memory.yaml \
+  --site benchmark/configs/local/site-h200.yaml \
+  --execute \
+  --systems edge-dit.cpp \
+  --output-root benchmark/results/memory-YYYYMMDD
+
+BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
+python3 benchmark/orchestration/run_suite.py \
+  --suite benchmark/configs/suites/ablation.yaml \
+  --site benchmark/configs/local/site-h200.yaml \
+  --execute \
+  --systems edge-dit.cpp \
+  --output-root benchmark/results/ablation-YYYYMMDD
+```
+
+Generate the local SenCache profile and run the repeated cache-mode matrix:
+
+```bash
+mkdir -p benchmark/cache
+
+BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
+python3 benchmark/orchestration/run_suite.py \
+  --suite benchmark/configs/suites/cache-calibration-smoke.yaml \
+  --site benchmark/configs/local/site-h200.yaml \
+  --execute \
+  --systems edge-dit.cpp \
+  --output-root benchmark/results/cache-calibration-smoke-YYYYMMDD
+
+BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
+python3 benchmark/orchestration/run_suite.py \
+  --suite benchmark/configs/suites/cache-matrix.yaml \
+  --site benchmark/configs/local/site-h200.yaml \
+  --execute \
+  --systems edge-dit.cpp \
+  --output-root benchmark/results/cache-matrix-YYYYMMDD
+```
+
+Run quick edge-dit.cpp parallel smoke suites:
+
+```bash
+BENCHMARK_CUDA_VISIBLE_DEVICES=3,4,5,6 \
+python3 benchmark/orchestration/run_suite.py \
+  --suite benchmark/configs/suites/parallel-smoke.yaml \
+  --site benchmark/configs/local/site-h200.yaml \
+  --execute \
+  --systems edge-dit.cpp \
+  --output-root benchmark/results/parallel-smoke-YYYYMMDD
+
+BENCHMARK_CUDA_VISIBLE_DEVICES=3,4 \
+python3 benchmark/orchestration/run_suite.py \
+  --suite benchmark/configs/suites/cfg-smoke.yaml \
+  --site benchmark/configs/local/site-h200.yaml \
+  --execute \
+  --systems edge-dit.cpp \
+  --output-root benchmark/results/cfg-smoke-YYYYMMDD
+```
 
 For unattended official FLUX runs, use the release script. It waits for enough
 free GPU memory, runs the 50-step suite, and regenerates the benchmark report:
@@ -166,10 +255,10 @@ an explicit opt-in before execution:
 
 ```bash
 python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/pilot-flux.yaml \
+  --suite benchmark/configs/suites/flux-parallel-e2e.yaml \
   --site benchmark/configs/local/site-h200.yaml \
   --execute \
-  --systems stable-diffusion.cpp \
+  --systems xdit \
   --force-external-update \
   --warmup-runs 0 \
   --measured-runs 1 \
@@ -195,14 +284,19 @@ System adapters that participate in official comparisons must write
 `runner_metrics.json` with `load_ms`, `warmup_ms`, and `measured_ms`. The
 orchestrator refuses official adapters that do not produce this file, so
 process startup and model loading cannot be accidentally counted as steady-state
-generation latency. The stable-diffusion.cpp and xDiT adapters must gain their
-own load-once e2e wrappers before their numbers can be reported.
+generation latency. edge-dit.cpp, Diffusers, and stable-diffusion.cpp have
+load-once wrappers for the README text-to-image main table; xDiT still needs a
+matching official wrapper before its numbers can be reported.
 
 The executable adapters live in `benchmark/scripts/`:
 
 ```text
 benchmark/scripts/run_edge_e2e.py       # wraps build-cuda/bin/ed-sample
+benchmark/scripts/run_edge_cli_once.py  # wraps build-cuda/bin/ed-cli for non-T2I smoke
 benchmark/scripts/run_diffusers_e2e.py  # runs Diffusers load-once loops
+benchmark/scripts/sd_cpp_e2e.cpp        # stable-diffusion.cpp C API load-once wrapper
+benchmark/scripts/build_sd_cpp_e2e.py   # builds the stable-diffusion.cpp wrapper
+benchmark/scripts/prepare_sdcpp_sd3_transformer.py
 ```
 
 Inspect completed and pending suite entries:

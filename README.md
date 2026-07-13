@@ -90,31 +90,22 @@ For dependencies, build profiles, and platform-specific instructions, see
 
 ## Performance
 
-Representative results are measured with the CUDA `performance` profile.
+The README main-table snapshot below was measured on 2026-07-13 with the CUDA
+`performance` profile on a local NVIDIA H200 node. Full benchmark configs,
+commands, environment metadata, raw result roots, and interpretation notes are
+available in [Performance and benchmarks](docs/performance.md).
 
-Latency is reported as the median of repeated runs after warm-up. Pipeline
-latency includes text encoding, DiT inference, and VAE decoding, while model
-loading and output file encoding are reported separately.
-
-### Single-GPU Inference
-
-| Model / task | Configuration | edge-dit.cpp | Diffusers | stable-diffusion.cpp | Peak VRAM |
+| Model | System | Load (s) | Median (s) | P90 (s) | Peak VRAM (MiB) |
 |---|---|---:|---:|---:|---:|
-| FLUX.1-dev | 1024×1024, 50 steps, BF16, batch 1 | `<latency>` | `<latency>` | `<latency>` | `<edge / baselines>` |
-| Qwen-Image | 1024×1024, BF16, batch 1 | `<latency>` | `<latency>` | `<latency>` | `<edge / baselines>` |
-| Wan 2.x | 832×480, 81 frames, batch 1 | `<latency>` | `<latency>` | `<latency>` | `<edge / baselines>` |
-
-### Constrained and Parallel Execution
-
-| Scenario | Comparison | Result |
-|---|---|---|
-| Memory-constrained FLUX inference | Quantization, offload, and VRAM control | `<validated result>` |
-| Two-GPU image generation | CFG or sequence parallelism | `<speedup and efficiency>` |
-| Two-GPU video generation | edge-dit.cpp vs xDiT | `<latency and scaling efficiency>` |
-
-Full benchmark configurations, commits, commands, raw measurements, quality
-checks, and optimization breakdowns are available in
-[Performance and benchmarks](docs/performance.md).
+| FLUX.1-dev | edge-dit.cpp | 6.645 | 10.784 | 10.861 | 38341 |
+| | Diffusers | 14.531 | 10.040 | 10.048 | 37711 |
+| | stable-diffusion.cpp | 1.333 | 30.371 | 30.379 | 40331 |
+| Stable Diffusion 3 Medium | edge-dit.cpp | 5.840 | 4.003 | 4.049 | 20833 |
+| | Diffusers | 11.244 | 3.376 | 3.381 | 20283 |
+| | stable-diffusion.cpp | 1.457 | 10.740 | 10.797 | 22997 |
+| Qwen-Image | edge-dit.cpp | 11.621 | 10.697 | 10.736 | 59725 |
+| | Diffusers | 25.220 | 9.558 | 9.565 | 60935 |
+| | stable-diffusion.cpp | 1.782 | 62.671 | 62.728 | 61879 |
 
 ## Open-Source Interfaces
 

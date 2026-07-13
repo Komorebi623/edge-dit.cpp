@@ -12,6 +12,7 @@ class StableDiffusionCppRunner(BenchmarkRunner):
     def preflight(self) -> PreflightResult:
         repo = self.resolve_path(self.system_config.get("repo", {}).get("path_ref"))
         binary = self.resolve_path(self.system_config.get("binary", {}).get("path_ref"))
+        e2e_binary = self.resolve_path(self.system_config.get("e2e_binary", {}).get("path_ref"))
         messages: list[str] = []
         metadata: dict[str, Any] = {
             "force_update_policy": self.system_config.get("repo", {}).get("commit_policy")
@@ -32,9 +33,14 @@ class StableDiffusionCppRunner(BenchmarkRunner):
                 )
 
         if binary is None or not binary.exists():
-            messages.append(f"missing sd-cli binary: {binary}")
+            metadata["binary_missing"] = str(binary)
         else:
             metadata["binary"] = str(binary)
+
+        if e2e_binary is None or not e2e_binary.exists():
+            messages.append(f"missing stable-diffusion.cpp e2e wrapper: {e2e_binary}")
+        else:
+            metadata["e2e_binary"] = str(e2e_binary)
 
         return PreflightResult(
             system_id=self.system_id,
@@ -74,10 +80,58 @@ class StableDiffusionCppRunner(BenchmarkRunner):
         warmup_runs: int,
         measured_runs: int,
     ) -> list[str]:
-        raise NotImplementedError(
-            "stable-diffusion.cpp load-once e2e wrapper is not implemented yet; "
-            "do not report process-level CLI timing"
-        )
+        if workload["task"] != "text-to-image":
+            raise NotImplementedError(
+                "stable-diffusion.cpp load-once e2e wrapper currently supports text-to-image"
+            )
+        if gpu_count != 1:
+            raise NotImplementedError("stable-diffusion.cpp is a single-GPU baseline")
+        binary = self.resolve_path(self.system_config.get("e2e_binary", {}).get("path_ref"))
+        model_ref = workload["model"]["local_path_ref"]
+        model_path = self.resolve_path(model_ref)
+        if binary is None:
+            raise NotImplementedError("stable-diffusion.cpp e2e wrapper path is not resolved")
+        if model_path is None or not model_path.exists():
+            raise NotImplementedError(
+                f"missing stable-diffusion.cpp model path for {model_ref}: {model_path}"
+            )
+
+        generation = dict(workload["generation"])
+        generation.update({k: v for k, v in run_options.items() if k in generation})
+        prompt = workload.get("resolved_prompt", {}).get("prompt", "")
+        cfg_scale, distilled_guidance = sd_cpp_guidance(workload, generation)
+        command = [
+            str(binary),
+            "--output-dir",
+            str(output_dir.resolve()),
+            "--prompt",
+            prompt,
+            "--width",
+            str(generation["width"]),
+            "--height",
+            str(generation["height"]),
+            "--steps",
+            str(generation["steps"]),
+            "--seed",
+            str(generation["seed"]),
+            "--cfg-scale",
+            str(cfg_scale),
+            "--distilled-guidance",
+            str(distilled_guidance),
+            "--dtype",
+            str(generation.get("precision", "auto")),
+            "--backend",
+            "cuda",
+            "--warmup-runs",
+            str(warmup_runs),
+            "--measured-runs",
+            str(measured_runs),
+            "--diffusion-fa",
+        ]
+        command.extend(sd_cpp_component_args(workload, model_path, self.resolve_path))
+        self.apply_wrapper_options(command, workload.get("model_options", {}))
+        self.apply_wrapper_options(command, run_options)
+        return command
 
     def build_command(
         self,
@@ -146,3 +200,128 @@ class StableDiffusionCppRunner(BenchmarkRunner):
         if cache is not None and cache is not False and cache != "off":
             command.extend(["--cache-mode", str(cache)])
         return command
+
+    def apply_wrapper_options(self, command: list[str], options: dict[str, Any]) -> None:
+        if options.get("flash_attention") is True:
+            command.append("--flash-attn")
+        if options.get("diffusion_flash_attention") is True:
+            command.append("--diffusion-fa")
+        if options.get("vae_tiling"):
+            command.append("--vae-tiling")
+        if options.get("max_vram_gib") is not None:
+            command.extend(["--max-vram", str(options["max_vram_gib"])])
+        if options.get("model_args"):
+            command.extend(["--model-args", str(options["model_args"])])
+        if options.get("sample_method"):
+            command.extend(["--sample-method", str(options["sample_method"])])
+        if options.get("scheduler"):
+            command.extend(["--scheduler", str(options["scheduler"])])
+        if options.get("flow_shift") is not None:
+            command.extend(["--flow-shift", str(options["flow_shift"])])
+        if options.get("qwen_image_layers") is not None:
+            command.extend(["--qwen-image-layers", str(options["qwen_image_layers"])])
+
+
+def sd_cpp_guidance(
+    workload: dict[str, Any],
+    generation: dict[str, Any],
+) -> tuple[float, float]:
+    guidance = float(generation["guidance"])
+    cfg_scale = float(generation.get("cfg_scale", 1.0))
+    if workload["model_family"] == "FLUX.1":
+        return cfg_scale, guidance
+    return guidance, float(generation.get("distilled_guidance", 3.5))
+
+
+def sd_cpp_component_args(workload: dict[str, Any], model_path, resolve_path) -> list[str]:
+    family = workload["model_family"]
+    if family == "FLUX.1":
+        return existing_component_args(
+            [
+                ("--diffusion-model", first_existing(model_path, [
+                    "flux1-dev.safetensors",
+                    "transformer/diffusion_pytorch_model.safetensors.index.json",
+                ])),
+                ("--vae", first_existing(model_path, [
+                    "ae.safetensors",
+                    "vae/diffusion_pytorch_model.safetensors",
+                ])),
+                ("--clip-l", first_existing(model_path, [
+                    "text_encoder/model.safetensors",
+                ])),
+                ("--t5xxl", first_existing(model_path, [
+                    "text_encoder_2/model.safetensors.index.json",
+                    "text_encoder_2/model.safetensors",
+                ])),
+            ]
+        )
+    if family == "SD3":
+        converted_ref = workload.get("model_options", {}).get(
+            "stable_diffusion_cpp_transformer_ref"
+        ) or "stable_diffusion_cpp_sd3_transformer"
+        converted_path = resolve_path(str(converted_ref)) if converted_ref else None
+        model_flag = "--model" if workload.get("model_options", {}).get(
+            "stable_diffusion_cpp_transformer_ref"
+        ) else "--diffusion-model"
+        return existing_component_args(
+            [
+                (model_flag, converted_path or first_existing(model_path, [
+                    "transformer/diffusion_pytorch_model.safetensors",
+                    "transformer/diffusion_pytorch_model.fp16.safetensors",
+                ])),
+                ("--vae", first_existing(model_path, [
+                    "vae/diffusion_pytorch_model.fp16.safetensors",
+                    "vae/diffusion_pytorch_model.safetensors",
+                ])),
+                ("--clip-l", first_existing(model_path, [
+                    "text_encoder/model.fp16.safetensors",
+                    "text_encoder/model.safetensors",
+                ])),
+                ("--clip-g", first_existing(model_path, [
+                    "text_encoder_2/model.fp16.safetensors",
+                    "text_encoder_2/model.safetensors",
+                ])),
+                ("--t5xxl", first_existing(model_path, [
+                    "text_encoder_3/model.safetensors.index.fp16.json",
+                    "text_encoder_3/model.safetensors.index.json",
+                ])),
+            ]
+        )
+    if family == "Qwen-Image":
+        return existing_component_args(
+            [
+                ("--diffusion-model", first_existing(model_path, [
+                    "transformer/diffusion_pytorch_model.safetensors.index.json",
+                ])),
+                ("--vae", first_existing(model_path, [
+                    "vae/diffusion_pytorch_model.safetensors",
+                ])),
+                ("--llm", first_existing(model_path, [
+                    "text_encoder/model.safetensors.index.json",
+                ])),
+            ]
+        )
+    raise NotImplementedError(f"stable-diffusion.cpp has no component mapping for {family}")
+
+
+def first_existing(base, candidates: list[str]):
+    for candidate in candidates:
+        path = base / candidate
+        if path.exists():
+            return path
+    return None
+
+
+def existing_component_args(items) -> list[str]:
+    command: list[str] = []
+    missing = []
+    for flag, path in items:
+        if path is None:
+            missing.append(flag)
+        else:
+            command.extend([flag, str(path)])
+    if missing:
+        raise NotImplementedError(
+            "missing stable-diffusion.cpp component path(s): " + ", ".join(missing)
+        )
+    return command

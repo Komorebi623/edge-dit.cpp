@@ -496,11 +496,21 @@ class BenchmarkRunner:
                 text=True,
             )
             peak_rss = None
+            last_heartbeat = start
             while process.poll() is None:
                 sample = process_tree_rss_mib(process.pid)
                 process_samples.append((time.time(), sample))
                 if sample is not None:
                     peak_rss = sample if peak_rss is None else max(peak_rss, sample)
+                now = time.perf_counter()
+                if now - last_heartbeat >= 10.0:
+                    elapsed_s = now - start
+                    print(
+                        f"[benchmark-heartbeat] {self.system_id} {phase} "
+                        f"elapsed={elapsed_s:.1f}s pid={process.pid}",
+                        flush=True,
+                    )
+                    last_heartbeat = now
                 time.sleep(0.2)
             returncode = process.wait()
         elapsed_ms = (time.perf_counter() - start) * 1000.0

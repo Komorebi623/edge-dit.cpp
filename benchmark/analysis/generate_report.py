@@ -7,23 +7,6 @@ import argparse
 import json
 from pathlib import Path
 
-
-REPORT_SECTIONS = [
-    "Executive Summary",
-    "Benchmark Methodology",
-    "Workload Matrix",
-    "Functional and Numerical Validation",
-    "Single-GPU Performance",
-    "Memory-Efficient Execution",
-    "Graph and Operator Ablation",
-    "Computation Reuse",
-    "Parallel Scaling",
-    "Stability and Reproducibility",
-    "Known Limitations",
-    "Reproduction",
-]
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("summary", type=Path)
@@ -32,29 +15,39 @@ def main() -> int:
     args = parser.parse_args()
 
     data = json.loads(args.summary.read_text(encoding="utf-8"))
+    rows = data.get("results", [])
     tables = args.tables.read_text(encoding="utf-8") if args.tables and args.tables.exists() else ""
     table_sections = split_table_sections(tables)
+    successful = [row for row in rows if row.get("status") == "success"]
+    workloads = sorted({str(row.get("workload")) for row in rows if row.get("workload")})
+    systems = sorted({str(row.get("system")) for row in rows if row.get("system")})
     lines = [
         "# Performance and Benchmarks",
         "",
         f"Suite: `{data.get('suite_id', 'unknown')}`",
         "",
-        "> This report is generated from benchmark result summaries. Pending rows mean",
-        "> the corresponding official benchmark has not been executed yet.",
+        "This report is generated from benchmark result summaries.",
+        "",
+        "## Executive Summary",
+        "",
+        f"- Rows: {len(rows)} total, {len(successful)} successful.",
+        f"- Workloads: {', '.join(workloads) if workloads else '-'}",
+        f"- Systems: {', '.join(systems) if systems else '-'}",
         "",
     ]
-    for section in REPORT_SECTIONS:
-        lines.append(f"## {section}")
+    if table_sections.get("Single-GPU Inference"):
+        lines.append("## Single-GPU Performance")
         lines.append("")
-        if section == "Single-GPU Performance" and table_sections.get("Single-GPU Inference"):
-            lines.append(table_sections["Single-GPU Inference"])
-            lines.append("")
-        elif section == "Parallel Scaling" and table_sections.get("Memory and Parallel Scaling"):
-            lines.append(table_sections["Memory and Parallel Scaling"])
-            lines.append("")
-        else:
-            lines.append("Pending official benchmark results.")
-            lines.append("")
+        lines.append(table_sections["Single-GPU Inference"])
+        lines.append("")
+    if table_sections.get("Parallel Scaling"):
+        lines.append("## Parallel Scaling")
+        lines.append("")
+        lines.append(table_sections["Parallel Scaling"])
+        lines.append("")
+    if not table_sections:
+        lines.append("No benchmark rows found.")
+        lines.append("")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("\n".join(lines), encoding="utf-8")
     return 0

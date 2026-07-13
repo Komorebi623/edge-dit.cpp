@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import subprocess
 from typing import Any
 
 from .base import BenchmarkRunner, PreflightResult
@@ -13,13 +14,86 @@ from .base import BenchmarkRunner, PreflightResult
 class DiffusersRunner(BenchmarkRunner):
     def preflight(self) -> PreflightResult:
         required = self.system_config.get("preflight", {}).get("require_python_packages", [])
-        missing = [name for name in required if not self.package_importable(name)]
+        python = self.python_executable()
+        messages: list[str] = []
+        metadata: dict[str, Any] = {
+            "python": python,
+            "required_packages": required,
+        }
+        if self.configured_python_path() is not None and not Path(python).exists():
+            messages.append(f"missing Diffusers Python: {python}")
+            return PreflightResult(
+                system_id=self.system_id,
+                ok=False,
+                messages=messages,
+                metadata=metadata,
+            )
+
+        missing = [name for name in required if not self.package_importable_with_python(python, name)]
+        messages.extend(f"missing Python package: {name}" for name in missing)
+        if not missing:
+            metadata["package_versions"] = self.package_versions(python, required)
         return PreflightResult(
             system_id=self.system_id,
-            ok=not missing,
-            messages=[f"missing Python package: {name}" for name in missing],
-            metadata={"required_packages": required},
+            ok=not messages,
+            messages=messages,
+            metadata=metadata,
         )
+
+    def configured_python_path(self) -> Path | None:
+        ref = self.system_config.get("python", {}).get("path_ref")
+        return self.resolve_path(ref)
+
+    def python_executable(self) -> str:
+        configured = self.configured_python_path()
+        return str(configured) if configured is not None else "python3"
+
+    def package_importable_with_python(self, python: str, module_name: str) -> bool:
+        code = f"import {module_name}"
+        return subprocess.run(
+            [python, "-c", code],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode == 0
+
+    def package_versions(self, python: str, packages: list[str]) -> dict[str, str | None]:
+        code = """
+import importlib.metadata as metadata
+import json
+import sys
+packages = sys.argv[1:]
+versions = {}
+for package in packages:
+    try:
+        versions[package] = metadata.version(package)
+    except metadata.PackageNotFoundError:
+        versions[package] = None
+print(json.dumps(versions, sort_keys=True))
+"""
+        completed = subprocess.run(
+            [python, "-c", code, *packages],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return {}
+        import json
+
+        data = json.loads(completed.stdout)
+        return data if isinstance(data, dict) else {}
+
+    def environment_metadata(self) -> dict[str, Any]:
+        data = super().environment_metadata()
+        python = self.python_executable()
+        packages = self.system_config.get("preflight", {}).get("require_python_packages", [])
+        data.setdefault("software", {})["diffusers_python"] = {
+            "executable": python,
+            "package_versions": self.package_versions(python, packages),
+        }
+        return data
 
     def extra_env(self, gpu_count: int) -> dict[str, str]:
         existing = os.environ.get("PYTHONPATH", "")
@@ -53,7 +127,7 @@ class DiffusersRunner(BenchmarkRunner):
         generation.update({k: v for k, v in run_options.items() if k in generation})
         prompt = workload.get("resolved_prompt", {}).get("prompt", "")
         return [
-            "python3",
+            self.python_executable(),
             str(self.repo_root / "benchmark" / "scripts" / "run_diffusers_e2e.py"),
             "--model",
             str(model_path),
@@ -99,7 +173,7 @@ class DiffusersRunner(BenchmarkRunner):
         generation = workload["generation"]
         prompt = workload.get("resolved_prompt", {}).get("prompt", "")
         return [
-            "python3",
+            self.python_executable(),
             "-m",
             "benchmark.runners.diffusers",
             "--model",

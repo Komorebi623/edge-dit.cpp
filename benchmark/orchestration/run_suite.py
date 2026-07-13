@@ -63,7 +63,7 @@ def main() -> int:
         runner_cls = RUNNERS[runner_name]
         runner = runner_cls(config, graph["site"], root)
         runners[system_id] = runner
-        if args.preflight:
+        if args.preflight and system_id in active_system_ids(runs):
             output["preflight"].append(runner.preflight().to_dict())
 
     if args.execute:
@@ -171,6 +171,10 @@ def main() -> int:
 
     print_json(output)
     return 0
+
+
+def active_system_ids(runs: list[dict[str, object]]) -> set[str]:
+    return {str(run["system_id"]) for run in runs}
 
 
 def filter_runs(

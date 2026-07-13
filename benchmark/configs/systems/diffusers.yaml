@@ -6,6 +6,8 @@ runner: diffusers
 repo:
   path_ref: null
   commit_policy: package_version
+python:
+  path_ref: diffusers_python
 capabilities:
   tasks: [text-to-image, image-editing, text-to-video]
   backends: [cuda]

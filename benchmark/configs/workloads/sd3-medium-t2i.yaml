@@ -1,14 +1,14 @@
 schema_version: 1
-workload_id: sd35-t2i-1024
+workload_id: sd3-medium-t2i-1024
 model_family: SD3
-model_name: SD3.5
+model_name: Stable Diffusion 3 Medium
 task: text-to-image
 model:
-  public_id: stabilityai/stable-diffusion-3.5-large
-  local_path_ref: sd35_dir
+  public_id: stabilityai/stable-diffusion-3-medium
+  local_path_ref: sd3_medium_dir
   format: diffusers-directory
 prompt_set: ../../prompts/text-to-image-v1.jsonl
-prompt_id: sd35_glass_teapot
+prompt_id: sd3_glass_teapot
 generation:
   width: 1024
   height: 1024
@@ -17,9 +17,11 @@ generation:
   seed: 0
   batch_size: 1
   guidance: 4.5
-  cfg_scale: 1.0
+  cfg_scale: 4.5
   scheduler: model-default
   precision: bf16
+model_options:
+  stable_diffusion_cpp_transformer_ref: sd3_medium_sdcpp_transformer
 measurement:
   output_encoding_in_core_latency: false
   require_peak_vram: true
@@ -29,5 +31,5 @@ quality:
   reference_policy: edge-dit-bf16-full-compute
   metrics: [psnr, ssim, lpips, clip, image_reward]
 notes:
-  - Requires a real SD3.5 Large checkpoint path in the local site config.
-  - Do not point `sd35_dir` at the Stable Diffusion 3 Medium checkpoint.
+  - Local H200 smoke workload for Stable Diffusion 3 Medium.
+  - Do not report this as SD3.5; the local checkpoint is SD3 Medium.

@@ -10,19 +10,19 @@ from typing import Any
 
 
 def fmt_ms(value: Any) -> str:
-    return "Pending" if value is None else f"{float(value):.1f} ms"
+    return "-" if value is None else f"{float(value):.1f} ms"
 
 
 def fmt_mib(value: Any) -> str:
-    return "Pending" if value is None else f"{float(value):.0f} MiB"
+    return "-" if value is None else f"{float(value):.0f} MiB"
 
 
 def fmt_x(value: Any) -> str:
-    return "Pending" if value is None else f"{float(value):.2f}x"
+    return "-" if value is None else f"{float(value):.2f}x"
 
 
 def fmt_pct(value: Any) -> str:
-    return "Pending" if value is None else f"{float(value) * 100.0:.1f}%"
+    return "-" if value is None else f"{float(value) * 100.0:.1f}%"
 
 
 def single_gpu_table(rows: list[dict[str, Any]]) -> str:
@@ -36,7 +36,7 @@ def single_gpu_table(rows: list[dict[str, Any]]) -> str:
         if row.get("gpu_count", 1) == 1 and row.get("parallel_mode") is None
     ]
     if not single_rows:
-        lines.append("| Pending | Pending | Pending | Pending | Pending | Pending | Pending | Pending | Pending |")
+        return ""
     for row in single_rows:
         lines.append(
             "| {workload} | {scenario} | {system} | {load} | {median} | {p90} | {vram} | {boundary} | {status} |".format(
@@ -61,7 +61,7 @@ def parallel_table(rows: list[dict[str, Any]]) -> str:
     ]
     parallel_rows = [row for row in rows if row.get("parallel_mode") is not None]
     if not parallel_rows:
-        lines.append("| Pending | Pending | Pending | Pending | Pending | Pending | Pending | Pending | Pending | Pending | Pending |")
+        return ""
     for row in parallel_rows:
         lines.append(
             "| {workload} | {scenario} | {system} | {mode} | {gpus} | {median} | {speedup} | {efficiency} | {vram} | {boundary} | {status} |".format(
@@ -89,14 +89,16 @@ def main() -> int:
 
     data = json.loads(args.summary.read_text(encoding="utf-8"))
     rows = data.get("results", [])
-    markdown = "\n\n".join(
-        [
-            "## Single-GPU Inference",
-            single_gpu_table(rows),
-            "## Memory and Parallel Scaling",
-            parallel_table(rows),
-        ]
-    )
+    sections = []
+    single_gpu = single_gpu_table(rows)
+    if single_gpu:
+        sections.extend(["## Single-GPU Inference", single_gpu])
+    parallel = parallel_table(rows)
+    if parallel:
+        sections.extend(["## Parallel Scaling", parallel])
+    if not sections:
+        sections = ["No benchmark rows found."]
+    markdown = "\n\n".join(sections)
     markdown += "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

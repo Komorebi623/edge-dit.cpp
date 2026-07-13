@@ -20,13 +20,15 @@ systems:
     - ../systems/edge-dit.yaml
     - ../systems/xdit.yaml
 workloads:
-  release_gate:
+  single_gpu:
     - ../workloads/flux1-dev-t2i-1024-s50.yaml
-    - ../workloads/sd35-t2i.yaml
+    - ../workloads/sd3-medium-t2i.yaml
     - ../workloads/qwen-image-t2i.yaml
     - ../workloads/flux-kontext-edit.yaml
     - ../workloads/qwen-image-edit.yaml
     - ../workloads/wan2-t2v.yaml
+  parallel:
+    - ../workloads/flux1-dev-t2i-1024-s50.yaml
 parallel_matrix:
   gpu_counts: [1, 2, 4]
   baseline: xdit

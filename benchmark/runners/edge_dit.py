@@ -66,7 +66,15 @@ class EdgeDitRunner(BenchmarkRunner):
         measured_runs: int,
     ) -> list[str]:
         if workload["task"] != "text-to-image":
-            raise NotImplementedError("edge e2e benchmark adapter currently supports text-to-image")
+            return self.build_cli_once_command(
+                workload,
+                gpu_count,
+                parallel_mode,
+                run_options,
+                output_dir,
+                warmup_runs,
+                measured_runs,
+            )
         sample_binary = self.edge_sample_binary()
         model_ref = workload["model"]["local_path_ref"]
         model_path = self.resolve_path(model_ref)
@@ -110,6 +118,82 @@ class EdgeDitRunner(BenchmarkRunner):
             "--measured-runs",
             str(measured_runs),
         ]
+        self.apply_edge_wrapper_options(command, workload.get("model_options", {}))
+        self.apply_edge_wrapper_options(command, run_options)
+        if gpu_count > 1:
+            devices = edge_device_csv(gpu_count)
+            command.extend(["--devices", devices])
+            if parallel_mode == "sequence":
+                command.extend(["--sp-size", str(gpu_count)])
+            elif parallel_mode == "cfg":
+                command.extend(["--cfg-parallel-size", str(gpu_count)])
+        return command
+
+    def build_cli_once_command(
+        self,
+        workload: dict[str, Any],
+        gpu_count: int,
+        parallel_mode: str | None,
+        run_options: dict[str, Any],
+        output_dir: Path,
+        warmup_runs: int,
+        measured_runs: int,
+    ) -> list[str]:
+        binary = self.resolve_path(self.system_config.get("binary", {}).get("path_ref"))
+        model_ref = workload["model"]["local_path_ref"]
+        model_path = self.resolve_path(model_ref)
+        if binary is None:
+            raise NotImplementedError("edge-dit path references are not resolved")
+        if model_path is None or not model_path.exists():
+            raise NotImplementedError(f"missing model path for {model_ref}: {model_path}")
+
+        generation = dict(workload["generation"])
+        generation.update({k: v for k, v in run_options.items() if k in generation})
+        prompt = workload_prompt(workload)
+        command = [
+            "python3",
+            str(self.repo_root / "benchmark" / "scripts" / "run_edge_cli_once.py"),
+            "--binary",
+            str(binary),
+            "--model",
+            str(model_path),
+            "--prompt",
+            prompt,
+            "--output-dir",
+            str(output_dir.resolve()),
+            "--task",
+            workload["task"],
+            "--width",
+            str(generation["width"]),
+            "--height",
+            str(generation["height"]),
+            "--steps",
+            str(generation["steps"]),
+            "--seed",
+            str(generation["seed"]),
+            "--guidance",
+            str(generation["guidance"]),
+            "--cfg-scale",
+            str(generation.get("cfg_scale", 1.0)),
+            "--dtype",
+            str(generation.get("precision", "auto")),
+            "--backend",
+            "cuda",
+            "--warmup-runs",
+            str(warmup_runs),
+            "--measured-runs",
+            str(measured_runs),
+        ]
+        if workload["task"] == "image-editing":
+            input_ref = workload.get("input_image_ref")
+            input_path = self.resolve_path(input_ref)
+            if input_path is None or not input_path.exists():
+                raise NotImplementedError(f"missing image editing input path for {input_ref}: {input_path}")
+            command.extend(["--input-image", str(input_path)])
+        if workload["task"] == "text-to-video":
+            command.extend(["--frames", str(generation.get("frames", 1))])
+            if "fps" in generation:
+                command.extend(["--fps", str(generation["fps"])])
         self.apply_edge_wrapper_options(command, workload.get("model_options", {}))
         self.apply_edge_wrapper_options(command, run_options)
         if gpu_count > 1:
@@ -208,6 +292,7 @@ class EdgeDitRunner(BenchmarkRunner):
         cache = options.get("cache")
         if cache is not None and cache is not False:
             command.extend(["--cache", str(cache)])
+        self.apply_cache_tuning_options(command, options)
 
     def apply_edge_options(self, command: list[str], options: dict[str, Any]) -> None:
         if options.get("qwen_image_zero_cond_t"):
@@ -229,8 +314,66 @@ class EdgeDitRunner(BenchmarkRunner):
         cache = options.get("cache")
         if cache is not None and cache is not False:
             command.extend(["--cache", str(cache)])
+        self.apply_cache_tuning_options(command, options)
         if options.get("precision") is not None:
             command.extend(["--type", str(options["precision"])])
+
+    def apply_cache_tuning_options(self, command: list[str], options: dict[str, Any]) -> None:
+        value_flags = [
+            ("cache_threshold", "--cache-threshold"),
+            ("cache_reuse_threshold", "--cache-threshold"),
+            ("cache_start", "--cache-start"),
+            ("cache_end", "--cache-end"),
+            ("cache_error_decay", "--cache-error-decay"),
+            ("cache_fn_blocks", "--cache-fn-blocks"),
+            ("cache_bn_blocks", "--cache-bn-blocks"),
+            ("cache_residual_threshold", "--cache-residual-threshold"),
+            ("cache_residual_diff_threshold", "--cache-residual-threshold"),
+            ("cache_max_accumulated_residual_diff", "--cache-max-accumulated-residual-diff"),
+            ("cache_warmup_steps", "--cache-warmup-steps"),
+            ("cache_max_warmup_steps", "--cache-warmup-steps"),
+            ("cache_max_cached_steps", "--cache-max-cached-steps"),
+            ("cache_max_continuous_cached_steps", "--cache-max-continuous-cached-steps"),
+            ("cache_taylor_order", "--cache-taylor-order"),
+            ("cache_taylorseer_n_derivatives", "--cache-taylor-order"),
+            ("cache_taylor_skip", "--cache-taylor-skip"),
+            ("cache_taylorseer_skip_interval", "--cache-taylor-skip"),
+            ("cache_scm_mask", "--cache-scm-mask"),
+            ("cache_calibrate", "--cache-calibrate"),
+            ("cache_profile", "--cache-profile"),
+        ]
+        seen_flags: set[str] = set()
+        for key, flag in value_flags:
+            value = options.get(key)
+            if value is not None and flag not in seen_flags:
+                command.extend([flag, str(value)])
+                seen_flags.add(flag)
+
+        path_refs = [
+            ("cache_calibrate_ref", "--cache-calibrate"),
+            ("cache_profile_ref", "--cache-profile"),
+        ]
+        for key, flag in path_refs:
+            ref = options.get(key)
+            if ref is None or flag in seen_flags:
+                continue
+            path = self.resolve_path(str(ref))
+            if path is None:
+                raise NotImplementedError(f"cache path reference is not resolved: {ref}")
+            command.extend([flag, str(path)])
+            seen_flags.add(flag)
+
+        bool_flags = [
+            ("cache_relative_threshold", "--cache-relative-threshold"),
+            ("cache_absolute_threshold", "--cache-absolute-threshold"),
+            ("cache_no_reset_error", "--cache-no-reset-error"),
+            ("cache_reset_error", "--cache-reset-error"),
+            ("cache_static_scm", "--cache-static-scm"),
+            ("cache_dynamic_scm", "--cache-dynamic-scm"),
+        ]
+        for key, flag in bool_flags:
+            if options.get(key):
+                command.append(flag)
 
 
 def workload_prompt(workload: dict[str, Any]) -> str:
