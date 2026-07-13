@@ -70,11 +70,6 @@ inline void channel_rms_norm_tensor_f32_set(ggml_tensor* t,
 }
 
 inline void channel_rms_norm_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdata) {
-    if (ith != 0) {
-        return;
-    }
-    GGML_UNUSED(nth);
-
     const ChannelRmsNormCustomParams params = channel_rms_norm_params_from_userdata(userdata);
     GGML_ASSERT(channel_rms_norm_params_valid(params));
     GGML_ASSERT(dst->src[0] != nullptr && dst->src[1] != nullptr);
@@ -88,21 +83,26 @@ inline void channel_rms_norm_cpu_custom_op(ggml_tensor* dst, int ith, int nth, v
 
     constexpr float eps = 1e-12f;
     const int64_t channels = x->ne[3];
-    for (int64_t i2 = 0; i2 < x->ne[2]; ++i2) {
-        for (int64_t i1 = 0; i1 < x->ne[1]; ++i1) {
-            for (int64_t i0 = 0; i0 < x->ne[0]; ++i0) {
-                float sum = 0.0f;
-                for (int64_t c = 0; c < channels; ++c) {
-                    const float v = channel_rms_norm_tensor_f32_at(x, i0, i1, i2, c);
-                    sum += v * v;
-                }
-                const float scale = 1.0f / std::sqrt(sum / static_cast<float>(channels) + eps);
-                for (int64_t c = 0; c < channels; ++c) {
-                    const float v = channel_rms_norm_tensor_f32_at(x, i0, i1, i2, c);
-                    const float w = channel_rms_norm_tensor_f32_at(weight, c, 0, 0, 0);
-                    channel_rms_norm_tensor_f32_set(dst, i0, i1, i2, c, v * scale * w);
-                }
-            }
+    // Normalize over the channel dim (ne[3]) per spatial position (i0,i1,i2).
+    // Parallelize over the flattened (i2,i1,i0) grid: each position writes its own
+    // dst rows across all channels, so a static ith/nth split is race-free. Was
+    // single-threaded (ith!=0 return) — a CUDA-era no-op that ran the whole VAE
+    // channel-norm on 1 of 96 cores (~69ms/call x 30 = the 2s CUSTOM in Qwen VAE).
+    const int64_t rows = x->ne[0] * x->ne[1] * x->ne[2];
+    for (int64_t r = ith; r < rows; r += nth) {
+        const int64_t i0 = r % x->ne[0];
+        const int64_t i1 = (r / x->ne[0]) % x->ne[1];
+        const int64_t i2 = r / (x->ne[0] * x->ne[1]);
+        float sum = 0.0f;
+        for (int64_t c = 0; c < channels; ++c) {
+            const float v = channel_rms_norm_tensor_f32_at(x, i0, i1, i2, c);
+            sum += v * v;
+        }
+        const float scale = 1.0f / std::sqrt(sum / static_cast<float>(channels) + eps);
+        for (int64_t c = 0; c < channels; ++c) {
+            const float v = channel_rms_norm_tensor_f32_at(x, i0, i1, i2, c);
+            const float w = channel_rms_norm_tensor_f32_at(weight, c, 0, 0, 0);
+            channel_rms_norm_tensor_f32_set(dst, i0, i1, i2, c, v * scale * w);
         }
     }
 }

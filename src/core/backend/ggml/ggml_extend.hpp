@@ -1232,6 +1232,16 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_conv_3d(ggml_context* ctx,
                                                 bool direct = false) {
     int64_t OC = w->ne[3] / IC;
     int64_t N  = x->ne[3] / IC;
+    if (direct) {
+        // Same AMX win as conv2d: a bf16 conv kernel makes the internal CONV_3D
+        // im2col GEMM route through oneDNN (Intel AMX bf16). Cast the f16 kernel
+        // to bf16 once here; opt-in via ED_CONV_BF16 so non-AMX / non-oneDNN
+        // builds keep the f16 path.
+        const char* conv_bf16 = std::getenv("ED_CONV_BF16");
+        if (conv_bf16 && conv_bf16[0] && conv_bf16[0] != '0' && w->type == GGML_TYPE_F16) {
+            w = ggml_cast(ctx, w, GGML_TYPE_BF16);
+        }
+    }
     x          = direct ? ggml_conv_3d_direct(ctx, w, x, s0, s1, s2, p0, p1, p2, d0, d1, d2, (int)IC, (int)N, (int)OC)
                         : ggml_conv_3d(ctx, w, x, IC, s0, s1, s2, p0, p1, p2, d0, d1, d2);
 
@@ -1533,7 +1543,15 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
         // LOG_DEBUG("attention_ext L_q:%d L_k:%d n_head:%d C:%d d_head:%d N:%d", L_q, L_k, n_head, C, d_head, N);
         bool can_use_flash_attn = true;
         const bool prefer_cudnn_unpadded = ggml_ext_prefer_cudnn_sdpa_unpadded(backend, L_q, L_k, d_head, mask);
-        if (pad_kv_for_flash_attn && can_use_flash_attn && !prefer_cudnn_unpadded && L_k % 256 != 0) {
+        // KV-256 padding is a CUDA-flash constraint. On CPU the oneDNN brgemm flash
+        // kernel tiles kvBlk internally and zero-pads its last tile, so it handles
+        // arbitrary L_k with no mask — padding here would instead build a -inf mask
+        // that disqualifies the oneDNN path (mask must be null) and forces the slow
+        // native f32 fallback. This is why Qwen (L_k=1031, not a 256-multiple) ran
+        // attention at ~1844 GFLOP/s while Flux (L_k=1536=6*256, no pad) hit AMX.
+        const bool cpu_skip_pad = mask == nullptr && sd_backend_is(backend, "CPU") &&
+                                  !ggml_ext_env_flag_enabled("ED_CPU_FLASH_NOPAD_OFF");
+        if (pad_kv_for_flash_attn && can_use_flash_attn && !prefer_cudnn_unpadded && !cpu_skip_pad && L_k % 256 != 0) {
             kv_pad = GGML_PAD(L_k, 256) - static_cast<int>(L_k);
         }
 
