@@ -1,0 +1,33 @@
+schema_version: 1
+workload_id: qwen-image-edit-1024
+model_family: Qwen-Image-Edit
+model_name: Qwen-Image-Edit
+task: image-editing
+model:
+  public_id: Qwen/Qwen-Image-Edit
+  local_path_ref: qwen_image_edit_dir
+  format: diffusers-directory
+prompt_set: ../../prompts/image-editing-v1.jsonl
+prompt_id: qwen_edit_studio_background
+input_image_ref: edit_input_image
+generation:
+  width: 1024
+  height: 1024
+  frames: 1
+  steps: 20
+  seed: 0
+  batch_size: 1
+  guidance: 4.0
+  cfg_scale: 1.0
+  scheduler: model-default
+  precision: bf16
+model_options:
+  qwen_image_zero_cond_t: true
+measurement:
+  output_encoding_in_core_latency: false
+  require_peak_vram: true
+  require_peak_host_rss: true
+quality:
+  enabled: true
+  reference_policy: edge-dit-bf16-full-compute
+  metrics: [psnr, ssim, lpips, clip, image_reward]

@@ -100,7 +100,7 @@ loading and output file encoding are reported separately.
 
 | Model / task | Configuration | edge-dit.cpp | Diffusers | stable-diffusion.cpp | Peak VRAM |
 |---|---|---:|---:|---:|---:|
-| FLUX.1-dev | 1024×1024, BF16, batch 1 | `<latency>` | `<latency>` | `<latency>` | `<edge / baselines>` |
+| FLUX.1-dev | 1024×1024, 50 steps, BF16, batch 1 | `<latency>` | `<latency>` | `<latency>` | `<edge / baselines>` |
 | Qwen-Image | 1024×1024, BF16, batch 1 | `<latency>` | `<latency>` | `<latency>` | `<edge / baselines>` |
 | Wan 2.x | 832×480, 81 frames, batch 1 | `<latency>` | `<latency>` | `<latency>` | `<edge / baselines>` |
 

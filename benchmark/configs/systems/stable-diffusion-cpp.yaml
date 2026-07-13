@@ -1,0 +1,31 @@
+schema_version: 1
+system_id: stable-diffusion.cpp
+display_name: stable-diffusion.cpp
+role: native_baseline
+runner: stable_diffusion_cpp
+repo:
+  path_ref: stable_diffusion_cpp_repo
+  remote: origin
+  branch: main
+  commit_policy: force_latest_origin_main
+binary:
+  path_ref: stable_diffusion_cpp_cli
+  help_command: ["{binary}", "--help"]
+capabilities:
+  tasks: [text-to-image, image-editing, text-to-video]
+  backends: [cuda, cpu, metal, vulkan]
+  parallel: []
+  memory_modes: [quantization, offload, vae_tiling, graph_cut]
+preflight:
+  force_update_commands:
+    - git fetch origin main
+    - git switch main
+    - git reset --hard origin/main
+    - git clean -fdx
+  require_binary: true
+  record_git_commit: true
+unsupported_policy:
+  unsupported_workloads_must_emit_status: unsupported
+benchmark_notes:
+  - This baseline may be force-reset during benchmark execution.
+  - Do not fabricate results for unsupported model families or options.

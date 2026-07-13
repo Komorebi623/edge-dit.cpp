@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/THU-MIG/edge-dit.cpp/benchmark/schemas/summary.schema.json",
+  "title": "edge-dit.cpp benchmark summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "suite_id", "generated_at_utc", "results"],
+  "properties": {
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "suite_id": { "type": "string", "minLength": 1 },
+    "generated_at_utc": { "type": "string", "minLength": 1 },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "suite",
+          "system",
+          "workload",
+          "scenario",
+          "status",
+          "parallel_mode",
+          "gpu_count",
+          "load_ms",
+          "steady_state_median_ms",
+          "steady_state_p90_ms",
+          "coefficient_of_variation",
+          "peak_vram_mib",
+          "speedup",
+          "scaling_efficiency",
+          "metric_source",
+          "measurement_boundary",
+          "quality_reference"
+        ],
+        "properties": {
+          "suite": { "type": "string" },
+          "system": { "type": "string" },
+          "workload": { "type": "string" },
+          "scenario": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["success", "failed", "unsupported", "skipped"]
+          },
+          "parallel_mode": { "type": ["string", "null"] },
+          "gpu_count": { "type": "integer", "minimum": 1 },
+          "load_ms": { "type": ["number", "null"], "minimum": 0 },
+          "steady_state_median_ms": { "type": ["number", "null"], "minimum": 0 },
+          "steady_state_p90_ms": { "type": ["number", "null"], "minimum": 0 },
+          "coefficient_of_variation": { "type": ["number", "null"], "minimum": 0 },
+          "peak_vram_mib": { "type": ["number", "null"], "minimum": 0 },
+          "speedup": { "type": ["number", "null"], "minimum": 0 },
+          "scaling_efficiency": { "type": ["number", "null"], "minimum": 0 },
+          "metric_source": { "type": ["string", "null"] },
+          "measurement_boundary": { "type": ["string", "null"] },
+          "quality_reference": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}

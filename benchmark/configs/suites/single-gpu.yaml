@@ -1,0 +1,24 @@
+schema_version: 1
+suite_id: single-gpu
+description: Single-GPU latency, memory, and quality comparison suite.
+mode: official
+defaults:
+  warmup_runs: 2
+  measured_runs: 10
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+    - ../systems/diffusers.yaml
+    - ../systems/stable-diffusion-cpp.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux1-dev-t2i-1024-s50.yaml
+    - ../workloads/qwen-image-t2i.yaml
+    - ../workloads/wan2-t2v.yaml
+reporting:
+  table: single_gpu_inference
+  require_quality_metrics: true

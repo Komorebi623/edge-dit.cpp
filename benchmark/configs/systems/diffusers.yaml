@@ -1,0 +1,19 @@
+schema_version: 1
+system_id: diffusers
+display_name: Diffusers
+role: python_reference
+runner: diffusers
+repo:
+  path_ref: null
+  commit_policy: package_version
+capabilities:
+  tasks: [text-to-image, image-editing, text-to-video]
+  backends: [cuda]
+  parallel: []
+  memory_modes: [torch_dtype, attention_backend]
+preflight:
+  require_python_packages: [torch, diffusers, transformers]
+  record_package_versions: true
+benchmark_notes:
+  - Use the same model directory, prompt, seed, resolution, steps, guidance, and dtype as edge-dit.cpp.
+  - PyTorch allocator stats may be recorded but external GPU memory is authoritative.

@@ -62,6 +62,25 @@ first_existing_dir() {
   return 1
 }
 
+first_existing_dir_with_file() {
+  local required_file="$1"
+  shift
+  local candidate
+  for candidate in "$@"; do
+    if [[ -d "${candidate}" && -f "${candidate}/${required_file}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+common_prefix_from_include_lib() {
+  local include_dir="$1"
+  local _lib_file="$2"
+  printf '%s\n' "${include_dir%/include}"
+}
+
 python_module_dir() {
   local module_name="$1"
   "${PYTHON_BIN:-python3}" - "${module_name}" <<'PY' 2>/dev/null || true
@@ -87,12 +106,69 @@ discover_python_nvidia_root() {
   fi
 }
 
+python_nvidia_cuda_deps_ready() {
+  "${PYTHON_BIN:-python3}" - <<'PY' >/dev/null 2>&1
+import importlib.util
+from pathlib import Path
+import sys
+
+required = {
+    "nvidia.cudnn": [
+        ("include", "cudnn.h"),
+        ("include", "cudnn_version.h"),
+        ("lib", "libcudnn.so"),
+    ],
+    "nvidia.cuda_nvrtc": [("lib", "libnvrtc.so")],
+    "nvidia.cuda_runtime": [("lib", "libcudart.so")],
+}
+
+for module, files in required.items():
+    spec = importlib.util.find_spec(module)
+    if spec is None or not spec.submodule_search_locations:
+        sys.exit(1)
+    root = Path(list(spec.submodule_search_locations)[0])
+    for subdir, stem in files:
+        if not any((root / subdir).glob(stem + "*")):
+            sys.exit(1)
+PY
+}
+
 install_python_cudnn() {
+  if python_nvidia_cuda_deps_ready; then
+    echo "Using existing Python NVIDIA cuDNN/CUDA runtime wheels."
+    return
+  fi
   echo "Installing user-level NVIDIA cuDNN CUDA 12 wheels via ${PYTHON_BIN:-python3} -m pip ..."
-  "${PYTHON_BIN:-python3}" -m pip install --user --upgrade \
+  "${PYTHON_BIN:-python3}" -m pip install --user \
     nvidia-cudnn-cu12 \
     nvidia-cuda-runtime-cu12 \
     nvidia-cuda-nvrtc-cu12
+}
+
+prepare_python_cudnn_root() {
+  local nvidia_root="$1"
+  local deps_dir
+  local out_dir
+  local lib
+  local name
+  local stem
+
+  mkdir -p "${BUILD_DIR}/_deps"
+  deps_dir="$(cd "${BUILD_DIR}/_deps" && pwd)"
+  out_dir="${deps_dir}/python-cudnn"
+  rm -rf -- "${out_dir}"
+  mkdir -p "${out_dir}/lib"
+  ln -s "${nvidia_root}/cudnn/include" "${out_dir}/include"
+
+  for lib in "${nvidia_root}/cudnn/lib"/libcudnn*.so*; do
+    [[ -f "${lib}" ]] || continue
+    name="$(basename "${lib}")"
+    stem="${name%%.so*}"
+    ln -sf "${lib}" "${out_dir}/lib/${name}"
+    ln -sf "${lib}" "${out_dir}/lib/${stem}.so"
+  done
+
+  printf '%s\n' "${out_dir}"
 }
 
 tool_version() {
@@ -224,24 +300,29 @@ NCCL_STATUS="disabled"
 NCCL_VERSION="n/a"
 NCCL_PATH="n/a"
 if truthy "${ED_ENABLE_NCCL}"; then
-  NCCL_INCLUDE="$(first_existing_dir \
+  NCCL_INCLUDE="$(first_existing_dir_with_file nccl.h \
     "${NCCL_ROOT:-}/include" \
+    "${ROOT_DIR}/third_party/nccl/include" \
     "${CUDA_ROOT}/include" \
     /usr/include \
     /usr/local/include || true)"
   NCCL_LIB="$(first_existing_file \
     "${NCCL_ROOT:-}/lib/libnccl.so" \
     "${NCCL_ROOT:-}/lib64/libnccl.so" \
+    "${ROOT_DIR}/third_party/nccl/lib/libnccl.so" \
+    "${ROOT_DIR}/third_party/nccl/lib64/libnccl.so" \
     "${CUDA_ROOT}/lib64/libnccl.so" \
+    /usr/lib64/libnccl.so \
+    /usr/lib/libnccl.so \
     /usr/lib/x86_64-linux-gnu/libnccl.so \
     /usr/local/lib/libnccl.so \
     /usr/local/lib64/libnccl.so || true)"
-  [[ -n "${NCCL_INCLUDE}" && -f "${NCCL_INCLUDE}/nccl.h" && -n "${NCCL_LIB}" ]] || fail "ED_ENABLE_NCCL=ON requires NCCL headers and library. Set NCCL_ROOT=/path/to/nccl."
+  [[ -n "${NCCL_INCLUDE}" && -f "${NCCL_INCLUDE}/nccl.h" && -n "${NCCL_LIB}" ]] || fail "ED_ENABLE_NCCL=ON requires NCCL headers and library. Install NCCL, set NCCL_ROOT=/path/to/nccl, or provide third_party/nccl."
   NCCL_STATUS="enabled"
-  NCCL_PATH="${NCCL_ROOT:-${NCCL_INCLUDE%/include}}"
+  NCCL_PATH="${NCCL_ROOT:-$(common_prefix_from_include_lib "${NCCL_INCLUDE}" "${NCCL_LIB}")}"
   NCCL_VERSION="$(header_define_version "${NCCL_INCLUDE}/nccl.h" NCCL)"
   NCCL_VERSION="${NCCL_VERSION:-unknown}"
-  [[ -z "${NCCL_ROOT:-}" ]] || CMAKE_ARGS+=("-DNCCL_ROOT=${NCCL_ROOT}")
+  CMAKE_ARGS+=("-DNCCL_ROOT=${NCCL_PATH}")
 fi
 
 MPI_STATUS="disabled"
@@ -270,7 +351,8 @@ if truthy "${ED_ENABLE_CUDNN_SDPA}"; then
     install_python_cudnn
     NVIDIA_PY_ROOT="$(discover_python_nvidia_root)"
     if [[ -n "${NVIDIA_PY_ROOT}" && -d "${NVIDIA_PY_ROOT}/cudnn" ]]; then
-      CUDNN_ROOT="${NVIDIA_PY_ROOT}/cudnn"
+      CUDNN_ROOT="$(prepare_python_cudnn_root "${NVIDIA_PY_ROOT}")"
+      [[ -d "${CUDNN_ROOT}/lib" ]] && CUDNN_LD_PATHS+=("${CUDNN_ROOT}/lib")
       [[ -d "${NVIDIA_PY_ROOT}/cuda_nvrtc/lib" ]] && CUDNN_LD_PATHS+=("${NVIDIA_PY_ROOT}/cuda_nvrtc/lib")
       [[ -d "${NVIDIA_PY_ROOT}/cuda_runtime/lib" ]] && CUDNN_LD_PATHS+=("${NVIDIA_PY_ROOT}/cuda_runtime/lib")
       [[ -d "${NVIDIA_PY_ROOT}/cudnn/lib" ]] && CUDNN_LD_PATHS+=("${NVIDIA_PY_ROOT}/cudnn/lib")
@@ -281,7 +363,9 @@ if truthy "${ED_ENABLE_CUDNN_SDPA}"; then
     "${CUDA_ROOT}/include" || true)"
   CUDNN_LIB="$(first_existing_file \
     "${CUDNN_ROOT:-}/lib/libcudnn.so" \
+    "${CUDNN_ROOT:-}/lib/libcudnn.so.9" \
     "${CUDNN_ROOT:-}/lib64/libcudnn.so" \
+    "${CUDNN_ROOT:-}/lib64/libcudnn.so.9" \
     "${CUDA_ROOT}/lib64/libcudnn.so" || true)"
   [[ -n "${CUDNN_INCLUDE}" && -f "${CUDNN_INCLUDE}/cudnn.h" && -n "${CUDNN_LIB}" ]] || fail "ED_ENABLE_CUDNN_SDPA=ON requires cuDNN. The build script tried automatic user-level installation when ED_INSTALL_CUDNN=ON. Set CUDNN_ROOT=/path/to/cudnn, or set ED_AUTO_INSTALL_DEPS=OFF to disable automatic dependency installation."
   [[ -f "${ROOT_DIR}/third_party/cudnn-frontend/CMakeLists.txt" || "${ED_FETCH_CUDNN_FRONTEND:-OFF}" == "ON" ]] || fail "cuDNN SDPA requires third_party/cudnn-frontend. The build script enables CMake fetching by default when ED_INSTALL_CUDNN_FRONTEND=ON. Initialize submodules, set ED_FETCH_CUDNN_FRONTEND=ON, or set ED_AUTO_INSTALL_DEPS=OFF to disable automatic dependency fetching."

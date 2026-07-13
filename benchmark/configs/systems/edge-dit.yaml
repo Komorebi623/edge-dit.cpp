@@ -1,0 +1,26 @@
+schema_version: 1
+system_id: edge-dit.cpp
+display_name: edge-dit.cpp
+role: primary
+runner: edge_dit
+repo:
+  path_ref: edge_dit_repo
+  commit_policy: current_checkout
+binary:
+  path_ref: edge_dit_cli
+  help_command: ["{binary}", "--help"]
+sample_binary:
+  path_ref: edge_dit_sample
+  help_command: ["{binary}", "--help"]
+capabilities:
+  tasks: [text-to-image, image-editing, text-to-video]
+  backends: [cuda, cpu, metal, vulkan]
+  parallel: [cfg, sequence]
+  memory_modes: [quantization, cpu_offload, component_placement, vae_tiling, graph_cut]
+preflight:
+  require_binary: true
+  require_git_commit: true
+  record_ggml_commit: true
+benchmark_notes:
+  - Runner implementation must not hard-code workload parameters.
+  - Read resolved suite and workload config to construct ed-cli commands.
