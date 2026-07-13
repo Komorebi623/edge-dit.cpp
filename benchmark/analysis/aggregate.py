@@ -7,6 +7,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -48,31 +49,64 @@ def main() -> int:
         metrics = {}
         if metrics_path.exists():
             metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        runner_metrics_path = path.parent / "runner_metrics.json"
+        runner_metrics = {}
+        if runner_metrics_path.exists():
+            runner_metrics = json.loads(runner_metrics_path.read_text(encoding="utf-8"))
+            if not isinstance(runner_metrics, dict):
+                runner_metrics = {}
         measurement_boundary = metrics.get("measurement_boundary")
         if measurement_boundary is None and item.get("status") == "skipped":
             measurement_boundary = "not executed due to preflight failure"
         latency = item.get("latency_ms", {})
         memory = item.get("memory", {})
         parallel = item.get("parallel", {})
+        quality = merged_quality(item, metrics)
+        generation = generation_options(resolved_config)
         results.append(
             {
                 "suite": suite,
                 "system": item.get("system"),
                 "workload": item.get("workload"),
+                "model": item.get("model"),
+                "task": item.get("task"),
                 "scenario": resolved_config.get("scenario_id", "default"),
                 "status": item.get("status"),
                 "parallel_mode": resolved_config.get("parallel_mode"),
                 "gpu_count": parallel.get("gpu_count", 1),
+                "width": generation.get("width"),
+                "height": generation.get("height"),
+                "frames": generation.get("frames"),
+                "steps": generation.get("steps"),
+                "precision": generation.get("precision"),
+                "run_options": resolved_config.get("run_options", {}),
                 "load_ms": latency.get("load"),
                 "steady_state_median_ms": latency.get("steady_state_median"),
                 "steady_state_p90_ms": latency.get("steady_state_p90"),
                 "coefficient_of_variation": latency.get("coefficient_of_variation"),
+                "text_encoder_ms": latency.get("text_encoder"),
+                "dit_ms": latency.get("dit"),
+                "vae_ms": latency.get("vae"),
+                "per_step_avg_ms": latency.get("per_step_avg"),
                 "peak_vram_mib": memory.get("peak_vram_mib"),
+                "peak_host_rss_mib": memory.get("peak_host_rss_mib"),
                 "speedup": None,
                 "scaling_efficiency": None,
+                "communication_ms": parallel.get("communication_ms"),
+                "all_to_all_ms": parallel.get("all_to_all_ms"),
+                "packing_ms": parallel.get("packing_ms"),
+                "receive_preparation_ms": parallel.get("receive_preparation_ms"),
+                "graph_segment_count": parallel.get("graph_segment_count"),
                 "metric_source": metrics.get("metric_source"),
                 "measurement_boundary": measurement_boundary,
-                "quality_reference": item.get("quality_reference"),
+                "quality_reference": quality_reference(item, resolved_config),
+                "psnr": quality.get("psnr"),
+                "ssim": quality.get("ssim"),
+                "lpips": quality.get("lpips"),
+                "clip": quality.get("clip"),
+                "image_reward": quality.get("image_reward"),
+                "cache_events": runner_metrics.get("cache_events", []),
+                "sample_output_dir": runner_metrics.get("sample_output_dir"),
             }
         )
     add_parallel_scaling(results)
@@ -113,6 +147,42 @@ def load_resolved_config(result_dir: Path) -> dict:
     with path.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return data if isinstance(data, dict) else {}
+
+
+def merged_quality(item: dict, metrics: dict) -> dict[str, Any]:
+    result_quality = item.get("quality")
+    metric_quality = metrics.get("quality")
+    quality: dict[str, Any] = {}
+    for source in (metric_quality, result_quality):
+        if not isinstance(source, dict):
+            continue
+        for key in ["psnr", "ssim", "lpips", "clip", "image_reward"]:
+            value = source.get(key)
+            if quality.get(key) is None:
+                quality[key] = value
+    return quality
+
+
+def quality_reference(item: dict, resolved_config: dict) -> str | None:
+    value = item.get("quality_reference")
+    if isinstance(value, str):
+        return value
+    workload = resolved_config.get("workload", {})
+    if isinstance(workload, dict):
+        quality = workload.get("quality", {})
+        if isinstance(quality, dict):
+            value = quality.get("reference_policy")
+            if isinstance(value, str):
+                return value
+    return None
+
+
+def generation_options(resolved_config: dict) -> dict[str, Any]:
+    workload = resolved_config.get("workload", {})
+    if not isinstance(workload, dict):
+        return {}
+    generation = workload.get("generation", {})
+    return generation if isinstance(generation, dict) else {}
 
 
 def add_parallel_scaling(results: list[dict]) -> None:

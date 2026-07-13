@@ -1,0 +1,42 @@
+schema_version: 1
+suite_id: cuda-optimization-ablation-qwen
+description: >
+  Qwen-Image CUDA optimization ablation over the valid build range. Qwen-Image
+  requires the RoPE CUDA path; generic and norm-only builds fail before image
+  output and are intentionally excluded from public performance results.
+mode: official
+defaults:
+  warmup_runs: 1
+  measured_runs: 5
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/qwen-image-t2i-1024-s50.yaml
+scenarios:
+  - scenario_id: norm_rope
+    options:
+      edge_cli_ref: edge_dit_cli_norm_rope
+      edge_sample_ref: edge_dit_sample_norm_rope
+      cuda_build_variant: norm_rope
+      cudnn_sdpa: false
+      cuda_norm: true
+      cuda_rope: true
+      cuda_modulation: false
+  - scenario_id: norm_rope_mod
+    options:
+      edge_cli_ref: edge_dit_cli_norm_rope_mod
+      edge_sample_ref: edge_dit_sample_norm_rope_mod
+      cuda_build_variant: norm_rope_mod
+      cudnn_sdpa: false
+      cuda_norm: true
+      cuda_rope: true
+      cuda_modulation: true
+reporting:
+  table: cuda_optimization_ablation
+  require_quality_metrics: false

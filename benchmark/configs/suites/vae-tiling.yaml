@@ -1,0 +1,42 @@
+schema_version: 1
+suite_id: vae-tiling
+description: >
+  High-resolution FLUX.1-dev VAE tiling suite. Tiling is measured as a memory
+  trade-off and does not publish quality metrics.
+mode: official
+defaults:
+  warmup_runs: 1
+  measured_runs: 5
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux1-dev-t2i-2048-s20.yaml
+scenarios:
+  - scenario_id: untiled
+    options:
+      precision: bf16
+      vae_mode: untiled
+  - scenario_id: tiled_2x2
+    options:
+      precision: bf16
+      vae_tiling: true
+      vae_tile_size: 2.0
+      vae_mode: tiled
+      tile_layout: approximately_2x2
+  - scenario_id: tiled_4x4
+    options:
+      precision: bf16
+      vae_tiling: true
+      vae_tile_size: 4.0
+      vae_mode: tiled
+      tile_layout: approximately_4x4
+reporting:
+  table: vae_tiling
+  require_quality_metrics: false
+  allow_oom_rows: true

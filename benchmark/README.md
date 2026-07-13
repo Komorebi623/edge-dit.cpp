@@ -109,6 +109,88 @@ workloads are smoke or diagnostic only and must not be aggregated into README
 or main-table performance numbers. The local H200 config currently has Stable
 Diffusion 3 Medium, not a real SD3.5 Large checkpoint.
 
+## Full Performance Page Suites
+
+`docs/performance.md` is backed by a wider feature-results matrix than the root
+README. Run these suites into separate frozen result roots, then aggregate those
+roots into a `performance-page` summary.
+
+```bash
+# Build the five CUDA variants used by cuda-optimization-ablation.
+bash benchmark/scripts/build_cuda_ablation_matrix.sh
+
+# Task coverage: T2I, image editing, and video.
+BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
+python3 benchmark/orchestration/run_suite.py \
+  --suite benchmark/configs/suites/task-coverage.yaml \
+  --site benchmark/configs/local/site-h200.yaml \
+  --execute \
+  --output-root benchmark/results/perf-task-coverage-YYYYMMDD
+
+# CFG scaling. This intentionally uses SD3 Medium, not FLUX distilled guidance.
+BENCHMARK_CUDA_VISIBLE_DEVICES=3,4 \
+python3 benchmark/orchestration/run_suite.py \
+  --suite benchmark/configs/suites/cfg-parallel.yaml \
+  --site benchmark/configs/local/site-h200.yaml \
+  --execute \
+  --output-root benchmark/results/perf-cfg-parallel-YYYYMMDD
+
+# Sequence-parallel scaling, including short and long sequence workloads.
+BENCHMARK_CUDA_VISIBLE_DEVICES=3,4,5,6 \
+python3 benchmark/orchestration/run_suite.py \
+  --suite benchmark/configs/suites/sp-parallel.yaml \
+  --site benchmark/configs/local/site-h200.yaml \
+  --execute \
+  --force-external-update \
+  --output-root benchmark/results/perf-sp-parallel-YYYYMMDD
+
+# Cache speed-quality. This is the only suite that gates public quality metrics.
+BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
+python3 benchmark/orchestration/run_suite.py \
+  --suite benchmark/configs/suites/cache-quality.yaml \
+  --site benchmark/configs/local/site-h200.yaml \
+  --execute \
+  --systems edge-dit.cpp \
+  --output-root benchmark/results/perf-cache-quality-YYYYMMDD
+
+# Resource, quantization, VAE tiling, and CUDA optimization trade-offs.
+for suite in resource-profiles quantization vae-tiling cuda-optimization-ablation; do
+  BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
+  python3 benchmark/orchestration/run_suite.py \
+    --suite "benchmark/configs/suites/${suite}.yaml" \
+    --site benchmark/configs/local/site-h200.yaml \
+    --execute \
+    --systems edge-dit.cpp \
+    --output-root "benchmark/results/perf-${suite}-YYYYMMDD"
+done
+```
+
+After cache quality evaluation, apply metric summaries back to the matching
+target result directories:
+
+```bash
+python3 benchmark/analysis/apply_quality_metrics.py \
+  --result-dir benchmark/results/perf-cache-quality-YYYYMMDD/.../target-run \
+  --eval-summary benchmark/results/perf-cache-quality-YYYYMMDD/.../eval_summary/summary.json
+```
+
+Finally aggregate the frozen roots:
+
+```bash
+python3 benchmark/analysis/aggregate.py \
+  --results-dir benchmark/results/perf-main-table-YYYYMMDD \
+  --results-dir benchmark/results/perf-task-coverage-YYYYMMDD \
+  --results-dir benchmark/results/perf-cfg-parallel-YYYYMMDD \
+  --results-dir benchmark/results/perf-sp-parallel-YYYYMMDD \
+  --results-dir benchmark/results/perf-cache-quality-YYYYMMDD \
+  --results-dir benchmark/results/perf-resource-profiles-YYYYMMDD \
+  --results-dir benchmark/results/perf-quantization-YYYYMMDD \
+  --results-dir benchmark/results/perf-vae-tiling-YYYYMMDD \
+  --results-dir benchmark/results/perf-cuda-optimization-ablation-YYYYMMDD \
+  --suite-id performance-page \
+  --output benchmark/results/performance-page-YYYYMMDD/summary.json
+```
+
 Run the public model smoke suite across all locally configured public-preview
 model families:
 

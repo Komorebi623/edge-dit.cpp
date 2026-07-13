@@ -1,0 +1,34 @@
+schema_version: 1
+suite_id: performance-page
+description: >
+  Meta-suite for the docs/performance.md feature-results page. Execute the
+  referenced suites individually and aggregate their frozen result roots into a
+  single performance-page summary.
+mode: meta
+systems: {}
+workloads: {}
+includes:
+  - readme-main-table
+  - task-coverage
+  - cfg-parallel
+  - sp-parallel
+  - cache-quality
+  - resource-profiles
+  - quantization
+  - vae-tiling
+  - cuda-optimization-ablation
+  - cuda-optimization-ablation-qwen
+reporting:
+  table: performance_page
+  require_quality_metrics:
+    cache-quality: [psnr, lpips]
+  quality_exempt_suites:
+    - readme-main-table
+    - task-coverage
+    - cfg-parallel
+    - sp-parallel
+    - resource-profiles
+    - quantization
+    - vae-tiling
+    - cuda-optimization-ablation
+    - cuda-optimization-ablation-qwen

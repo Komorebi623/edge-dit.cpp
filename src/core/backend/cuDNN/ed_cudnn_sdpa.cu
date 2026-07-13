@@ -227,29 +227,39 @@ static void append_unique_path(std::vector<std::string> & paths, const std::stri
     }
 }
 
-static bool ensure_nvrtc_loaded() {
+static std::vector<std::string> cudnn_runtime_paths() {
+    std::vector<std::string> paths;
+    for (const auto & path : split_paths(getenv("LD_LIBRARY_PATH"))) {
+        append_unique_path(paths, path);
+    }
+#ifdef ED_CUDNN_RUNTIME_LIBRARY_DIRS
+    for (const auto & path : split_paths(ED_CUDNN_RUNTIME_LIBRARY_DIRS)) {
+        append_unique_path(paths, path);
+    }
+#endif
+    return paths;
+}
+
+static bool dlopen_any_global(const std::vector<std::string> & names,
+                              const std::vector<std::string> & paths,
+                              const char * label) {
 #if defined(__linux__)
-    static const bool loaded = [] {
-        void * handle = dlopen("libnvrtc.so.12", RTLD_NOW | RTLD_GLOBAL);
+    std::string last_error;
+    for (const std::string & name : names) {
+        void * handle = dlopen(name.c_str(), RTLD_NOW | RTLD_GLOBAL);
         if (handle != nullptr) {
             return true;
         }
-
-        std::vector<std::string> paths;
-        for (const auto & path : split_paths(getenv("LD_LIBRARY_PATH"))) {
-            append_unique_path(paths, path);
+        const char * err = dlerror();
+        if (err != nullptr) {
+            last_error = err;
         }
-#ifdef ED_CUDNN_RUNTIME_LIBRARY_DIRS
-        for (const auto & path : split_paths(ED_CUDNN_RUNTIME_LIBRARY_DIRS)) {
-            append_unique_path(paths, path);
-        }
-#endif
+    }
 
-        const char * initial_error = dlerror();
-        std::string last_error = initial_error != nullptr ? initial_error : "";
-        for (const std::string & path : paths) {
-            const std::string candidate = path + "/libnvrtc.so.12";
-            handle = dlopen(candidate.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    for (const std::string & path : paths) {
+        for (const std::string & name : names) {
+            const std::string candidate = path + "/" + name;
+            void * handle = dlopen(candidate.c_str(), RTLD_NOW | RTLD_GLOBAL);
             if (handle != nullptr) {
                 if (profile_enabled()) {
                     GGML_LOG_INFO("ED_CUDNN_SDPA loaded %s\n", candidate.c_str());
@@ -261,9 +271,29 @@ static bool ensure_nvrtc_loaded() {
                 last_error = err;
             }
         }
+    }
 
-        GGML_LOG_WARN("ED_CUDNN_SDPA could not load libnvrtc.so.12 before cuDNN graph build: %s\n", last_error.c_str());
-        return false;
+    GGML_LOG_WARN("ED_CUDNN_SDPA could not load %s before cuDNN graph build: %s\n",
+                  label,
+                  last_error.c_str());
+    return false;
+#else
+    (void) names;
+    (void) paths;
+    (void) label;
+    return true;
+#endif
+}
+
+static bool ensure_cuda_graph_build_libraries_loaded() {
+#if defined(__linux__)
+    static const bool loaded = [] {
+        const std::vector<std::string> paths = cudnn_runtime_paths();
+        bool ok = true;
+        ok = dlopen_any_global({"libcublasLt.so", "libcublasLt.so.13", "libcublasLt.so.12"}, paths, "cuBLASLt") && ok;
+        ok = dlopen_any_global({"libcublas.so", "libcublas.so.13", "libcublas.so.12"}, paths, "cuBLAS") && ok;
+        ok = dlopen_any_global({"libnvrtc.so", "libnvrtc.so.13", "libnvrtc.so.12"}, paths, "NVRTC") && ok;
+        return ok;
     }();
     return loaded;
 #else
@@ -639,12 +669,12 @@ static std::shared_ptr<fe::graph::Graph> create_graph(const ed_cudnn_sdpa_key & 
 }
 
 static std::unique_ptr<ed_cudnn_sdpa_plan> create_plan(const ed_cudnn_sdpa_key & key, ed_cudnn_sdpa_result_t & result) {
-    auto plan = std::make_unique<ed_cudnn_sdpa_plan>();
-    if (cudnnCreate(&plan->handle) != CUDNN_STATUS_SUCCESS) {
+    if (!ensure_cuda_graph_build_libraries_loaded()) {
         result = ED_CUDNN_SDPA_BUILD_FAILED;
         return nullptr;
     }
-    if (!ensure_nvrtc_loaded()) {
+    auto plan = std::make_unique<ed_cudnn_sdpa_plan>();
+    if (cudnnCreate(&plan->handle) != CUDNN_STATUS_SUCCESS) {
         result = ED_CUDNN_SDPA_BUILD_FAILED;
         return nullptr;
     }

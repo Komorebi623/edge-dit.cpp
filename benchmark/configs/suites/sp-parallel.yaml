@@ -1,6 +1,9 @@
 schema_version: 1
-suite_id: parallel
-description: CFG and sequence-parallel scaling suite.
+suite_id: sp-parallel
+description: >
+  Official sequence-parallel scaling suite. It includes a standard 1024x1024
+  FLUX workload and longer image/video token sequences so edge-dit.cpp
+  communication overhead and memory savings are both visible.
 mode: official
 defaults:
   warmup_runs: 1
@@ -12,7 +15,6 @@ hardware:
 systems:
   parallel:
     - ../systems/edge-dit.yaml
-    - ../systems/xdit.yaml
 workloads:
   parallel:
     - ../workloads/flux1-dev-t2i-1024-s50.yaml
@@ -22,7 +24,7 @@ parallel_matrix:
   gpu_counts: [1, 2, 4]
   modes:
     edge-dit.cpp: [sequence]
-    xdit: [ulysses]
 reporting:
-  table: parallel_scaling
+  table: sequence_parallel_scaling
+  require_quality_metrics: false
   require_communication_breakdown: true
