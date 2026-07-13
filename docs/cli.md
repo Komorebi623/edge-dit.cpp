@@ -170,15 +170,6 @@ SD3-family models can skip T5XXL to reduce memory:
   --output qwen.png
 ```
 
-Some Qwen checkpoints require:
-
-```bash
---qwen-image-zero-cond-t
-```
-
-Use that flag only for checkpoints that need the zero-conditioned timestep
-behavior.
-
 ## Image Editing
 
 <a id="flux1-kontext"></a>
@@ -207,12 +198,14 @@ behavior.
   --model /path/to/Qwen-Image-Edit \
   --image /path/to/input.png \
   --prompt "change the background to a clean studio" \
-  --qwen-image-zero-cond-t \
   --width 1024 \
   --height 1024 \
   --steps 20 \
   --output qwen-edit.png
 ```
+
+Use `--qwen-image-zero-cond-t` for Qwen-Image-Edit-2511. For other
+Qwen-Image-Edit models, ignore this option.
 
 Image editing support depends on the model family and checkpoint format. See
 [Supported models and usage](models.md) for the public preview support matrix.
