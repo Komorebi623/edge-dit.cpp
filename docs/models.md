@@ -12,12 +12,12 @@ support commitment.
 
 | Model family | Task | Common format | Backend coverage | Status |
 |---|---|---|---|---|
-| SD3 / SD3.5 | Text-to-image | Diffusers directory or component weights | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| FLUX.1 | Text-to-image | Diffusers directory, top-level FLUX safetensors, or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| SD3 / SD3.5 | Text-to-image | Diffusers-style directory or component weights | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| FLUX.1 | Text-to-image | Diffusers-style directory, top-level FLUX safetensors, or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
 | FLUX.1-Kontext | Image editing / reference-guided generation | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Qwen-Image | Text-to-image | Diffusers directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Qwen-Image-Edit | Image editing | Diffusers directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Wan 2.x | Video generation | Diffusers directory or components | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized |
+| Qwen-Image | Text-to-image | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| Qwen-Image-Edit | Image editing | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| Wan 2.x | Video generation | Diffusers-style directory or components | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized |
 
 Backend availability means the runtime can be built for that backend. Model
 quality, memory use, and speed are workload dependent and should be validated
@@ -68,17 +68,11 @@ Command example: [SD3 / SD3.5 CLI](cli.md#sd3-sd35).
 Qwen-Image text-to-image support uses Diffusers-style directories or component
 weights.
 
-Some Qwen checkpoints require:
-
-```bash
---qwen-image-zero-cond-t
-```
-
-Use it only for checkpoints that need that conditioning behavior.
-
 Command example: [Qwen-Image CLI](cli.md#qwen-image).
 
 ## Image Editing
+
+Image editing support depends on the model family and checkpoint format.
 
 ### FLUX.1-Kontext
 
@@ -88,12 +82,22 @@ Command example: [FLUX.1-Kontext CLI](cli.md#flux1-kontext).
 
 ### Qwen-Image-Edit
 
-Qwen-Image-Edit uses an input/reference image via `--image`. Some checkpoints
-also require `--qwen-image-zero-cond-t`.
+Qwen-Image-Edit uses an input/reference image via `--image`.
+
+For Qwen-Image-Edit-2511, use:
+
+```bash
+--qwen-image-zero-cond-t
+```
+
+`--qwen-image-zero-cond-t` makes reference-image tokens use the `t = 0`
+timestep condition while the image tokens being generated or edited still use
+the current denoising timestep `t`.
+
+It is an inference compatibility switch introduced for Qwen-Image-Edit-2511.
+For other Qwen-Image-Edit models, ignore this option.
 
 Command example: [Qwen-Image-Edit CLI](cli.md#qwen-image-edit).
-
-Image editing support depends on the model family and checkpoint format.
 
 ## Video Generation
 
@@ -146,8 +150,8 @@ profiling behavior.
   runtime behavior.
 - Cache methods and sequence parallelism are workload dependent and may not be
   valid for every model or resolution.
-- Some editing models require model-specific conditioning flags such as
-  `--qwen-image-zero-cond-t`.
+- Model-specific options such as `--qwen-image-zero-cond-t`
+  should only be used with the model families documented above.
 - Component loading requires a complete, compatible set of text encoders, VAE,
   diffusion transformer, and optional vision components for the selected model.
 
