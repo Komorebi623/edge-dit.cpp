@@ -307,6 +307,10 @@ Cache modes:
   --output flux-cache.png
 ```
 
+`--cache-residual-threshold 0.08` above is a DBCache/CacheDiT example, not a
+global cache default. MagCache, DiCache, and SenCache use their own
+method-specific thresholds unless this flag is passed explicitly.
+
 Supported cache mode names:
 
 ```text

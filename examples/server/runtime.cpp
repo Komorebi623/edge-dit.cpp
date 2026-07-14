@@ -167,7 +167,8 @@ bool validate_image_params(const ed_image_generation_params_t& params, std::stri
         }
         return false;
     }
-    if (params.sample.cache_residual_diff_threshold < 0.0f) {
+    if (std::isfinite(params.sample.cache_residual_diff_threshold) &&
+        params.sample.cache_residual_diff_threshold < 0.0f) {
         if (error != nullptr) {
             *error = "cache_residual_diff_threshold must be non-negative";
         }

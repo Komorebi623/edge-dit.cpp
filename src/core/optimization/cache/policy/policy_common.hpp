@@ -130,9 +130,9 @@ inline CacheProgram make_output_diff_program(const char* method, int block_segme
 // STORAGE is declarative:
 //   FULL.after   : STORE captured-feature -> slot
 //   REUSE.before : LOAD slot -> inject-feature (lowering calls hooks.inject)
-// device_backed: when true (MagCache on a GPU runner with a device store wired),
+// device_backed: when true (feature reuse on a GPU runner with a device store wired),
 // slot0 is a device tensor so the residual is stored/reused on-device without a
-// host round-trip. SenCache leaves it false (host declarative path).
+// host round-trip.
 inline CacheProgram make_feature_reuse_program(const char* method, int block_segment_id,
                                                bool device_backed = false) {
     CacheProgram program;
@@ -170,6 +170,32 @@ inline CacheProgram make_feature_reuse_program(const char* method, int block_seg
     }
     reuse.segments.push_back(reuse_seg);
     program.variants.push_back(reuse);
+
+    return program;
+}
+
+// Build a FULL-only Feature program for calibration passes that need the
+// captured block-stack feature but must never select a reuse/inject variant.
+inline CacheProgram make_feature_capture_program(const char* method, int block_segment_id) {
+    CacheProgram program;
+    program.method_name = method;
+    program.slots.push_back(make_slot(0, "block_stack_residual"));
+
+    GraphVariantPlan full;
+    full.id = kVariantFull;
+    full.kind = GraphVariantKind::FULL;
+    SegmentPlan full_seg;
+    full_seg.segment_id = block_segment_id;
+    full_seg.execution = SegmentExecutionMode::FULL_COMPUTE;
+    {
+        CacheAction store;
+        store.kind = CacheActionKind::STORE;
+        store.inputs = {ValueRef::of_ambient(kAmbientCapturedFeature)};
+        store.outputs = {ValueRef::of_slot(0)};
+        full_seg.after.push_back(store);
+    }
+    full.segments.push_back(full_seg);
+    program.variants.push_back(full);
 
     return program;
 }

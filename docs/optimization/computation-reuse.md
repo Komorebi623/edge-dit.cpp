@@ -108,7 +108,7 @@ bool            cache_use_relative_threshold;
 bool            cache_reset_error_on_compute;
 int             cache_Fn_compute_blocks;        /* DBCache/CacheDiT; 8 */
 int             cache_Bn_compute_blocks;        /* DBCache/CacheDiT; 0 */
-float           cache_residual_diff_threshold;  /* 0.08 */
+float           cache_residual_diff_threshold;  /* unset by default; method-specific */
 float           cache_max_accumulated_residual_diff;
 int             cache_max_warmup_steps;         /* 8 */
 int             cache_max_cached_steps;
