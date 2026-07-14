@@ -4,8 +4,8 @@
 
 This page is the public benchmark result page for the current H200 benchmark
 snapshot. It is meant to answer the feature questions behind the README claims:
-single-GPU runtime, task coverage, parallel execution, computation reuse,
-low-memory execution, quantization, VAE tiling, and CUDA operator optimization.
+single-GPU runtime, parallel execution, computation reuse, low-memory execution,
+quantization, VAE tiling, and CUDA operator optimization.
 
 The root README intentionally keeps only one main performance table. This page
 keeps the supporting feature results and the reproducibility contract.
@@ -21,9 +21,8 @@ faster than its baseline.
 | Capability | Representative workload | Compared configurations | Headline result |
 |---|---|---|---|
 | Native single-GPU runtime | FLUX.1-dev, SD3 Medium, Qwen-Image; 1024x1024, 50 steps | edge-dit.cpp vs Diffusers vs stable-diffusion.cpp | edge-dit.cpp is within 1.07x-1.19x of Diffusers and 2.68x-5.86x faster than stable-diffusion.cpp. |
-| Model and task coverage | Text-to-image, image editing, text-to-video; 20 steps | edge-dit.cpp across six public-preview workloads | edge-dit.cpp completes all six task workloads, including FLUX-Kontext editing, Qwen-Image-Edit, and Wan text-to-video. |
 | CFG parallelism | SD3 Medium, 1024x1024, 50 steps, CFG 4.5 | 1 GPU vs CFG-2 | CFG-2 reduces latency from 9.748 s to 6.341 s, a 1.54x speedup at 76.9% efficiency. |
-| Sequence parallelism | FLUX 1024x1024, FLUX 2048x2048, Wan 832x480x81 | SP-1 vs SP-2 vs SP-4 | SP-4 reaches 2.33x on FLUX 1024, 3.27x on FLUX 2048, and 1.72x on Wan video. |
+| Sequence parallelism | FLUX 1024x1024 and 2048x2048 | SP-1 vs SP-2 vs SP-4 | With the README build, SP-4 reaches 1.53x on FLUX 1024 and 2.17x on FLUX 2048. |
 | Computation reuse | FLUX.1-dev, 1024x1024, 50 steps, 8 prompts x 3 seeds | Full compute vs EasyCache, CacheDiT, MagCache, DiCache, SenCache | MagCache is the fastest cache point at 2.69x; EasyCache reaches 2.09x; tuned SenCache now reaches 1.92x with 29-30/50 reused steps. |
 | Weight quantization | FLUX.1-dev, 1024x1024 | BF16 vs Q8_0/Q6_K/Q4_K | Q4_K reduces peak VRAM from 40509 MiB to 17803 MiB, with 1.59x latency slowdown. |
 | Low-memory execution | FLUX.1-dev, 1024x1024 | BF16 performance profile vs Q4_K + CPU placement/offload + graph budget + VAE tiling | The 8 GB experimental profile runs at 7591 MiB peak VRAM, with 6.01x latency slowdown. |
@@ -47,40 +46,21 @@ Contract: local NVIDIA H200 node, CUDA `performance` profile, 1024x1024,
 50 denoising steps, BF16, batch 1, seed 0, 2 warm-up runs, 10 measured runs,
 load-once generation. Output encoding is outside `Median` and `P90`.
 
-| Model | edge-dit.cpp Median | Relative to Diffusers | Speedup over sd.cpp | Peak VRAM |
-|---|---:|---:|---:|---:|
-| FLUX.1-dev | 10.784 s | 1.07x | 2.82x | 38341 MiB |
-| Qwen-Image | 10.697 s | 1.12x | 5.86x | 59725 MiB |
-| Stable Diffusion 3 Medium | 4.003 s | 1.19x | 2.68x | 20833 MiB |
+| Model | System | Load (s) | Median (s) | P90 (s) | Peak VRAM (MiB) |
+|---|---|---:|---:|---:|---:|
+| FLUX.1-dev | edge-dit.cpp | 6.645 | 10.784 | 10.861 | 38341 |
+| | Diffusers | 14.531 | 10.040 | 10.048 | 37711 |
+| | stable-diffusion.cpp | 1.333 | 30.371 | 30.379 | 40331 |
+| Stable Diffusion 3 Medium | edge-dit.cpp | 5.840 | 4.003 | 4.049 | 20833 |
+| | Diffusers | 11.244 | 3.376 | 3.381 | 20283 |
+| | stable-diffusion.cpp | 1.457 | 10.740 | 10.797 | 22997 |
+| Qwen-Image | edge-dit.cpp | 11.621 | 10.697 | 10.736 | 59725 |
+| | Diffusers | 25.220 | 9.558 | 9.565 | 60935 |
+| | stable-diffusion.cpp | 1.782 | 62.671 | 62.728 | 61879 |
 
 The local model tree contains Stable Diffusion 3 Medium, not SD3.5 Large. These
 results must not be reported as SD3.5. Adding SD3.5 requires adding a real local
 checkpoint path and rerunning the same suite.
-
-## Model and Task Coverage
-
-Raw result root: `benchmark/results/perf-task-coverage-20260714`.
-
-Suite config: `benchmark/configs/suites/task-coverage.yaml`.
-
-Contract: local NVIDIA H200 node, BF16, batch 1, seed 0, 1 warm-up run,
-5 measured runs. Text-to-image rows use load-once generation. Image editing and
-video rows use the CLI single-run boundary, which includes load and output
-encoding.
-
-| Model | Task | Setting | Steps | edge-dit.cpp | Diffusers | Relative | Peak VRAM |
-|---|---|---|---:|---:|---:|---:|---:|
-| FLUX.1-dev | text-to-image | 1024x1024 | 20 | 7.795 s | 4.070 s | 1.92x | 40509 MiB |
-| Qwen-Image | text-to-image | 1024x1024 | 20 | 7.959 s | 3.852 s | 2.07x | 89297 MiB |
-| Stable Diffusion 3 Medium | text-to-image | 1024x1024 | 20 | 4.275 s | 1.447 s | 2.95x | 23169 MiB |
-| FLUX.1-Kontext-dev | image-editing | 1024x1024 | 20 | 29.544 s | - | - | 40577 MiB |
-| Qwen-Image-Edit | image-editing | 1024x1024 | 20 | 39.204 s | - | - | 96449 MiB |
-| Wan 2.x | text-to-video | 832x480x81 | 20 | 184.926 s | - | - | 76623 MiB |
-
-Diffusers is used as the reference backend for text-to-image in this suite.
-The current benchmark harness does not include matching load-once Diffusers
-adapters for the image-editing and video rows, so those rows are presented as
-edge-dit.cpp coverage results only.
 
 ## Parallel Execution
 
@@ -103,24 +83,24 @@ batch 1, seed 0, load-once generation.
 
 ### Sequence Parallelism
 
-Raw result root: `benchmark/results/perf-sp-parallel-20260714`.
+Raw result root: `benchmark/results/perf-sp-parallel-readme-build-20260714`.
 
 Suite config: `benchmark/configs/suites/sp-parallel.yaml`.
 
-Contract: local H200 node, BF16, batch 1. FLUX 1024 uses 50 steps. FLUX 2048
-and Wan use 20 steps. The Wan row uses a CLI single-run boundary.
+Contract: local H200 node, CUDA `performance` profile, BF16, batch 1, seed 0,
+1 warm-up run, 5 measured runs, load-once generation. FLUX 1024 uses 50 steps;
+FLUX 2048 uses 20 steps. This rerun uses the same README build as the main
+single-GPU table so the 1-GPU baseline is aligned with the public performance
+claim.
 
 | Workload | System | Mode | GPUs | Median | Speedup | Efficiency | Max VRAM / GPU | Comm. | Segments / Step |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| flux1-dev-t2i-1024-s50 | edge-dit.cpp | sequence | 1 | 18.719 s | 1.00x | 100.0% | 40387 MiB | - | - |
-| flux1-dev-t2i-1024-s50 | edge-dit.cpp | sequence | 2 | 10.520 s | 1.78x | 89.0% | 41665 MiB | - | - |
-| flux1-dev-t2i-1024-s50 | edge-dit.cpp | sequence | 4 | 8.034 s | 2.33x | 58.2% | 42485 MiB | - | - |
-| flux1-dev-t2i-2048-s20 | edge-dit.cpp | sequence | 1 | 67.127 s | 1.00x | 100.0% | 61907 MiB | - | - |
-| flux1-dev-t2i-2048-s20 | edge-dit.cpp | sequence | 2 | 35.772 s | 1.88x | 93.8% | 63185 MiB | - | - |
-| flux1-dev-t2i-2048-s20 | edge-dit.cpp | sequence | 4 | 20.510 s | 3.27x | 81.8% | 64149 MiB | - | - |
-| wan2-t2v-832x480-f81 | edge-dit.cpp | sequence | 1 | 106.410 s | 1.00x | 100.0% | 35973 MiB | - | - |
-| wan2-t2v-832x480-f81 | edge-dit.cpp | sequence | 2 | 88.407 s | 1.20x | 60.2% | 36931 MiB | - | - |
-| wan2-t2v-832x480-f81 | edge-dit.cpp | sequence | 4 | 61.879 s | 1.72x | 43.0% | 37665 MiB | - | - |
+| flux1-dev-t2i-1024-s50 | edge-dit.cpp | sequence | 1 | 10.664 s | 1.00x | 100.0% | 38341 MiB | - | - |
+| flux1-dev-t2i-1024-s50 | edge-dit.cpp | sequence | 2 | 7.539 s | 1.41x | 70.7% | 39469 MiB | - | - |
+| flux1-dev-t2i-1024-s50 | edge-dit.cpp | sequence | 4 | 6.990 s | 1.53x | 38.1% | 37581 MiB | - | - |
+| flux1-dev-t2i-2048-s20 | edge-dit.cpp | sequence | 1 | 20.816 s | 1.00x | 100.0% | 56357 MiB | - | - |
+| flux1-dev-t2i-2048-s20 | edge-dit.cpp | sequence | 2 | 13.062 s | 1.59x | 79.7% | 57053 MiB | - | - |
+| flux1-dev-t2i-2048-s20 | edge-dit.cpp | sequence | 4 | 9.578 s | 2.17x | 54.3% | 57823 MiB | - | - |
 
 The current public SP result is edge-dit.cpp only. xDiT is not included because
 the configured external checkout lacks the DistVAE dependency required for the
@@ -284,11 +264,10 @@ python3 benchmark/analysis/aggregate.py \
   --results-dir benchmark/results/perf-quantization-20260714 \
   --results-dir benchmark/results/perf-resource-profiles-20260714 \
   --results-dir benchmark/results/perf-vae-tiling-20260714 \
-  --results-dir benchmark/results/perf-task-coverage-20260714 \
   --results-dir benchmark/results/perf-cuda-optimization-ablation-20260714 \
   --results-dir benchmark/results/perf-cuda-optimization-ablation-qwen-20260714 \
   --results-dir benchmark/results/perf-cfg-parallel-20260714 \
-  --results-dir benchmark/results/perf-sp-parallel-20260714 \
+  --results-dir benchmark/results/perf-sp-parallel-readme-build-20260714 \
   --results-dir benchmark/results/performance-page-readme-build-20260714/cache-quality \
   --results-dir benchmark/results/cache-retune-magcache-20260714/cache-quality-magcache-retuned \
   --results-dir benchmark/results/cache-retune-sencache-20260714/cache-quality-sencache-retuned \
@@ -318,11 +297,11 @@ The retuned cache rows use matched reference/target image sets scored in:
 
 - Stable Diffusion results use Stable Diffusion 3 Medium because that is the
   checkpoint present in the local model tree.
-- Diffusers task-coverage comparisons are available for text-to-image only in
-  this snapshot because the benchmark harness does not yet expose matching
-  load-once adapters for image editing and video.
 - xDiT is kept out of the public SP table for this snapshot because the external
   checkout lacks the DistVAE dependency required by the selected workloads.
+- Wan video SP was rerun with the same README build but is excluded from the
+  public SP speedup claim because it shows negative scaling under the current
+  CLI single-run boundary.
 - SenCache is reported with a tuned 50-step profile and threshold 0.60 for this
   workload; additional thresholds need the same 24-sample speed/quality pass
   before they can replace the published row.
