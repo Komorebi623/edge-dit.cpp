@@ -1,0 +1,26 @@
+schema_version: 1
+suite_id: flux-e2e
+description: >
+  Reproducible FLUX.1-dev single-GPU e2e generation suite for immediate
+  performance validation. This suite uses the official performance build and
+  measures generation after loading the model once.
+mode: official
+defaults:
+  warmup_runs: 2
+  measured_runs: 10
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+    - ../systems/diffusers.yaml
+    - ../systems/stable-diffusion-cpp.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux1-dev-t2i-1024-s50.yaml
+reporting:
+  table: single_gpu_flux_e2e
+  require_environment_metadata: true
+  measurement_boundary: load_once_e2e_generation_no_output_encoding

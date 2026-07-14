@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/THU-MIG/edge-dit.cpp/benchmark/schemas/run.schema.json",
+  "title": "edge-dit.cpp benchmark run result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "status",
+    "system",
+    "workload",
+    "model",
+    "task",
+    "warmup_runs",
+    "measured_runs",
+    "latency_ms",
+    "memory",
+    "parallel",
+    "quality"
+  ],
+  "properties": {
+    "run_id": { "type": "string", "minLength": 1 },
+    "status": {
+      "type": "string",
+      "enum": ["success", "failed", "unsupported", "skipped"]
+    },
+    "system": {
+      "type": "string",
+      "enum": ["edge-dit.cpp", "diffusers", "stable-diffusion.cpp", "xdit"]
+    },
+    "workload": { "type": "string", "minLength": 1 },
+    "model": { "type": "string", "minLength": 1 },
+    "task": {
+      "type": "string",
+      "enum": ["text-to-image", "image-editing", "text-to-video"]
+    },
+    "warmup_runs": { "type": "integer", "minimum": 0 },
+    "measured_runs": { "type": "integer", "minimum": 0 },
+    "latency_ms": { "$ref": "#/$defs/latency" },
+    "memory": { "$ref": "#/$defs/memory" },
+    "parallel": { "$ref": "#/$defs/parallel" },
+    "quality": { "$ref": "#/$defs/quality" }
+  },
+  "$defs": {
+    "nullable_number": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "latency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "load",
+        "first_generation",
+        "steady_state_median",
+        "steady_state_p90",
+        "steady_state_mean",
+        "steady_state_std",
+        "coefficient_of_variation",
+        "text_encoder",
+        "dit",
+        "vae",
+        "per_step_avg"
+      ],
+      "properties": {
+        "load": { "$ref": "#/$defs/nullable_number" },
+        "first_generation": { "$ref": "#/$defs/nullable_number" },
+        "steady_state_median": { "$ref": "#/$defs/nullable_number" },
+        "steady_state_p90": { "$ref": "#/$defs/nullable_number" },
+        "steady_state_mean": { "$ref": "#/$defs/nullable_number" },
+        "steady_state_std": { "$ref": "#/$defs/nullable_number" },
+        "coefficient_of_variation": { "$ref": "#/$defs/nullable_number" },
+        "text_encoder": { "$ref": "#/$defs/nullable_number" },
+        "dit": { "$ref": "#/$defs/nullable_number" },
+        "vae": { "$ref": "#/$defs/nullable_number" },
+        "per_step_avg": { "$ref": "#/$defs/nullable_number" }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["peak_vram_mib", "peak_host_rss_mib"],
+      "properties": {
+        "peak_vram_mib": { "$ref": "#/$defs/nullable_number" },
+        "peak_host_rss_mib": { "$ref": "#/$defs/nullable_number" }
+      }
+    },
+    "parallel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gpu_count",
+        "speedup",
+        "scaling_efficiency",
+        "communication_ms",
+        "all_to_all_ms",
+        "packing_ms",
+        "receive_preparation_ms",
+        "graph_segment_count"
+      ],
+      "properties": {
+        "gpu_count": { "type": "integer", "minimum": 1 },
+        "speedup": { "$ref": "#/$defs/nullable_number" },
+        "scaling_efficiency": { "$ref": "#/$defs/nullable_number" },
+        "communication_ms": { "$ref": "#/$defs/nullable_number" },
+        "all_to_all_ms": { "$ref": "#/$defs/nullable_number" },
+        "packing_ms": { "$ref": "#/$defs/nullable_number" },
+        "receive_preparation_ms": { "$ref": "#/$defs/nullable_number" },
+        "graph_segment_count": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["psnr", "ssim", "lpips", "clip", "image_reward"],
+      "properties": {
+        "psnr": { "$ref": "#/$defs/nullable_number" },
+        "ssim": { "$ref": "#/$defs/nullable_number" },
+        "lpips": { "$ref": "#/$defs/nullable_number" },
+        "clip": { "$ref": "#/$defs/nullable_number" },
+        "image_reward": { "$ref": "#/$defs/nullable_number" }
+      }
+    }
+  }
+}

@@ -1,0 +1,29 @@
+schema_version: 1
+system_id: stable-diffusion.cpp
+display_name: stable-diffusion.cpp
+role: native_baseline
+runner: stable_diffusion_cpp
+repo:
+  path_ref: stable_diffusion_cpp_repo
+  remote: origin
+  branch: main
+  commit_policy: local_fixed
+binary:
+  path_ref: stable_diffusion_cpp_cli
+  help_command: ["{binary}", "--help"]
+e2e_binary:
+  path_ref: stable_diffusion_cpp_e2e
+capabilities:
+  tasks: [text-to-image, image-editing, text-to-video]
+  backends: [cuda, cpu, metal, vulkan]
+  parallel: []
+  memory_modes: [quantization, offload, vae_tiling, graph_cut]
+preflight:
+  require_binary: true
+  require_e2e_binary: true
+  record_git_commit: true
+unsupported_policy:
+  unsupported_workloads_must_emit_status: unsupported
+benchmark_notes:
+  - This baseline is treated as a fixed local build during benchmark execution.
+  - Do not fabricate results for unsupported model families or options.

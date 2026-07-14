@@ -13,6 +13,7 @@
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -29,8 +30,11 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "backend/ggml/ed_ggml_attention_ext.hpp"
+#include "backend/ggml/ed_ggml_sp_flux_ext.hpp"
 #include "backend/ggml/ggml_extend_backend.hpp"
 #include "backend/ggml/ggml_graph_cut.h"
+#include "optimization/cache/cache_graph_scope.hpp"
+#include "optimization/cache/state/cache_device_store.hpp"
 
 #include "edge-dit.h"
 #include "core/runtime/model_loader.h"
@@ -1475,6 +1479,11 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
     ggml_tensor* kqv = nullptr;
 
     auto build_kqv = [&](ggml_tensor* q_in, ggml_tensor* k_in, ggml_tensor* v_in, ggml_tensor* mask_in) -> ggml_tensor* {
+        // ggml CUDA flash-attn kernels currently require Q to be F32.
+        if (q_in->type != GGML_TYPE_F32) {
+            q_in = ggml_cast(ctx, q_in, GGML_TYPE_F32);
+        }
+
         if (kv_pad != 0) {
             k_in = ggml_pad(ctx, k_in, 0, kv_pad, 0, 0);
         }
@@ -1487,7 +1496,9 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
 
         if (kv_pad == 0 && kv_scale == 1.0f) {
             if (auto v_f16 = edgedit::ggml_ext::attention_v_prep_custom_f16(ctx, v_in, v_is_seq_major)) {
-                v_in = v_f16;
+                if (ggml_backend_supports_op(backend, v_f16)) {
+                    v_in = v_f16;
+                }
             }
         }
         if (v_in->type != GGML_TYPE_F16 || !ggml_is_contiguous(v_in)) {
@@ -1821,6 +1832,93 @@ struct GGMLRunnerContext {
     bool circular_x_enabled                       = false;
     bool circular_y_enabled                       = false;
     std::shared_ptr<WeightAdapter> weight_adapter = nullptr;
+    // Build-time cache seam; null on the uncached path (graph is then identical).
+    sd::CacheGraphScope* cache_scope              = nullptr;
+};
+
+// Device backing for CacheStateManager slots (implements the cache core's
+// abstract ICacheDeviceStore). Owns one persistent ggml_context + backend buffer,
+// allocated on the runtime backend OUTSIDE any per-step compute buffer, so slot
+// tensors survive run_cache_pass's compute(free=false) + reset_graph_cut_run_cache().
+// Entries are keyed by (ring_key, ring_index); a shape change frees and rebuilds
+// (mirrors ensure_dicache_gpu_state). release_all() runs per generation from
+// CacheStateManager::reset(), matching the old reset_dicache_gpu_states() lifetime.
+class RunnerCacheDeviceStore final : public edgedit::cache::ICacheDeviceStore {
+public:
+    explicit RunnerCacheDeviceStore(ggml_backend_t backend) : backend_(backend) {}
+    ~RunnerCacheDeviceStore() override { release_all(); }
+
+    void* ensure_entry(uint64_t ring_key, int ring_index,
+                       const std::vector<int64_t>& shape) override {
+        if (backend_ == nullptr || shape.empty() || shape.size() > GGML_MAX_DIMS) {
+            return nullptr;
+        }
+        const uint64_t key = entry_key(ring_key, ring_index);
+        auto it = entries_.find(key);
+        if (it != entries_.end() && it->second.shape == shape) {
+            return it->second.tensor;
+        }
+        // Shape changed (or first use): rebuild this entry's own context+buffer.
+        if (it != entries_.end()) {
+            it->second.free();
+            entries_.erase(it);
+        }
+        Entry e;
+        // Own tiny no_alloc context (1 tensor); mirrors new_cache_context but keeps
+        // this store independent of GGMLRunner's declaration order.
+        {
+            ggml_init_params p;
+            p.mem_size = ggml_tensor_overhead() + 64;
+            p.mem_buffer = nullptr;
+            p.no_alloc = true;
+            e.ctx = ggml_init(p);
+        }
+        if (e.ctx == nullptr) {
+            return nullptr;
+        }
+        int64_t ne[GGML_MAX_DIMS] = {1, 1, 1, 1};
+        for (size_t i = 0; i < shape.size(); ++i) {
+            ne[i] = shape[i];
+        }
+        e.tensor = ggml_new_tensor(e.ctx, GGML_TYPE_F32,
+                                   static_cast<int>(shape.size()), ne);
+        e.buffer = ggml_backend_alloc_ctx_tensors(e.ctx, backend_);
+        if (e.buffer == nullptr || e.tensor == nullptr) {
+            e.free();
+            return nullptr;
+        }
+        e.shape = shape;
+        ggml_tensor* t = e.tensor;
+        entries_.emplace(key, std::move(e));
+        return t;
+    }
+
+    void release_all() override {
+        for (auto& kv : entries_) {
+            kv.second.free();
+        }
+        entries_.clear();
+    }
+
+private:
+    struct Entry {
+        ggml_context* ctx = nullptr;
+        ggml_backend_buffer_t buffer = nullptr;
+        ggml_tensor* tensor = nullptr;
+        std::vector<int64_t> shape;
+        void free() {
+            if (buffer != nullptr) { ggml_backend_buffer_free(buffer); buffer = nullptr; }
+            if (ctx != nullptr) { ggml_free(ctx); ctx = nullptr; }
+            tensor = nullptr;
+            shape.clear();
+        }
+    };
+    static uint64_t entry_key(uint64_t ring_key, int ring_index) {
+        // ring_index is tiny (< history_depth); reserve the low 8 bits for it.
+        return (ring_key << 8) ^ static_cast<uint64_t>(ring_index & 0xff);
+    }
+    ggml_backend_t backend_ = nullptr;
+    std::unordered_map<uint64_t, Entry> entries_;
 };
 
 struct GGMLRunner {
@@ -2128,6 +2226,30 @@ protected:
     ggml_context* compute_ctx    = nullptr;
     ggml_gallocr* compute_allocr = nullptr;
 
+    // ---- Experimental: build-once / reuse-across-steps compute graph ----
+    // (ED_CACHE_COMPILED_GRAPHS). When capturing, make_input() stages each input
+    // leaf's bytes into a stable runner-owned buffer and records the node in call
+    // order; on a later step with matching input shapes the graph is NOT rebuilt —
+    // only the staging contents are refreshed. persistent_.gf lives inside
+    // compute_ctx, so free_compute_ctx() invalidates it (no separate lifetime).
+    struct ReuseInput {
+        ggml_tensor* node = nullptr;   // leaf in compute_ctx (valid while gf valid)
+        // Heap-stable via unique_ptr: the graph leaf is bound to staging->data(),
+        // so the byte buffer's address MUST NOT move when persistent_.inputs (the
+        // outer vector) reallocates as later make_input() calls push more slots.
+        // A plain std::vector<uint8_t> member would move its storage on realloc and
+        // leave earlier leaves bound to freed memory (nondeterministic garbage).
+        std::unique_ptr<std::vector<uint8_t>> staging;
+    };
+    struct PersistentGraph {
+        bool valid = false;
+        bool reuse_disabled = false;  // built once, but ordered_inputs mismatched -> never reuse
+        ggml_cgraph* gf = nullptr;
+        std::vector<ReuseInput> inputs;
+    };
+    PersistentGraph persistent_;
+    bool reuse_capture_mode_ = false;  // make_input records+stages while true
+
     ggml_context* partial_offload_ctx                   = nullptr;
     ggml_backend_buffer_t partial_runtime_params_buffer = nullptr;
     std::vector<std::pair<ggml_tensor*, ggml_tensor*>> partial_offload_pairs;
@@ -2151,6 +2273,26 @@ protected:
     bool conv2d_direct_enabled = false;
     bool circular_x_enabled    = false;
     bool circular_y_enabled    = false;
+
+    // Non-owning; set by the CacheController before a cache pass, cleared after.
+    // When null, get_context() leaves ctx.cache_scope null and the model graph
+    // is byte-identical to the uncached path.
+    sd::CacheGraphScope* cache_scope_ = nullptr;
+
+    // Device backing for CacheStateManager slots (on-GPU residual reuse). Created
+    // lazily on the runtime backend; handed to the engine's state manager via
+    // cache_device_store(). Freed with the runner.
+    std::unique_ptr<RunnerCacheDeviceStore> cache_device_store_;
+public:
+    // Public so pipelines can hand it to CacheEngine::init(). The field stays
+    // protected; only lazy access is exposed.
+    RunnerCacheDeviceStore* cache_device_store() {
+        if (cache_device_store_ == nullptr && runtime_backend != nullptr) {
+            cache_device_store_ = std::make_unique<RunnerCacheDeviceStore>(runtime_backend);
+        }
+        return cache_device_store_.get();
+    }
+protected:
 
     sd::ggml_graph_cut::PlanCache graph_cut_plan_cache_;
     std::unordered_set<const ggml_tensor*> params_tensor_set_;
@@ -3571,7 +3713,19 @@ protected:
         // and then read by many SP graph-cut segments.  Caching the uploaded
         // device tensor fixes repeated runtime-input upload; it does not change
         // RoPE math or operator placement.
-        return name == "pe" && ggml_nbytes(tensor) >= 1024 * 1024;
+        const size_t nbytes = ggml_nbytes(tensor);
+        if (name == "pe" && nbytes >= 1024 * 1024) {
+            return true;
+        }
+
+        // Wan text context is the same external tensor for every transformer
+        // block in one SP graph-cut forward. Upload it once, then bind the
+        // later segment inputs to the cached device tensor.
+        if (name == "wan.context" && nbytes >= 1024 * 1024) {
+            return process_group_ != nullptr && process_group_->enabled();
+        }
+
+        return false;
     }
 
     std::string runtime_const_cache_key(const ggml_tensor* tensor,
@@ -3623,8 +3777,34 @@ protected:
         return runtime_const_cache_tensor_shape_matches(tensor, entry);
     }
 
+    size_t runtime_const_cache_slot_entry_limit(const ggml_tensor* tensor) const {
+        if (tensor == nullptr || tensor->name[0] == '\0') {
+            return 1;
+        }
+
+        // Wan alternates cond/uncond text contexts during CFG sampling. Both
+        // tensors are stable across denoise steps, so keep both device uploads
+        // instead of pruning one when the other branch runs.
+        if (std::strcmp(tensor->name, "wan.context") == 0) {
+            return 2;
+        }
+
+        return 1;
+    }
+
     void prune_stale_runtime_const_cache_entries(const ggml_tensor* tensor,
                                                  const void* data) {
+        const size_t slot_limit = runtime_const_cache_slot_entry_limit(tensor);
+        size_t slot_entries = 0;
+        for (const auto& entry : runtime_const_cache_) {
+            if (runtime_const_cache_entry_matches_tensor_slot(tensor, entry)) {
+                ++slot_entries;
+            }
+        }
+        if (slot_entries < slot_limit) {
+            return;
+        }
+
         runtime_const_cache_.erase(std::remove_if(runtime_const_cache_.begin(),
                                                   runtime_const_cache_.end(),
                                                   [&](const RuntimeConstCacheEntry& entry) {
@@ -4400,6 +4580,22 @@ protected:
             compute_ctx = nullptr;
         }
         backend_tensor_data_map.clear();
+        invalidate_persistent_graph();
+    }
+
+    // The reuse graph (persistent_.gf) is valid only while BOTH compute_ctx (its
+    // nodes) and compute_allocr (the device buffer its tensors point into) are
+    // alive and unchanged. Any teardown of either must invalidate it, else a later
+    // reuse step re-executes a graph whose tensors dangle into freed memory. This
+    // is the single safety anchor; both free_compute_ctx() and free_compute_buffer()
+    // call it, so within a generation (buffer kept alive across steps) reuse holds,
+    // and a new generation (buffer freed post-loop) rebuilds once.
+    void invalidate_persistent_graph() {
+        persistent_.valid = false;
+        persistent_.reuse_disabled = false;
+        persistent_.gf = nullptr;
+        persistent_.inputs.clear();
+        reuse_capture_mode_ = false;
     }
 
     void rebuild_params_tensor_set() {
@@ -4437,12 +4633,59 @@ protected:
     ggml_cgraph* get_compute_graph(get_graph_cb_t get_graph) {
         prepare_build_in_tensor_before();
         ggml_cgraph* gf = get_graph();
+        // The model result is the last node get_graph expanded. execute_graph
+        // reads it back BY NAME (final_result_name), not by position, so name it
+        // first — then the cache seam can append aux capture branches without
+        // stealing the result slot.
         if (ggml_graph_n_nodes(gf) > 0) {
             auto result = ggml_graph_node(gf, -1);
             ggml_set_name(result, final_result_name.c_str());
         }
+        if (cache_scope_ != nullptr && ggml_graph_n_nodes(gf) > 0) {
+            expand_cache_scope_nodes(gf);
+        }
         prepare_build_in_tensor_after(gf);
         return gf;
+    }
+
+    // Names used to read back the cache seam's aux tensors post-compute.
+    static constexpr const char* kCacheFeatureName = "ed_cache_feature";
+    static constexpr const char* kCacheBeforeName  = "ed_cache_before";
+    static constexpr const char* kCacheProbeName   = "ed_cache_probe";
+    static constexpr const char* kCacheDeltaYName  = "ed_cache_delta_y";
+    static constexpr const char* kCacheDeltaXName  = "ed_cache_delta_x";
+    static constexpr const char* kCacheGammaName   = "ed_cache_gamma";
+    static constexpr const char* kCacheProbeResidName = "ed_cache_probe_resid";
+
+    void expand_cache_scope_nodes(ggml_cgraph* gf) {
+        auto expand_named = [&](ggml_tensor* node, const char* name) {
+            if (node == nullptr) {
+                return;
+            }
+            ggml_set_name(node, name);
+            ggml_set_output(node);  // keep the allocator from reusing its buffer
+            cache(name, node);
+            ggml_build_forward_expand(gf, node);
+        };
+        if (cache_scope_->capture_mode()) {
+            expand_named(cache_scope_->feature_node, kCacheFeatureName);
+            // GPU DiCache: also expose before/probe/probe_resid so capture can
+            // snapshot them into the persistent cross-step buffers (device-to-device).
+            expand_named(cache_scope_->before_node, kCacheBeforeName);
+            expand_named(cache_scope_->probe_node, kCacheProbeName);
+            expand_named(cache_scope_->probe_resid_node, kCacheProbeResidName);
+        } else if (cache_scope_->probe_mode()) {
+            // On probe the model returns the probe state as `out`, so it becomes
+            // the final result node; only the block-stack input needs a name.
+            expand_named(cache_scope_->before_node, kCacheBeforeName);
+            expand_named(cache_scope_->probe_node, kCacheProbeName);
+            // GPU DiCache: the decision scalars (built from probe/before vs the
+            // persistent prev_* tensors). Only a few bytes are read back per step.
+            cache_scope_->build_probe_metrics(compute_ctx);
+            expand_named(cache_scope_->delta_y_node, kCacheDeltaYName);
+            expand_named(cache_scope_->delta_x_node, kCacheDeltaXName);
+            expand_named(cache_scope_->gamma_node, kCacheGammaName);
+        }
     }
 
     bool prepare_compute_graph(get_graph_cb_t get_graph,
@@ -5726,6 +5969,7 @@ public:
         runner_ctx.circular_x_enabled    = circular_x_enabled;
         runner_ctx.circular_y_enabled    = circular_y_enabled;
         runner_ctx.weight_adapter        = weight_adapter;
+        runner_ctx.cache_scope           = cache_scope_;
         return runner_ctx;
     }
 
@@ -5822,6 +6066,9 @@ public:
             ggml_gallocr_free(compute_allocr);
             compute_allocr = nullptr;
         }
+        // The reuse graph's tensors point into the buffer just freed; invalidate so
+        // the next compute_reuse() rebuilds instead of re-executing dangling nodes.
+        invalidate_persistent_graph();
         restore_partial_params();
         restore_all_params();
     }
@@ -5834,6 +6081,20 @@ public:
     template <typename T>
     ggml_tensor* make_input(const sd::Tensor<T>& tensor) {
         ggml_tensor* input = sd::make_ggml_tensor(compute_ctx, tensor, false);
+        if (reuse_capture_mode_) {
+            // Stage the bytes into a heap-stable runner-owned buffer and bind the
+            // node to it, so the binding survives across steps (only contents
+            // change) AND survives persistent_.inputs reallocating as more inputs
+            // are captured this build.
+            const size_t nbytes = ggml_nbytes(input);
+            persistent_.inputs.emplace_back();
+            ReuseInput& ri = persistent_.inputs.back();
+            ri.node = input;
+            ri.staging = std::make_unique<std::vector<uint8_t>>(nbytes);
+            std::memcpy(ri.staging->data(), tensor.data(), nbytes);
+            set_backend_tensor_data(input, ri.staging->data());
+            return input;
+        }
         set_backend_tensor_data(input, tensor.data());
         return input;
     }
@@ -5883,16 +6144,129 @@ public:
         return iter->second;
     }
 
+    // Device-to-device copy of a named cache tensor (resident in the run cache
+    // until reset_graph_cut_run_cache) into a caller-owned persistent tensor.
+    // Used by the GPU DiCache handoff. Returns false if the source is missing or
+    // the byte sizes differ.
+    bool copy_named_cache_tensor_to(const std::string& name, ggml_tensor* dst) {
+        ggml_tensor* src = get_cache_tensor_by_name(name);
+        if (src == nullptr || dst == nullptr) {
+            return false;
+        }
+        if (ggml_nbytes(src) != ggml_nbytes(dst)) {
+            return false;
+        }
+        ggml_backend_tensor_copy(src, dst);
+        return true;
+    }
+
+    // Run one cache-aware compute pass with `scope` attached. Builds the graph
+    // via `get_graph` (whose model forward() consults the scope), executes on
+    // the plain path (feature caching is gated off the segmented path by the
+    // pipeline), and reads the seam's aux tensors back to host. `expected_dim`
+    // restores trailing singleton dims on the main result like compute() does.
+    // The compute buffer is kept alive (not freed) so the named aux nodes are
+    // readable; the caller frees it as usual after the step.
+    struct CachePassResult {
+        sd::Tensor<float> output;
+        sd::Tensor<float> feature;
+        sd::Tensor<float> before;
+        sd::Tensor<float> probe;
+        // GPU DiCache scalar readbacks (NaN if the node was absent this pass).
+        float delta_y = std::numeric_limits<float>::quiet_NaN();
+        float delta_x = std::numeric_limits<float>::quiet_NaN();
+        float gamma = std::numeric_limits<float>::quiet_NaN();
+    };
+    CachePassResult run_cache_pass(get_graph_cb_t get_graph,
+                                   int n_threads,
+                                   sd::CacheGraphScope* scope,
+                                   size_t expected_dim,
+                                   const std::function<void()>& post_readback = nullptr) {
+        CachePassResult result;
+        set_cache_scope(scope);
+        const int64_t t_pass_begin = ggml_time_ms();
+        const bool dprof = std::getenv("ED_PROFILE_DICACHE") != nullptr;
+        auto out = GGMLRunner::compute<float>(get_graph, n_threads, /*free=*/false);
+        result.output = restore_trailing_singleton_dims(std::move(out), expected_dim);
+        if (dprof && scope != nullptr) {
+            const char* m = scope->probe_mode() ? "probe"
+                          : scope->inject_mode() ? "inject"
+                          : scope->capture_mode() ? "capture" : "other";
+            LOG_INFO("[dicache-prof] %s pass %lld ms", m,
+                     (long long)(ggml_time_ms() - t_pass_begin));
+        }
+
+        if (scope != nullptr) {
+            auto read_scalar = [&](const char* name) -> float {
+                ggml_tensor* t = get_cache_tensor_by_name(name);
+                if (t == nullptr) {
+                    return std::numeric_limits<float>::quiet_NaN();
+                }
+                float v = std::numeric_limits<float>::quiet_NaN();
+                ggml_backend_tensor_get(t, &v, 0, sizeof(float));
+                return v;
+            };
+            if (scope->capture_mode()) {
+                // Host path only: read the ~50-190MB feature residual back so the
+                // policy can build its host residual ring in observe(). GPU DiCache
+                // fills that ring device-to-device in the post_readback handoff and
+                // reconstructs via inject_gpu, so the host readback is dead weight —
+                // skip it under gpu_metric.
+                if (!scope->gpu_metric) {
+                    ggml_tensor* feat = get_cache_tensor_by_name(kCacheFeatureName);
+                    if (feat != nullptr) {
+                        result.feature = sd::make_sd_tensor_from_ggml<float>(feat);
+                    }
+                }
+            } else if (scope->probe_mode()) {
+                if (scope->gpu_metric) {
+                    // GPU DiCache: read back only the decision scalars (a few bytes),
+                    // NOT the ~50MB before/probe tensors.
+                    result.delta_y = read_scalar(kCacheDeltaYName);
+                    result.delta_x = read_scalar(kCacheDeltaXName);
+                    result.gamma = read_scalar(kCacheGammaName);
+                } else {
+                    ggml_tensor* before = get_cache_tensor_by_name(kCacheBeforeName);
+                    if (before != nullptr) {
+                        result.before = sd::make_sd_tensor_from_ggml<float>(before);
+                    }
+                    ggml_tensor* probe = get_cache_tensor_by_name(kCacheProbeName);
+                    if (probe != nullptr) {
+                        result.probe = sd::make_sd_tensor_from_ggml<float>(probe);
+                    }
+                }
+            }
+        }
+        set_cache_scope(nullptr);
+        // GPU DiCache handoff: while the named cache tensors are still resident
+        // (before reset frees the run cache), copy them device-to-device into the
+        // runner's persistent cross-step buffers. Callback uses get_cache_tensor_by_name.
+        if (post_readback) {
+            post_readback();
+        }
+        // compute<float>(free=false) leaves the run cache (cache_ctx/buffer/chunks)
+        // allocated; the plain (non-segmented) seam path never calls
+        // reset_graph_cut_run_cache(), so without this a per-step chunk would
+        // survive across steps AND generations (~1GB/img GPU leak). Free it here
+        // now that the host copies are made; pool retention keeps one same-layout
+        // chunk for cheap reuse.
+        reset_graph_cut_run_cache();
+        return result;
+    }
+
     template <typename T>
     std::optional<sd::Tensor<T>> compute(get_graph_cb_t get_graph,
                                          int n_threads,
                                          bool free_compute_buffer_immediately,
                                          bool no_return = false) {
+        const bool rprof = runner_profile_enabled();
+        int64_t t_build_begin = rprof ? ggml_time_ms() : 0;
         ggml_cgraph* gf = nullptr;
         if (!prepare_compute_graph(get_graph, &gf)) {
             return std::nullopt;
         }
         GGML_ASSERT(gf != nullptr);
+        int64_t t_build_end = rprof ? ggml_time_ms() : 0;
 
         if (can_attempt_graph_cut_segmented_compute()) {
             GraphCutPlan plan;
@@ -5914,12 +6288,19 @@ public:
             }
         }
         sd::ggml_graph_cut::clear_comm_marks();
+        int64_t t_alloc_begin = rprof ? ggml_time_ms() : 0;
         if (!alloc_compute_buffer(gf)) {
             LOG_ERROR("%s alloc compute buffer failed", get_desc().c_str());
             return std::nullopt;
         }
+        int64_t t_alloc_end = rprof ? ggml_time_ms() : 0;
+        if (rprof) {
+            LOG_INFO("%s compute prep build=%lldms alloc=%lldms",
+                     get_desc().c_str(),
+                     static_cast<long long>(t_build_end - t_build_begin),
+                     static_cast<long long>(t_alloc_end - t_alloc_begin));
+        }
         GraphExecuteProfile runner_profile;
-        const bool rprof = runner_profile_enabled();
         const int64_t t_rprof_begin = rprof ? ggml_time_ms() : 0;
         auto rprof_result = execute_graph<T>(gf,
                                 n_threads,
@@ -5950,8 +6331,128 @@ public:
         return rprof_result;
     }
 
+    // Experimental build-once / reuse-across-steps path (ED_CACHE_COMPILED_GRAPHS).
+    // `ordered_inputs` MUST list the per-step input tensors in the exact order the
+    // model's build_graph() calls make_input() — their staged bytes are refreshed
+    // in that order on a reuse step. On the first call (or when the input count /
+    // any per-slot byte size differs) the graph is rebuilt with capture on; every
+    // later matching call skips build entirely and only memcpy's new input bytes.
+    // The caller is responsible for only routing here on the plain (non-segmented)
+    // path with stable shapes; a mismatch safely falls back to a rebuild.
+    template <typename T>
+    std::optional<sd::Tensor<T>> compute_reuse(get_graph_cb_t get_graph,
+                                               const std::vector<const sd::Tensor<T>*>& ordered_inputs,
+                                               int n_threads,
+                                               bool no_return = false) {
+        // Decide reuse vs rebuild: same input count and same per-slot byte sizes.
+        bool can_reuse = persistent_.valid &&
+                         !persistent_.reuse_disabled &&
+                         compute_ctx != nullptr &&
+                         persistent_.inputs.size() == ordered_inputs.size();
+        if (can_reuse) {
+            for (size_t i = 0; i < ordered_inputs.size(); ++i) {
+                const size_t want = ordered_inputs[i] != nullptr
+                                        ? ordered_inputs[i]->numel() * sizeof(T)
+                                        : 0;
+                if (want != persistent_.inputs[i].staging->size()) {
+                    can_reuse = false;
+                    break;
+                }
+            }
+        }
+
+        const bool rprof = runner_profile_enabled();
+        if (!can_reuse) {
+            // (Re)build with capture on so make_input records + stages each leaf.
+            reset_compute_ctx();
+            reuse_capture_mode_ = true;
+            const int64_t t_build_begin = rprof ? ggml_time_ms() : 0;
+            ggml_cgraph* gf = get_compute_graph(get_graph);
+            reuse_capture_mode_ = false;
+            sd::ggml_graph_cut::clear_comm_marks();
+            if (gf == nullptr) {
+                free_compute_ctx();
+                return std::nullopt;
+            }
+            persistent_.valid = true;
+            persistent_.gf = gf;
+            // Consistency guard: on the build step make_input() captured exactly the
+            // leaves the model's build_graph() created, in call order. The caller's
+            // ordered_inputs MUST describe that same sequence, so the count and each
+            // per-slot byte size have to match what was just captured. A mismatch
+            // means the ordered_inputs list is wrong (missing/extra/misordered slot)
+            // — fail loudly here rather than silently corrupt a later reuse step.
+            bool ordered_ok = persistent_.inputs.size() == ordered_inputs.size();
+            for (size_t i = 0; ordered_ok && i < ordered_inputs.size(); ++i) {
+                const size_t want = ordered_inputs[i] != nullptr
+                                        ? ordered_inputs[i]->numel() * sizeof(T)
+                                        : 0;
+                if (want != persistent_.inputs[i].staging->size()) {
+                    ordered_ok = false;
+                }
+            }
+            if (!ordered_ok) {
+                LOG_ERROR("%s compute_reuse: ordered_inputs (%zu) does not match captured "
+                          "graph inputs (%zu) — disabling reuse for this run",
+                          get_desc().c_str(), ordered_inputs.size(), persistent_.inputs.size());
+                // Fall back to a correct one-shot result; leave the graph built but
+                // mark it non-reusable so we never memcpy into the wrong slots.
+                persistent_.reuse_disabled = true;
+            }
+            if (rprof) {
+                LOG_INFO("%s compiled-graph build (reuse path) build=%lldms inputs=%zu",
+                         get_desc().c_str(),
+                         static_cast<long long>(ggml_time_ms() - t_build_begin),
+                         persistent_.inputs.size());
+            }
+        } else {
+            // Reuse: refresh only the staged input bytes; graph & bindings persist.
+            for (size_t i = 0; i < ordered_inputs.size(); ++i) {
+                if (ordered_inputs[i] == nullptr) {
+                    continue;
+                }
+                ReuseInput& ri = persistent_.inputs[i];
+                std::memcpy(ri.staging->data(), ordered_inputs[i]->data(), ri.staging->size());
+                // Re-bind in case a prior step's copy cleared the map entry.
+                set_backend_tensor_data(ri.node, ri.staging->data());
+            }
+        }
+
+        if (persistent_.gf == nullptr) {
+            LOG_ERROR("%s reuse path has no graph", get_desc().c_str());
+            return std::nullopt;
+        }
+        GraphExecuteProfile runner_profile;
+        // execute_graph() handles alloc_compute_buffer + ggml_gallocr_alloc_graph.
+        // preserve_backend_tensor_data_map=true keeps the staged/const bindings
+        // alive across steps; free=false keeps the graph + allocr resident.
+        return execute_graph<T>(persistent_.gf,
+                                n_threads,
+                                /*free_compute_buffer_immediately=*/false,
+                                {},
+                                /*preserve_backend_tensor_data_map=*/true,
+                                no_return,
+                                nullptr,
+                                nullptr,
+                                nullptr,
+                                runner_profile_enabled() ? &runner_profile : nullptr);
+    }
     void set_flash_attention_enabled(bool enabled) {
         flash_attn_enabled = enabled;
+    }
+
+    // Attach/detach the build-time cache seam consulted by model forward().
+    void set_cache_scope(sd::CacheGraphScope* scope) {
+        cache_scope_ = scope;
+    }
+    sd::CacheGraphScope* cache_scope() const {
+        return cache_scope_;
+    }
+    // True when the block-stack feature seam can run: only on the plain compute
+    // path (no process-group comm, no VRAM-budgeted segmented execution), since
+    // mid-graph capture is not preserved across segments.
+    bool feature_cache_available() const {
+        return !can_attempt_graph_cut_segmented_compute();
     }
 
     void set_conv2d_direct_enabled(bool enabled) {
@@ -6099,6 +6600,7 @@ protected:
     bool force_f32;
     bool force_prec_f32;
     float scale;
+    bool scale_quantized_only;
     std::string prefix;
 
     void init_params(ggml_context* ctx, const String2TensorStorage& tensor_storage_map = {}, const std::string prefix = "") override {
@@ -6120,13 +6622,15 @@ public:
            bool bias           = true,
            bool force_f32      = false,
            bool force_prec_f32 = false,
-           float scale         = 1.f)
+           float scale         = 1.f,
+           bool scale_quantized_only = false)
         : in_features(in_features),
           out_features(out_features),
           bias(bias),
           force_f32(force_f32),
           force_prec_f32(force_prec_f32),
-          scale(scale) {}
+          scale(scale),
+          scale_quantized_only(scale_quantized_only) {}
 
     void set_scale(float scale_) {
         scale = scale_;
@@ -6136,20 +6640,26 @@ public:
         force_prec_f32 = force_prec_f32_;
     }
 
+    bool weight_is_quantized() const {
+        auto it = params.find("weight");
+        return it != params.end() && ggml_is_quantized(it->second->type);
+    }
+
     ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
         ggml_tensor* w = params["weight"];
         ggml_tensor* b = nullptr;
         if (bias) {
             b = params["bias"];
         }
+        const float effective_scale = scale_quantized_only && !ggml_is_quantized(w->type) ? 1.f : scale;
         if (ctx->weight_adapter) {
             WeightAdapter::ForwardParams forward_params;
             forward_params.op_type               = WeightAdapter::ForwardParams::op_type_t::OP_LINEAR;
             forward_params.linear.force_prec_f32 = force_prec_f32;
-            forward_params.linear.scale          = scale;
+            forward_params.linear.scale          = effective_scale;
             return ctx->weight_adapter->forward_with_lora(ctx->ggml_ctx, ctx->backend, x, w, b, prefix, forward_params);
         }
-        return ggml_ext_linear(ctx->ggml_ctx, x, w, b, force_prec_f32, scale);
+        return ggml_ext_linear(ctx->ggml_ctx, x, w, b, force_prec_f32, effective_scale);
     }
 
     ggml_tensor* forward_output_slice(GGMLRunnerContext* ctx,
@@ -6183,6 +6693,106 @@ public:
         }
 
         return ggml_ext_linear(ctx->ggml_ctx, x, w_slice, b_slice, force_prec_f32, scale);
+    }
+
+    ggml_tensor* forward_input_concat_split(GGMLRunnerContext* ctx,
+                                            ggml_tensor* x0,
+                                            ggml_tensor* x1) {
+        if (ctx == nullptr ||
+            x0 == nullptr ||
+            x1 == nullptr ||
+            ctx->weight_adapter != nullptr ||
+            x0->ne[0] <= 0 ||
+            x1->ne[0] <= 0 ||
+            x0->ne[0] + x1->ne[0] != in_features ||
+            x0->ne[1] != x1->ne[1] ||
+            x0->ne[2] != x1->ne[2] ||
+            x0->ne[3] != x1->ne[3]) {
+            return nullptr;
+        }
+
+        ggml_tensor* w = params["weight"];
+        const int64_t block_size = ggml_blck_size(w->type);
+        if (block_size <= 0 ||
+            x0->ne[0] % block_size != 0 ||
+            x1->ne[0] % block_size != 0) {
+            return nullptr;
+        }
+
+        ggml_tensor* w0 = ggml_view_2d(ctx->ggml_ctx,
+                                       w,
+                                       x0->ne[0],
+                                       out_features,
+                                       w->nb[1],
+                                       0);
+        ggml_tensor* w1 = ggml_view_2d(ctx->ggml_ctx,
+                                       w,
+                                       x1->ne[0],
+                                       out_features,
+                                       w->nb[1],
+                                       static_cast<size_t>(x0->ne[0] / block_size) * w->nb[0]);
+
+        ggml_tensor* y0 = ggml_ext_linear(ctx->ggml_ctx, x0, w0, nullptr, force_prec_f32, scale);
+        ggml_tensor* y1 = ggml_ext_linear(ctx->ggml_ctx, x1, w1, nullptr, force_prec_f32, scale);
+        ggml_tensor* y  = ggml_add(ctx->ggml_ctx, y0, y1);
+        if (bias) {
+            y = ggml_add_inplace(ctx->ggml_ctx, y, params["bias"]);
+        }
+        return y;
+    }
+
+    ggml_tensor* forward_input_concat_fused(GGMLRunnerContext* ctx,
+                                            ggml_tensor* x0,
+                                            ggml_tensor* x1) {
+        if (ctx == nullptr ||
+            x0 == nullptr ||
+            x1 == nullptr ||
+            ctx->weight_adapter != nullptr ||
+            force_prec_f32 ||
+            scale != 1.f ||
+            x0->ne[0] <= 0 ||
+            x1->ne[0] <= 0 ||
+            x0->ne[0] + x1->ne[0] != in_features ||
+            x0->ne[1] != x1->ne[1] ||
+            x0->ne[2] != x1->ne[2] ||
+            x0->ne[3] != x1->ne[3]) {
+            return nullptr;
+        }
+
+        ggml_tensor* w = params["weight"];
+        ggml_tensor* b = bias ? params["bias"] : nullptr;
+        return edgedit::ggml_ext::flux_sp_concat_linear_custom(ctx->ggml_ctx, x0, x1, w, b);
+    }
+
+    ggml_tensor* forward_input_concat_residual_gate_fused(GGMLRunnerContext* ctx,
+                                                          ggml_tensor* residual,
+                                                          ggml_tensor* x0,
+                                                          ggml_tensor* x1,
+                                                          ggml_tensor* gate) {
+        if (ctx == nullptr ||
+            residual == nullptr ||
+            x0 == nullptr ||
+            x1 == nullptr ||
+            gate == nullptr ||
+            ctx->weight_adapter != nullptr ||
+            force_prec_f32 ||
+            scale != 1.f ||
+            x0->ne[0] <= 0 ||
+            x1->ne[0] <= 0 ||
+            x0->ne[0] + x1->ne[0] != in_features ||
+            residual->ne[0] != out_features ||
+            x0->ne[1] != x1->ne[1] ||
+            x0->ne[2] != x1->ne[2] ||
+            x0->ne[3] != x1->ne[3] ||
+            residual->ne[1] != x0->ne[1] ||
+            residual->ne[2] != x0->ne[2] ||
+            residual->ne[3] != x0->ne[3]) {
+            return nullptr;
+        }
+
+        ggml_tensor* w = params["weight"];
+        ggml_tensor* b = bias ? params["bias"] : nullptr;
+        return edgedit::ggml_ext::flux_sp_concat_linear_residual_gate_custom(ctx->ggml_ctx, residual, x0, x1, w, b, gate);
     }
 
 };

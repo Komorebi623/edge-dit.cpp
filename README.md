@@ -1,16 +1,130 @@
-# edge-dit.cpp
+<p align="center">
+  <img src="assets/logo.png" alt="edge-dit.cpp logo" width="100%">
+</p>
 
-`edge-dit.cpp` 是一个基于 C/C++ 的 DiT 推理项目，提供 `ed-cli` 命令行工具运行 SD3、Flux、Wan、Qwen-Image 等模型。
+<h1>edge-dit.cpp</h1>
 
-## 支持的模型
+<p align="center">
+  <strong>A lightweight native C/C++ runtime for Diffusion Transformer inference
+  on resource-constrained devices and local deployment environments.</strong>
+</p>
 
-- **SD3**（stable-diffusion-3-medium-diffusers）
-- **Flux1**（flux-dev）
-- **Qwen-Image**（qwen-image）
-- **Wan2.2-T2V-A14B**（Wan2.2-T2V-A14B-Diffusers，文生视频）
-- **Wan2.1-T2V-1.3B**（Wan2.1-T2V-1.3B-Diffusers，文生视频）
+[![Status](https://img.shields.io/badge/status-public_preview-orange)](#development-status)
+[![Backend](https://img.shields.io/badge/backend-CUDA--first-blue)](#backend-support)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](#license)
 
-## 编译
+edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for local, edge, and resource-constrained deployment. Built on ggml, it provides a unified runtime for image generation, image editing, and video generation, with explicit control over model loading, memory usage, graph execution, and backend selection.
+
+## Latest News
+
+- **2026-07-11:** 🚀 **edge-dit.cpp v0.1.0-alpha** enters **public preview**.
+- **2026-07-08:** 🚀 Added the **managed development console** for the
+  **Python job server**.
+- **2026-07-07:** 🚀 Added **FLUX.1-Kontext** image generation and editing
+  support.
+- **2026-07-05:** 🚀 Added **Python bindings** and examples for native runtime
+  integration.
+- **2026-07-02:** 🚀 Added **Qwen-Image-Edit** image editing support.
+- **2026-05-27:** 🚀 Added **Qwen-Image**, **native C API**, **CLI**, and
+  **HTTP server** support.
+- **2026-05-26:** 🚀 Added native **SD3** and **Wan 2.x** video pipeline support.
+- **2026-05-25:** 🚀 Added the first **FLUX.1-dev** text-to-image backend.
+
+## Features
+
+- **Lightweight native DiT runtime**
+  - Pure C/C++ inference built on [ggml-org/ggml](https://github.com/ggml-org/ggml)
+  - No Python or PyTorch required at runtime
+  - Explicit tensor, graph, memory, and device control
+  - Designed for local and resource-constrained deployment
+
+- **DiT engine abstraction and architecture**
+  - Loader layer for Diffusers directories, standalone components, safetensors shards, and GGUF
+  - Runtime layer for tensor storage, graph execution, memory management, devices, and backend dispatch
+  - Model layer for architecture-specific DiT blocks, conditioning, and output adapters
+  - Pipeline layer for image generation, image editing, and video generation
+  - Shared C API, CLI, HTTP server, and Python interfaces across model families
+
+- **System-level optimization for efficient DiT inference**
+  - **[Model representation and precision](docs/optimization/model-representation-and-precision.md)**
+    - Quantization, mixed precision, and per-tensor dtype control
+  - **[Memory-efficient execution](docs/optimization/memory-efficient-execution.md)**
+    - CPU offload, graph VRAM control, VAE tiling, and component placement
+  - **[Graph and operator optimization](docs/optimization/graph-and-operator-optimization.md)**
+    - cuDNN SDPA, DiT-specific CUDA operators, and tensor-layout optimization
+  - **[Computation reuse](docs/optimization/computation-reuse.md)**
+    - Timestep- and block-level cache reuse with output, feature, and probe policies
+  - **[Parallel execution](docs/optimization/parallel-execution.md)**
+    - CFG parallelism, sequence parallelism, and NCCL/MPI multi-worker execution
+
+## Supported Models
+
+The public preview focuses on the model families below. Some source files
+contain experimental model scaffolding beyond this table; those are not part of
+the current public support commitment unless documented in
+[Supported Models](docs/models.md).
+
+| Model family | Task | Status |
+|---|---|---|
+| SD3 / SD3.5 | Text-to-image | Public preview |
+| FLUX.1 | Text-to-image | Public preview |
+| FLUX.1-Kontext | Image editing / reference-guided generation | Public preview |
+| Qwen-Image | Text-to-image | Public preview |
+| Qwen-Image-Edit | Image editing | Public preview |
+| Wan 2.x | Video generation | Public preview |
+
+See [Supported Models](docs/models.md) for formats, backend coverage,
+model-specific options, examples, and known limitations.
+
+## Backend Support
+
+| Backend | Status | Notes |
+|---|---|---|
+| CUDA | First-class | Primary backend for optimized inference |
+| CPU | Functional | Portable execution, fallback, and offload |
+| Metal | Experimental | Early macOS support |
+| Vulkan | Experimental | Early cross-vendor GPU support |
+
+For dependencies, build profiles, and platform-specific instructions, see
+[Build and installation](docs/build.md).
+
+## Performance
+
+The README main-table snapshot below was measured on 2026-07-13 with the CUDA
+`performance` profile on a local NVIDIA H200 node. Full benchmark configs,
+commands, environment metadata, raw result roots, and interpretation notes are
+available in [Performance and benchmarks](docs/performance.md).
+
+| Model | System | Load (s) | Median (s) | P90 (s) | Peak VRAM (MiB) |
+|---|---|---:|---:|---:|---:|
+| FLUX.1-dev | edge-dit.cpp | 6.645 | 10.784 | 10.861 | 38341 |
+| | Diffusers | 14.531 | 10.040 | 10.048 | 37711 |
+| | stable-diffusion.cpp | 1.333 | 30.371 | 30.379 | 40331 |
+| Stable Diffusion 3 Medium | edge-dit.cpp | 5.840 | 4.003 | 4.049 | 20833 |
+| | Diffusers | 11.244 | 3.376 | 3.381 | 20283 |
+| | stable-diffusion.cpp | 1.457 | 10.740 | 10.797 | 22997 |
+| Qwen-Image | edge-dit.cpp | 11.621 | 10.697 | 10.736 | 59725 |
+| | Diffusers | 25.220 | 9.558 | 9.565 | 60935 |
+| | stable-diffusion.cpp | 1.782 | 62.671 | 62.728 | 61879 |
+
+## Open-Source Interfaces
+
+edge-dit.cpp exposes the same runtime through several public integration
+surfaces:
+
+| Interface | Entry point | Documentation |
+|---|---|---|
+| CLI | `ed-cli`, `ed-sample` | [Command line usage](docs/cli.md) |
+| C API | `include/edge-dit.h` | [API and bindings](docs/api.md#c-api) |
+| Native HTTP server | `ed-server` | [API and bindings](docs/api.md#native-http-server) |
+| Python bindings | `edge_dit` package | [API and bindings](docs/api.md#python-bindings) |
+| Python job server / console | `edge_dit.server_v2`, managed console | [API and bindings](docs/api.md#python-server-v2) |
+
+The v0.x API, ABI, CLI flags, and HTTP schemas are public but not yet stable.
+
+## Quick Start
+
+Clone the repository with submodules:
 
 首次克隆后先拉取子模块（ggml + oneDNN）：
 
@@ -31,222 +145,108 @@ bash ./scripts/build_cpu.sh      # 自动探测上面的 install 并启用 GGML_
 `LD_LIBRARY_PATH=third_party/onednn/install/lib64`。
 
 ```bash
-bash ./scripts/build_cuda.sh
-bash ./scripts/build_cpu.sh
+git clone --recursive https://github.com/THU-MIG/edge-dit.cpp
+cd edge-dit.cpp
 ```
 
-CUDA 构建脚本默认会启用 cuDNN SDPA fast attention。脚本会先查找
-`CUDNN_ROOT` 或当前 Python/conda 环境中的 NVIDIA cuDNN wheel；如果没有找到，
-会尝试用用户态 pip 安装 CUDA 12 cuDNN/NVRTC/runtime wheel，不需要 sudo：
+If the repository was cloned without submodules:
 
 ```bash
-bash ./scripts/build_cuda.sh
+bash scripts/bootstrap.sh
 ```
 
-常用覆盖项：
+Build the default CUDA performance profile:
 
 ```bash
-# 使用已有 cuDNN 安装
-CUDNN_ROOT=/path/to/nvidia/cudnn bash ./scripts/build_cuda.sh
-
-# 禁止脚本自动 pip install cuDNN wheel，找不到 cuDNN 时退回普通 CUDA 构建
-ED_INSTALL_CUDNN=OFF bash ./scripts/build_cuda.sh
-
-# 完全关闭 cuDNN SDPA fast attention
-ED_ENABLE_CUDNN_SDPA=OFF bash ./scripts/build_cuda.sh
+bash scripts/build_cuda.sh
 ```
 
-编译完成后，命令行程序位于：
+Verify the installation:
 
 ```bash
-./build-cuda/bin/ed-cli   # GPU 推理
-./build-cpu/bin/ed-cli    # CPU 推理
+./build-cuda/bin/ed-cli --help
 ```
 
-## 基本用法
-
-### 使用 diffusers 目录加载模型
+Run FLUX text-to-image inference:
 
 ```bash
-./build-cuda/bin/ed-cli --backend cuda \
-  --model /path/to/diffusers-model-dir \
-  -p "prompt text" \
-  -W 1024 -H 1024 --steps 20 -s 0 \
-  -o output.png
+./build-cuda/bin/ed-cli \
+  --backend cuda \
+  --model /path/to/flux-dev \
+  --prompt "a glass teapot on a wooden table" \
+  --width 1024 \
+  --height 1024 \
+  --steps 20 \
+  --output output.png
 ```
 
-### 组件式路径加载（仅Flux和SD3支持）
+The default build uses the official `performance` profile. It enables the
+optimized CUDA path and automatically handles user-space dependencies when
+possible. For CI or dependency-limited environments, see the optional `minimal`
+profile in [Build and installation](docs/build.md).
 
-```bash
-./build-cuda/bin/ed-cli --backend cuda \
-  --diffusion-model /path/to/transformer.safetensors \
-  --clip_l /path/to/clip_l.safetensors \
-  --clip_g /path/to/clip_g.safetensors \
-  --t5xxl /path/to/t5xxl.safetensors.index.json \
-  --vae /path/to/vae.safetensors \
-  -p "prompt text" \
-  -W 1024 -H 1024 --steps 20 -s 0 \
-  -o output.png
+For full build options and command-line usage, see:
+
+- [Build and installation](docs/build.md)
+- [Command line usage](docs/cli.md)
+
+## Contributors
+
+Thank you to everyone who has contributed to edge-dit.cpp.
+
+<a href="https://github.com/THU-MIG/edge-dit.cpp/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=THU-MIG/edge-dit.cpp" alt="edge-dit.cpp contributors">
+</a>
+
+For contribution guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md) and
+[Development](docs/development.md).
+
+## Acknowledgements
+
+Model ecosystems and native inference references:
+
+- [Stability-AI/sd3.5](https://github.com/Stability-AI/sd3.5) for SD3/SD3.5
+  reference material.
+- [black-forest-labs/flux](https://github.com/black-forest-labs/flux) for
+  FLUX.1 and FLUX.1-Kontext reference material.
+- [QwenLM/Qwen-Image](https://github.com/QwenLM/Qwen-Image) for Qwen-Image and
+  Qwen-Image-Edit reference material.
+- [Wan-Video/Wan2.1](https://github.com/Wan-Video/Wan2.1) and
+  [Wan-Video/Wan2.2](https://github.com/Wan-Video/Wan2.2) for Wan video model
+  reference material.
+- [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) for
+  native diffusion model implementation references.
+
+Runtime, operator, and dependency foundations:
+
+- [ggml](https://github.com/ggml-org/ggml) as the underlying tensor and graph
+  runtime.
+- [NVIDIA cuDNN frontend](https://github.com/NVIDIA/cudnn-frontend) for
+  attention and CNN operator support through cuDNN.
+- [NVIDIA NCCL](https://github.com/NVIDIA/nccl) and
+  [Open MPI](https://github.com/open-mpi/ompi) for distributed and multi-GPU
+  runtime support.
+- [nlohmann/json](https://github.com/nlohmann/json),
+  [cpp-httplib](https://github.com/yhirose/cpp-httplib), and
+  [stb](https://github.com/nothings/stb) for lightweight utility components.
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependency licenses.
+
+## Citation
+
+Technical report citation coming soon. For now, cite the repository:
+
+```bibtex
+@software{edge_dit_cpp,
+  title  = {edge-dit.cpp: A Lightweight Native Runtime for Diffusion Transformers on Resource-Constrained Devices},
+  author = {edge-dit.cpp contributors},
+  url    = {https://github.com/THU-MIG/edge-dit.cpp},
+  year   = {2026}
+}
 ```
 
-### 视频生成（Wan）
+## License
 
-```bash
-./build-cuda/bin/ed-cli --backend cuda \
-  --video \
-  --model /path/to/Wan2.2-T2V-A14B-Diffusers \
-  -p "a small robot walking through a rainy neon street" \
-  -W 832 -H 480 --frames 81 --fps 16 --steps 50 -s 0 \
-  --cfg-scale 5.0 --flow-shift 5.0 \
-  -o output.avi
-```
-
-## 量化与内存优化
-
-### 在线量化（`--type`）
-
-加载时实时量化权重，降低显存占用：
-
-```bash
-# Q8 量化（显存约为 FP16 的 56%）
-./build-cuda/bin/ed-cli --backend cuda --model /path/to/sd3 --type q8_0 \
-  -p "a cat" -W 1024 -H 1024 --steps 20 -o output.png
-
-# Q4_K 量化（显存约为 FP16 的 33%）
-./build-cuda/bin/ed-cli --backend cuda --model /path/to/sd3 --type q4_k \
-  -p "a cat" -W 1024 -H 1024 --steps 20 -o output.png
-
-# 混合量化：主体 Q4_K，norm 层保持 F16
-./build-cuda/bin/ed-cli --backend cuda --model /path/to/sd3 --type q4_k \
-  --tensor-type-rules "norm=f16,bias=f32" \
-  -p "a cat" -W 1024 -H 1024 --steps 20 -o output.png
-```
-
-支持的量化类型：`f32`、`f16`、`bf16`、`q4_0`、`q4_1`、`q5_0`、`q5_1`、`q8_0`、`q2_k`、`q3_k`、`q4_k`、`q5_k`、`q6_k`
-
-### 跳过 T5（`--no-t5`，仅 SD3）
-
-SD3 的 T5XXL 占 ~9 GB 显存但非必需：
-
-```bash
-./build-cuda/bin/ed-cli --backend cuda --model /path/to/sd3 --no-t5 \
-  -p "a cat" -W 1024 -H 1024 --steps 20 -o output.png
-```
-
-### VAE Tiling（`--vae-tiling`）
-
-大分辨率图像的 VAE 解码分块执行，降低显存峰值：
-
-```bash
-# 启用 2×2 分块（省约 21% 显存）
-./build-cuda/bin/ed-cli --backend cuda --model /path/to/sd3 --vae-tiling \
-  -p "a cat" -W 2048 -H 2048 --steps 20 -o output.png
-
-# 4×4 更细分块（省约 28% 显存）
-./build-cuda/bin/ed-cli --backend cuda --model /path/to/sd3 --vae-tile-size 4 \
-  -p "a cat" -W 2048 -H 2048 --steps 20 -o output.png
-```
-
-### 显存 Offload
-
-将模型权重保留在 CPU，降低 GPU 常驻显存：
-
-```bash
-# 文本编码器放 CPU（省约 10 GB）
-./build-cuda/bin/ed-cli --backend cuda --model /path/to/sd3 --keep-text-encoder-on-cpu --vae-tiling \
-  -p "a cat" -W 1024 -H 1024 --steps 20 -o output.png
-
-# 全部 offload + 限制计算图显存
-./build-cuda/bin/ed-cli --backend cuda --model /path/to/sd3 --offload-to-cpu --max-vram 6 --vae-tiling \
-  -p "a cat" -W 1024 -H 1024 --steps 20 -o output.png
-```
-
-### 组合使用（小显存设备）
-
-```bash
-./build-cuda/bin/ed-cli --backend cuda --model /path/to/sd3 \
-  --type q4_k --no-t5 --vae-tiling --keep-text-encoder-on-cpu \
-  -p "a cat" -W 1024 -H 1024 --steps 20 -o output.png
-```
-
-## 并行推理
-
-### CFG 并行（双 GPU）
-
-```bash
-./build-cuda/bin/ed-cli --backend cuda \
-  --model /path/to/model \
-  -p "prompt text" \
-  -W 1024 -H 1024 --steps 20 -s 0 \
-  --cfg-scale 5.0 \
-  --devices 0,1 \
-  --cfg-size 2 \
-  -o output.png
-```
-
-### Sequence Parallel（多 GPU）
-
-```bash
-./build-cuda/bin/ed-cli --backend cuda \
-  --model /path/to/model \
-  -p "prompt text" \
-  -W 1024 -H 1024 --steps 20 -s 0 \
-  --devices 0,1 \
-  --sp-size 2 \
-  -o output.png
-```
-
-## 常用参数
-
-### 模型加载
-| 参数 | 说明 |
-|---|---|
-| `--backend cuda\|cpu` | 计算后端 |
-| `--model <dir>` | diffusers 模型目录 |
-| `--diffusion-model <path>` | 单独指定 transformer 权重 |
-| `--clip_l <path>` | CLIP-L 权重 |
-| `--clip_g <path>` | CLIP-G 权重 |
-| `--t5xxl <path>` | T5XXL 权重 |
-| `--vae <path>` | VAE 权重 |
-
-### 生成参数
-| 参数 | 说明 |
-|---|---|
-| `-p, --prompt <text>` | 文本提示词 |
-| `-W, --width <int>` | 输出宽度，默认 1024 |
-| `-H, --height <int>` | 输出高度，默认 1024 |
-| `--steps <int>` | 采样步数，默认 20 |
-| `-s, --seed <int64>` | 随机种子 |
-| `--cfg-scale <float>` | CFG scale |
-| `--guidance <float>` | Flux distilled guidance |
-| `--flow-shift <float>` | Flow scheduler shift |
-| `--video` | 生成视频 |
-| `--frames <int>` | 视频帧数 |
-| `--fps <int>` | 视频帧率 |
-| `-o, --output <path>` | 输出文件路径 |
-
-### 量化与内存
-| 参数 | 说明 |
-|---|---|
-| `--type <dtype>` | 在线量化类型 |
-| `--tensor-type-rules <csv>` | 混合量化规则 |
-| `--no-t5` | 跳过 T5 文本编码器（仅 SD3） |
-| `--vae-tiling` | 启用 VAE 分块解码 |
-| `--vae-tile-size <float>` | VAE 分块相对大小 |
-| `--offload-to-cpu` | 全部权重放 CPU |
-| `--keep-text-encoder-on-cpu` | 文本编码器放 CPU |
-| `--keep-vae-on-cpu` | VAE 放 CPU |
-| `--max-vram <GB>` | 计算图显存上限（配合 offload） |
-
-### 并行
-| 参数 | 说明 |
-|---|---|
-| `--devices <csv>` | GPU 列表，如 `0,1` |
-| `--cfg-size <n>` | CFG 并行规模（1 或 2） |
-| `--sp-size <n>` | Sequence parallel 规模 |
-| `-t, --threads <int>` | CPU 线程数 |
-
-## 更多文档
-
-- 改进详情：[docs/improvements.md](docs/improvements.md)
-- SP 性能报告：[docs/sp_benchmark_report.md](docs/sp_benchmark_report.md)
+edge-dit.cpp is released under the [Apache License 2.0](LICENSE).
+Third-party components and model weights remain under their own licenses; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [NOTICE](NOTICE).

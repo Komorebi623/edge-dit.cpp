@@ -1,0 +1,43 @@
+schema_version: 1
+suite_id: memory
+description: Memory-constrained execution suite for quantization, placement, tiling, and graph-cut.
+mode: official
+defaults:
+  warmup_runs: 1
+  measured_runs: 5
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux1-dev-t2i.yaml
+scenarios:
+  - scenario_id: flux_unlimited_bf16
+    vram_constraint_gib: null
+    options:
+      precision: bf16
+  - scenario_id: flux_24g_bf16_tiling
+    vram_constraint_gib: 24
+    options:
+      precision: bf16
+      vae_tiling: true
+  - scenario_id: flux_16g_q8_graph_cut
+    vram_constraint_gib: 16
+    options:
+      precision: q8_0
+      max_vram_gib: 16
+      profile_graph_cuts: true
+  - scenario_id: flux_12g_q4_offload
+    vram_constraint_gib: 12
+    options:
+      precision: q4_0
+      offload_to_cpu: true
+      keep_text_encoder_on_cpu: true
+      keep_vae_on_cpu: true
+reporting:
+  table: memory_constrained_execution
+  require_graph_cut_metrics: true

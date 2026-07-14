@@ -1,0 +1,27 @@
+schema_version: 1
+suite_id: parallel
+description: CFG and sequence-parallel scaling suite.
+mode: official
+defaults:
+  warmup_runs: 1
+  measured_runs: 5
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  parallel:
+    - ../systems/edge-dit.yaml
+    - ../systems/xdit.yaml
+workloads:
+  parallel:
+    - ../workloads/flux1-dev-t2i-1024-s50.yaml
+    - ../workloads/wan2-t2v.yaml
+parallel_matrix:
+  gpu_counts: [1, 2, 4]
+  modes:
+    edge-dit.cpp: [sequence]
+    xdit: [ulysses]
+reporting:
+  table: parallel_scaling
+  require_communication_breakdown: true

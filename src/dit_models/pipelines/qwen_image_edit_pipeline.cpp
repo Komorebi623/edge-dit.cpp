@@ -6,7 +6,7 @@
 #include <cstring>
 #include <vector>
 
-#include "core/optimization/cache/cache_runtime.hpp"
+#include "core/optimization/cache/runtime/cache_engine.hpp"
 #include "dit_models/components/autoencoders/vae.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
 #include "dit_models/models/qwen_image.hpp"
@@ -471,6 +471,10 @@ ed_status_t QwenImageEditPipeline::generate_image(const ed_image_generation_para
     }
 
     const int count = params->batch_count > 0 ? params->batch_count : 1;
+    const int steps = params->sample.steps > 0 ? params->sample.steps : 50;
+    if (GenerationControl* control = runtime_->generation_control()) {
+        control->start(count * steps);
+    }
     ed_image_t* images = static_cast<ed_image_t*>(std::calloc(static_cast<size_t>(count), sizeof(ed_image_t)));
     if (images == nullptr) {
         if (error != nullptr) {
@@ -704,9 +708,29 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         qwen_edit_round_tensor_to_bf16(x);
     }
     cache::CacheRuntime cache_runtime;
-    const bool cache_enabled = cache_runtime.init(params->sample, version_, sigmas);
+    const bool cache_use_cfg_parallel = !uncond.empty() &&
+                                        parallel::cfg_parallel_available(runtime_->parallel_context());
+    const bool cache_seam_available =
+        !cache_use_cfg_parallel && diffusion_->feature_cache_available();
+    const bool cache_enabled =
+        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available);
+    // GPU DiCache (ED_DICACHE_GPU): reset per-generation persistent state and set
+    // the probe depth the capture step uses, kept in sync with the policy config.
+    if (cache_enabled && diffusion_ != nullptr) {
+        diffusion_->reset_dicache_gpu_states();
+        diffusion_->dicache_probe_depth_ = cache_runtime.dicache_probe_depth();
+    }
     const int64_t sample_start_ms = ggml_time_ms();
+    GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {
+        if (control != nullptr && control->should_cancel()) {
+            control->mark_cancelled();
+            if (error != nullptr && error->empty()) {
+                *error = "generation cancelled";
+            }
+            diffusion_->free_compute_buffer();
+            return false;
+        }
         const float sigma = sigmas[static_cast<size_t>(step)];
         const float sigma_next = sigmas[static_cast<size_t>(step + 1)];
 
@@ -731,38 +755,82 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         const void* condition_key = static_cast<const void*>(&condition);
         const cache::CacheBranch condition_branch = uncond.empty() ? cache::CacheBranch::Main
                                                                    : cache::CacheBranch::Cond;
-        const bool cache_hit = !use_cfg_parallel &&
-                               cache_enabled &&
-                               cache_runtime.before_forward(condition_branch,
-                                                            condition_key,
-                                                            x,
-                                                            &model_out);
+        // Cache hooks for one condition. Feature/Probe seam gated to the plain
+        // path and disabled under CFG-parallel (see flux_pipeline).
+        auto make_hooks = [&](const SDCondition& cond_in) {
+            cache::CacheRunnerHooks hooks;
+            hooks.input = &x;
+            hooks.full = [&, cond_in]() {
+                return diffusion_->compute(n_threads, x, timesteps, cond_in.c_crossattn,
+                                           ref_latents, true);
+            };
+            const bool seam_ok = !use_cfg_parallel && diffusion_->feature_cache_available();
+            hooks.feature_supported = seam_ok;
+            if (seam_ok) {
+                const void* branch_key = static_cast<const void*>(&cond_in);
+                // Only DiCache (Probe) uses the on-GPU probe/inject seam that a
+                // branch_key drives; passing it into compute_capture for a Feature
+                // method (MagCache/TaylorSeer/SenCache) would flip gpu_metric on and
+                // suppress the host feature readback those methods rely on.
+                const bool is_probe = cache_runtime.granularity() == cache::CacheGranularity::Probe;
+                // Feature-granularity on-GPU reuse: keep the captured residual on
+                // device and inject it there on skips, avoiding the ~50MB host
+                // reconstruct copy + H2D upload the host inject path pays per skip.
+                const bool feature_gpu = !is_probe &&
+                    cache_runtime.granularity() == cache::CacheGranularity::Feature &&
+                    Qwen::QwenImageRunner::feature_gpu_enabled();
+                const void* capture_key = is_probe ? branch_key : nullptr;
+                if (feature_gpu) {
+                    hooks.capture = [&, cond_in, branch_key](int region_start, int region_end) {
+                        return diffusion_->compute_capture_feature_gpu(
+                            n_threads, x, timesteps, cond_in.c_crossattn, ref_latents, true,
+                            region_start, region_end, branch_key);
+                    };
+                    hooks.inject_feature_gpu = [&, cond_in, branch_key](int region_start, int region_end) {
+                        return diffusion_->compute_inject_feature_gpu(
+                            n_threads, x, timesteps, cond_in.c_crossattn, ref_latents, true,
+                            branch_key, region_start, region_end);
+                    };
+                } else {
+                    hooks.capture = [&, cond_in, capture_key](int region_start, int region_end) {
+                        return diffusion_->compute_capture(n_threads, x, timesteps, cond_in.c_crossattn,
+                                                           ref_latents, true, region_start, region_end,
+                                                           capture_key);
+                    };
+                }
+                hooks.inject = [&, cond_in](const sd::Tensor<float>& feat, int region_start, int region_end) {
+                    return diffusion_->compute_inject(n_threads, x, timesteps, cond_in.c_crossattn,
+                                                      ref_latents, true, feat, region_start, region_end);
+                };
+                if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
+                    hooks.probe = [&, cond_in, branch_key](int depth) {
+                        return diffusion_->compute_probe(n_threads, x, timesteps, cond_in.c_crossattn,
+                                                         ref_latents, true, depth, branch_key);
+                    };
+                    // Only wire on-GPU inject when the model's GPU DiCache path is
+                    // active; with ED_DICACHE_GPU=0 the lowering takes the declarative
+                    // host probe path instead (residual-ring blend).
+                    if (Qwen::QwenImageRunner::dicache_gpu_enabled()) {
+                        hooks.inject_gpu = [&, cond_in, branch_key](float gamma, int region_start, int region_end) {
+                            return diffusion_->compute_inject_gpu(n_threads, x, timesteps, cond_in.c_crossattn,
+                                                                  ref_latents, true, gamma, branch_key,
+                                                                  region_start, region_end);
+                        };
+                    }
+                }
+            }
+            return hooks;
+        };
+
         if (use_cfg_parallel) {
             const bool local_is_uncond = cfg_rank == 0;
             const SDCondition& local_condition = local_is_uncond ? uncond : condition;
             const cache::CacheBranch local_branch = local_is_uncond ? cache::CacheBranch::Uncond
                                                                     : cache::CacheBranch::Cond;
             const void* local_key = static_cast<const void*>(&local_condition);
-            sd::Tensor<float> local_out;
-            const bool local_cache_hit = cache_enabled &&
-                                         cache_runtime.before_forward(local_branch,
-                                                                      local_key,
-                                                                      x,
-                                                                      &local_out);
-            if (!local_cache_hit) {
-                local_out = diffusion_->compute(n_threads,
-                                                x,
-                                                timesteps,
-                                                local_condition.c_crossattn,
-                                                ref_latents,
-                                                true);
-                if (!local_out.empty() && cache_enabled) {
-                    cache_runtime.after_forward(local_branch,
-                                                local_key,
-                                                x,
-                                                local_out);
-                }
-            }
+            sd::Tensor<float> local_out = cache_enabled
+                ? cache_runtime.run_branch(local_branch, local_key, make_hooks(local_condition))
+                : make_hooks(local_condition).full();
             std::vector<sd::Tensor<float>> gathered;
             if (local_out.empty() ||
                 !parallel::cfg_all_gather(*runtime_->parallel_context(), local_out, &gathered, error) ||
@@ -774,43 +842,17 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
                 return false;
             }
             model_out = true_cfg_rescale(gathered[1], gathered[0], cfg_scale, patch_size);
-        } else if (!cache_hit) {
-            model_out = diffusion_->compute(n_threads,
-                                            x,
-                                            timesteps,
-                                            condition.c_crossattn,
-                                            ref_latents,
-                                            true);
-            if (!model_out.empty() && cache_enabled) {
-                cache_runtime.after_forward(condition_branch,
-                                            condition_key,
-                                            x,
-                                            model_out);
-            }
+        } else {
+            model_out = cache_enabled
+                ? cache_runtime.run_branch(condition_branch, condition_key, make_hooks(condition))
+                : make_hooks(condition).full();
         }
 
         if (!uncond.empty() && !use_cfg_parallel) {
-            sd::Tensor<float> uncond_out;
             const void* uncond_key = static_cast<const void*>(&uncond);
-            const bool uncond_cache_hit = cache_enabled &&
-                                          cache_runtime.before_forward(cache::CacheBranch::Uncond,
-                                                                       uncond_key,
-                                                                       x,
-                                                                       &uncond_out);
-            if (!uncond_cache_hit) {
-                uncond_out = diffusion_->compute(n_threads,
-                                                 x,
-                                                 timesteps,
-                                                 uncond.c_crossattn,
-                                                 ref_latents,
-                                                 true);
-                if (!uncond_out.empty() && cache_enabled) {
-                    cache_runtime.after_forward(cache::CacheBranch::Uncond,
-                                                uncond_key,
-                                                x,
-                                                uncond_out);
-                }
-            }
+            sd::Tensor<float> uncond_out = cache_enabled
+                ? cache_runtime.run_branch(cache::CacheBranch::Uncond, uncond_key, make_hooks(uncond))
+                : make_hooks(uncond).full();
             if (uncond_out.empty()) {
                 if (error != nullptr) {
                     *error = sd_format("Qwen-Image-Edit unconditional transformer compute failed at step %d", step + 1);
@@ -831,6 +873,27 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
             qwen_edit_round_tensor_to_bf16(model_out);
         }
 
+        // SenCache calibration: finite-diff sensitivities on the true-CFG-combined
+        // velocity. Two extra plain forwards/step, calibration only; off under
+        // CFG-parallel. Qwen-Image-Edit feeds timestep = sigma*1000.
+        if (cache_enabled && cache_runtime.needs_calibration() && !use_cfg_parallel) {
+            auto forward_at = [&](const sd::Tensor<float>& x_raw, float sigma_eval) -> sd::Tensor<float> {
+                sd::Tensor<float> ts({1}, std::vector<float>{sigma_eval * 1000.0f});
+                sd::Tensor<float> cond_v = diffusion_->compute(n_threads, x_raw, ts, condition.c_crossattn,
+                                                               ref_latents, true);
+                if (cond_v.empty() || uncond.empty()) {
+                    return cond_v;
+                }
+                sd::Tensor<float> uncond_v = diffusion_->compute(n_threads, x_raw, ts, uncond.c_crossattn,
+                                                                 ref_latents, true);
+                if (uncond_v.empty()) {
+                    return {};
+                }
+                return true_cfg_rescale(cond_v, uncond_v, cfg_scale, patch_size);
+            };
+            cache_runtime.calibrate(condition_branch, condition_key, x, model_out, forward_at);
+        }
+
         sd::Tensor<float> denoised = model_out * (-sigma) + x;
         if (sigma == 0.0f) {
             x = denoised;
@@ -844,6 +907,9 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         LOG_INFO("qwen-image-edit step %d/%d sigma=%.6f next=%.6f", step + 1, steps, sigma, sigma_next);
         if (cache_enabled) {
             cache_runtime.end_step(cache_step);
+        }
+        if (control != nullptr) {
+            control->step_done();
         }
     }
     if (cache_enabled) {

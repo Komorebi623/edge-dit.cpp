@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from PIL import Image
+
 from .errors import InvalidArgumentError
 
 
@@ -125,6 +127,10 @@ class ImageRequest:
     cache_taylorseer_skip_interval: int | None = None
     cache_scm_mask: str | None = None
     cache_scm_policy_dynamic: bool | None = None
+    init_image: Image.Image | None = None
+    mask_image: Image.Image | None = None
+    control_image: Image.Image | None = None
+    ref_images: list[Image.Image] | tuple[Image.Image, ...] | None = None
     output_type: str | None = None
 
     def __post_init__(self) -> None:
@@ -152,6 +158,20 @@ class ImageRequest:
             value = getattr(self, field_name)
             if value is not None and value <= 0:
                 raise InvalidArgumentError(f"{field_name} must be > 0")
+
+        for field_name in ("init_image", "mask_image", "control_image"):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, Image.Image):
+                raise InvalidArgumentError(f"{field_name} must be a PIL.Image.Image")
+
+        if self.ref_images is not None:
+            if not isinstance(self.ref_images, (list, tuple)):
+                raise InvalidArgumentError("ref_images must be a list or tuple of PIL.Image.Image")
+            if not self.ref_images:
+                raise InvalidArgumentError("ref_images must contain at least one image")
+            for image in self.ref_images:
+                if not isinstance(image, Image.Image):
+                    raise InvalidArgumentError("ref_images must contain only PIL.Image.Image values")
 
         if self.guidance is not None and self.distilled_guidance is not None:
             if self.guidance != self.distilled_guidance:

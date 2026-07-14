@@ -7,6 +7,7 @@ STATUS_MODEL_LOAD_FAILED = 3
 STATUS_GENERATION_FAILED = 4
 STATUS_OUT_OF_MEMORY = 5
 STATUS_UNSUPPORTED = 6
+STATUS_CANCELLED = 7
 
 
 class EdgeDitError(RuntimeError):
@@ -33,6 +34,10 @@ class GenerationError(EdgeDitError):
     """Raised when image generation fails."""
 
 
+class GenerationCancelledError(GenerationError):
+    """Raised when generation is cancelled cooperatively by the native engine."""
+
+
 class UnsupportedError(EdgeDitError):
     """Raised when a requested feature is unsupported."""
 
@@ -48,6 +53,8 @@ def exception_for_status(status: int, message: str) -> EdgeDitError:
         return ModelLoadError(message)
     if status in (STATUS_GENERATION_FAILED, STATUS_OUT_OF_MEMORY):
         return GenerationError(message)
+    if status == STATUS_CANCELLED:
+        return GenerationCancelledError(message)
     if status == STATUS_UNSUPPORTED:
         return UnsupportedError(message)
     return EdgeDitError(message)
@@ -81,4 +88,3 @@ def raise_for_status(
 
     message = get_last_error_message(lib, ctx) or default_message
     raise exception_for_status(status, message)
-

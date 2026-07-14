@@ -7,6 +7,7 @@
 #include <new>
 #include <string>
 #include "core/runtime/edge_dit_engine.hpp"
+#include "core/optimization/cache/cache_types.hpp"
 #include "utils/util.h"
 
 struct ed_context {
@@ -26,6 +27,22 @@ static void ed_set_error(ed_context_t * ctx, const char * message) {
     if (ctx != nullptr) {
         ctx->last_error = message != nullptr ? message : "";
     }
+}
+
+const char * ed_version_string(void) {
+    return ED_VERSION_STRING;
+}
+
+int ed_version_major(void) {
+    return ED_VERSION_MAJOR;
+}
+
+int ed_version_minor(void) {
+    return ED_VERSION_MINOR;
+}
+
+int ed_version_patch(void) {
+    return ED_VERSION_PATCH;
 }
 
 void ed_context_params_init(ed_context_params_t * params) {
@@ -80,6 +97,8 @@ void ed_sample_params_init(ed_sample_params_t * params) {
     params->cache_taylorseer_n_derivatives = 1;
     params->cache_taylorseer_skip_interval = 1;
     params->cache_scm_policy_dynamic = true;
+    params->cache_calibrate_path = nullptr;
+    params->cache_profile_path = nullptr;
 }
 
 void ed_image_generation_params_init(ed_image_generation_params_t * params) {
@@ -321,6 +340,66 @@ const char * ed_get_last_error(const ed_context_t * ctx) {
     return ctx->last_error.c_str();
 }
 
+const char* ed_context_pipeline_name(const ed_context_t* ctx) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return nullptr;
+    }
+    return ctx->engine->pipeline_name();
+}
+
+const char* ed_context_version_name(const ed_context_t* ctx) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return nullptr;
+    }
+    return ctx->engine->version_name();
+}
+
+bool ed_context_supports_image(const ed_context_t* ctx) {
+    return ctx != nullptr && ctx->engine != nullptr && ctx->engine->supports_image_generation();
+}
+
+bool ed_context_supports_video(const ed_context_t* ctx) {
+    return ctx != nullptr && ctx->engine != nullptr && ctx->engine->supports_video_generation();
+}
+
+ed_sampler_t ed_context_default_sampler(const ed_context_t* ctx) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return ED_SAMPLER_AUTO;
+    }
+    return ctx->engine->get_default_sample_method();
+}
+
+ed_scheduler_t ed_context_default_scheduler(const ed_context_t* ctx, ed_sampler_t sampler) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return ED_SCHEDULER_AUTO;
+    }
+    const ed_sampler_t resolved = sampler == ED_SAMPLER_AUTO
+                                      ? ctx->engine->get_default_sample_method()
+                                      : sampler;
+    return ctx->engine->get_default_scheduler(resolved);
+}
+
+void ed_context_request_cancel(ed_context_t* ctx) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return;
+    }
+    ctx->engine->request_cancel();
+}
+
+int ed_context_progress_current_step(const ed_context_t* ctx) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return 0;
+    }
+    return ctx->engine->progress_current_step();
+}
+
+int ed_context_progress_total_steps(const ed_context_t* ctx) {
+    if (ctx == nullptr || ctx->engine == nullptr) {
+        return 0;
+    }
+    return ctx->engine->progress_total_steps();
+}
+
 int ed_context_parallel_rank(const ed_context_t* ctx) {
     if (ctx == nullptr || ctx->engine == nullptr) {
         return 0;
@@ -340,4 +419,8 @@ bool ed_context_parallel_is_root(const ed_context_t* ctx) {
         return true;
     }
     return ctx->engine->parallel_is_root();
+}
+
+bool ed_cache_mode_supports_calibration(ed_cache_mode_t mode) {
+    return edgedit::cache::cache_mode_supports_calibration(edgedit::cache::cache_mode_from_ld(mode));
 }

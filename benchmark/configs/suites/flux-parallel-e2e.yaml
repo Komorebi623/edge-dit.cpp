@@ -1,0 +1,29 @@
+schema_version: 1
+suite_id: flux-parallel-e2e
+description: >
+  Reproducible FLUX.1-dev parallel e2e generation suite for edge-dit.cpp
+  sequence parallelism and xDiT baseline preflight.
+mode: official
+defaults:
+  warmup_runs: 2
+  measured_runs: 10
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  parallel:
+    - ../systems/edge-dit.yaml
+    - ../systems/xdit.yaml
+workloads:
+  parallel:
+    - ../workloads/flux1-dev-t2i-1024-s50.yaml
+parallel_matrix:
+  gpu_counts: [1, 2, 4]
+  modes:
+    edge-dit.cpp: [sequence]
+    xdit: [ulysses]
+reporting:
+  table: flux_parallel_e2e
+  require_environment_metadata: true
+  measurement_boundary: load_once_e2e_generation_no_output_encoding

@@ -5,6 +5,7 @@
 
 #include "edge-dit.h"
 #include "runtime/model_loader.h"
+#include "utils/tensor.hpp"
 
 namespace edgedit {
 namespace cache {
@@ -16,34 +17,9 @@ enum class CacheMode {
     DBCache,
     TaylorSeer,
     CacheDiT,
-};
-
-enum class CacheExecType {
-    Full,
-    Reuse,
-    Probe,
-    ResumeFull,
-    Taylor,
-    Disabled,
-};
-
-enum class CacheStorageKind {
-    None,
-    HiddenState,
-    Residual,
-    BlockResidual,
-    Token,
-    Attention,
-    Custom,
-};
-
-enum class CacheSelectorKind {
-    All,
-    Random,
-    Attention,
-    Norm,
-    Score,
-    Custom,
+    MagCache,
+    DiCache,
+    SenCache,
 };
 
 enum class CacheBranch {
@@ -52,29 +28,24 @@ enum class CacheBranch {
     Uncond,
 };
 
-enum class CacheRegionPattern {
-    HiddenOnly,
-    HiddenContext,
-    ImageText,
-    PackedImageText,
-    Custom,
+// Decision granularity of a cache policy. Determines which lifecycle hooks the
+// engine drives and whether the method needs the model's block-stack seam.
+//   Output  - operates on whole-model input latent / output noise (black box).
+//   Feature - operates on the block-stack residual captured via the model seam.
+//   Probe   - runs a shallow prefix of blocks, then decides skip vs. full.
+enum class CacheGranularity {
+    Output,
+    Feature,
+    Probe,
 };
 
-struct CacheRegionSpec {
-    std::string id;
-    std::string graph_prefix;
-    int block_count = 0;
-    CacheRegionPattern pattern = CacheRegionPattern::HiddenOnly;
-    std::vector<std::string> input_keys;
-    std::vector<std::string> output_keys;
-    int default_fn_blocks = 0;
-    int default_bn_blocks = 0;
-};
-
+// Per-model block-count / naming metadata, consumed when a policy needs the
+// model name (MagCache/SenCache profiles) or block count. The declarative
+// contract (DiTModelCacheContract) is derived from the same version data.
 struct CacheModelSpec {
     std::string model_name;
     SDVersion version = VERSION_COUNT;
-    std::vector<CacheRegionSpec> regions;
+    int block_count = 0;
     bool separate_cfg = false;
 };
 
@@ -85,25 +56,6 @@ struct CacheStepInfo {
     float sigma_next = 0.0f;
 };
 
-struct CacheRegionFrame {
-    CacheStepInfo step;
-    CacheBranch branch = CacheBranch::Main;
-    std::string region_id;
-    int block_index = -1;
-};
-
-struct CacheRegionPlan {
-    CacheExecType exec_type = CacheExecType::Full;
-    CacheStorageKind storage_kind = CacheStorageKind::Residual;
-    CacheSelectorKind selector_kind = CacheSelectorKind::All;
-    int fn_blocks = 0;
-    int bn_blocks = 0;
-    int probe_blocks = 0;
-    bool needs_input_snapshot = false;
-    bool needs_output_snapshot = true;
-    bool can_reuse = false;
-};
-
 inline CacheMode cache_mode_from_ld(ed_cache_mode_t mode) {
     switch (mode) {
         case ED_CACHE_EASYCACHE: return CacheMode::EasyCache;
@@ -111,12 +63,16 @@ inline CacheMode cache_mode_from_ld(ed_cache_mode_t mode) {
         case ED_CACHE_DBCACHE: return CacheMode::DBCache;
         case ED_CACHE_TAYLORSEER: return CacheMode::TaylorSeer;
         case ED_CACHE_CACHE_DIT: return CacheMode::CacheDiT;
+        case ED_CACHE_MAGCACHE: return CacheMode::MagCache;
+        case ED_CACHE_DICACHE: return CacheMode::DiCache;
+        case ED_CACHE_SENCACHE: return CacheMode::SenCache;
         case ED_CACHE_DISABLED:
         default: return CacheMode::Disabled;
     }
 }
 
 const char* cache_mode_name(CacheMode mode);
+bool cache_mode_supports_calibration(CacheMode mode);
 CacheModelSpec cache_model_spec_for_version(SDVersion version);
 
 }  // namespace cache

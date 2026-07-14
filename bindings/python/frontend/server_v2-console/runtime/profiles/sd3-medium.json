@@ -1,0 +1,26 @@
+{
+  "slug": "sd3-medium",
+  "name": "stable-diffusion-3-medium-diffusers",
+  "kind": "image",
+  "model_env": "EDGE_DIT_SD3_MODEL_PATH",
+  "description": "Conservative SD3 preset for local smoke runs.",
+  "engine": {
+    "model_path": "/path/to/stable-diffusion-3-medium-diffusers",
+    "backend": "cuda",
+    "offload_params_to_cpu": true,
+    "keep_text_encoder_on_cpu": true,
+    "skip_t5": true,
+    "max_vram_gb": 8.0
+  },
+  "request_example": {
+    "prompt": "a studio photo of a glass teapot",
+    "width": 256,
+    "height": 256,
+    "steps": 1,
+    "seed": 42
+  },
+  "notes": [
+    "Set EDGE_DIT_SD3_MODEL_PATH to your local model directory before launching this profile.",
+    "Use the smoke envelope first, then raise resolution and steps as your hardware allows."
+  ]
+}

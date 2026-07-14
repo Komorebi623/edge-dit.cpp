@@ -40,6 +40,7 @@ constexpr int64_t MIN_CUDNN_SDPA_FAST_SEQ = 4096;
 
 struct ed_cudnn_sdpa_key {
     int device = 0;
+    ggml_type dst_type = GGML_TYPE_COUNT;
     int64_t b = 0;
     int64_t h = 0;
     int64_t sq = 0;
@@ -48,14 +49,16 @@ struct ed_cudnn_sdpa_key {
     int64_t d = 0;
     float attn_scale = 0.0f;
     bool padding_mask = false;
+    bool allow_short_kv_cross_attn = false;
     int64_t q_stride[4] = {};
     int64_t k_stride[4] = {};
     int64_t v_stride[4] = {};
     int64_t o_stride[4] = {};
 
     bool operator==(const ed_cudnn_sdpa_key & other) const {
-        return device == other.device && b == other.b && h == other.h && sq == other.sq && sk == other.sk &&
+        return device == other.device && dst_type == other.dst_type && b == other.b && h == other.h && sq == other.sq && sk == other.sk &&
                sk_actual == other.sk_actual && d == other.d && attn_scale == other.attn_scale && padding_mask == other.padding_mask &&
+               allow_short_kv_cross_attn == other.allow_short_kv_cross_attn &&
                std::memcmp(q_stride, other.q_stride, sizeof(q_stride)) == 0 &&
                std::memcmp(k_stride, other.k_stride, sizeof(k_stride)) == 0 &&
                std::memcmp(v_stride, other.v_stride, sizeof(v_stride)) == 0 &&
@@ -69,6 +72,7 @@ struct ed_cudnn_sdpa_key_hash {
         auto mix = [&h](int64_t v) {
             h ^= std::hash<int64_t>()(v) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
         };
+        mix(static_cast<int64_t>(key.dst_type));
         mix(key.b);
         mix(key.h);
         mix(key.sq);
@@ -79,6 +83,7 @@ struct ed_cudnn_sdpa_key_hash {
         std::memcpy(&scale_bits, &key.attn_scale, sizeof(scale_bits));
         mix(scale_bits);
         mix(key.padding_mask ? 1 : 0);
+        mix(key.allow_short_kv_cross_attn ? 1 : 0);
         for (int i = 0; i < 4; ++i) {
             mix(key.q_stride[i]);
             mix(key.k_stride[i]);
@@ -173,6 +178,28 @@ static bool cudnn_sdpa_vec_convert_disabled() {
     return disabled;
 }
 
+static bool env_flag_enabled_or_default(const char * name, bool default_enabled) {
+    const char * env = getenv(name);
+    if (env == nullptr || env[0] == '\0') {
+        return default_enabled;
+    }
+    return std::strcmp(env, "0") != 0 &&
+           std::strcmp(env, "false") != 0 &&
+           std::strcmp(env, "FALSE") != 0 &&
+           std::strcmp(env, "off") != 0 &&
+           std::strcmp(env, "OFF") != 0;
+}
+
+static bool cudnn_sdpa_sync_f32_self_attn_enabled() {
+    static const bool enabled = env_flag_enabled_or_default("ED_CUDNN_SDPA_SYNC_F32_SELF_ATTN", false);
+    return enabled;
+}
+
+static bool cudnn_sdpa_wan_sp_cross_attn_enabled() {
+    static const bool enabled = env_flag_enabled_or_default("ED_WAN_SP_CUDNN_CROSS_ATTN", true);
+    return enabled;
+}
+
 static double now_ms() {
     using clock = std::chrono::steady_clock;
     return std::chrono::duration<double, std::milli>(clock::now().time_since_epoch()).count();
@@ -259,6 +286,14 @@ static bool supports_tensor_shape(const ggml_tensor * t, ggml_type type, int64_t
            is_contiguous_3d(t);
 }
 
+static bool is_wan_sp_cross_attn_tensor(const ggml_tensor * dst) {
+    if (dst == nullptr || !cudnn_sdpa_wan_sp_cross_attn_enabled()) {
+        return false;
+    }
+    return std::strstr(dst->name, "wan_block") != nullptr &&
+           std::strstr(dst->name, "_cross_attn") != nullptr;
+}
+
 static void log_unsupported_shape(const char * reason, const ggml_tensor * q, const ggml_tensor * k, const ggml_tensor * v, const ggml_tensor * dst, const ggml_tensor * mask) {
     if (!profile_enabled()) {
         return;
@@ -305,7 +340,7 @@ static bool make_key(const ggml_tensor * dst, ed_cudnn_sdpa_key & key, int devic
     if ((q->type != GGML_TYPE_F32 && q->type != GGML_TYPE_F16) ||
         k->type != GGML_TYPE_F16 ||
         v->type != GGML_TYPE_F16 ||
-        dst->type != GGML_TYPE_F32) {
+        (dst->type != GGML_TYPE_F32 && dst->type != GGML_TYPE_F16)) {
         log_unsupported_shape("type", q, k, v, dst, mask);
         return false;
     }
@@ -352,9 +387,14 @@ static bool make_key(const ggml_tensor * dst, ed_cudnn_sdpa_key & key, int devic
         log_unsupported_shape("dst_shape", q, k, v, dst, mask);
         return false;
     }
+    if (!supports_tensor_shape(dst, dst->type, d, h, sq)) {
+        log_unsupported_shape("dst_layout", q, k, v, dst, mask);
+        return false;
+    }
 
     key = {};
     key.device = device;
+    key.dst_type = dst->type;
     key.b = 1;
     key.h = h;
     key.sq = sq;
@@ -363,6 +403,7 @@ static bool make_key(const ggml_tensor * dst, ed_cudnn_sdpa_key & key, int devic
     key.d = d;
     key.attn_scale = attn_scale;
     key.padding_mask = padding_mask;
+    key.allow_short_kv_cross_attn = is_wan_sp_cross_attn_tensor(dst);
 
     // cuDNN logical dim is [B,H,S,D]. The current ggml attention inputs are contiguous [D,S,H].
     key.q_stride[0] = h * sq * d;
@@ -377,33 +418,168 @@ static bool make_key(const ggml_tensor * dst, ed_cudnn_sdpa_key & key, int devic
     key.v_stride[1] = sk * d;
     key.v_stride[2] = d;
     key.v_stride[3] = 1;
-    key.o_stride[0] = h * sq * d;
-    key.o_stride[1] = sq * d;
-    key.o_stride[2] = d;
-    key.o_stride[3] = 1;
+    if (dst->type == GGML_TYPE_F16) {
+        const int64_t dst_ts = static_cast<int64_t>(type_size(dst->type));
+        key.o_stride[0] = dst->nb[3] / dst_ts;
+        key.o_stride[1] = dst->nb[1] / dst_ts;
+        key.o_stride[2] = dst->nb[2] / dst_ts;
+        key.o_stride[3] = dst->nb[0] / dst_ts;
+    } else {
+        key.o_stride[0] = h * sq * d;
+        key.o_stride[1] = sq * d;
+        key.o_stride[2] = d;
+        key.o_stride[3] = 1;
+    }
+    return true;
+}
+
+static bool make_self_attn_key(int device,
+                               ggml_type dst_type,
+                               int64_t d,
+                               int64_t h,
+                               int64_t seq,
+                               float attn_scale,
+                               ed_cudnn_sdpa_key & key) {
+    if ((dst_type != GGML_TYPE_F32 && dst_type != GGML_TYPE_F16) ||
+        d <= 0 || h <= 0 || seq <= 0 ||
+        !std::isfinite(attn_scale) || attn_scale <= 0.0f) {
+        return false;
+    }
+
+    key = {};
+    key.device = device;
+    key.dst_type = dst_type;
+    key.b = 1;
+    key.h = h;
+    key.sq = seq;
+    key.sk = seq;
+    key.sk_actual = seq;
+    key.d = d;
+    key.attn_scale = attn_scale;
+    key.padding_mask = false;
+    key.allow_short_kv_cross_attn = false;
+
+    key.q_stride[0] = h * seq * d;
+    key.q_stride[1] = seq * d;
+    key.q_stride[2] = d;
+    key.q_stride[3] = 1;
+    key.k_stride[0] = h * seq * d;
+    key.k_stride[1] = seq * d;
+    key.k_stride[2] = d;
+    key.k_stride[3] = 1;
+    key.v_stride[0] = h * seq * d;
+    key.v_stride[1] = seq * d;
+    key.v_stride[2] = d;
+    key.v_stride[3] = 1;
+
+    if (dst_type == GGML_TYPE_F16) {
+        key.o_stride[0] = h * seq * d;
+        key.o_stride[1] = d;
+        key.o_stride[2] = h * d;
+        key.o_stride[3] = 1;
+    } else {
+        key.o_stride[0] = h * seq * d;
+        key.o_stride[1] = seq * d;
+        key.o_stride[2] = d;
+        key.o_stride[3] = 1;
+    }
+    return true;
+}
+
+static bool make_cross_attn_key(int device,
+                                ggml_type dst_type,
+                                int64_t d,
+                                int64_t h,
+                                int64_t seq_q,
+                                int64_t seq_kv,
+                                float attn_scale,
+                                ed_cudnn_sdpa_key & key) {
+    if ((dst_type != GGML_TYPE_F32 && dst_type != GGML_TYPE_F16) ||
+        d <= 0 || h <= 0 || seq_q <= 0 || seq_kv <= 0 ||
+        !std::isfinite(attn_scale) || attn_scale <= 0.0f) {
+        return false;
+    }
+
+    key = {};
+    key.device = device;
+    key.dst_type = dst_type;
+    key.b = 1;
+    key.h = h;
+    key.sq = seq_q;
+    key.sk = seq_kv;
+    key.sk_actual = seq_kv;
+    key.d = d;
+    key.attn_scale = attn_scale;
+    key.padding_mask = false;
+    key.allow_short_kv_cross_attn = true;
+
+    key.q_stride[0] = h * seq_q * d;
+    key.q_stride[1] = seq_q * d;
+    key.q_stride[2] = d;
+    key.q_stride[3] = 1;
+    key.k_stride[0] = h * seq_kv * d;
+    key.k_stride[1] = seq_kv * d;
+    key.k_stride[2] = d;
+    key.k_stride[3] = 1;
+    key.v_stride[0] = h * seq_kv * d;
+    key.v_stride[1] = seq_kv * d;
+    key.v_stride[2] = d;
+    key.v_stride[3] = 1;
+
+    if (dst_type == GGML_TYPE_F16) {
+        key.o_stride[0] = h * seq_q * d;
+        key.o_stride[1] = d;
+        key.o_stride[2] = h * d;
+        key.o_stride[3] = 1;
+    } else {
+        key.o_stride[0] = h * seq_q * d;
+        key.o_stride[1] = seq_q * d;
+        key.o_stride[2] = d;
+        key.o_stride[3] = 1;
+    }
     return true;
 }
 
 static bool should_use_cudnn_sdpa(const ed_cudnn_sdpa_key & key) {
     const bool supported_head_dim = key.d == 64 || key.d == 128;
-    const bool supported_sequence = key.sq >= MIN_CUDNN_SDPA_FAST_SEQ &&
-                                    ((key.sq == key.sk && !key.padding_mask) ||
-                                     (key.padding_mask && key.sk_actual == key.sq && key.sk >= key.sq));
+    const bool supported_self_sequence = key.sq >= MIN_CUDNN_SDPA_FAST_SEQ &&
+                                         ((key.sq == key.sk && !key.padding_mask) ||
+                                          (key.padding_mask && key.sk_actual == key.sq && key.sk >= key.sq));
+    const bool supported_cross_sequence =
+        key.allow_short_kv_cross_attn &&
+        !key.padding_mask &&
+        key.sq >= 1024 &&
+        key.sk > 0 &&
+        key.sk <= 1024 &&
+        key.sk_actual == key.sk;
+    const bool supported_sequence = supported_self_sequence || supported_cross_sequence;
     const bool use_cudnn = supported_head_dim && supported_sequence;
 
     if (!use_cudnn && profile_enabled()) {
-        GGML_LOG_INFO("ED_CUDNN_SDPA unsupported: gate d=%lld sq=%lld sk=%lld sk_actual=%lld scale=%g padding_mask=%d supported_head_dim=%d supported_sequence=%d\n",
+        GGML_LOG_INFO("ED_CUDNN_SDPA unsupported: gate d=%lld sq=%lld sk=%lld sk_actual=%lld scale=%g padding_mask=%d allow_cross=%d supported_head_dim=%d supported_sequence=%d\n",
                       (long long) key.d,
                       (long long) key.sq,
                       (long long) key.sk,
                       (long long) key.sk_actual,
                       key.attn_scale,
                       key.padding_mask ? 1 : 0,
+                      key.allow_short_kv_cross_attn ? 1 : 0,
                       supported_head_dim ? 1 : 0,
                       supported_sequence ? 1 : 0);
     }
 
     return use_cudnn;
+}
+
+static bool should_sync_plan_build(const ed_cudnn_sdpa_key & key) {
+    if (key.dst_type == GGML_TYPE_F16) {
+        return true;
+    }
+    return key.dst_type == GGML_TYPE_F32 &&
+           cudnn_sdpa_sync_f32_self_attn_enabled() &&
+           !key.padding_mask &&
+           key.sq == key.sk &&
+           key.sq >= MIN_CUDNN_SDPA_FAST_SEQ;
 }
 
 static std::shared_ptr<fe::graph::Graph> create_graph(const ed_cudnn_sdpa_key & key) {
@@ -492,7 +668,9 @@ static std::unique_ptr<ed_cudnn_sdpa_plan> create_plan(const ed_cudnn_sdpa_key &
     }
     plan->elements = key.b * key.h * key.sq * key.d;
     CUDA_CHECK(cudaMalloc(&plan->q_f16, (size_t) plan->elements * sizeof(half)));
-    CUDA_CHECK(cudaMalloc(&plan->o_f16, (size_t) plan->elements * sizeof(half)));
+    if (key.dst_type != GGML_TYPE_F16) {
+        CUDA_CHECK(cudaMalloc(&plan->o_f16, (size_t) plan->elements * sizeof(half)));
+    }
     if (key.padding_mask) {
         const int32_t seq_q = (int32_t) key.sq;
         const int32_t seq_kv = (int32_t) key.sk_actual;
@@ -547,7 +725,7 @@ static void build_plan_async(ed_cudnn_sdpa_key key, std::shared_ptr<ed_cudnn_sdp
     }).detach();
 }
 
-static ed_cudnn_sdpa_plan * get_plan(const ed_cudnn_sdpa_key & key, cudaStream_t stream, ed_cudnn_sdpa_result_t & result) {
+static ed_cudnn_sdpa_plan * get_plan(const ed_cudnn_sdpa_key & key, cudaStream_t stream, ed_cudnn_sdpa_result_t & result, bool sync_build) {
     std::shared_ptr<ed_cudnn_sdpa_plan_entry> entry;
     bool start_build = false;
     {
@@ -563,6 +741,34 @@ static ed_cudnn_sdpa_plan * get_plan(const ed_cudnn_sdpa_key & key, cudaStream_t
     }
 
     if (start_build) {
+        if (sync_build) {
+            const double start_ms = profile_enabled() ? now_ms() : 0.0;
+            std::unique_ptr<ed_cudnn_sdpa_plan> plan = create_plan(key, result);
+            const double build_ms = profile_enabled() ? now_ms() - start_ms : 0.0;
+            std::lock_guard<std::mutex> lock(entry->mutex);
+            if (plan != nullptr && result == ED_CUDNN_SDPA_SUCCESS) {
+                entry->plan = std::move(plan);
+                entry->state = ed_cudnn_sdpa_plan_state::READY;
+                entry->result = ED_CUDNN_SDPA_SUCCESS;
+                cudnnSetStream(entry->plan->handle, stream);
+                if (profile_enabled()) {
+                    GGML_LOG_INFO("ED_CUDNN_SDPA sync build b=%lld h=%lld sq=%lld sk=%lld d=%lld dst_type=%d scale=%g result=%s build=%.3fms\n",
+                                  (long long) key.b,
+                                  (long long) key.h,
+                                  (long long) key.sq,
+                                  (long long) key.sk,
+                                  (long long) key.d,
+                                  (int) key.dst_type,
+                                  key.attn_scale,
+                                  ed_cudnn_sdpa_result_name(result),
+                                  build_ms);
+                }
+                return entry->plan.get();
+            }
+            entry->state = ed_cudnn_sdpa_plan_state::FAILED;
+            entry->result = result == ED_CUDNN_SDPA_SUCCESS ? ED_CUDNN_SDPA_BUILD_FAILED : result;
+            return nullptr;
+        }
         build_plan_async(key, entry);
         result = ED_CUDNN_SDPA_BUILD_PENDING;
         return nullptr;
@@ -670,7 +876,7 @@ static void profile_record(const ed_cudnn_sdpa_key & key,
     stat.o_cast_ms += o_cast_ms;
     if ((stat.calls & (stat.calls - 1)) == 0) {
         GGML_LOG_INFO("ED_CUDNN_SDPA profile b=%lld h=%lld sq=%lld sk=%lld d=%lld scale=%g padding_mask=%d calls=%" PRIu64
-                      " get_plan=%.3fms q_cast=%.3fms execute=%.3fms o_cast=%.3fms\n",
+                      " dst_type=%d get_plan=%.3fms q_cast=%.3fms execute=%.3fms o_cast=%.3fms\n",
                       (long long) key.b,
                       (long long) key.h,
                       (long long) key.sq,
@@ -679,6 +885,7 @@ static void profile_record(const ed_cudnn_sdpa_key & key,
                       key.attn_scale,
                       key.padding_mask ? 1 : 0,
                       stat.calls,
+                      (int) key.dst_type,
                       stat.get_plan_ms,
                       stat.q_cast_ms,
                       stat.execute_ms,
@@ -695,6 +902,76 @@ bool ed_cudnn_sdpa_supported(const ggml_tensor * dst, int device) {
 
     ed_cudnn_sdpa_key key;
     return make_key(dst, key, device) && should_use_cudnn_sdpa(key);
+}
+
+ed_cudnn_sdpa_result_t ed_cudnn_sdpa_prewarm_self_attn(int device,
+                                                       ggml_type dst_type,
+                                                       int64_t d,
+                                                       int64_t h,
+                                                       int64_t seq,
+                                                       float attn_scale,
+                                                       bool sync_build) {
+    if (cudnn_sdpa_disabled()) {
+        return ED_CUDNN_SDPA_DISABLED;
+    }
+
+    ed_cudnn_sdpa_key key;
+    if (!make_self_attn_key(device, dst_type, d, h, seq, attn_scale, key)) {
+        return ED_CUDNN_SDPA_UNSUPPORTED;
+    }
+    if (!should_use_cudnn_sdpa(key)) {
+        return ED_CUDNN_SDPA_UNSUPPORTED;
+    }
+
+    ed_cudnn_sdpa_result_t result = ED_CUDNN_SDPA_SUCCESS;
+    (void) get_plan(key, nullptr, result, sync_build);
+    if (profile_enabled()) {
+        GGML_LOG_INFO("ED_CUDNN_SDPA prewarm self-attn device=%d h=%lld seq=%lld d=%lld dst_type=%d sync=%d result=%s\n",
+                      device,
+                      (long long) h,
+                      (long long) seq,
+                      (long long) d,
+                      (int) dst_type,
+                      sync_build ? 1 : 0,
+                      ed_cudnn_sdpa_result_name(result));
+    }
+    return result;
+}
+
+ed_cudnn_sdpa_result_t ed_cudnn_sdpa_prewarm_cross_attn(int device,
+                                                        ggml_type dst_type,
+                                                        int64_t d,
+                                                        int64_t h,
+                                                        int64_t seq_q,
+                                                        int64_t seq_kv,
+                                                        float attn_scale,
+                                                        bool sync_build) {
+    if (cudnn_sdpa_disabled() || !cudnn_sdpa_wan_sp_cross_attn_enabled()) {
+        return ED_CUDNN_SDPA_DISABLED;
+    }
+
+    ed_cudnn_sdpa_key key;
+    if (!make_cross_attn_key(device, dst_type, d, h, seq_q, seq_kv, attn_scale, key)) {
+        return ED_CUDNN_SDPA_UNSUPPORTED;
+    }
+    if (!should_use_cudnn_sdpa(key)) {
+        return ED_CUDNN_SDPA_UNSUPPORTED;
+    }
+
+    ed_cudnn_sdpa_result_t result = ED_CUDNN_SDPA_SUCCESS;
+    (void) get_plan(key, nullptr, result, sync_build);
+    if (profile_enabled()) {
+        GGML_LOG_INFO("ED_CUDNN_SDPA prewarm cross-attn device=%d h=%lld sq=%lld sk=%lld d=%lld dst_type=%d sync=%d result=%s\n",
+                      device,
+                      (long long) h,
+                      (long long) seq_q,
+                      (long long) seq_kv,
+                      (long long) d,
+                      (int) dst_type,
+                      sync_build ? 1 : 0,
+                      ed_cudnn_sdpa_result_name(result));
+    }
+    return result;
 }
 
 ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_stream_t stream_ptr) {
@@ -722,7 +999,8 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
     double execute_ms = 0.0;
     double o_cast_ms = 0.0;
     const double get_plan_start_ms = do_profile ? now_ms() : 0.0;
-    ed_cudnn_sdpa_plan * plan = get_plan(key, stream, result);
+    const bool direct_f16_output = dst->type == GGML_TYPE_F16;
+    ed_cudnn_sdpa_plan * plan = get_plan(key, stream, result, should_sync_plan_build(key));
     if (do_profile) {
         cudaEventCreate(&profile_start);
         cudaEventCreate(&profile_stop);
@@ -769,7 +1047,7 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
         {Q_UID, const_cast<void *>(q_data)},
         {K_UID, k->data},
         {V_UID, v->data},
-        {O_UID, plan->o_f16},
+        {O_UID, direct_f16_output ? dst->data : static_cast<void *>(plan->o_f16)},
     };
     if (key.padding_mask) {
         variant_pack[SEQ_LEN_Q_UID] = plan->seq_len_q;
@@ -796,20 +1074,22 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
         return ED_CUDNN_SDPA_EXECUTE_FAILED;
     }
 
-    if (do_profile) {
-        cudaEventRecord(profile_start, stream);
-    }
-    if (can_use_vec2_output_convert(plan->o_f16, dst->data, key.d)) {
-        const int blocks_vec = (int) (((n / 2) + threads - 1) / threads);
-        f16_bhsd_to_f32_dst_vec2_kernel<<<blocks_vec, threads, 0, stream>>>(plan->o_f16, (float *) dst->data, key.d, key.sq, key.h);
-    } else {
-        f16_bhsd_to_f32_dst_kernel<<<blocks, threads, 0, stream>>>(plan->o_f16, (float *) dst->data, key.d, key.sq, key.h);
-    }
-    CUDA_CHECK(cudaGetLastError());
-    if (do_profile) {
-        cudaEventRecord(profile_stop, stream);
-        cudaEventSynchronize(profile_stop);
-        o_cast_ms = elapsed_ms(profile_start, profile_stop);
+    if (!direct_f16_output) {
+        if (do_profile) {
+            cudaEventRecord(profile_start, stream);
+        }
+        if (can_use_vec2_output_convert(plan->o_f16, dst->data, key.d)) {
+            const int blocks_vec = (int) (((n / 2) + threads - 1) / threads);
+            f16_bhsd_to_f32_dst_vec2_kernel<<<blocks_vec, threads, 0, stream>>>(plan->o_f16, (float *) dst->data, key.d, key.sq, key.h);
+        } else {
+            f16_bhsd_to_f32_dst_kernel<<<blocks, threads, 0, stream>>>(plan->o_f16, (float *) dst->data, key.d, key.sq, key.h);
+        }
+        CUDA_CHECK(cudaGetLastError());
+        if (do_profile) {
+            cudaEventRecord(profile_stop, stream);
+            cudaEventSynchronize(profile_stop);
+            o_cast_ms = elapsed_ms(profile_start, profile_stop);
+        }
     }
 
     if (profile_enabled()) {

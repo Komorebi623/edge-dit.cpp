@@ -6,9 +6,12 @@
 #include <inttypes.h>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "backend/ggml/ed_ggml_rope_ext.hpp"
+#include "backend/ggml/ed_ggml_modulation_ext.hpp"
+#include "backend/ggml/ed_ggml_sp_flux_ext.hpp"
 #include "dit_models/components/common/common_dit.hpp"
 #include "dit_models/components/common/modulation.hpp"
 #include "dit_models/components/common/normalization.hpp"
@@ -59,6 +62,18 @@ namespace Flux {
                std::strcmp(env, "OFF") != 0;
     }
 
+    static inline bool flux_env_flag_enabled_or_default(const char* name, bool default_enabled) {
+        const char* env = std::getenv(name);
+        if (env == nullptr || env[0] == '\0') {
+            return default_enabled;
+        }
+        return std::strcmp(env, "0") != 0 &&
+               std::strcmp(env, "false") != 0 &&
+               std::strcmp(env, "FALSE") != 0 &&
+               std::strcmp(env, "off") != 0 &&
+               std::strcmp(env, "OFF") != 0;
+    }
+
     static inline bool flux_profile_enabled() {
         return flux_env_flag_enabled("ED_PROFILE_GRAPH_CUTS") ||
                flux_env_flag_enabled("ED_PROFILE_FLUX");
@@ -75,6 +90,29 @@ namespace Flux {
     }
 
     static inline bool flux_sp_qk_seq_major_enabled() {
+        return true;
+    }
+
+    static inline bool flux_sp_shared_pe_seq_major_enabled() {
+        const char* env = std::getenv("ED_FLUX_SP_SHARED_PE_SEQ_MAJOR");
+        if (env != nullptr && env[0] != '\0') {
+            return flux_env_flag_enabled("ED_FLUX_SP_SHARED_PE_SEQ_MAJOR");
+        }
+        return false;
+    }
+
+    static inline bool flux_sp_skip_block_cuts_with_custom_comm_enabled(GGMLRunnerContext* ctx) {
+        return flux_sp_enabled(ctx) &&
+               !flux_sp_strict_barrier_enabled() &&
+               edgedit::ggml_ext::flux_sp_all_to_all_custom_enabled() &&
+               flux_env_flag_enabled_or_default("ED_FLUX_SP_SKIP_BLOCK_CUTS_WITH_CUSTOM_COMM", true);
+    }
+
+    static inline bool flux_sp_double_to_single_reshard_enabled() {
+        const char* env = std::getenv("ED_FLUX_SP_DOUBLE_TO_SINGLE_RESHARD");
+        if (env != nullptr && env[0] != '\0') {
+            return flux_env_flag_enabled("ED_FLUX_SP_DOUBLE_TO_SINGLE_RESHARD");
+        }
         return true;
     }
 
@@ -95,11 +133,207 @@ namespace Flux {
     }
 
     static inline bool flux_sp_split_single_linear1_enabled() {
+        const char* env = std::getenv("ED_FLUX_SP_SPLIT_SINGLE_LINEAR1");
+        if (env != nullptr && env[0] != '\0') {
+            return flux_env_flag_enabled("ED_FLUX_SP_SPLIT_SINGLE_LINEAR1");
+        }
         return true;
     }
 
     static inline bool flux_sp_pre_qk_norm_enabled() {
         return true;
+    }
+
+    static inline bool flux_sp_fused_qkv_send_pack_enabled() {
+        const char* env = std::getenv("ED_FLUX_SP_FUSED_QKV_SEND_PACK");
+        if (env != nullptr && env[0] != '\0') {
+            return flux_env_flag_enabled("ED_FLUX_SP_FUSED_QKV_SEND_PACK");
+        }
+        return true;
+    }
+
+    static inline bool flux_sp_mixed_qkv_send_enabled() {
+        return flux_env_flag_enabled("ED_FLUX_SP_MIXED_QKV_SEND");
+    }
+
+    static inline bool flux_sp_f16_qkv_send_enabled() {
+        return flux_env_flag_enabled_or_default("ED_FLUX_SP_F16_QKV_SEND", true);
+    }
+
+    static inline bool flux_sp_f16_qk_norm_enabled() {
+        return flux_env_flag_enabled_or_default("ED_FLUX_SP_F16_QK_NORM", true);
+    }
+
+    static inline bool flux_sp_mixed_double_qkv_send_enabled() {
+        return flux_env_flag_enabled("ED_FLUX_SP_MIXED_DOUBLE_QKV_SEND");
+    }
+
+    static inline bool flux_sp_split_single_linear2_enabled() {
+        const char* env = std::getenv("ED_FLUX_SP_SPLIT_SINGLE_LINEAR2");
+        if (env != nullptr && env[0] != '\0') {
+            return flux_env_flag_enabled("ED_FLUX_SP_SPLIT_SINGLE_LINEAR2");
+        }
+        return false;
+    }
+
+    static inline bool flux_sp_fused_single_linear2_enabled() {
+        const char* env = std::getenv("ED_FLUX_SP_FUSED_SINGLE_LINEAR2");
+        if (env != nullptr && env[0] != '\0') {
+            return flux_env_flag_enabled("ED_FLUX_SP_FUSED_SINGLE_LINEAR2");
+        }
+        return true;
+    }
+
+    static inline bool flux_sp_fused_single_linear2_residual_gate_enabled() {
+        const char* env = std::getenv("ED_FLUX_SP_FUSED_SINGLE_LINEAR2_RESIDUAL_GATE");
+        if (env != nullptr && env[0] != '\0') {
+            return flux_env_flag_enabled("ED_FLUX_SP_FUSED_SINGLE_LINEAR2_RESIDUAL_GATE");
+        }
+        return true;
+    }
+
+    static inline bool flux_sp_mlp_gelu_bf16_enabled() {
+        return flux_env_flag_enabled("ED_FLUX_SP_MLP_GELU_BF16");
+    }
+
+    static inline bool flux_sp_fused_head_to_seq_enabled() {
+        const char* env = std::getenv("ED_FLUX_SP_FUSED_HEAD_TO_SEQ");
+        if (env != nullptr && env[0] != '\0') {
+            return flux_env_flag_enabled("ED_FLUX_SP_FUSED_HEAD_TO_SEQ");
+        }
+        return true;
+    }
+
+    static inline bool flux_sp_f16_head_to_seq_enabled() {
+        return flux_env_flag_enabled("ED_FLUX_SP_F16_HEAD_TO_SEQ");
+    }
+
+    static inline bool flux_sp_f16_double_head_to_seq_enabled() {
+        const char* env = std::getenv("ED_FLUX_SP_F16_DOUBLE_HEAD_TO_SEQ");
+        if (env != nullptr && env[0] != '\0') {
+            return flux_env_flag_enabled("ED_FLUX_SP_F16_DOUBLE_HEAD_TO_SEQ");
+        }
+        return flux_sp_f16_head_to_seq_enabled();
+    }
+
+    static inline bool flux_sp_f16_single_head_to_seq_enabled() {
+        const char* env = std::getenv("ED_FLUX_SP_F16_SINGLE_HEAD_TO_SEQ");
+        if (env != nullptr && env[0] != '\0') {
+            return flux_env_flag_enabled("ED_FLUX_SP_F16_SINGLE_HEAD_TO_SEQ");
+        }
+        return flux_sp_f16_head_to_seq_enabled();
+    }
+
+    static inline bool flux_sp_f16_single_head_to_seq_output_enabled() {
+        return flux_env_flag_enabled("ED_FLUX_SP_F16_SINGLE_HEAD_TO_SEQ_OUTPUT");
+    }
+
+    static inline bool flux_sp_bf16_single_head_to_seq_output_enabled() {
+        return flux_env_flag_enabled_or_default("ED_FLUX_SP_BF16_SINGLE_HEAD_TO_SEQ_OUTPUT", true);
+    }
+
+    static inline bool flux_sp_f16_double_head_to_seq_output_enabled() {
+        return flux_env_flag_enabled("ED_FLUX_SP_F16_DOUBLE_HEAD_TO_SEQ_OUTPUT");
+    }
+
+    static inline bool flux_sp_bf16_double_head_to_seq_output_enabled() {
+        return flux_env_flag_enabled_or_default("ED_FLUX_SP_BF16_DOUBLE_HEAD_TO_SEQ_OUTPUT", true);
+    }
+
+    static inline bool flux_sp_f16_q_attention_enabled() {
+        return flux_env_flag_enabled("ED_FLUX_SP_F16_Q_ATTENTION");
+    }
+
+    static inline bool flux_sp_f16_attention_output_enabled() {
+        return flux_env_flag_enabled("ED_FLUX_SP_F16_ATTN_OUTPUT");
+    }
+
+    static inline bool flux_sp_fused_single_head_to_seq_enabled() {
+        const char* env = std::getenv("ED_FLUX_SP_FUSED_SINGLE_HEAD_TO_SEQ");
+        if (env != nullptr && env[0] != '\0') {
+            return flux_env_flag_enabled("ED_FLUX_SP_FUSED_SINGLE_HEAD_TO_SEQ");
+        }
+        return false;
+    }
+
+    static inline bool flux_sp_fused_single_qkv_recv_prep_enabled() {
+        const char* env = std::getenv("ED_FLUX_SP_FUSED_SINGLE_QKV_RECV_PREP");
+        if (env != nullptr && env[0] != '\0') {
+            return flux_env_flag_enabled("ED_FLUX_SP_FUSED_SINGLE_QKV_RECV_PREP");
+        }
+        return true;
+    }
+
+    static inline bool flux_sp_bundle_single_qkv_recv_prep_enabled() {
+        return flux_env_flag_enabled_or_default("ED_FLUX_SP_BUNDLE_SINGLE_QKV_RECV_PREP", true);
+    }
+
+    static inline bool flux_sp_bundle_double_qkv_recv_prep_enabled() {
+        return flux_env_flag_enabled_or_default("ED_FLUX_SP_BUNDLE_DOUBLE_QKV_RECV_PREP", true);
+    }
+
+    static inline bool flux_sp_fused_modulation_enabled() {
+        return flux_env_flag_enabled_or_default("ED_FLUX_SP_FUSED_MODULATION", true);
+    }
+
+    static inline ggml_tensor* flux_sp_modulate(ggml_context* ctx,
+                                                ggml_tensor* x,
+                                                ggml_tensor* shift,
+                                                ggml_tensor* scale) {
+#ifdef ED_ENABLE_CUDA_MODULATION
+        if (flux_sp_fused_modulation_enabled() &&
+            ctx != nullptr &&
+            x != nullptr &&
+            shift != nullptr &&
+            scale != nullptr) {
+            ggml_tensor* shift_in = shift;
+            ggml_tensor* scale_in = scale;
+            if (shift->ne[2] == 1 && shift->ne[3] == 1) {
+                shift_in = ggml_reshape_3d(ctx, shift, shift->ne[0], 1, shift->ne[1]);
+            }
+            if (scale->ne[2] == 1 && scale->ne[3] == 1) {
+                scale_in = ggml_reshape_3d(ctx, scale, scale->ne[0], 1, scale->ne[1]);
+            }
+            if (auto fused = edgedit::ggml_ext::fused_modulate_custom(ctx, x, shift_in, scale_in)) {
+                return fused;
+            }
+        }
+#endif
+        return dit::modulate(ctx, x, shift, scale);
+    }
+
+    static inline ggml_tensor* flux_sp_residual_gate(ggml_context* ctx,
+                                                     ggml_tensor* residual,
+                                                     ggml_tensor* x,
+                                                     ggml_tensor* gate) {
+#ifdef ED_ENABLE_CUDA_MODULATION
+        if (flux_sp_fused_modulation_enabled() &&
+            ctx != nullptr &&
+            residual != nullptr &&
+            x != nullptr &&
+            gate != nullptr) {
+            ggml_tensor* gate_in = gate;
+            if (gate->ne[2] == 1 && gate->ne[3] == 1) {
+                gate_in = ggml_reshape_3d(ctx, gate, gate->ne[0], 1, gate->ne[1]);
+            }
+            if (auto fused = edgedit::ggml_ext::fused_residual_gate_custom(ctx, residual, x, gate_in)) {
+                return fused;
+            }
+        }
+#endif
+        return ggml_add(ctx, residual, ggml_mul(ctx, x, gate));
+    }
+
+    static inline bool flux_sp_fused_double_qkv_recv_prep_enabled() {
+        const char* env = std::getenv("ED_FLUX_SP_FUSED_DOUBLE_QKV_RECV_PREP");
+        if (env != nullptr && env[0] != '\0') {
+            return flux_env_flag_enabled("ED_FLUX_SP_FUSED_DOUBLE_QKV_RECV_PREP");
+        }
+        return true;
+    }
+
+    static inline bool flux_sp_fuse_double_qkv_a2a_enabled() {
+        return flux_env_flag_enabled_or_default("ED_FLUX_SP_FUSE_DOUBLE_QKV_A2A", true);
     }
 
 #ifdef ED_DEBUG_SP_COMM
@@ -589,7 +823,9 @@ namespace Flux {
         if (kv_pad != 0) {
             v_in = ggml_pad(ctx->ggml_ctx, v_in, 0, kv_pad, 0, 0);
         }
-        v_in = ggml_cast(ctx->ggml_ctx, v_in, GGML_TYPE_F16);
+        if (v_in->type != GGML_TYPE_F16 || !ggml_is_contiguous(v_in)) {
+            v_in = ggml_cast(ctx->ggml_ctx, v_in, GGML_TYPE_F16);
+        }
 
         ggml_tensor* mask_in = mask;
         if (mask_in != nullptr) {
@@ -611,7 +847,13 @@ namespace Flux {
             mask_in         = ggml_cast(ctx->ggml_ctx, mask_in, GGML_TYPE_F16);
         }
 
-        ggml_tensor* out = ggml_flash_attn_ext(ctx->ggml_ctx, q, k_in, v_in, mask_in, scale, 0, 0);
+        ggml_tensor* q_in = q;
+        if (flux_sp_f16_q_attention_enabled() && q_in->type != GGML_TYPE_F16) {
+            q_in = ggml_cast(ctx->ggml_ctx, q_in, GGML_TYPE_F16);
+        }
+
+        const ggml_type attn_out_type = flux_sp_f16_attention_output_enabled() ? GGML_TYPE_F16 : GGML_TYPE_F32;
+        ggml_tensor* out = ggml_flash_attn_ext_with_type(ctx->ggml_ctx, q_in, k_in, v_in, mask_in, scale, 0, 0, attn_out_type);
         ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);
         if (!ggml_backend_supports_op(ctx->backend, out)) {
             return nullptr;
@@ -629,7 +871,8 @@ namespace Flux {
                                                  ggml_tensor* v,
                                                  ggml_tensor* pe,
                                                  ggml_tensor* mask,
-                                                 const std::string& name_prefix) {
+                                                 const std::string& name_prefix,
+                                                 ggml_tensor* prepared_pe_seq_major = nullptr) {
         GGML_ASSERT(ctx != nullptr);
         GGML_ASSERT(q != nullptr);
         GGML_ASSERT(k != nullptr);
@@ -638,12 +881,14 @@ namespace Flux {
 
         const bool qk_seq_major = flux_sp_qk_seq_major_enabled();
         ggml_tensor* prepared_pe = qk_seq_major ?
-                                       flux_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
-                                                                         pe,
-                                                                         name_prefix + "_pe_seq_major") :
+                                       (prepared_pe_seq_major != nullptr ?
+                                            prepared_pe_seq_major :
+                                            flux_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
+                                                                              pe,
+                                                                              name_prefix + "_pe_seq_major")) :
                                        nullptr;
         q = qk_seq_major ? flux_sp_apply_rope_seq_major(ctx->ggml_ctx, q, pe, true, prepared_pe) :
-                           Rope::apply_rope(ctx->ggml_ctx, q, pe);
+                           Rope::apply_rope(ctx->ggml_ctx, q, pe, true, ctx->backend);
         if (qk_seq_major) {
             k = flux_sp_apply_rope_seq_major(ctx->ggml_ctx,
                                              k,
@@ -652,13 +897,14 @@ namespace Flux {
                                              prepared_pe,
                                              flux_sp_flash_attn_enabled(ctx) ? GGML_TYPE_F16 : GGML_TYPE_F32);
         } else if (flux_sp_flash_attn_enabled(ctx)) {
-            if (auto k_f16 = edgedit::ggml_ext::apply_rope_f16(ctx->ggml_ctx, k, pe, true)) {
+            ggml_tensor* k_f16 = edgedit::ggml_ext::apply_rope_f16(ctx->ggml_ctx, k, pe, true);
+            if (k_f16 != nullptr && ggml_backend_supports_op(ctx->backend, k_f16)) {
                 k = k_f16;
             } else {
-                k = Rope::apply_rope(ctx->ggml_ctx, k, pe);
+                k = Rope::apply_rope(ctx->ggml_ctx, k, pe, true, ctx->backend);
             }
         } else {
-            k = Rope::apply_rope(ctx->ggml_ctx, k, pe);
+            k = Rope::apply_rope(ctx->ggml_ctx, k, pe, true, ctx->backend);
         }
 
         GGML_ASSERT(pe->ne[3] == q->ne[1]);
@@ -672,10 +918,13 @@ namespace Flux {
                                                                        ggml_tensor* pe,
                                                                        ggml_tensor* mask,
                                                                        int64_t d_head,
-                                                                       const std::string& name_prefix) {
-        ggml_tensor* prepared_pe = flux_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
-                                                                     pe,
-                                                                     name_prefix + "_pe_seq_major");
+                                                                       const std::string& name_prefix,
+                                                                       ggml_tensor* prepared_pe_seq_major = nullptr) {
+        ggml_tensor* prepared_pe = prepared_pe_seq_major != nullptr ?
+                                       prepared_pe_seq_major :
+                                       flux_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
+                                                                         pe,
+                                                                         name_prefix + "_pe_seq_major");
         q = flux_sp_apply_rope_seq_major_work_layout(ctx->ggml_ctx, q, pe, d_head, prepared_pe);
         k = flux_sp_apply_rope_seq_major_work_layout(ctx->ggml_ctx,
                                                      k,
@@ -757,6 +1006,7 @@ namespace Flux {
 
         auto layout = edgedit::parallel::sp_all_to_all_4d_seq_to_head(ctx->ggml_ctx,
                                                                       local,
+                                                                      ctx->process_group,
                                                                       world_size,
                                                                       name + "_a2a");
 
@@ -773,6 +1023,7 @@ namespace Flux {
 
         auto roundtrip = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
                                                                          layout.output,
+                                                                         ctx->process_group,
                                                                          world_size,
                                                                          name + "_back");
         ggml_tensor* roundtrip_err = flux_debug_sse(ctx->ggml_ctx,
@@ -837,6 +1088,13 @@ namespace Flux {
             ggml_tensor* q = nullptr;
             ggml_tensor* k = nullptr;
             ggml_tensor* v = nullptr;
+            ggml_tensor* recv_flat = nullptr;
+            bool mixed_recv_flat = false;
+            int64_t heads = 0;
+            int64_t head_dim = 0;
+            int64_t sequence = 0;
+            int64_t shard_sequence = 0;
+            int world_size = 0;
         };
 
     public:
@@ -883,7 +1141,8 @@ namespace Flux {
         }
 
         SPQKV pre_attention_sp_local_qkv(GGMLRunnerContext* ctx,
-                                         ggml_tensor* x_local) {
+                                         ggml_tensor* x_local,
+                                         bool qk_norm_f16 = false) {
             auto qkv_proj = std::dynamic_pointer_cast<Linear>(blocks["qkv"]);
             auto norm     = std::dynamic_pointer_cast<QKNorm>(blocks["norm"]);
 
@@ -923,10 +1182,19 @@ namespace Flux {
 
             const bool pre_qk_norm = flux_sp_pre_qk_norm_enabled();
             if (pre_qk_norm) {
-                q = norm->query_norm(ctx, q);
-                k = norm->key_norm(ctx, k);
+                if (qk_norm_f16) {
+                    q = norm->query_norm_f16(ctx, q);
+                    k = norm->key_norm_f16(ctx, k);
+                } else {
+                    q = norm->query_norm(ctx, q);
+                    k = norm->key_norm(ctx, k);
+                }
             }
-            return {q, k, v};
+            SPQKV out;
+            out.q = q;
+            out.k = k;
+            out.v = v;
+            return out;
         }
 
         SPQKV pre_attention_sp(GGMLRunnerContext* ctx,
@@ -940,48 +1208,128 @@ namespace Flux {
             ggml_tensor* v = local_qkv.v;
             const bool pre_qk_norm = flux_sp_pre_qk_norm_enabled();
 
-            auto qkv_head = flux_sp_qk_seq_major_enabled() ?
-                                edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched_mixed(ctx->ggml_ctx,
-                                                                                              {q, k, v},
-                                                                                              {true, true, flux_sp_flash_v_seq_major_enabled(ctx)},
-                                                                                              world_size,
-                                                                                              name_prefix + "_qkv_seq_to_head") :
-                                edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched(ctx->ggml_ctx,
-                                                                                        {q, k, v},
-                                                                                        world_size,
-                                                                                        name_prefix + "_qkv_seq_to_head");
+            std::vector<edgedit::parallel::SPSeqToHeadOutputLayout> output_layouts = {
+                flux_sp_qk_seq_major_enabled() ?
+                    edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajor :
+                    edgedit::parallel::SPSeqToHeadOutputLayout::HeadMajor,
+                flux_sp_qk_seq_major_enabled() ?
+                    edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajor :
+                    edgedit::parallel::SPSeqToHeadOutputLayout::HeadMajor,
+                flux_sp_flash_v_seq_major_enabled(ctx) ?
+                    edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajor :
+                    edgedit::parallel::SPSeqToHeadOutputLayout::HeadMajor,
+            };
+            auto qkv_head = flux_sp_fused_qkv_send_pack_enabled() ?
+                                edgedit::parallel::sp_all_to_all_4d_qkv_seq_to_head_packed_layouts(ctx->ggml_ctx,
+                                                                                                   q,
+                                                                                                   k,
+                                                                                                   v,
+                                                                                                   output_layouts,
+                                                                                                   ctx->process_group,
+                                                                                                   world_size,
+                                                                                                   name_prefix + "_qkv_seq_to_head") :
+                                edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched_layouts(ctx->ggml_ctx,
+                                                                                                {q, k, v},
+                                                                                                output_layouts,
+                                                                                                ctx->process_group,
+                                                                                                world_size,
+                                                                                                name_prefix + "_qkv_seq_to_head");
             GGML_ASSERT(qkv_head.outputs.size() == 3);
 
             q = pre_qk_norm ? qkv_head.outputs[0] : norm->query_norm(ctx, qkv_head.outputs[0]);
             k = pre_qk_norm ? qkv_head.outputs[1] : norm->key_norm(ctx, qkv_head.outputs[1]);
             v = qkv_head.outputs[2];
-            return {q, k, v};
+
+            SPQKV out;
+            out.q = q;
+            out.k = k;
+            out.v = v;
+            out.recv_flat = qkv_head.recv_flat;
+            out.heads = q->ne[1];
+            out.head_dim = q->ne[0];
+            out.sequence = qkv_head.sequence;
+            out.shard_sequence = qkv_head.shard_sequence;
+            out.world_size = world_size;
+            return out;
         }
 
         SPQKV pre_attention_sp_rope_work_qk(GGMLRunnerContext* ctx,
                                             ggml_tensor* x_local,
-                                            const std::string& name_prefix) {
+                                            const std::string& name_prefix,
+                                            bool use_mixed_qkv_send = false,
+                                            bool use_f16_qkv_send = false) {
             const int world_size = flux_sp_world_size(ctx);
-            SPQKV local_qkv = pre_attention_sp_local_qkv(ctx, x_local);
+            GGML_ASSERT(flux_sp_pre_qk_norm_enabled());
+            use_mixed_qkv_send = use_mixed_qkv_send &&
+                                 flux_sp_mixed_qkv_send_enabled() &&
+                                 flux_sp_fused_qkv_send_pack_enabled() &&
+                                 flux_sp_flash_v_seq_major_enabled(ctx);
+            use_f16_qkv_send = !use_mixed_qkv_send &&
+                                use_f16_qkv_send &&
+                                flux_sp_f16_qkv_send_enabled() &&
+                                flux_sp_fused_qkv_send_pack_enabled() &&
+                                flux_sp_flash_v_seq_major_enabled(ctx);
+            SPQKV local_qkv = pre_attention_sp_local_qkv(ctx,
+                                                         x_local,
+                                                         flux_sp_f16_qk_norm_enabled() && use_f16_qkv_send);
             ggml_tensor* q = local_qkv.q;
             ggml_tensor* k = local_qkv.k;
             ggml_tensor* v = local_qkv.v;
-            GGML_ASSERT(flux_sp_pre_qk_norm_enabled());
 
-            auto qkv_head =
-                edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched_layouts(
-                    ctx->ggml_ctx,
-                    {q, k, v},
-                    {edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajorRopeInterleaved,
-                     edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajorRopeInterleaved,
-                     flux_sp_flash_v_seq_major_enabled(ctx) ?
-                         edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajor :
-                         edgedit::parallel::SPSeqToHeadOutputLayout::HeadMajor},
-                    world_size,
-                    name_prefix + "_qkv_seq_to_head");
-            GGML_ASSERT(qkv_head.outputs.size() == 3);
+            std::vector<edgedit::parallel::SPSeqToHeadOutputLayout> output_layouts = {
+                edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajorRopeInterleaved,
+                edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajorRopeInterleaved,
+                flux_sp_flash_v_seq_major_enabled(ctx) ?
+                    edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajor :
+                    edgedit::parallel::SPSeqToHeadOutputLayout::HeadMajor,
+            };
+            auto qkv_head = use_mixed_qkv_send ?
+                                edgedit::parallel::sp_all_to_all_4d_qkv_seq_to_head_mixed_recv_only(ctx->ggml_ctx,
+                                                                                                     q,
+                                                                                                     k,
+                                                                                                     v,
+                                                                                                     ctx->process_group,
+                                                                                                     world_size,
+                                                                                                     name_prefix + "_qkv_seq_to_head") :
+                            use_f16_qkv_send ?
+                                edgedit::parallel::sp_all_to_all_4d_qkv_seq_to_head_f16_recv_only(ctx->ggml_ctx,
+                                                                                                  q,
+                                                                                                  k,
+                                                                                                  v,
+                                                                                                  ctx->process_group,
+                                                                                                  world_size,
+                                                                                                  name_prefix + "_qkv_seq_to_head") :
+                            flux_sp_fused_qkv_send_pack_enabled() ?
+                                edgedit::parallel::sp_all_to_all_4d_qkv_seq_to_head_packed_layouts(ctx->ggml_ctx,
+                                                                                                   q,
+                                                                                                   k,
+                                                                                                   v,
+                                                                                                   output_layouts,
+                                                                                                   ctx->process_group,
+                                                                                                   world_size,
+                                                                                                   name_prefix + "_qkv_seq_to_head") :
+                                edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched_layouts(ctx->ggml_ctx,
+                                                                                                {q, k, v},
+                                                                                                output_layouts,
+                                                                                                ctx->process_group,
+                                                                                                world_size,
+                                                                                                name_prefix + "_qkv_seq_to_head");
+            if (!use_mixed_qkv_send && !use_f16_qkv_send) {
+                GGML_ASSERT(qkv_head.outputs.size() == 3);
+            }
 
-            return {qkv_head.outputs[0], qkv_head.outputs[1], qkv_head.outputs[2]};
+            SPQKV out;
+            out.q = (use_mixed_qkv_send || use_f16_qkv_send) ? q : qkv_head.outputs[0];
+            out.k = (use_mixed_qkv_send || use_f16_qkv_send) ? k : qkv_head.outputs[1];
+            out.v = (use_mixed_qkv_send || use_f16_qkv_send) ? v : qkv_head.outputs[2];
+            out.recv_flat = qkv_head.recv_flat;
+            out.mixed_recv_flat = use_mixed_qkv_send;
+            out.heads = q->ne[1];
+            out.head_dim = q->ne[0];
+            out.sequence = qkv_head.sequence;
+            out.shard_sequence = qkv_head.shard_sequence;
+            out.world_size = world_size;
+            return out;
         }
 
         ggml_tensor* post_attention(GGMLRunnerContext* ctx, ggml_tensor* x) {
@@ -1282,7 +1630,8 @@ namespace Flux {
                                                          ggml_tensor* pe,
                                                          ggml_tensor* mask                   = nullptr,
                                                          std::vector<ModulationOut> img_mods = {},
-                                                         std::vector<ModulationOut> txt_mods = {}) {
+                                                         std::vector<ModulationOut> txt_mods = {},
+                                                         ggml_tensor* prepared_pe_seq_major  = nullptr) {
             auto img_norm1 = std::dynamic_pointer_cast<LayerNorm>(blocks["img_norm1"]);
             auto img_attn  = std::dynamic_pointer_cast<SelfAttention>(blocks["img_attn"]);
 
@@ -1320,40 +1669,265 @@ namespace Flux {
             const int world_size     = flux_sp_world_size(ctx);
 
             ggml_tensor* img_modulated = img_norm1->forward(ctx, img);
-            img_modulated              = dit::modulate(ctx->ggml_ctx, img_modulated, img_mod1.shift, img_mod1.scale);
+            img_modulated              = flux_sp_modulate(ctx->ggml_ctx, img_modulated, img_mod1.shift, img_mod1.scale);
 
             ggml_tensor* txt_modulated = txt_norm1->forward(ctx, txt);
-            txt_modulated              = dit::modulate(ctx->ggml_ctx, txt_modulated, txt_mod1.shift, txt_mod1.scale);
+            txt_modulated              = flux_sp_modulate(ctx->ggml_ctx, txt_modulated, txt_mod1.shift, txt_mod1.scale);
             const bool qk_seq_major = flux_sp_qk_seq_major_enabled();
             const bool qk_rope_work = qk_seq_major && flux_sp_pre_qk_norm_enabled();
-            auto img_qkv = qk_rope_work ?
-                               img_attn->pre_attention_sp_rope_work_qk(ctx, img_modulated, prefix + "_img") :
-                               img_attn->pre_attention_sp(ctx, img_modulated, prefix + "_img");
-            auto txt_qkv = qk_rope_work ?
-                               txt_attn->pre_attention_sp_rope_work_qk(ctx, txt_modulated, prefix + "_txt") :
-                               txt_attn->pre_attention_sp(ctx, txt_modulated, prefix + "_txt");
-
-            ggml_tensor* q = ggml_concat(ctx->ggml_ctx, txt_qkv.q, img_qkv.q, qk_seq_major ? 1 : 2);
-            ggml_tensor* k = ggml_concat(ctx->ggml_ctx, txt_qkv.k, img_qkv.k, qk_seq_major ? 1 : 2);
-            ggml_tensor* v = ggml_concat(ctx->ggml_ctx,
-                                          txt_qkv.v,
-                                          img_qkv.v,
-                                          flux_sp_flash_v_seq_major_enabled(ctx) ? 1 : 2);
+            const bool use_mixed_qkv_send =
+                flux_sp_mixed_qkv_send_enabled() &&
+                flux_sp_mixed_double_qkv_send_enabled() &&
+                flux_sp_fused_qkv_send_pack_enabled() &&
+                flux_sp_fused_double_qkv_recv_prep_enabled() &&
+                qk_rope_work &&
+                flux_sp_flash_v_seq_major_enabled(ctx) &&
+                mask == nullptr;
+            const bool use_f16_qkv_send =
+                !use_mixed_qkv_send &&
+                flux_sp_f16_qkv_send_enabled() &&
+                flux_sp_fused_qkv_send_pack_enabled() &&
+                flux_sp_fused_double_qkv_recv_prep_enabled() &&
+                qk_rope_work &&
+                flux_sp_flash_v_seq_major_enabled(ctx) &&
+                mask == nullptr;
+            ggml_tensor* q = nullptr;
+            ggml_tensor* k = nullptr;
+            ggml_tensor* v = nullptr;
+            bool used_fused_double_qkv_recv_prep = false;
+            const bool use_combined_double_qkv_a2a =
+                flux_sp_fuse_double_qkv_a2a_enabled() &&
+                use_f16_qkv_send &&
+                flux_sp_f16_qk_norm_enabled() &&
+                !use_mixed_qkv_send;
+            SelfAttention::SPQKV txt_qkv;
+            SelfAttention::SPQKV img_qkv;
+            if (use_combined_double_qkv_a2a) {
+                txt_qkv = txt_attn->pre_attention_sp_local_qkv(ctx, txt_modulated, true);
+                img_qkv = img_attn->pre_attention_sp_local_qkv(ctx, img_modulated, true);
+                auto qkv_head =
+                    edgedit::parallel::sp_all_to_all_4d_double_qkv_seq_to_head_f16_recv_only(ctx->ggml_ctx,
+                                                                                             txt_qkv.q,
+                                                                                             txt_qkv.k,
+                                                                                             txt_qkv.v,
+                                                                                             img_qkv.q,
+                                                                                             img_qkv.k,
+                                                                                             img_qkv.v,
+                                                                                             ctx->process_group,
+                                                                                             world_size,
+                                                                                             prefix + "_txt_img_qkv_seq_to_head");
+                ggml_tensor* prepared_pe = prepared_pe_seq_major != nullptr ?
+                                               prepared_pe_seq_major :
+                                               flux_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
+                                                                                 pe,
+                                                                                 prefix + "_combined_pair_recv_pe_seq_major");
+                const ggml_type q_recv_prep_type = flux_sp_f16_q_attention_enabled() ? GGML_TYPE_F16 : GGML_TYPE_F32;
+                ggml_tensor* fused_q = nullptr;
+                ggml_tensor* fused_k = nullptr;
+                ggml_tensor* fused_v = nullptr;
+                if (flux_sp_bundle_double_qkv_recv_prep_enabled() &&
+                    q_recv_prep_type == GGML_TYPE_F16) {
+                    ggml_tensor* bundle =
+                        edgedit::ggml_ext::flux_sp_qkv_combined_pair_recv_prep_bundle_custom(ctx->ggml_ctx,
+                                                                                              qkv_head.recv_flat,
+                                                                                              prepared_pe,
+                                                                                              world_size,
+                                                                                              txt_qkv.q->ne[1],
+                                                                                              txt_qkv.q->ne[0],
+                                                                                              txt_qkv.q->ne[2]);
+                    if (bundle != nullptr) {
+                        const size_t plane_offset = static_cast<size_t>(bundle->nb[3]);
+                        fused_q = ggml_view_3d(ctx->ggml_ctx,
+                                               bundle,
+                                               bundle->ne[0],
+                                               bundle->ne[1],
+                                               bundle->ne[2],
+                                               bundle->nb[1],
+                                               bundle->nb[2],
+                                               0);
+                        fused_k = ggml_view_3d(ctx->ggml_ctx,
+                                               bundle,
+                                               bundle->ne[0],
+                                               bundle->ne[1],
+                                               bundle->ne[2],
+                                               bundle->nb[1],
+                                               bundle->nb[2],
+                                               plane_offset);
+                        fused_v = ggml_view_3d(ctx->ggml_ctx,
+                                               bundle,
+                                               bundle->ne[0],
+                                               bundle->ne[1],
+                                               bundle->ne[2],
+                                               bundle->nb[1],
+                                               bundle->nb[2],
+                                               2 * plane_offset);
+                    }
+                }
+                if (fused_q == nullptr || fused_k == nullptr || fused_v == nullptr) {
+                    fused_q = edgedit::ggml_ext::flux_sp_qkv_combined_pair_recv_prep_custom(ctx->ggml_ctx,
+                                                                                            qkv_head.recv_flat,
+                                                                                            prepared_pe,
+                                                                                            edgedit::ggml_ext::FluxSPQKVRecvPrepPlane::Q,
+                                                                                            world_size,
+                                                                                            txt_qkv.q->ne[1],
+                                                                                            txt_qkv.q->ne[0],
+                                                                                            txt_qkv.q->ne[2],
+                                                                                            q_recv_prep_type);
+                    fused_k = edgedit::ggml_ext::flux_sp_qkv_combined_pair_recv_prep_custom(ctx->ggml_ctx,
+                                                                                            qkv_head.recv_flat,
+                                                                                            prepared_pe,
+                                                                                            edgedit::ggml_ext::FluxSPQKVRecvPrepPlane::K,
+                                                                                            world_size,
+                                                                                            txt_qkv.q->ne[1],
+                                                                                            txt_qkv.q->ne[0],
+                                                                                            txt_qkv.q->ne[2]);
+                    fused_v = edgedit::ggml_ext::flux_sp_qkv_combined_pair_recv_prep_custom(ctx->ggml_ctx,
+                                                                                            qkv_head.recv_flat,
+                                                                                            prepared_pe,
+                                                                                            edgedit::ggml_ext::FluxSPQKVRecvPrepPlane::V,
+                                                                                            world_size,
+                                                                                            txt_qkv.q->ne[1],
+                                                                                            txt_qkv.q->ne[0],
+                                                                                            txt_qkv.q->ne[2]);
+                }
+                if (fused_q != nullptr && fused_k != nullptr && fused_v != nullptr) {
+                    q = fused_q;
+                    k = fused_k;
+                    v = fused_v;
+                    used_fused_double_qkv_recv_prep = true;
+                    txt_qkv.recv_flat = qkv_head.recv_flat;
+                    img_qkv.recv_flat = qkv_head.recv_flat;
+                    txt_qkv.world_size = world_size;
+                    img_qkv.world_size = world_size;
+                    txt_qkv.heads = txt_qkv.q->ne[1];
+                    img_qkv.heads = img_qkv.q->ne[1];
+                    txt_qkv.head_dim = txt_qkv.q->ne[0];
+                    img_qkv.head_dim = img_qkv.q->ne[0];
+                    txt_qkv.sequence = qkv_head.sequences.size() > 0 ? qkv_head.sequences[0] : txt_qkv.q->ne[2] * world_size;
+                    img_qkv.sequence = qkv_head.sequences.size() > 1 ? qkv_head.sequences[1] : img_qkv.q->ne[2] * world_size;
+                    txt_qkv.shard_sequence = txt_qkv.q->ne[2];
+                    img_qkv.shard_sequence = img_qkv.q->ne[2];
+                }
+            } else {
+                img_qkv = qk_rope_work ?
+                              img_attn->pre_attention_sp_rope_work_qk(ctx, img_modulated, prefix + "_img", use_mixed_qkv_send, use_f16_qkv_send) :
+                              img_attn->pre_attention_sp(ctx, img_modulated, prefix + "_img");
+                txt_qkv = qk_rope_work ?
+                              txt_attn->pre_attention_sp_rope_work_qk(ctx, txt_modulated, prefix + "_txt", use_mixed_qkv_send, use_f16_qkv_send) :
+                              txt_attn->pre_attention_sp(ctx, txt_modulated, prefix + "_txt");
+            }
+            const bool can_fuse_double_qkv_recv_prep =
+                flux_sp_fused_double_qkv_recv_prep_enabled() &&
+                !used_fused_double_qkv_recv_prep &&
+                qk_rope_work &&
+                flux_sp_flash_v_seq_major_enabled(ctx) &&
+                mask == nullptr &&
+                txt_qkv.recv_flat != nullptr &&
+                img_qkv.recv_flat != nullptr &&
+                txt_qkv.world_size == world_size &&
+                img_qkv.world_size == world_size &&
+                txt_qkv.heads == img_qkv.heads &&
+                txt_qkv.head_dim == img_qkv.head_dim &&
+                txt_qkv.mixed_recv_flat == img_qkv.mixed_recv_flat;
+            if (can_fuse_double_qkv_recv_prep) {
+                ggml_tensor* prepared_pe = prepared_pe_seq_major != nullptr ?
+                                               prepared_pe_seq_major :
+                                               flux_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
+                                                                                 pe,
+                                                                                 prefix + "_pair_recv_pe_seq_major");
+                const ggml_type q_recv_prep_type = flux_sp_f16_q_attention_enabled() ? GGML_TYPE_F16 : GGML_TYPE_F32;
+                ggml_tensor* fused_q = txt_qkv.mixed_recv_flat ?
+                                           edgedit::ggml_ext::flux_sp_qkv_pair_mixed_recv_prep_custom(ctx->ggml_ctx,
+                                                                                                      txt_qkv.recv_flat,
+                                                                                                      img_qkv.recv_flat,
+                                                                                                      prepared_pe,
+                                                                                                      edgedit::ggml_ext::FluxSPQKVRecvPrepPlane::Q,
+                                                                                                      world_size,
+                                                                                                      txt_qkv.heads,
+                                                                                                      txt_qkv.head_dim,
+                                                                                                      q_recv_prep_type) :
+                                           edgedit::ggml_ext::flux_sp_qkv_pair_recv_prep_custom(ctx->ggml_ctx,
+                                                                                                 txt_qkv.recv_flat,
+                                                                                                 img_qkv.recv_flat,
+                                                                                                 prepared_pe,
+                                                                                                 edgedit::ggml_ext::FluxSPQKVRecvPrepPlane::Q,
+                                                                                                 world_size,
+                                                                                                 txt_qkv.heads,
+                                                                                                 txt_qkv.head_dim,
+                                                                                                 q_recv_prep_type);
+                ggml_tensor* fused_k = txt_qkv.mixed_recv_flat ?
+                                           edgedit::ggml_ext::flux_sp_qkv_pair_mixed_recv_prep_custom(ctx->ggml_ctx,
+                                                                                                      txt_qkv.recv_flat,
+                                                                                                      img_qkv.recv_flat,
+                                                                                                      prepared_pe,
+                                                                                                      edgedit::ggml_ext::FluxSPQKVRecvPrepPlane::K,
+                                                                                                      world_size,
+                                                                                                      txt_qkv.heads,
+                                                                                                      txt_qkv.head_dim) :
+                                           edgedit::ggml_ext::flux_sp_qkv_pair_recv_prep_custom(ctx->ggml_ctx,
+                                                                                                 txt_qkv.recv_flat,
+                                                                                                 img_qkv.recv_flat,
+                                                                                                 prepared_pe,
+                                                                                                 edgedit::ggml_ext::FluxSPQKVRecvPrepPlane::K,
+                                                                                                 world_size,
+                                                                                                 txt_qkv.heads,
+                                                                                                 txt_qkv.head_dim);
+                ggml_tensor* fused_v = txt_qkv.mixed_recv_flat ?
+                                           edgedit::ggml_ext::flux_sp_qkv_pair_mixed_recv_prep_custom(ctx->ggml_ctx,
+                                                                                                      txt_qkv.recv_flat,
+                                                                                                      img_qkv.recv_flat,
+                                                                                                      prepared_pe,
+                                                                                                      edgedit::ggml_ext::FluxSPQKVRecvPrepPlane::V,
+                                                                                                      world_size,
+                                                                                                      txt_qkv.heads,
+                                                                                                      txt_qkv.head_dim) :
+                                           edgedit::ggml_ext::flux_sp_qkv_pair_recv_prep_custom(ctx->ggml_ctx,
+                                                                                                 txt_qkv.recv_flat,
+                                                                                                 img_qkv.recv_flat,
+                                                                                                 prepared_pe,
+                                                                                                 edgedit::ggml_ext::FluxSPQKVRecvPrepPlane::V,
+                                                                                                 world_size,
+                                                                                                 txt_qkv.heads,
+                                                                                                 txt_qkv.head_dim);
+                if (fused_q != nullptr && fused_k != nullptr && fused_v != nullptr) {
+                    q = fused_q;
+                    k = fused_k;
+                    v = fused_v;
+                    used_fused_double_qkv_recv_prep = true;
+                }
+            }
+            GGML_ASSERT((!use_mixed_qkv_send && !use_f16_qkv_send) || used_fused_double_qkv_recv_prep);
+            if (!used_fused_double_qkv_recv_prep) {
+                q = ggml_concat(ctx->ggml_ctx, txt_qkv.q, img_qkv.q, qk_seq_major ? 1 : 2);
+                k = ggml_concat(ctx->ggml_ctx, txt_qkv.k, img_qkv.k, qk_seq_major ? 1 : 2);
+                v = ggml_concat(ctx->ggml_ctx,
+                                txt_qkv.v,
+                                img_qkv.v,
+                                flux_sp_flash_v_seq_major_enabled(ctx) ? 1 : 2);
+            }
             ggml_set_name(q, (prefix + "_q_attn").c_str());
             ggml_set_name(k, (prefix + "_k_attn").c_str());
             ggml_set_name(v, (prefix + "_v_attn").c_str());
 
-            const int64_t head_dim = qk_rope_work ? q->ne[0] * 2 : q->ne[0];
-            ggml_tensor* attn = qk_rope_work ?
-                                    flux_sp_attention_from_rope_work_layout(ctx, q, k, v, pe, mask, head_dim, prefix) :
-                                    flux_sp_attention(ctx, q, k, v, pe, mask, prefix);
+            const int64_t head_dim = used_fused_double_qkv_recv_prep ? q->ne[0] :
+                                     qk_rope_work ? q->ne[0] * 2 :
+                                                    q->ne[0];
+            ggml_tensor* attn = used_fused_double_qkv_recv_prep ?
+                                    flux_sp_attention_prepared_qk(ctx, q, k, v, mask, prefix) :
+                                qk_rope_work ?
+                                    flux_sp_attention_from_rope_work_layout(ctx, q, k, v, pe, mask, head_dim, prefix, prepared_pe_seq_major) :
+                                    flux_sp_attention(ctx, q, k, v, pe, mask, prefix, prepared_pe_seq_major);
             if (flux_sp_strict_barrier_enabled()) {
                 sd::ggml_graph_cut::mark_graph_cut(attn, prefix + ".sp_attention", "attn");
             }
 
-            const int64_t shard_heads  = qk_seq_major ? q->ne[2] : q->ne[1];
-            const int64_t txt_full_seq = qk_seq_major ? txt_qkv.q->ne[1] : txt_qkv.q->ne[2];
-            const int64_t img_full_seq = qk_seq_major ? img_qkv.q->ne[1] : img_qkv.q->ne[2];
+            const int64_t shard_heads  = (qk_seq_major || used_fused_double_qkv_recv_prep) ? q->ne[2] : q->ne[1];
+            const int64_t txt_full_seq = txt_qkv.sequence > 0 ? txt_qkv.sequence :
+                                         qk_seq_major ? txt_qkv.q->ne[1] :
+                                                        txt_qkv.q->ne[2];
+            const int64_t img_full_seq = img_qkv.sequence > 0 ? img_qkv.sequence :
+                                         qk_seq_major ? img_qkv.q->ne[1] :
+                                                        img_qkv.q->ne[2];
             const int64_t total_seq    = txt_full_seq + img_full_seq;
 
             ggml_tensor* attn_4d = ggml_reshape_4d(ctx->ggml_ctx,
@@ -1364,54 +1938,95 @@ namespace Flux {
                                                    attn->ne[2]);
             ggml_set_name(attn_4d, (prefix + "_attn_4d").c_str());
 
-            ggml_tensor* txt_attn_head = ggml_view_4d(ctx->ggml_ctx,
-                                                      attn_4d,
-                                                      head_dim,
-                                                      shard_heads,
-                                                      txt_full_seq,
-                                                      attn_4d->ne[3],
-                                                      attn_4d->nb[1],
-                                                      attn_4d->nb[2],
-                                                      attn_4d->nb[3],
-                                                      0);
-            if (!ggml_is_contiguous(txt_attn_head)) {
-                txt_attn_head = ggml_cont(ctx->ggml_ctx, txt_attn_head);
+            edgedit::parallel::SPAllToAll4DBatchLayout attn_local;
+            const bool keep_double_attn_bf16 = flux_sp_bf16_double_head_to_seq_output_enabled() &&
+                                               attn_4d->type == GGML_TYPE_F16;
+            if (keep_double_attn_bf16) {
+                attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq_two_stream_packed_bf16_output(
+                    ctx->ggml_ctx,
+                    attn_4d,
+                    txt_full_seq,
+                    img_full_seq,
+                    ctx->process_group,
+                    world_size,
+                    prefix + "_txt_img_attn_head_to_seq");
+            } else if (flux_sp_f16_double_head_to_seq_output_enabled() || attn_4d->type == GGML_TYPE_F16) {
+                attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq_two_stream_packed_f16_output(
+                    ctx->ggml_ctx,
+                    attn_4d,
+                    txt_full_seq,
+                    img_full_seq,
+                    ctx->process_group,
+                    world_size,
+                    prefix + "_txt_img_attn_head_to_seq");
+            } else if (flux_sp_f16_double_head_to_seq_enabled()) {
+                attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq_two_stream_packed_f16(
+                    ctx->ggml_ctx,
+                    attn_4d,
+                    txt_full_seq,
+                    img_full_seq,
+                    ctx->process_group,
+                    world_size,
+                    prefix + "_txt_img_attn_head_to_seq");
+            } else if (flux_sp_fused_head_to_seq_enabled()) {
+                attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq_two_stream_packed(ctx->ggml_ctx,
+                                                                                               attn_4d,
+                                                                                               txt_full_seq,
+                                                                                               img_full_seq,
+                                                                                               ctx->process_group,
+                                                                                               world_size,
+                                                                                               prefix + "_txt_img_attn_head_to_seq");
             } else {
-                txt_attn_head = ggml_reshape_4d(ctx->ggml_ctx,
-                                                txt_attn_head,
-                                                txt_attn_head->ne[0],
-                                                txt_attn_head->ne[1],
-                                                txt_attn_head->ne[2],
-                                                txt_attn_head->ne[3]);
-            }
-            ggml_set_name(txt_attn_head, (prefix + "_txt_attn_head").c_str());
+                ggml_tensor* txt_attn_head = ggml_view_4d(ctx->ggml_ctx,
+                                                          attn_4d,
+                                                          head_dim,
+                                                          shard_heads,
+                                                          txt_full_seq,
+                                                          attn_4d->ne[3],
+                                                          attn_4d->nb[1],
+                                                          attn_4d->nb[2],
+                                                          attn_4d->nb[3],
+                                                          0);
+                if (!ggml_is_contiguous(txt_attn_head)) {
+                    txt_attn_head = ggml_cont(ctx->ggml_ctx, txt_attn_head);
+                } else {
+                    txt_attn_head = ggml_reshape_4d(ctx->ggml_ctx,
+                                                    txt_attn_head,
+                                                    txt_attn_head->ne[0],
+                                                    txt_attn_head->ne[1],
+                                                    txt_attn_head->ne[2],
+                                                    txt_attn_head->ne[3]);
+                }
+                ggml_set_name(txt_attn_head, (prefix + "_txt_attn_head").c_str());
 
-            ggml_tensor* img_attn_head = ggml_view_4d(ctx->ggml_ctx,
-                                                      attn_4d,
-                                                      head_dim,
-                                                      shard_heads,
-                                                      img_full_seq,
-                                                      attn_4d->ne[3],
-                                                      attn_4d->nb[1],
-                                                      attn_4d->nb[2],
-                                                      attn_4d->nb[3],
-                                                      static_cast<size_t>(txt_full_seq) * attn_4d->nb[2]);
-            if (!ggml_is_contiguous(img_attn_head)) {
-                img_attn_head = ggml_cont(ctx->ggml_ctx, img_attn_head);
-            } else {
-                img_attn_head = ggml_reshape_4d(ctx->ggml_ctx,
-                                                img_attn_head,
-                                                img_attn_head->ne[0],
-                                                img_attn_head->ne[1],
-                                                img_attn_head->ne[2],
-                                                img_attn_head->ne[3]);
-            }
-            ggml_set_name(img_attn_head, (prefix + "_img_attn_head").c_str());
+                ggml_tensor* img_attn_head = ggml_view_4d(ctx->ggml_ctx,
+                                                          attn_4d,
+                                                          head_dim,
+                                                          shard_heads,
+                                                          img_full_seq,
+                                                          attn_4d->ne[3],
+                                                          attn_4d->nb[1],
+                                                          attn_4d->nb[2],
+                                                          attn_4d->nb[3],
+                                                          static_cast<size_t>(txt_full_seq) * attn_4d->nb[2]);
+                if (!ggml_is_contiguous(img_attn_head)) {
+                    img_attn_head = ggml_cont(ctx->ggml_ctx, img_attn_head);
+                } else {
+                    img_attn_head = ggml_reshape_4d(ctx->ggml_ctx,
+                                                    img_attn_head,
+                                                    img_attn_head->ne[0],
+                                                    img_attn_head->ne[1],
+                                                    img_attn_head->ne[2],
+                                                    img_attn_head->ne[3]);
+                }
+                ggml_set_name(img_attn_head, (prefix + "_img_attn_head").c_str());
 
-            auto attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq_batched(ctx->ggml_ctx,
-                                                                                      {txt_attn_head, img_attn_head},
-                                                                                      world_size,
-                                                                                      prefix + "_txt_img_attn_head_to_seq");
+                attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq_batched(ctx->ggml_ctx,
+                                                                                     {txt_attn_head, img_attn_head},
+                                                                                     ctx->process_group,
+                                                                                     world_size,
+                                                                                     prefix + "_txt_img_attn_head_to_seq");
+            }
             GGML_ASSERT(attn_local.outputs.size() == 2);
 
             ggml_tensor* txt_attn_out = ggml_reshape_3d(ctx->ggml_ctx,
@@ -1429,24 +2044,24 @@ namespace Flux {
             ggml_set_name(img_attn_out, (prefix + "_img_attn_out").c_str());
 
             ggml_tensor* img_post_attn = img_attn->post_attention(ctx, img_attn_out);
-            img = ggml_add(ctx->ggml_ctx, img, ggml_mul(ctx->ggml_ctx, img_post_attn, img_mod1.gate));
+            img = flux_sp_residual_gate(ctx->ggml_ctx, img, img_post_attn, img_mod1.gate);
 
-            ggml_tensor* img_mlp_in = dit::modulate(ctx->ggml_ctx,
-                                                    img_norm2->forward(ctx, img),
-                                                    img_mod2.shift,
-                                                    img_mod2.scale);
+            ggml_tensor* img_mlp_in = flux_sp_modulate(ctx->ggml_ctx,
+                                                       img_norm2->forward(ctx, img),
+                                                       img_mod2.shift,
+                                                       img_mod2.scale);
             auto img_mlp_out = img_mlp->forward(ctx, img_mlp_in);
-            img = ggml_add(ctx->ggml_ctx, img, ggml_mul(ctx->ggml_ctx, img_mlp_out, img_mod2.gate));
+            img = flux_sp_residual_gate(ctx->ggml_ctx, img, img_mlp_out, img_mod2.gate);
 
             ggml_tensor* txt_post_attn = txt_attn->post_attention(ctx, txt_attn_out);
-            txt = ggml_add(ctx->ggml_ctx, txt, ggml_mul(ctx->ggml_ctx, txt_post_attn, txt_mod1.gate));
+            txt = flux_sp_residual_gate(ctx->ggml_ctx, txt, txt_post_attn, txt_mod1.gate);
 
-            ggml_tensor* txt_mlp_in = dit::modulate(ctx->ggml_ctx,
-                                                    txt_norm2->forward(ctx, txt),
-                                                    txt_mod2.shift,
-                                                    txt_mod2.scale);
+            ggml_tensor* txt_mlp_in = flux_sp_modulate(ctx->ggml_ctx,
+                                                       txt_norm2->forward(ctx, txt),
+                                                       txt_mod2.shift,
+                                                       txt_mod2.scale);
             auto txt_mlp_out = txt_mlp->forward(ctx, txt_mlp_in);
-            txt = ggml_add(ctx->ggml_ctx, txt, ggml_mul(ctx->ggml_ctx, txt_mlp_out, txt_mod2.gate));
+            txt = flux_sp_residual_gate(ctx->ggml_ctx, txt, txt_mlp_out, txt_mod2.gate);
 
             return {img, txt};
         }
@@ -1812,6 +2427,7 @@ namespace Flux {
 
             auto attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq_batched(ctx->ggml_ctx,
                                                                                       {txt_attn_head, img_attn_head},
+                                                                                      ctx->process_group,
                                                                                       world_size,
                                                                                       prefix + "_txt_img_attn_head_to_seq");
             GGML_ASSERT(attn_local.outputs.size() == 2);
@@ -2098,7 +2714,8 @@ namespace Flux {
                                 ggml_tensor* vec,
                                 ggml_tensor* pe,
                                 ggml_tensor* mask               = nullptr,
-                                std::vector<ModulationOut> mods = {}) {
+                                std::vector<ModulationOut> mods = {},
+                                ggml_tensor* prepared_pe_seq_major = nullptr) {
             auto linear1  = std::dynamic_pointer_cast<Linear>(blocks["linear1"]);
             auto linear2  = std::dynamic_pointer_cast<Linear>(blocks["linear2"]);
             auto norm     = std::dynamic_pointer_cast<QKNorm>(blocks["norm"]);
@@ -2121,7 +2738,7 @@ namespace Flux {
             const int64_t head_dim   = hidden_size / num_heads;
             const std::string prefix = "flux_single" + std::to_string(idx);
 
-            auto x_mod   = dit::modulate(ctx->ggml_ctx, pre_norm->forward(ctx, x), mod.shift, mod.scale);
+            auto x_mod   = flux_sp_modulate(ctx->ggml_ctx, pre_norm->forward(ctx, x), mod.shift, mod.scale);
             ggml_tensor* qkv_mlp = nullptr;
             ggml_tensor* mlp = nullptr;
             if (flux_sp_split_single_linear1_enabled()) {
@@ -2145,36 +2762,198 @@ namespace Flux {
                                   qkv_mlp->nb[0] * head_dim, qkv_mlp->nb[1], qkv_mlp->nb[2], qkv_mlp->nb[0] * 2 * hidden_size);
 
             const bool pre_qk_norm = flux_sp_pre_qk_norm_enabled();
+            std::vector<edgedit::parallel::SPSeqToHeadOutputLayout> output_layouts = {
+                flux_sp_qk_seq_major_enabled() ?
+                    edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajorRopeInterleaved :
+                    edgedit::parallel::SPSeqToHeadOutputLayout::HeadMajor,
+                flux_sp_qk_seq_major_enabled() ?
+                    edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajorRopeInterleaved :
+                    edgedit::parallel::SPSeqToHeadOutputLayout::HeadMajor,
+                flux_sp_flash_v_seq_major_enabled(ctx) ?
+                    edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajor :
+                    edgedit::parallel::SPSeqToHeadOutputLayout::HeadMajor,
+            };
+            const bool can_fuse_qkv_recv_prep =
+                flux_sp_fused_single_qkv_recv_prep_enabled() &&
+                pre_qk_norm &&
+                flux_sp_qk_seq_major_enabled() &&
+                flux_sp_flash_v_seq_major_enabled(ctx) &&
+                mask == nullptr;
+            const bool use_mixed_qkv_send =
+                can_fuse_qkv_recv_prep &&
+                flux_sp_mixed_qkv_send_enabled() &&
+                flux_sp_fused_qkv_send_pack_enabled();
+            const bool use_f16_qkv_send =
+                can_fuse_qkv_recv_prep &&
+                flux_sp_f16_qkv_send_enabled() &&
+                flux_sp_fused_qkv_send_pack_enabled();
+            const bool f16_qk_norm =
+                pre_qk_norm &&
+                flux_sp_f16_qk_norm_enabled() &&
+                use_f16_qkv_send &&
+                !use_mixed_qkv_send;
             if (pre_qk_norm) {
-                q = norm->query_norm(ctx, q);
-                k = norm->key_norm(ctx, k);
+                if (f16_qk_norm) {
+                    q = norm->query_norm_f16(ctx, q);
+                    k = norm->key_norm_f16(ctx, k);
+                } else {
+                    q = norm->query_norm(ctx, q);
+                    k = norm->key_norm(ctx, k);
+                }
             }
-
-            auto qkv_head = flux_sp_qk_seq_major_enabled() ?
+            auto qkv_head = use_f16_qkv_send ?
+                                edgedit::parallel::sp_all_to_all_4d_qkv_seq_to_head_f16_recv_only(ctx->ggml_ctx,
+                                                                                                   q,
+                                                                                                   k,
+                                                                                                   v,
+                                                                                                   ctx->process_group,
+                                                                                                   world_size,
+                                                                                                   prefix + "_qkv_seq_to_head") :
+                            use_mixed_qkv_send ?
+                                edgedit::parallel::sp_all_to_all_4d_qkv_seq_to_head_mixed_recv_only(ctx->ggml_ctx,
+                                                                                                     q,
+                                                                                                     k,
+                                                                                                     v,
+                                                                                                     ctx->process_group,
+                                                                                                     world_size,
+                                                                                                     prefix + "_qkv_seq_to_head") :
+                            flux_sp_fused_qkv_send_pack_enabled() ?
+                                edgedit::parallel::sp_all_to_all_4d_qkv_seq_to_head_packed_layouts(ctx->ggml_ctx,
+                                                                                                   q,
+                                                                                                   k,
+                                                                                                   v,
+                                                                                                   output_layouts,
+                                                                                                   ctx->process_group,
+                                                                                                   world_size,
+                                                                                                   prefix + "_qkv_seq_to_head") :
                                 edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched_layouts(ctx->ggml_ctx,
                                                                                                 {q, k, v},
-                                                                                                {edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajorRopeInterleaved,
-                                                                                                 edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajorRopeInterleaved,
-                                                                                                 flux_sp_flash_v_seq_major_enabled(ctx) ?
-                                                                                                     edgedit::parallel::SPSeqToHeadOutputLayout::SeqMajor :
-                                                                                                     edgedit::parallel::SPSeqToHeadOutputLayout::HeadMajor},
+                                                                                                output_layouts,
+                                                                                                ctx->process_group,
                                                                                                 world_size,
-                                                                                                prefix + "_qkv_seq_to_head") :
-                                edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched(ctx->ggml_ctx,
-                                                                                        {q, k, v},
-                                                                                        world_size,
-                                                                                        prefix + "_qkv_seq_to_head");
-            GGML_ASSERT(qkv_head.outputs.size() == 3);
-
-            q = pre_qk_norm ? qkv_head.outputs[0] : norm->query_norm(ctx, qkv_head.outputs[0]);
-            k = pre_qk_norm ? qkv_head.outputs[1] : norm->key_norm(ctx, qkv_head.outputs[1]);
-            v = qkv_head.outputs[2];
+                                                                                                prefix + "_qkv_seq_to_head");
+            if (!use_mixed_qkv_send && !use_f16_qkv_send) {
+                GGML_ASSERT(qkv_head.outputs.size() == 3);
+                q = pre_qk_norm ? qkv_head.outputs[0] : norm->query_norm(ctx, qkv_head.outputs[0]);
+                k = pre_qk_norm ? qkv_head.outputs[1] : norm->key_norm(ctx, qkv_head.outputs[1]);
+                v = qkv_head.outputs[2];
+            }
             ggml_set_name(q, (prefix + "_q_attn").c_str());
             ggml_set_name(k, (prefix + "_k_attn").c_str());
             ggml_set_name(v, (prefix + "_v_attn").c_str());
-            auto attn = flux_sp_qk_seq_major_enabled() ?
-                            flux_sp_attention_from_rope_work_layout(ctx, q, k, v, pe, mask, head_dim, prefix) :
-                            flux_sp_attention(ctx, q, k, v, pe, mask, prefix);
+            ggml_tensor* attn = nullptr;
+            if (can_fuse_qkv_recv_prep && qkv_head.recv_flat != nullptr) {
+                ggml_tensor* prepared_pe = prepared_pe_seq_major != nullptr ?
+                                               prepared_pe_seq_major :
+                                               flux_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
+                                                                                 pe,
+                                                                                 prefix + "_fused_recv_pe_seq_major");
+                const bool mixed_qkv_recv = use_mixed_qkv_send &&
+                                            qkv_head.total_head_dim == head_dim * 2;
+                const ggml_type q_recv_prep_type = flux_sp_f16_q_attention_enabled() ? GGML_TYPE_F16 : GGML_TYPE_F32;
+                ggml_tensor* fused_q = nullptr;
+                ggml_tensor* fused_k = nullptr;
+                ggml_tensor* fused_v = nullptr;
+                if (flux_sp_bundle_single_qkv_recv_prep_enabled() &&
+                    use_f16_qkv_send &&
+                    !mixed_qkv_recv &&
+                    q_recv_prep_type == GGML_TYPE_F16) {
+                    ggml_tensor* bundle = edgedit::ggml_ext::flux_sp_qkv_recv_prep_bundle_custom(ctx->ggml_ctx,
+                                                                                                  qkv_head.recv_flat,
+                                                                                                  prepared_pe,
+                                                                                                  world_size,
+                                                                                                  num_heads,
+                                                                                                  head_dim);
+                    if (bundle != nullptr) {
+                        const size_t plane_offset = static_cast<size_t>(bundle->nb[3]);
+                        fused_q = ggml_view_3d(ctx->ggml_ctx,
+                                               bundle,
+                                               bundle->ne[0],
+                                               bundle->ne[1],
+                                               bundle->ne[2],
+                                               bundle->nb[1],
+                                               bundle->nb[2],
+                                               0);
+                        fused_k = ggml_view_3d(ctx->ggml_ctx,
+                                               bundle,
+                                               bundle->ne[0],
+                                               bundle->ne[1],
+                                               bundle->ne[2],
+                                               bundle->nb[1],
+                                               bundle->nb[2],
+                                               plane_offset);
+                        fused_v = ggml_view_3d(ctx->ggml_ctx,
+                                               bundle,
+                                               bundle->ne[0],
+                                               bundle->ne[1],
+                                               bundle->ne[2],
+                                               bundle->nb[1],
+                                               bundle->nb[2],
+                                               2 * plane_offset);
+                    }
+                }
+                if (fused_q == nullptr || fused_k == nullptr || fused_v == nullptr) {
+                    fused_q = mixed_qkv_recv ?
+                                  edgedit::ggml_ext::flux_sp_qkv_mixed_recv_prep_custom(ctx->ggml_ctx,
+                                                                                         qkv_head.recv_flat,
+                                                                                         prepared_pe,
+                                                                                         edgedit::ggml_ext::FluxSPQKVRecvPrepPlane::Q,
+                                                                                         world_size,
+                                                                                         num_heads,
+                                                                                         head_dim,
+                                                                                         q_recv_prep_type) :
+                                  edgedit::ggml_ext::flux_sp_qkv_recv_prep_custom(ctx->ggml_ctx,
+                                                                                  qkv_head.recv_flat,
+                                                                                  prepared_pe,
+                                                                                  edgedit::ggml_ext::FluxSPQKVRecvPrepPlane::Q,
+                                                                                  world_size,
+                                                                                  num_heads,
+                                                                                  head_dim,
+                                                                                  q_recv_prep_type);
+                    fused_k = mixed_qkv_recv ?
+                                  edgedit::ggml_ext::flux_sp_qkv_mixed_recv_prep_custom(ctx->ggml_ctx,
+                                                                                         qkv_head.recv_flat,
+                                                                                         prepared_pe,
+                                                                                         edgedit::ggml_ext::FluxSPQKVRecvPrepPlane::K,
+                                                                                         world_size,
+                                                                                         num_heads,
+                                                                                         head_dim) :
+                                  edgedit::ggml_ext::flux_sp_qkv_recv_prep_custom(ctx->ggml_ctx,
+                                                                                  qkv_head.recv_flat,
+                                                                                  prepared_pe,
+                                                                                  edgedit::ggml_ext::FluxSPQKVRecvPrepPlane::K,
+                                                                                  world_size,
+                                                                                  num_heads,
+                                                                                  head_dim);
+                    fused_v = mixed_qkv_recv ?
+                                  edgedit::ggml_ext::flux_sp_qkv_mixed_recv_prep_custom(ctx->ggml_ctx,
+                                                                                         qkv_head.recv_flat,
+                                                                                         prepared_pe,
+                                                                                         edgedit::ggml_ext::FluxSPQKVRecvPrepPlane::V,
+                                                                                         world_size,
+                                                                                         num_heads,
+                                                                                         head_dim) :
+                                  edgedit::ggml_ext::flux_sp_qkv_recv_prep_custom(ctx->ggml_ctx,
+                                                                                  qkv_head.recv_flat,
+                                                                                  prepared_pe,
+                                                                                  edgedit::ggml_ext::FluxSPQKVRecvPrepPlane::V,
+                                                                                  world_size,
+                                                                                  num_heads,
+                                                                                  head_dim);
+                }
+                if (fused_q != nullptr && fused_k != nullptr && fused_v != nullptr) {
+                    ggml_set_name(fused_q, (prefix + "_q_recv_rope").c_str());
+                    ggml_set_name(fused_k, (prefix + "_k_recv_rope").c_str());
+                    ggml_set_name(fused_v, (prefix + "_v_recv_prep").c_str());
+                    attn = flux_sp_attention_prepared_qk(ctx, fused_q, fused_k, fused_v, mask, prefix);
+                }
+            }
+            GGML_ASSERT((!use_mixed_qkv_send && !use_f16_qkv_send) || attn != nullptr);
+            if (attn == nullptr) {
+                attn = flux_sp_qk_seq_major_enabled() ?
+                           flux_sp_attention_from_rope_work_layout(ctx, q, k, v, pe, mask, head_dim, prefix, prepared_pe_seq_major) :
+                           flux_sp_attention(ctx, q, k, v, pe, mask, prefix, prepared_pe_seq_major);
+            }
             if (flux_sp_strict_barrier_enabled()) {
                 sd::ggml_graph_cut::mark_graph_cut(attn, prefix + ".sp_attention", "attn");
             }
@@ -2187,10 +2966,40 @@ namespace Flux {
                                            attn->ne[2]);
             ggml_set_name(attn_4d, (prefix + "_attn_4d").c_str());
 
-            auto attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
-                                                                              attn_4d,
-                                                                              world_size,
-                                                                              prefix + "_attn_head_to_seq");
+            const bool keep_single_attn_bf16 = flux_sp_bf16_single_head_to_seq_output_enabled() &&
+                                               attn_4d->type == GGML_TYPE_F16;
+            const bool keep_single_attn_f16 = !keep_single_attn_bf16 &&
+                                              (flux_sp_f16_single_head_to_seq_output_enabled() ||
+                                               attn_4d->type == GGML_TYPE_F16);
+            auto attn_local = keep_single_attn_bf16 ?
+                                  edgedit::parallel::sp_all_to_all_4d_head_to_seq_packed_bf16_output(ctx->ggml_ctx,
+                                                                                                     attn_4d,
+                                                                                                     ctx->process_group,
+                                                                                                     world_size,
+                                                                                                     prefix + "_attn_head_to_seq") :
+                              keep_single_attn_f16 ?
+                                  edgedit::parallel::sp_all_to_all_4d_head_to_seq_packed_f16_output(ctx->ggml_ctx,
+                                                                                                    attn_4d,
+                                                                                                    ctx->process_group,
+                                                                                                    world_size,
+                                                                                                    prefix + "_attn_head_to_seq") :
+                              flux_sp_f16_single_head_to_seq_enabled() ?
+                                  edgedit::parallel::sp_all_to_all_4d_head_to_seq_packed_f16(ctx->ggml_ctx,
+                                                                                             attn_4d,
+                                                                                             ctx->process_group,
+                                                                                             world_size,
+                                                                                             prefix + "_attn_head_to_seq") :
+                              flux_sp_fused_single_head_to_seq_enabled() ?
+                                  edgedit::parallel::sp_all_to_all_4d_head_to_seq_packed(ctx->ggml_ctx,
+                                                                                         attn_4d,
+                                                                                         ctx->process_group,
+                                                                                         world_size,
+                                                                                         prefix + "_attn_head_to_seq") :
+                                  edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
+                                                                                  attn_4d,
+                                                                                  ctx->process_group,
+                                                                                  world_size,
+                                                                                  prefix + "_attn_head_to_seq");
 
             auto attn_flat = ggml_reshape_3d(ctx->ggml_ctx,
                                              attn_local.output,
@@ -2204,13 +3013,58 @@ namespace Flux {
             } else if (use_mlp_silu_act) {
                 mlp = ggml_ext_silu_act(ctx->ggml_ctx, mlp);
             } else {
-                mlp = ggml_ext_gelu(ctx->ggml_ctx, mlp, true);
+                if (flux_sp_mlp_gelu_bf16_enabled()) {
+                    if (auto mlp_bf16 = edgedit::ggml_ext::flux_sp_gelu_bf16_custom(ctx->ggml_ctx, mlp)) {
+                        mlp = mlp_bf16;
+                        ggml_set_name(mlp, (prefix + "_mlp_gelu_bf16").c_str());
+                    } else {
+                        mlp = ggml_ext_gelu(ctx->ggml_ctx, mlp, true);
+                    }
+                } else {
+                    mlp = ggml_ext_gelu(ctx->ggml_ctx, mlp, true);
+                }
             }
-            auto attn_mlp = ggml_concat(ctx->ggml_ctx, attn_flat, mlp, 0);
-            ggml_set_name(attn_mlp, (prefix + "_attn_mlp").c_str());
-            auto output = linear2->forward(ctx, attn_mlp);
+            ggml_tensor* output = nullptr;
+            bool used_fused_residual_gate = false;
+            ggml_tensor* gate_for_concat_linear = mod.gate;
+            if (gate_for_concat_linear != nullptr &&
+                gate_for_concat_linear->ne[2] == 1 &&
+                gate_for_concat_linear->ne[3] == 1) {
+                gate_for_concat_linear = ggml_reshape_3d(ctx->ggml_ctx,
+                                                         gate_for_concat_linear,
+                                                         gate_for_concat_linear->ne[0],
+                                                         1,
+                                                         gate_for_concat_linear->ne[1]);
+            }
+            if (flux_sp_fused_modulation_enabled() &&
+                flux_sp_fused_single_linear2_enabled() &&
+                flux_sp_fused_single_linear2_residual_gate_enabled()) {
+                output = linear2->forward_input_concat_residual_gate_fused(ctx, x, attn_flat, mlp, gate_for_concat_linear);
+                used_fused_residual_gate = output != nullptr;
+            }
+            if (output == nullptr && flux_sp_fused_single_linear2_enabled()) {
+                output = linear2->forward_input_concat_fused(ctx, attn_flat, mlp);
+            }
+            if (output == nullptr && attn_flat->type != GGML_TYPE_F32) {
+                attn_flat = ggml_cast(ctx->ggml_ctx, attn_flat, GGML_TYPE_F32);
+                ggml_set_name(attn_flat, (prefix + "_attn_flat_f32").c_str());
+            }
+            if (output == nullptr && mlp->type != GGML_TYPE_F32) {
+                mlp = ggml_cast(ctx->ggml_ctx, mlp, GGML_TYPE_F32);
+                ggml_set_name(mlp, (prefix + "_mlp_f32").c_str());
+            }
+            if (output == nullptr && flux_sp_split_single_linear2_enabled()) {
+                output = linear2->forward_input_concat_split(ctx, attn_flat, mlp);
+            }
+            if (output == nullptr) {
+                auto attn_mlp = ggml_concat(ctx->ggml_ctx, attn_flat, mlp, 0);
+                ggml_set_name(attn_mlp, (prefix + "_attn_mlp").c_str());
+                output = linear2->forward(ctx, attn_mlp);
+            }
 
-            output = ggml_add(ctx->ggml_ctx, x, ggml_mul(ctx->ggml_ctx, output, mod.gate));
+            if (!used_fused_residual_gate) {
+                output = flux_sp_residual_gate(ctx->ggml_ctx, x, output, mod.gate);
+            }
             return output;
         }
 #endif
@@ -2256,6 +3110,7 @@ namespace Flux {
 
             auto qkv_head = edgedit::parallel::sp_all_to_all_4d_seq_to_head_batched(ctx->ggml_ctx,
                                                                                     {q, k, v},
+                                                                                    ctx->process_group,
                                                                                     world_size,
                                                                                     prefix + "_qkv_seq_to_head");
             GGML_ASSERT(qkv_head.outputs.size() == 3);
@@ -2284,6 +3139,7 @@ namespace Flux {
 
             auto attn_local = edgedit::parallel::sp_all_to_all_4d_head_to_seq(ctx->ggml_ctx,
                                                                               attn_4d,
+                                                                              ctx->process_group,
                                                                               world_size,
                                                                               prefix + "_attn_head_to_seq");
 
@@ -2720,6 +3576,22 @@ namespace Flux {
             txt = txt_in->forward(ctx, txt);
             const int64_t flux_full_img_seq = img->ne[1];
             const int64_t flux_full_txt_seq = txt->ne[1];
+            // Cache seam: the block stack transforms the image stream `img`. The
+            // cached quantity is that stream's residual. Disabled under SP
+            // (block-loop tensors are sequence-sharded, so before/after differ
+            // in shape). See cache_graph_scope.hpp.
+            sd::CacheGraphScope* cache_scope = flux_sp_enabled(ctx) ? nullptr : ctx->cache_scope;
+            // A sub-region (finite region_end) is cached inside the double-block
+            // loop, where `img` is coherent. The default whole-stack region spans
+            // the double AND single loops and is captured after the streams are
+            // recombined and `img` is sliced back out (the original behaviour).
+            const bool cache_subregion = cache_scope != nullptr && cache_scope->is_subregion();
+            const bool cache_inject = cache_scope != nullptr && cache_scope->inject_mode();
+            const bool cache_whole_inject = cache_inject && !cache_subregion;
+            ggml_tensor* cache_img_before = img;
+            if (cache_scope != nullptr && !cache_subregion) {
+                cache_scope->snapshot_before(cache_img_before);  // whole-stack anchor
+            }
             bool use_sp_mainline = flux_sp_enabled(ctx);
 #ifdef ED_DEBUG_SP_COMM
             use_sp_mainline = use_sp_mainline && !debug_sp_capture_enabled();
@@ -2932,9 +3804,35 @@ namespace Flux {
                 sd::ggml_graph_cut::mark_graph_cut(vec, "flux.prelude", "vec");
             }
 
-            for (int i = 0; i < params.depth; i++) {
+#ifndef ED_DEBUG_SP_COMM
+            ggml_tensor* sp_prepared_pe_seq_major = nullptr;
+            if (use_sp_mainline &&
+                flux_sp_shared_pe_seq_major_enabled() &&
+                flux_sp_qk_seq_major_enabled()) {
+                sp_prepared_pe_seq_major = flux_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
+                                                                              pe,
+                                                                              "flux_sp_shared_pe_seq_major");
+                sd::ggml_graph_cut::mark_graph_cut(sp_prepared_pe_seq_major,
+                                                   "flux.shared_pe",
+                                                   "seq_major");
+            }
+#endif
+
+            for (int i = 0; i < params.depth && !cache_whole_inject; i++) {
                 if (skip_layers.size() > 0 && std::find(skip_layers.begin(), skip_layers.end(), i) != skip_layers.end()) {
                     continue;
+                }
+                // Sub-region seam (inside the double-block loop): inject skips the
+                // region, capture snapshots its input and builds its residual.
+                if (cache_subregion && cache_inject) {
+                    if (ggml_tensor* injected = cache_scope->step_inject_region(ctx->ggml_ctx, i, img)) {
+                        img = injected;
+                        i = cache_scope->inject_resume_index(params.depth) - 1;
+                        continue;
+                    }
+                }
+                if (cache_subregion) {
+                    cache_scope->begin_region(i, img);
                 }
 
                 auto block = std::dynamic_pointer_cast<DoubleStreamBlock>(blocks["double_blocks." + std::to_string(i)]);
@@ -2969,7 +3867,8 @@ namespace Flux {
                                                      pe,
                                                      txt_img_mask,
                                                      ds_img_mods,
-                                                     ds_txt_mods);
+                                                     ds_txt_mods,
+                                                     sp_prepared_pe_seq_major);
                     img          = img_txt.first;   // [N, local_img_token, hidden_size]
                     txt          = img_txt.second;  // [N, local_txt_token, hidden_size]
 #endif
@@ -2982,8 +3881,26 @@ namespace Flux {
                 // across segments. Keep block outputs as cache boundaries so
                 // later communication segments do not recompute the residual
                 // chain from earlier blocks.
-                sd::ggml_graph_cut::mark_graph_cut(img, "flux.double_blocks." + std::to_string(i), "img");
-                sd::ggml_graph_cut::mark_graph_cut(txt, "flux.double_blocks." + std::to_string(i), "txt");
+                if (!flux_sp_skip_block_cuts_with_custom_comm_enabled(ctx)) {
+                    sd::ggml_graph_cut::mark_graph_cut(img, "flux.double_blocks." + std::to_string(i), "img");
+                    sd::ggml_graph_cut::mark_graph_cut(txt, "flux.double_blocks." + std::to_string(i), "txt");
+                }
+                // Sub-region capture: build the region residual at its last block.
+                if (cache_subregion) {
+                    cache_scope->end_region(ctx->ggml_ctx, i, params.depth, img);
+                }
+                // GPU DiCache: on a full (capture) step, snapshot the probe-depth
+                // hidden state so the runner refreshes prev_probe for next step.
+                if (cache_scope != nullptr) {
+                    cache_scope->record_capture_probe_state(ctx->ggml_ctx, i, img);
+                }
+                // Probe step: stop after the first probe_depth double blocks and
+                // hand the shallow image state back to the runner. The final
+                // layer is not run; the runner only reads the probe/before pair.
+                if (cache_scope != nullptr && cache_scope->stop_after_block(i)) {
+                    cache_scope->on_probe(img);
+                    return img;
+                }
 #ifdef ED_DEBUG_SP_COMM
                 if (debug_compare_double_inner &&
                     i >= debug_compare_double_block_idx) {
@@ -3027,17 +3944,57 @@ namespace Flux {
             }
 #endif
 
+            bool txt_img_already_split_for_single = false;
+            ggml_tensor* txt_img = nullptr;
             if (use_sp_mainline) {
+                const int rank       = flux_sp_rank(ctx);
                 const int world_size = flux_sp_world_size(ctx);
-                auto double_gather = edgedit::parallel::sp_mark_gather_sequence_batched(ctx->ggml_ctx,
-                                                                                        {txt, img},
-                                                                                        world_size,
-                                                                                        1,
-                                                                                        {txt_sp_split.pad, img_sp_split.pad},
-                                                                                        "flux_sp_double_txt_img_gather");
-                GGML_ASSERT(double_gather.gathered.size() == 2);
-                txt = double_gather.gathered[0];
-                img = double_gather.gathered[1];
+#ifndef ED_DEBUG_SP_COMM
+                if (flux_sp_double_to_single_reshard_enabled()) {
+                    auto reshard = edgedit::parallel::sp_double_to_single_reshard_sequence_2way(ctx->ggml_ctx,
+                                                                                               txt,
+                                                                                               img,
+                                                                                               rank,
+                                                                                               world_size,
+                                                                                               ctx->process_group,
+                                                                                               "flux_sp_double_to_single_reshard");
+                    if (reshard.local != nullptr) {
+                        txt_img = reshard.local;
+                        txt_img_sp_split.local = txt_img;
+                        txt_img_sp_split.local_view = txt_img;
+                        txt_img_sp_split.input_padded = txt_img;
+                        txt_img_sp_split.rank = rank;
+                        txt_img_sp_split.world_size = world_size;
+                        txt_img_sp_split.seq_dim = 1;
+                        txt_img_sp_split.local_seq_len = reshard.local_seq_len;
+                        txt_img_sp_split.padded_seq_len = reshard.local_seq_len * world_size;
+                        txt_img_sp_split.original_seq_len = txt_img_sp_split.padded_seq_len;
+                        txt_img_sp_split.pad = 0;
+                        txt_img_already_split_for_single = true;
+                        if (flux_profile_enabled() && flux_profile_should_log_rank(ctx)) {
+                            LOG_INFO("flux SP profile double-to-single reshard rank=%d/%d txt_local_seq=%" PRId64 " img_local_seq=%" PRId64 " txt_img_local_seq=%" PRId64 " count_per_peer=%.2fMiB",
+                                     rank,
+                                     world_size,
+                                     reshard.first_local_seq,
+                                     reshard.second_local_seq,
+                                     reshard.local_seq_len,
+                                     static_cast<double>(reshard.count_per_peer * ggml_type_size(txt->type) / ggml_blck_size(txt->type)) /
+                                         (1024.0 * 1024.0));
+                        }
+                    }
+                }
+#endif
+                if (!txt_img_already_split_for_single) {
+                    auto double_gather = edgedit::parallel::sp_mark_gather_sequence_batched(ctx->ggml_ctx,
+                                                                                            {txt, img},
+                                                                                            world_size,
+                                                                                            1,
+                                                                                            {txt_sp_split.pad, img_sp_split.pad},
+                                                                                            "flux_sp_double_txt_img_gather");
+                    GGML_ASSERT(double_gather.gathered.size() == 2);
+                    txt = double_gather.gathered[0];
+                    img = double_gather.gathered[1];
+                }
 #ifdef ED_DEBUG_SP_COMM
                 if (debug_compare_double_end || debug_compare_double_block) {
                     const std::string name = debug_double_compare_label();
@@ -3075,7 +4032,9 @@ namespace Flux {
             }
 #endif
 
-            auto txt_img = ggml_concat(ctx->ggml_ctx, txt, img, 1);  // [N, n_txt_token + n_img_token, hidden_size]
+            if (txt_img == nullptr) {
+                txt_img = ggml_concat(ctx->ggml_ctx, txt, img, 1);  // [N, n_txt_token + n_img_token, hidden_size]
+            }
 #ifdef ED_DEBUG_SP_COMM
             if (use_sp_mainline && debug_compare_single_entry) {
                 mark_flux_debug_compare_tensor(ctx->ggml_ctx,
@@ -3084,7 +4043,7 @@ namespace Flux {
                                                "flux_mainline_single_entry_txt_img");
             }
 #endif
-            if (use_sp_mainline) {
+            if (use_sp_mainline && !txt_img_already_split_for_single) {
                 const int rank       = flux_sp_rank(ctx);
                 const int world_size = flux_sp_world_size(ctx);
                 const int64_t txt_img_pad = edgedit::parallel::sp_sequence_padding(txt_img->ne[1],
@@ -3119,21 +4078,33 @@ namespace Flux {
                     }
                 }
             }
-            for (int i = 0; i < params.depth_single_blocks; i++) {
+            for (int i = 0; i < params.depth_single_blocks && !cache_whole_inject; i++) {
                 if (skip_layers.size() > 0 && std::find(skip_layers.begin(), skip_layers.end(), i + params.depth) != skip_layers.end()) {
                     continue;
                 }
                 auto block = std::dynamic_pointer_cast<SingleStreamBlock>(blocks["single_blocks." + std::to_string(i)]);
 
                 if (use_sp_mainline) {
+#ifdef ED_DEBUG_SP_COMM
                     txt_img = block->forward_sp(ctx, txt_img, vec, pe, txt_img_mask, ss_mods);
+#else
+                    txt_img = block->forward_sp(ctx,
+                                                txt_img,
+                                                vec,
+                                                pe,
+                                                txt_img_mask,
+                                                ss_mods,
+                                                sp_prepared_pe_seq_major);
+#endif
                 } else {
                     txt_img = block->forward(ctx, txt_img, vec, pe, txt_img_mask, ss_mods);
                 }
                 // See the double-block cache boundary above. Without this
                 // cut, each following qkv communication segment walks the
                 // residual chain and replays previous single blocks.
-                sd::ggml_graph_cut::mark_graph_cut(txt_img, "flux.single_blocks." + std::to_string(i), "txt_img");
+                if (!flux_sp_skip_block_cuts_with_custom_comm_enabled(ctx)) {
+                    sd::ggml_graph_cut::mark_graph_cut(txt_img, "flux.single_blocks." + std::to_string(i), "txt_img");
+                }
             }
 
             if (use_sp_mainline) {
@@ -3142,7 +4113,8 @@ namespace Flux {
                                                                                  flux_sp_world_size(ctx),
                                                                                  1,
                                                                                  txt_img_sp_split.pad,
-                                                                                 "flux_sp_final_txt_img_gather");
+                                                                                 "flux_sp_final_txt_img_gather",
+                                                                                 ctx->process_group);
                 txt_img = txt_img_gather.gathered;
             }
 
@@ -3172,6 +4144,20 @@ namespace Flux {
                                                "flux_mainline_final_img_before_layer");
             }
 #endif
+
+            // Cache seam (whole-stack path): on a capture step expose the
+            // image-stream residual for the runner to read back; on an inject
+            // step the loops above ran zero blocks so `img` equals
+            // cache_img_before, and we add the reconstructed residual to
+            // approximate the full stack output. A sub-region was already
+            // captured/injected inside the double-block loop above.
+            if (cache_scope != nullptr && !cache_subregion) {
+                if (cache_scope->inject_mode()) {
+                    img = cache_scope->add_injected(ctx->ggml_ctx, cache_img_before);
+                } else if (cache_scope->capture_mode()) {
+                    cache_scope->build_feature(ctx->ggml_ctx, img);
+                }
+            }
 
             if (final_layer) {
                 img = final_layer->forward(ctx, img, vec);  // (N, T, patch_size ** 2 * out_channels)
@@ -3400,6 +4386,36 @@ namespace Flux {
         sd::Tensor<float> guidance_tensor;
         SDVersion version;
         bool use_mask = false;
+        sd::Tensor<float> inject_feature_host_;  // kept alive across cache inject build
+        sd::Tensor<float> gamma_scalar_host_;    // GPU DiCache: [1] gamma for reconstruct
+
+        // ---- Persistent cross-step GPU state for DiCache (Probe granularity) ----
+        // Holds the last computed step's probe state, block input, probe residuals
+        // (2-deep) and full residuals (2-deep) as GPU tensors, per CFG branch, so
+        // the decision metric and residual reconstruction run on-device instead of
+        // reading ~50MB back to host each step. Allocated lazily at the live img
+        // shape; freed on reset / shape change. See dicache_perf notes.
+        struct DiCacheGpuState {
+            ggml_context* ctx = nullptr;
+            ggml_backend_buffer_t buffer = nullptr;
+            ggml_tensor* prev_probe = nullptr;
+            ggml_tensor* prev_input = nullptr;
+            ggml_tensor* probe_prev1 = nullptr;
+            ggml_tensor* probe_prev2 = nullptr;
+            ggml_tensor* resid_prev1 = nullptr;
+            ggml_tensor* resid_prev2 = nullptr;
+            std::vector<int64_t> shape;   // [ne0, ne1, ne2] the tensors were built for
+            bool has_probe_hist = false;  // prev_probe/prev_input valid
+            int probe_resid_count = 0;    // 0/1/2 valid probe residuals
+            int resid_count = 0;          // 0/1/2 valid full residuals
+            void free() {
+                if (buffer != nullptr) { ggml_backend_buffer_free(buffer); buffer = nullptr; }
+                if (ctx != nullptr) { ggml_free(ctx); ctx = nullptr; }
+                prev_probe = prev_input = probe_prev1 = probe_prev2 = resid_prev1 = resid_prev2 = nullptr;
+                shape.clear(); has_probe_hist = false; probe_resid_count = 0; resid_count = 0;
+            }
+        };
+        std::unordered_map<const void*, DiCacheGpuState> dicache_gpu_states_;
 
         FluxRunner(ggml_backend_t backend,
                    bool offload_params_to_cpu,
@@ -3761,6 +4777,41 @@ namespace Flux {
                 return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, skip_layers);
             };
 
+            // Experimental (ED_CACHE_COMPILED_GRAPHS): build the forward graph once
+            // and reuse it across sampling steps, refreshing only the input bytes.
+            // Gated to the plain non-segmented path and the txt2img case whose graph
+            // shape is stable step-to-step: excludes chroma (zeroes guidance
+            // in-graph, so the leaf bytes differ from the arg), SLG steps
+            // (skip_layers changes structure), and ref-latent variants.
+            const bool reuse_graphs =
+                flux_env_flag_enabled("ED_CACHE_COMPILED_GRAPHS") &&
+                !can_attempt_graph_cut_segmented_compute() &&
+                !flux_params.is_chroma &&
+                version != VERSION_CHROMA_RADIANCE &&
+                skip_layers.empty() &&
+                ref_latents.empty();
+            if (reuse_graphs) {
+                // Order MUST mirror build_graph()'s make_input() call sequence.
+                std::vector<const sd::Tensor<float>*> ordered_inputs;
+                ordered_inputs.push_back(&x);
+                ordered_inputs.push_back(&timesteps);
+                if (!context.empty())  ordered_inputs.push_back(&context);
+                if (!c_concat.empty()) ordered_inputs.push_back(&c_concat);
+                if (!y.empty())        ordered_inputs.push_back(&y);
+                if ((flux_params.guidance_embed || flux_params.is_chroma) && !guidance.empty()) {
+                    ordered_inputs.push_back(&guidance);
+                }
+                const bool reuse_profile = flux_profile_enabled();
+                const int64_t t_reuse0 = reuse_profile ? ggml_time_ms() : 0;
+                auto reuse_result = restore_trailing_singleton_dims(
+                    GGMLRunner::compute_reuse<float>(get_graph, ordered_inputs, n_threads), x.dim());
+                if (reuse_profile) {
+                    LOG_INFO("flux transformer compute (reuse) elapsed = %lld ms",
+                             static_cast<long long>(ggml_time_ms() - t_reuse0));
+                }
+                return reuse_result;
+            }
+
             const bool profile = flux_profile_enabled();
             const int64_t t_flux0 = profile ? ggml_time_ms() : 0;
             auto result = restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), x.dim());
@@ -3779,6 +4830,393 @@ namespace Flux {
                 }
             }
             return result;
+        }
+
+        // ---- Cache seam passes (Feature/Probe policies). Reuse build_graph. ----
+        // Ensure the per-branch persistent DiCache GPU state exists and matches the
+        // current block-stack shape [ne0, ne1, ne2]. (Re)allocates on first use or
+        // a shape change. Returns the state; its tensors are zero-initialized and
+        // marked invalid (has_probe_hist=false, counts=0) until the first capture
+        // fills them.
+        DiCacheGpuState& ensure_dicache_gpu_state(const void* branch_key,
+                                                  int64_t ne0, int64_t ne1, int64_t ne2) {
+            DiCacheGpuState& s = dicache_gpu_states_[branch_key];
+            const std::vector<int64_t> want = {ne0, ne1, ne2};
+            if (s.buffer != nullptr && s.shape == want) {
+                return s;
+            }
+            s.free();
+            s.ctx = new_cache_context(16);
+            auto mk = [&]() {
+                ggml_tensor* t = ggml_new_tensor_3d(s.ctx, GGML_TYPE_F32, ne0, ne1, ne2);
+                return t;
+            };
+            s.prev_probe = mk();
+            s.prev_input = mk();
+            s.probe_prev1 = mk();
+            s.probe_prev2 = mk();
+            s.resid_prev1 = mk();
+            s.resid_prev2 = mk();
+            s.buffer = ggml_backend_alloc_ctx_tensors(s.ctx, runtime_backend);
+            GGML_ASSERT(s.buffer != nullptr);
+            s.shape = want;
+            s.has_probe_hist = false;
+            s.probe_resid_count = 0;
+            s.resid_count = 0;
+            return s;
+        }
+
+        void reset_dicache_gpu_states() {
+            for (auto& kv : dicache_gpu_states_) {
+                kv.second.free();
+            }
+            dicache_gpu_states_.clear();
+        }
+
+        // Ensure per-branch persistent state sized to the just-computed named
+        // cache tensors (feature/probe/before all share the block-stack shape).
+        DiCacheGpuState& ensure_dicache_gpu_state_from_named(const void* branch_key) {
+            ggml_tensor* feat = get_cache_tensor_by_name(kCacheFeatureName);
+            if (feat == nullptr) {
+                return dicache_gpu_states_[branch_key];  // empty; caller checks buffer
+            }
+            return ensure_dicache_gpu_state(branch_key, feat->ne[0], feat->ne[1], feat->ne[2]);
+        }
+
+        int dicache_probe_depth_ = 1;  // set by the pipeline before capture/probe
+
+        sd::DiffusionCacheResult compute_capture(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& c_concat,
+                                             const sd::Tensor<float>& y,
+                                             const sd::Tensor<float>& guidance,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             int region_start = 0,
+                                             int region_end = -1,
+                                             const void* branch_key = nullptr) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Capture;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            const bool gpu = dicache_gpu_enabled() && branch_key != nullptr;
+            if (gpu) {
+                scope.gpu_metric = true;         // record probe-depth state during capture
+                scope.probe_depth = std::max(1, dicache_probe_depth_);
+            }
+            std::function<void()> handoff = nullptr;
+            if (gpu) {
+                handoff = [&]() {
+                    // Refresh the persistent cross-step state device-to-device from
+                    // the just-computed named tensors, with a 2-deep ping-pong ring.
+                    DiCacheGpuState& s = ensure_dicache_gpu_state_from_named(branch_key);
+                    if (s.buffer == nullptr) return;
+                    // full residual ring: prev2 <- prev1, prev1 <- feature
+                    std::swap(s.resid_prev1, s.resid_prev2);
+                    copy_named_cache_tensor_to(kCacheFeatureName, s.resid_prev1);
+                    s.resid_count = std::min(2, s.resid_count + 1);
+                    // probe residual ring: prev2 <- prev1, prev1 <- (probe - before)
+                    std::swap(s.probe_prev1, s.probe_prev2);
+                    copy_named_cache_tensor_to(kCacheProbeResidName, s.probe_prev1);
+                    s.probe_resid_count = std::min(2, s.probe_resid_count + 1);
+                    // raw probe & input for the delta_y / delta_x decision metrics
+                    copy_named_cache_tensor_to(kCacheProbeName, s.prev_probe);
+                    copy_named_cache_tensor_to(kCacheBeforeName, s.prev_input);
+                    s.has_probe_hist = true;
+                };
+            }
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim(), handoff);
+            sd::DiffusionCacheResult out;
+            out.output = std::move(pass.output);
+            out.feature = std::move(pass.feature);
+            return out;
+        }
+
+        sd::Tensor<float> compute_inject(int n_threads,
+                                         const sd::Tensor<float>& x,
+                                         const sd::Tensor<float>& timesteps,
+                                         const sd::Tensor<float>& context,
+                                         const sd::Tensor<float>& c_concat,
+                                         const sd::Tensor<float>& y,
+                                         const sd::Tensor<float>& guidance,
+                                         const std::vector<sd::Tensor<float>>& ref_latents,
+                                         bool increase_ref_index,
+                                         const sd::Tensor<float>& feature,
+                                         int region_start = 0,
+                                         int region_end = -1) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Inject;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            inject_feature_host_ = feature;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                scope.inject_feature = make_input(inject_feature_host_);
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            return std::move(pass.output);
+        }
+
+        // GPU DiCache reuse step: reconstruct the residual on-device from the
+        // persistent full-residual ring and a host-clamped gamma, injecting
+        //   x_before + resid_prev2 + gamma*(resid_prev1 - resid_prev2)
+        // No ~50MB host residual is built or uploaded. Returns empty if state is
+        // not ready (caller falls back to a capturing full step).
+        sd::Tensor<float> compute_inject_gpu(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& c_concat,
+                                             const sd::Tensor<float>& y,
+                                             const sd::Tensor<float>& guidance,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             float gamma,
+                                             const void* branch_key,
+                                             int region_start = 0,
+                                             int region_end = -1) {
+            auto it = dicache_gpu_states_.find(branch_key);
+            if (it == dicache_gpu_states_.end() || it->second.buffer == nullptr ||
+                it->second.resid_count < 2) {
+                return {};  // not enough history yet
+            }
+            DiCacheGpuState& s = it->second;
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Inject;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            scope.resid_prev1_node = s.resid_prev1;
+            scope.resid_prev2_node = s.resid_prev2;
+            gamma_scalar_host_ = sd::Tensor<float>({1}, std::vector<float>{gamma});
+            auto get_graph = [&]() -> ggml_cgraph* {
+                scope.gamma_scalar = make_input(gamma_scalar_host_);
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            return std::move(pass.output);
+        }
+
+        // ---- Feature-granularity on-GPU reuse (MagCache / TaylorSeer-single) ----
+        // MagCache's host reuse pays a ~50MB reconstruct copy + a 2nd host copy +
+        // an H2D upload per skip step. These two methods keep the last captured
+        // block-stack residual resident on-device (resid_prev1) and inject
+        // x_before + resid_prev1 straight from device memory. Same DiCacheGpuState
+        // struct, but only the resid_prev1 slot is used (no probe/gamma ring).
+        static bool feature_gpu_enabled() {
+            const char* v = std::getenv("ED_FEATURE_CACHE_GPU");
+            if (v == nullptr || v[0] == '\0') {
+                return true;  // default on
+            }
+            return v[0] != '0';
+        }
+
+        // Full-compute capture that also snapshots the block-stack residual to the
+        // persistent resid_prev1 (device-to-device), so the next skip step can
+        // inject it without a host round-trip.
+        sd::DiffusionCacheResult compute_capture_feature_gpu(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& c_concat,
+                                             const sd::Tensor<float>& y,
+                                             const sd::Tensor<float>& guidance,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             int region_start,
+                                             int region_end,
+                                             const void* branch_key) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Capture;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            std::function<void()> handoff = [&]() {
+                DiCacheGpuState& s = ensure_dicache_gpu_state_from_named(branch_key);
+                if (s.buffer == nullptr) return;
+                copy_named_cache_tensor_to(kCacheFeatureName, s.resid_prev1);
+                s.resid_count = std::min(2, s.resid_count + 1);
+            };
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim(), handoff);
+            sd::DiffusionCacheResult out;
+            out.output = std::move(pass.output);
+            // No host feature readback: the residual lives on-device in resid_prev1.
+            return out;
+        }
+
+        // Reuse step: inject x_before + resid_prev1 entirely on-device. Returns
+        // empty if state is not ready (caller falls back to a capturing full step).
+        sd::Tensor<float> compute_inject_feature_gpu(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& c_concat,
+                                             const sd::Tensor<float>& y,
+                                             const sd::Tensor<float>& guidance,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             const void* branch_key,
+                                             int region_start,
+                                             int region_end) {
+            auto it = dicache_gpu_states_.find(branch_key);
+            if (it == dicache_gpu_states_.end() || it->second.buffer == nullptr ||
+                it->second.resid_count < 1) {
+                return {};  // no residual captured yet
+            }
+            DiCacheGpuState& s = it->second;
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Inject;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            scope.resid_prev1_node = s.resid_prev1;  // single residual: gpu_reuse_available()
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            return std::move(pass.output);
+        }
+
+        // ---- Declarative device-slot seam (B2): same on-device single-residual
+        // reuse as compute_*_feature_gpu, but the persistent residual tensor is a
+        // CacheStateManager device slot (passed in) instead of DiCacheGpuState.
+        // capture copies the block-stack residual into `slot`; inject reads it. ----
+        sd::Tensor<float> compute_capture_to_slot(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& c_concat,
+                                             const sd::Tensor<float>& y,
+                                             const sd::Tensor<float>& guidance,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             const std::function<void*(const std::vector<int64_t>&)>& alloc_slot,
+                                             int region_start,
+                                             int region_end) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Capture;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            std::function<void()> handoff = [&]() {
+                // The residual named tensor is resident; allocate the device slot at
+                // its true (packed block-stack seq) shape, then d2d-copy into it.
+                ggml_tensor* feat = get_cache_tensor_by_name(kCacheFeatureName);
+                if (feat == nullptr) {
+                    return;
+                }
+                // Copy feat's exact dims so the slot is byte- and broadcast-identical
+                // (add_injected does ggml_add(x_before, slot)). ggml_n_dims collapses
+                // trailing singletons but never a size-1 inner dim.
+                std::vector<int64_t> shape;
+                const int nd = std::max(1, ggml_n_dims(feat));
+                for (int i = 0; i < nd; ++i) {
+                    shape.push_back(feat->ne[i]);
+                }
+                ggml_tensor* slot = static_cast<ggml_tensor*>(alloc_slot(shape));
+                if (slot != nullptr && ggml_nbytes(slot) == ggml_nbytes(feat)) {
+                    copy_named_cache_tensor_to(kCacheFeatureName, slot);
+                }
+            };
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim(), handoff);
+            return std::move(pass.output);
+        }
+
+        sd::Tensor<float> compute_inject_from_slot(int n_threads,
+                                             const sd::Tensor<float>& x,
+                                             const sd::Tensor<float>& timesteps,
+                                             const sd::Tensor<float>& context,
+                                             const sd::Tensor<float>& c_concat,
+                                             const sd::Tensor<float>& y,
+                                             const sd::Tensor<float>& guidance,
+                                             const std::vector<sd::Tensor<float>>& ref_latents,
+                                             bool increase_ref_index,
+                                             ggml_tensor* slot,
+                                             int region_start,
+                                             int region_end) {
+            if (slot == nullptr) {
+                return {};
+            }
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Inject;
+            scope.region_start = region_start;
+            scope.region_end = region_end;
+            scope.resid_prev1_node = slot;  // single residual: gpu_reuse_available()
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            return std::move(pass.output);
+        }
+
+        sd::DiffusionCacheResult compute_probe(int n_threads,
+                                           const sd::Tensor<float>& x,
+                                           const sd::Tensor<float>& timesteps,
+                                           const sd::Tensor<float>& context,
+                                           const sd::Tensor<float>& c_concat,
+                                           const sd::Tensor<float>& y,
+                                           const sd::Tensor<float>& guidance,
+                                           const std::vector<sd::Tensor<float>>& ref_latents,
+                                           bool increase_ref_index,
+                                           int probe_depth,
+                                           const void* branch_key = nullptr) {
+            sd::CacheGraphScope scope;
+            scope.mode = sd::CacheGraphScope::Mode::Probe;
+            scope.probe_depth = probe_depth;
+            // GPU DiCache path (env-gated until verified): attach the persistent
+            // prev_* tensors so build_probe_metrics emits delta_y/delta_x/gamma
+            // reductions in-graph; only scalars are read back.
+            DiCacheGpuState* gpu = nullptr;
+            if (dicache_gpu_enabled() && branch_key != nullptr) {
+                auto it = dicache_gpu_states_.find(branch_key);
+                if (it != dicache_gpu_states_.end() && it->second.has_probe_hist) {
+                    gpu = &it->second;
+                    scope.gpu_metric = true;
+                    scope.prev_probe_node = gpu->prev_probe;
+                    scope.prev_input_node = gpu->prev_input;
+                    if (gpu->probe_resid_count >= 2) {
+                        scope.probe_prev1_node = gpu->probe_prev1;
+                        scope.probe_prev2_node = gpu->probe_prev2;
+                    }
+                }
+            }
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, {});
+            };
+            auto pass = run_cache_pass(get_graph, n_threads, &scope, x.dim());
+            sd::DiffusionCacheResult out;
+            if (scope.gpu_metric) {
+                // GPU path: no ~50MB host tensors; only scalars.
+                out.delta_y = pass.delta_y;
+                out.delta_x = pass.delta_x;
+                out.gamma = pass.gamma;
+                return out;
+            }
+            // Prefer the explicit probe_node readback; fall back to the graph
+            // output (which is the probe state) if the node wasn't recorded.
+            out.probe = pass.probe.empty() ? std::move(pass.output) : std::move(pass.probe);
+            out.before = std::move(pass.before);
+            return out;
+        }
+
+        // GPU DiCache is the default: on-device metric + reconstruction avoids the
+        // ~4.5s/img host scalar work and the ~50MB/step GPU->host readback, and is
+        // slightly MORE accurate (exact GPU reductions). Set ED_DICACHE_GPU=0 to
+        // fall back to the host path (e.g. for debugging or a backend without the
+        // required ggml reduction ops).
+        static bool dicache_gpu_enabled() {
+            const char* v = std::getenv("ED_DICACHE_GPU");
+            if (v == nullptr || v[0] == '\0') {
+                return true;  // default on
+            }
+            return v[0] != '0';
         }
 
         void test() {

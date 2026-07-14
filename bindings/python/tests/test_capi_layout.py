@@ -12,6 +12,7 @@ class CApiLayoutTests(unittest.TestCase):
         self.assertIn("diffusion_model_path", field_names)
         self.assertIn("vae_path", field_names)
         self.assertIn("flash_attention", field_names)
+        self.assertIn("qwen_image_zero_cond_t", field_names)
         self.assertIn("cfg_parallel_size", field_names)
 
     def test_image_generation_params_contains_expected_fields(self) -> None:

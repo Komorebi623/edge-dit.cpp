@@ -275,12 +275,16 @@ void NcclProcessGroup::barrier() {
     check_cuda(cudaFree(d_out), "cudaFree");
 }
 
-std::unique_ptr<Work> NcclProcessGroup::record_work() {
+std::unique_ptr<Work> NcclProcessGroup::record_work(cudaStream_t stream) {
     cudaEvent_t event = nullptr;
     check_cuda(cudaEventCreateWithFlags(&event, cudaEventDisableTiming),
                "cudaEventCreateWithFlags");
-    check_cuda(cudaEventRecord(event, stream_), "cudaEventRecord");
+    check_cuda(cudaEventRecord(event, stream), "cudaEventRecord");
     return std::make_unique<NcclWork>(event);
+}
+
+std::unique_ptr<Work> NcclProcessGroup::record_work() {
+    return record_work(stream_);
 }
 
 std::unique_ptr<Work> NcclProcessGroup::all_reduce_async(
@@ -341,6 +345,36 @@ std::unique_ptr<Work> NcclProcessGroup::all_gather_async(
     return record_work();
 }
 
+std::unique_ptr<Work> NcclProcessGroup::all_gather_async_on_stream(
+    const Buffer& input,
+    const Buffer& output,
+    void* stream
+) {
+    set_device();
+    check_buffer(input);
+    check_buffer(output);
+
+    cudaStream_t comm_stream = reinterpret_cast<cudaStream_t>(stream);
+    if (comm_stream == nullptr) {
+        comm_stream = stream_;
+    }
+
+    if (input.type != output.type ||
+        output.count != input.count * static_cast<size_t>(config_.world_size)) {
+        throw std::invalid_argument("NCCL all_gather output must hold world_size copies of input");
+    }
+
+    check_nccl(ncclAllGather(input.data,
+                             output.data,
+                             input.count,
+                             to_nccl_dtype(input.type),
+                             comm_,
+                             comm_stream),
+               "ncclAllGather");
+
+    return record_work(comm_stream);
+}
+
 void NcclProcessGroup::all_gather(
     const Buffer& input,
     const Buffer& output
@@ -354,9 +388,21 @@ std::unique_ptr<Work> NcclProcessGroup::all_to_all_async(
     const Buffer& output,
     size_t count_per_peer
 ) {
+    return all_to_all_async_impl(input, output, count_per_peer, stream_);
+}
+
+std::unique_ptr<Work> NcclProcessGroup::all_to_all_async_impl(
+    const Buffer& input,
+    const Buffer& output,
+    size_t count_per_peer,
+    cudaStream_t comm_stream
+) {
     set_device();
     check_buffer(input);
     check_buffer(output);
+    if (comm_stream == nullptr) {
+        comm_stream = stream_;
+    }
 
     const size_t total_count = count_per_peer * static_cast<size_t>(config_.world_size);
     if (input.type != output.type ||
@@ -371,28 +417,63 @@ std::unique_ptr<Work> NcclProcessGroup::all_to_all_async(
     const size_t chunk_size = count_per_peer * item_size;
     const uint8_t* send     = reinterpret_cast<const uint8_t*>(input.data);
     uint8_t* recv           = reinterpret_cast<uint8_t*>(output.data);
+    const int self_peer     = config_.rank;
+    const uint8_t* self_send = send + static_cast<size_t>(self_peer) * chunk_size;
+    uint8_t* self_recv       = recv + static_cast<size_t>(self_peer) * chunk_size;
 
-    check_nccl(ncclGroupStart(), "ncclGroupStart");
-    for (int peer = 0; peer < config_.world_size; ++peer) {
-        check_nccl(ncclSend(send + static_cast<size_t>(peer) * chunk_size,
-                            count_per_peer,
-                            to_nccl_dtype(input.type),
-                            peer,
-                            comm_,
-                            stream_),
-                   "ncclSend");
-
-        check_nccl(ncclRecv(recv + static_cast<size_t>(peer) * chunk_size,
-                            count_per_peer,
-                            to_nccl_dtype(output.type),
-                            peer,
-                            comm_,
-                            stream_),
-                   "ncclRecv");
+    if (self_send != self_recv && chunk_size > 0) {
+        check_cuda(cudaMemcpyAsync(self_recv,
+                                   self_send,
+                                   chunk_size,
+                                   cudaMemcpyDeviceToDevice,
+                                   comm_stream),
+                   "cudaMemcpyAsync");
     }
-    check_nccl(ncclGroupEnd(), "ncclGroupEnd");
 
-    return record_work();
+    if (config_.world_size > 1) {
+        check_nccl(ncclGroupStart(), "ncclGroupStart");
+        for (int peer = 0; peer < config_.world_size; ++peer) {
+            if (peer == self_peer) {
+                continue;
+            }
+            check_nccl(ncclSend(send + static_cast<size_t>(peer) * chunk_size,
+                                count_per_peer,
+                                to_nccl_dtype(input.type),
+                                peer,
+                                comm_,
+                                comm_stream),
+                       "ncclSend");
+
+            check_nccl(ncclRecv(recv + static_cast<size_t>(peer) * chunk_size,
+                                count_per_peer,
+                                to_nccl_dtype(output.type),
+                                peer,
+                                comm_,
+                                comm_stream),
+                       "ncclRecv");
+        }
+        check_nccl(ncclGroupEnd(), "ncclGroupEnd");
+    }
+
+    return record_work(comm_stream);
+}
+
+std::unique_ptr<Work> NcclProcessGroup::all_to_all_async_on_stream(
+    const Buffer& input,
+    const Buffer& output,
+    size_t count_per_peer,
+    void* stream
+) {
+    set_device();
+    check_buffer(input);
+    check_buffer(output);
+
+    cudaStream_t comm_stream = reinterpret_cast<cudaStream_t>(stream);
+    if (comm_stream == nullptr) {
+        comm_stream = stream_;
+    }
+
+    return all_to_all_async_impl(input, output, count_per_peer, comm_stream);
 }
 
 void NcclProcessGroup::all_to_all(

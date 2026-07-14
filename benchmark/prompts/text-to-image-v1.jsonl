@@ -1,0 +1,4 @@
+{"prompt_id":"flux_glass_teapot","task":"text-to-image","prompt":"a glass teapot on a wooden table","negative_prompt":"","seed":0,"notes":"v0.1.0-alpha FLUX.1-dev pilot prompt"}
+{"prompt_id":"sd3_glass_teapot","task":"text-to-image","prompt":"a glass teapot on a wooden table","negative_prompt":"","seed":0,"notes":"v0.1.0-alpha SD3 Medium text-to-image prompt"}
+{"prompt_id":"sd35_glass_teapot","task":"text-to-image","prompt":"a glass teapot on a wooden table","negative_prompt":"","seed":0,"notes":"v0.1.0-alpha SD3.5 text-to-image prompt"}
+{"prompt_id":"qwen_city_robot","task":"text-to-image","prompt":"a small service robot reading a map in a modern city plaza","negative_prompt":"","seed":0,"notes":"v0.1.0-alpha Qwen-Image text-to-image prompt"}

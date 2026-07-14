@@ -34,24 +34,33 @@ bool is_auto_backend(const std::string& name) {
     return name.empty() || lowercase(name) == "auto" || lowercase(name) == "default";
 }
 
+bool is_generic_gpu_request(const std::string& requested) {
+    const std::string request = lowercase(requested);
+    return request == "gpu" || request == "cuda" || request == "vulkan" || request == "metal";
+}
+
 bool device_name_matches(ggml_backend_dev_t dev, const std::string& requested) {
     if (dev == nullptr) {
         return false;
     }
 
     const std::string request = lowercase(requested);
+    
     if (request == "gpu") {
         const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
         return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
     }
 
-    const char* name = ggml_backend_dev_name(dev);
-    return name != nullptr && contains(lowercase(name), request);
-}
-
-bool is_generic_gpu_request(const std::string& requested) {
-    const std::string request = lowercase(requested);
-    return request == "gpu" || request == "cuda";
+    const char* name_c = ggml_backend_dev_name(dev);
+    if (name_c == nullptr) {
+        return false;
+    }
+    const std::string name = lowercase(name_c);
+    if (request == "metal") {
+        // ggml's Metal device is named "MTL0", not "metal"
+        return contains(name, "metal") || contains(name, "mtl");
+    }
+    return contains(name, request);
 }
 
 bool is_gpu_device(ggml_backend_dev_t dev) {

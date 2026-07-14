@@ -1,0 +1,31 @@
+schema_version: 1
+system_id: xdit
+display_name: xDiT
+role: parallel_baseline
+runner: xdit
+repo:
+  path_ref: xdit_repo
+  remote: origin
+  branch: main
+  commit_policy: force_latest_origin_main
+environment:
+  pythonpath_ref: xdit_repo
+capabilities:
+  tasks: [text-to-image, text-to-video]
+  backends: [cuda]
+  parallel: [ulysses, ring, pipefusion, cfg]
+  memory_modes: [parallel_vae, torch_dtype]
+preflight:
+  force_update_commands:
+    - git fetch origin main
+    - git switch main
+    - git reset --hard origin/main
+    - git clean -fdx
+  require_python_packages: [torch, diffusers, transformers]
+  require_imports: [xfuser, distvae]
+  require_flux_entrypoint: true
+unsupported_policy:
+  missing_flux_entrypoint_must_emit_status: unsupported
+benchmark_notes:
+  - xDiT is used for parallel baseline comparisons, not for the single-GPU main table.
+  - If the latest checkout has no usable FLUX entrypoint, mark the workload unsupported with the reason.

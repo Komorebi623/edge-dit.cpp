@@ -25,7 +25,7 @@ void print_usage(const char* prog) {
         "  --clip_l <path>           CLIP-L text encoder weights\n"
         "  --clip_g <path>           CLIP-G text encoder weights\n"
         "  --t5xxl <path>            T5XXL text encoder weights\n"
-        "  --backend <name>          Backend: auto, cpu, cuda, gpu. Default: auto\n"
+        "  --backend <name>          Backend: auto, cpu, cuda, vulkan, metal, gpu. Default: auto\n"
         "  --gpu                     Alias for --backend gpu\n"
         "  -t, --threads <int>       Thread count, default: auto\n\n"
         "Default generation options:\n"

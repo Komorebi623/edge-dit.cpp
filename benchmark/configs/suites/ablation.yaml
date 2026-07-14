@@ -1,0 +1,44 @@
+schema_version: 1
+suite_id: ablation
+description: Graph, operator, quantization, and cache ablation suite.
+mode: official
+defaults:
+  warmup_runs: 1
+  measured_runs: 5
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux1-dev-t2i.yaml
+ablation_stacks:
+  - stack_id: full_optimized_runtime
+    options: {}
+  - stack_id: no_flash_attention
+    options:
+      flash_attention: false
+  - stack_id: graph_cut_profile
+    options:
+      profile_graph_cuts: true
+  - stack_id: cache_off
+    options:
+      cache: "off"
+  - stack_id: easycache
+    options:
+      cache: easycache
+  - stack_id: dicache
+    options:
+      cache: dicache
+  - stack_id: q8
+    options:
+      precision: q8_0
+  - stack_id: q4
+    options:
+      precision: q4_0
+reporting:
+  table: graph_operator_and_reuse_ablation
+  require_quality_reference: edge-dit-bf16-full-compute

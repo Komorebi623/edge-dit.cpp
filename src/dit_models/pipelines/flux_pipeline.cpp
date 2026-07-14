@@ -8,7 +8,7 @@
 #include <memory>
 #include <sstream>
 
-#include "core/optimization/cache/cache_runtime.hpp"
+#include "core/optimization/cache/runtime/cache_engine.hpp"
 #include "dit_models/components/autoencoders/auto_encoder_kl.hpp"
 #include "dit_models/components/text_encoders/conditioner.hpp"
 #include "dit_models/models/flux.hpp"
@@ -680,6 +680,10 @@ ed_status_t FluxPipeline::generate_image(const ed_image_generation_params_t* par
     }
 
     const int count = params->batch_count > 0 ? params->batch_count : 1;
+    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    if (GenerationControl* control = runtime_->generation_control()) {
+        control->start(count * steps);
+    }
     ed_image_t* images = static_cast<ed_image_t*>(std::calloc(static_cast<size_t>(count), sizeof(ed_image_t)));
     if (images == nullptr) {
         if (error != nullptr) {
@@ -857,9 +861,41 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
     sd::Tensor<float> x = init_latent * (1.0f - sigmas[0]) + noise * sigmas[0];
     sd::Tensor<float> denoised = x;
     cache::CacheRuntime cache_runtime;
-    const bool cache_enabled = cache_runtime.init(params->sample, version_, sigmas);
+    // The block-stack seam is usable only outside CFG-parallel (skip decisions
+    // must stay in lockstep across ranks) and when the runner can cut its stack.
+    const bool cfg_parallel_for_cache =
+        !uncond.empty() && parallel::cfg_parallel_available(runtime_->parallel_context());
+    const bool cache_seam_available =
+        !cfg_parallel_for_cache && flux_runner_->feature_cache_available();
+    // Wire the device store only when the on-GPU feature-reuse path is active
+    // (ED_FEATURE_CACHE_GPU on); with it off, leave the store null so a
+    // device_backed slot cleanly falls back to the host declarative path.
+    cache::ICacheDeviceStore* cache_store =
+        (cache_seam_available && flux_runner_ != nullptr &&
+         Flux::FluxRunner::feature_gpu_enabled())
+            ? flux_runner_->cache_device_store()
+            : nullptr;
+    const bool cache_enabled =
+        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, cache_store);
+    // GPU DiCache (ED_DICACHE_GPU): reset per-generation persistent state and set
+    // the probe depth the capture step uses to snapshot its probe residual. Read
+    // the resolved depth from the engine so it stays in sync with the policy's
+    // config (the reference default is 1, NOT DBCache's cache_Fn_compute_blocks).
+    if (cache_enabled && flux_runner_ != nullptr) {
+        flux_runner_->reset_dicache_gpu_states();
+        flux_runner_->dicache_probe_depth_ = cache_runtime.dicache_probe_depth();
+    }
     const int64_t sample_start_ms = ggml_time_ms();
+    GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {
+        if (control != nullptr && control->should_cancel()) {
+            control->mark_cancelled();
+            if (error != nullptr && error->empty()) {
+                *error = "generation cancelled";
+            }
+            flux_runner_->free_compute_buffer();
+            return false;
+        }
         const float sigma = sigmas[static_cast<size_t>(step)];
         const float sigma_next = sigmas[static_cast<size_t>(step + 1)];
         const float c_skip = 1.0f;
@@ -886,39 +922,98 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         const void* condition_key = static_cast<const void*>(&condition);
         const cache::CacheBranch condition_branch = uncond.empty() ? cache::CacheBranch::Main
                                                                    : cache::CacheBranch::Cond;
-        const bool cache_hit = !use_cfg_parallel &&
-                               cache_enabled &&
-                               cache_runtime.before_forward(condition_branch,
-                                                            condition_key,
-                                                            noised_input,
-                                                            &model_out);
+
+        // Build cache hooks for one condition. Feature/Probe methods (which
+        // gate to the plain compute path) are disabled under CFG-parallel to
+        // keep rank skip-decisions in lockstep; DiCache (Probe) is value-driven
+        // so it must never run per-rank.
+        auto make_hooks = [&](const SDCondition& cond_in) {
+            cache::CacheRunnerHooks hooks;
+            hooks.input = &noised_input;
+            hooks.full = [&]() {
+                return flux_runner_->compute(n_threads, noised_input, timesteps,
+                                             cond_in.c_crossattn, {}, cond_in.c_vector, guidance);
+            };
+            const bool seam_ok = !use_cfg_parallel && flux_runner_->feature_cache_available();
+            hooks.feature_supported = seam_ok;
+            if (seam_ok) {
+                const void* branch_key = static_cast<const void*>(&cond_in);
+                // Only DiCache (Probe) uses the on-GPU probe/inject seam that a
+                // branch_key drives; passing it into compute_capture for a Feature
+                // method (MagCache/TaylorSeer/SenCache) would flip gpu_metric on and
+                // suppress the host feature readback those methods rely on.
+                const bool is_probe = cache_runtime.granularity() == cache::CacheGranularity::Probe;
+                // Feature-granularity on-GPU reuse: keep the captured residual on
+                // device and inject it there on skips, avoiding the ~50MB host
+                // reconstruct copy + H2D upload the host inject path pays per skip.
+                const bool feature_gpu = !is_probe &&
+                    cache_runtime.granularity() == cache::CacheGranularity::Feature &&
+                    Flux::FluxRunner::feature_gpu_enabled();
+                const void* capture_key = is_probe ? branch_key : nullptr;
+                if (feature_gpu) {
+                    // Declarative device-slot seam (B2): the lowering hands us the
+                    // slot's device tensor; capture stores the residual into it and
+                    // reuse injects x_before + slot on-device. Replaces the legacy
+                    // capture_feature_gpu + inject_feature_gpu (DiCacheGpuState) path.
+                    hooks.capture_to_slot = [&](const std::function<void*(const std::vector<int64_t>&)>& alloc_slot,
+                                                int region_start, int region_end) {
+                        return flux_runner_->compute_capture_to_slot(
+                            n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
+                            cond_in.c_vector, guidance, {}, false,
+                            alloc_slot, region_start, region_end);
+                    };
+                    hooks.inject_from_slot = [&](void* slot, int region_start, int region_end) {
+                        return flux_runner_->compute_inject_from_slot(
+                            n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
+                            cond_in.c_vector, guidance, {}, false,
+                            static_cast<ggml_tensor*>(slot), region_start, region_end);
+                    };
+                } else {
+                    hooks.capture = [&, capture_key](int region_start, int region_end) {
+                        return flux_runner_->compute_capture(n_threads, noised_input, timesteps,
+                                                             cond_in.c_crossattn, {}, cond_in.c_vector,
+                                                             guidance, {}, false, region_start, region_end,
+                                                             capture_key);
+                    };
+                }
+                hooks.inject = [&](const sd::Tensor<float>& feat, int region_start, int region_end) {
+                    return flux_runner_->compute_inject(n_threads, noised_input, timesteps,
+                                                        cond_in.c_crossattn, {}, cond_in.c_vector,
+                                                        guidance, {}, false, feat, region_start, region_end);
+                };
+                if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
+                    hooks.probe = [&, branch_key](int depth) {
+                        return flux_runner_->compute_probe(n_threads, noised_input, timesteps,
+                                                           cond_in.c_crossattn, {}, cond_in.c_vector,
+                                                           guidance, {}, false, depth, branch_key);
+                    };
+                    // Only wire the on-GPU inject when the model's GPU DiCache path
+                    // is active. With ED_DICACHE_GPU=0, leaving inject_gpu unset lets
+                    // the lowering take the declarative host probe path (the residual
+                    // ring blend), instead of the legacy on-device reconstruction.
+                    if (Flux::FluxRunner::dicache_gpu_enabled()) {
+                        hooks.inject_gpu = [&, branch_key](float gamma, int region_start, int region_end) {
+                            return flux_runner_->compute_inject_gpu(n_threads, noised_input, timesteps,
+                                                                    cond_in.c_crossattn, {}, cond_in.c_vector,
+                                                                    guidance, {}, false, gamma, branch_key,
+                                                                    region_start, region_end);
+                        };
+                    }
+                }
+            }
+            return hooks;
+        };
+
         if (use_cfg_parallel) {
             const bool local_is_uncond = cfg_rank == 0;
             const SDCondition& local_condition = local_is_uncond ? uncond : condition;
             const cache::CacheBranch local_branch = local_is_uncond ? cache::CacheBranch::Uncond
                                                                     : cache::CacheBranch::Cond;
             const void* local_key = static_cast<const void*>(&local_condition);
-            sd::Tensor<float> local_out;
-            const bool local_cache_hit = cache_enabled &&
-                                         cache_runtime.before_forward(local_branch,
-                                                                      local_key,
-                                                                      noised_input,
-                                                                      &local_out);
-            if (!local_cache_hit) {
-                local_out = flux_runner_->compute(n_threads,
-                                                  noised_input,
-                                                  timesteps,
-                                                  local_condition.c_crossattn,
-                                                  {},
-                                                  local_condition.c_vector,
-                                                  guidance);
-                if (!local_out.empty() && cache_enabled) {
-                    cache_runtime.after_forward(local_branch,
-                                                local_key,
-                                                noised_input,
-                                                local_out);
-                }
-            }
+            sd::Tensor<float> local_out = cache_enabled
+                ? cache_runtime.run_branch(local_branch, local_key, make_hooks(local_condition))
+                : flux_runner_->compute(n_threads, noised_input, timesteps,
+                                        local_condition.c_crossattn, {}, local_condition.c_vector, guidance);
             std::vector<sd::Tensor<float>> gathered;
             if (local_out.empty() ||
                 !parallel::cfg_all_gather(*runtime_->parallel_context(), local_out, &gathered, error) ||
@@ -930,44 +1025,18 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                 return false;
             }
             model_out = gathered[0] + cfg_scale * (gathered[1] - gathered[0]);
-        } else if (!cache_hit) {
-            model_out = flux_runner_->compute(n_threads,
-                                              noised_input,
-                                              timesteps,
-                                              condition.c_crossattn,
-                                              {},
-                                              condition.c_vector,
-                                              guidance);
-            if (!model_out.empty() && cache_enabled) {
-                cache_runtime.after_forward(condition_branch,
-                                            condition_key,
-                                            noised_input,
-                                            model_out);
-            }
+        } else {
+            model_out = cache_enabled
+                ? cache_runtime.run_branch(condition_branch, condition_key, make_hooks(condition))
+                : flux_runner_->compute(n_threads, noised_input, timesteps,
+                                        condition.c_crossattn, {}, condition.c_vector, guidance);
         }
         if (!uncond.empty() && !use_cfg_parallel) {
-            sd::Tensor<float> uncond_out;
             const void* uncond_key = static_cast<const void*>(&uncond);
-            const bool uncond_cache_hit = cache_enabled &&
-                                          cache_runtime.before_forward(cache::CacheBranch::Uncond,
-                                                                       uncond_key,
-                                                                       noised_input,
-                                                                       &uncond_out);
-            if (!uncond_cache_hit) {
-                uncond_out = flux_runner_->compute(n_threads,
-                                                   noised_input,
-                                                   timesteps,
-                                                   uncond.c_crossattn,
-                                                   {},
-                                                   uncond.c_vector,
-                                                   guidance);
-                if (!uncond_out.empty() && cache_enabled) {
-                    cache_runtime.after_forward(cache::CacheBranch::Uncond,
-                                                uncond_key,
-                                                noised_input,
-                                                uncond_out);
-                }
-            }
+            sd::Tensor<float> uncond_out = cache_enabled
+                ? cache_runtime.run_branch(cache::CacheBranch::Uncond, uncond_key, make_hooks(uncond))
+                : flux_runner_->compute(n_threads, noised_input, timesteps,
+                                        uncond.c_crossattn, {}, uncond.c_vector, guidance);
             if (uncond_out.empty()) {
                 if (error != nullptr) {
                     *error = sd_format("Flux unconditional transformer compute failed at step %d", step + 1);
@@ -984,6 +1053,29 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
             flux_runner_->free_compute_buffer();
             return false;
         }
+
+        // SenCache calibration: measure finite-difference sensitivities on the
+        // CFG-combined velocity. Two extra plain forwards per step, calibration
+        // only; the seam (and thus calibration) is off under CFG-parallel. The
+        // policy owns the protocol; the pipeline supplies only forward_at.
+        if (cache_enabled && cache_runtime.needs_calibration() && !use_cfg_parallel) {
+            auto forward_at = [&](const sd::Tensor<float>& x_raw, float sigma_eval) -> sd::Tensor<float> {
+                sd::Tensor<float> ts({1}, std::vector<float>{sigma_eval});
+                sd::Tensor<float> cond_v = flux_runner_->compute(n_threads, x_raw, ts,
+                                                                 condition.c_crossattn, {}, condition.c_vector, guidance);
+                if (cond_v.empty() || uncond.empty()) {
+                    return cond_v;
+                }
+                sd::Tensor<float> uncond_v = flux_runner_->compute(n_threads, x_raw, ts,
+                                                                   uncond.c_crossattn, {}, uncond.c_vector, guidance);
+                if (uncond_v.empty()) {
+                    return {};
+                }
+                return uncond_v + cfg_scale * (cond_v - uncond_v);
+            };
+            cache_runtime.calibrate(condition_branch, condition_key, x, model_out, forward_at);
+        }
+
         denoised = model_out * c_out + x * c_skip;
 
         if (sigma == 0.0f) {
@@ -995,6 +1087,9 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         LOG_INFO("flux step %d/%d sigma=%.6f next=%.6f", step + 1, steps, sigma, sigma_next);
         if (cache_enabled) {
             cache_runtime.end_step(cache_step);
+        }
+        if (control != nullptr) {
+            control->step_done();
         }
     }
     if (cache_enabled) {
