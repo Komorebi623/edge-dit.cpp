@@ -24,7 +24,7 @@ faster than its baseline.
 | Model and task coverage | Text-to-image, image editing, text-to-video; 20 steps | edge-dit.cpp across six public-preview workloads | edge-dit.cpp completes all six task workloads, including FLUX-Kontext editing, Qwen-Image-Edit, and Wan text-to-video. |
 | CFG parallelism | SD3 Medium, 1024x1024, 50 steps, CFG 4.5 | 1 GPU vs CFG-2 | CFG-2 reduces latency from 9.748 s to 6.341 s, a 1.54x speedup at 76.9% efficiency. |
 | Sequence parallelism | FLUX 1024x1024, FLUX 2048x2048, Wan 832x480x81 | SP-1 vs SP-2 vs SP-4 | SP-4 reaches 2.33x on FLUX 1024, 3.27x on FLUX 2048, and 1.72x on Wan video. |
-| Computation reuse | FLUX.1-dev, 1024x1024, 50 steps, 8 prompts x 3 seeds | Full compute vs EasyCache, CacheDiT, MagCache, DiCache, SenCache | MagCache is fastest at 2.20x. DiCache is the higher-fidelity accelerated point at 1.36x, PSNR 31.39, LPIPS 0.0415. |
+| Computation reuse | FLUX.1-dev, 1024x1024, 50 steps, 8 prompts x 3 seeds | Full compute vs EasyCache, CacheDiT, MagCache, DiCache, SenCache | MagCache is the fastest cache point at 2.69x; EasyCache reaches 2.09x; tuned SenCache now reaches 1.92x with 29-30/50 reused steps. |
 | Weight quantization | FLUX.1-dev, 1024x1024 | BF16 vs Q8_0/Q6_K/Q4_K | Q4_K reduces peak VRAM from 40509 MiB to 17803 MiB, with 1.59x latency slowdown. |
 | Low-memory execution | FLUX.1-dev, 1024x1024 | BF16 performance profile vs Q4_K + CPU placement/offload + graph budget + VAE tiling | The 8 GB experimental profile runs at 7591 MiB peak VRAM, with 6.01x latency slowdown. |
 | VAE tiling | FLUX.1-dev, 2048x2048, 20 steps | Untiled vs 2x2 vs 4x4 tiling | 4x4 VAE tiling reduces peak VRAM by 40.1%, from 62029 MiB to 37185 MiB, with 1.01x latency slowdown. |
@@ -32,9 +32,16 @@ faster than its baseline.
 
 ## Overall Performance
 
-Raw result root: `benchmark/results/readme-main-table-20260713-clean`.
+Reproduce the README main table with:
 
-Suite config: `benchmark/configs/suites/readme-main-table.yaml`.
+```bash
+bash benchmark/scripts/run_readme_main_table.sh
+```
+
+The current frozen table expands to three real local text-to-image model
+workloads. Add a fourth real 1024x1024, 50-step workload to the README
+main-table suite before publishing a four-model table; the script checks the
+expanded workload count before it runs.
 
 Contract: local NVIDIA H200 node, CUDA `performance` profile, 1024x1024,
 50 denoising steps, BF16, batch 1, seed 0, 2 warm-up runs, 10 measured runs,
@@ -122,28 +129,37 @@ external repository.
 
 ## Computation Reuse
 
-Raw result root: `benchmark/results/perf-cache-quality-20260714`.
+Reproduce this table with the cache-reuse table runner:
 
-Suite config: `benchmark/configs/suites/cache-quality.yaml`.
+```bash
+bash benchmark/scripts/run_cache_reuse_table.sh
+```
+
+The script runs the full-compute/cache matrix, the retuned MagCache and DiCache
+rows, the 50-step SenCache calibration, the tuned SenCache row, and PSNR/LPIPS
+evaluation against matched full-compute prompt/seed outputs.
 
 Contract: FLUX.1-dev, 1024x1024, 50 steps, BF16, batch 1, 8 prompts x 3 seeds,
-1 warm-up run, 5 measured runs, load-once generation. PSNR and LPIPS compare
-each method against the matching `Full compute` prompt/seed output. CLIP is
-left out of the public table for this snapshot.
+1 warm-up run, 5 measured runs, load-once generation with the build used by the
+README main table. PSNR and LPIPS compare each method against the matching
+`Full compute` prompt/seed output. CLIP is left out of the public table for
+this snapshot.
 
-| Method | Granularity | Median | Speedup | Peak VRAM | Saved Steps | PSNR | LPIPS |
-|---|---|---:|---:|---:|---:|---:|---:|
-| Full compute | full | 18.648 s | 1.00x | 40388 MiB | - | 100.00 | 0.0000 |
-| EasyCache | output | 9.040 s | 2.06x | 40388 MiB | 27/50 | 26.36 | 0.1018 |
-| CacheDiT | block/output | 11.169 s | 1.67x | 60383 MiB | 21/50 | 29.22 | 0.0704 |
-| MagCache | feature | 8.495 s | 2.20x | 64569 MiB | 30/50 | 25.10 | 0.1291 |
-| DiCache | probe | 13.675 s | 1.36x | 41492 MiB | 20/50 | 31.39 | 0.0415 |
-| SenCache | feature | 18.799 s | 0.99x | 40387 MiB | 0/50 | 100.00 | 0.0000 |
+Speedup below is computed against the matched full-compute subset for each row.
+The MagCache and DiCache rows use their method-specific default thresholds. The
+`0.08` residual threshold remains the DBCache/CacheDiT default and is only
+applied to MagCache or DiCache when explicitly passed. The SenCache row uses a
+50-step SenCache profile generated under this workload and
+`cache_residual_threshold=0.60`.
 
-This gives two useful cache profiles. MagCache is the fastest point in this
-matrix, while DiCache gives a smaller acceleration with better PSNR and LPIPS.
-SenCache is functional in this configuration, but its current profile does not
-engage reuse for this prompt/seed matrix.
+| Method | Samples | Granularity | Median | Speedup vs Matched Full | Peak VRAM | Saved Steps | PSNR | LPIPS |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| Full compute | 24/24 | full | 10.765 s | 1.00x | 38341 MiB | - | 100.00 | 0.0000 |
+| EasyCache | 24/24 | output | 5.154 s | 2.09x | 38341 MiB | 27/50 | 26.34 | 0.1016 |
+| CacheDiT | 24/24 | block/output | 6.406 s | 1.68x | 38341 MiB | 21/50 | 29.03 | 0.0720 |
+| MagCache method default | 24/24 | feature | 4.001 s | 2.69x | 38485 MiB | 35/50 | 23.30 | 0.1754 |
+| DiCache method default | 24/24 | probe | 6.514 s | 1.65x | 39471 MiB | 30/50 | 26.89 | 0.0995 |
+| SenCache tuned t=0.60 | 24/24 | feature | 5.613 s | 1.92x | 40923 MiB | 29/50 | 25.78 | 0.1231 |
 
 ## Resource-Constrained Execution
 
@@ -243,8 +259,7 @@ separate benchmark suite.
 |---|---|---|---|
 | Maximum performance | H100/H200 or other large-memory CUDA GPU | BF16 + CUDA Norm/RoPE/modulation optimized build | Main table and resource `Performance` profile. |
 | Balanced memory | 24 GB class GPU | Q8_0, or Q4_K with selected precision rules | Q8_0 uses 25341 MiB; Q4_K uses 17803 MiB in the quantization suite. |
-| Fast approximate cache | Large-memory CUDA GPU | BF16 + MagCache | 2.20x speedup, PSNR 25.10, LPIPS 0.1291. |
-| High-fidelity cache | Large-memory CUDA GPU | BF16 + DiCache | 1.36x speedup, PSNR 31.39, LPIPS 0.0415. |
+| Fast approximate cache | Large-memory CUDA GPU | BF16 + EasyCache or MagCache method default | 2.09x and 2.69x speedup respectively in the matched cache table; MagCache is faster but more approximate. |
 | Low memory | 12-16 GB class GPU | Q4_K + text encoder CPU + VAE tiling, optionally graph budget | 9785 MiB for the 16 GB profile; 10513 MiB for the 12 GB graph-budget profile. |
 | Minimum memory | 8-12 GB class GPU | Q4_K + text encoder CPU + parameter offload + graph budget + VAE tiling | 7591 MiB in the 8 GB experimental profile, with high latency. |
 
@@ -274,7 +289,9 @@ python3 benchmark/analysis/aggregate.py \
   --results-dir benchmark/results/perf-cuda-optimization-ablation-qwen-20260714 \
   --results-dir benchmark/results/perf-cfg-parallel-20260714 \
   --results-dir benchmark/results/perf-sp-parallel-20260714 \
-  --results-dir benchmark/results/perf-cache-quality-20260714 \
+  --results-dir benchmark/results/performance-page-readme-build-20260714/cache-quality \
+  --results-dir benchmark/results/cache-retune-magcache-20260714/cache-quality-magcache-retuned \
+  --results-dir benchmark/results/cache-retune-sencache-20260714/cache-quality-sencache-retuned \
   --suite-id performance-page \
   --output benchmark/results/performance-page-20260714/summary.json
 ```
@@ -287,16 +304,15 @@ python3 benchmark/analysis/generate_tables.py \
   --output benchmark/results/performance-page-20260714/tables.md
 ```
 
-Cache quality metrics were applied with the benchmark Python environment:
+Cache quality metrics for the public cache table are produced by
+`benchmark/scripts/run_cache_reuse_table.sh`, which scores PSNR/LPIPS for the
+full cache matrix and the matched retuned cache rows after generation.
 
-```bash
-/export/home/liuyiming54/miniconda3/envs/editcache/bin/python \
-  benchmark/analysis/evaluate_cache_quality.py \
-  --results-root benchmark/results/perf-cache-quality-20260714 \
-  --metrics psnr,lpips \
-  --device cuda:3 \
-  --skip-if-json-exists
-```
+The retuned cache rows use matched reference/target image sets scored in:
+
+- `benchmark/results/cache-retune-magcache-20260714/eval_magcache_default/summary/summary.json`
+- `benchmark/results/cache-retune-magcache-20260714/eval_dicache_default/summary/summary.json`
+- `benchmark/results/cache-retune-sencache-20260714/eval_sencache_t060/sencache_t060/summary/summary.json`
 
 ## Limitations
 
@@ -307,8 +323,9 @@ Cache quality metrics were applied with the benchmark Python environment:
   load-once adapters for image editing and video.
 - xDiT is kept out of the public SP table for this snapshot because the external
   checkout lacks the DistVAE dependency required by the selected workloads.
-- SenCache produced identical outputs to full compute in this prompt/seed
-  matrix, but it also saved 0 of 50 steps and gave no speedup.
+- SenCache is reported with a tuned 50-step profile and threshold 0.60 for this
+  workload; additional thresholds need the same 24-sample speed/quality pass
+  before they can replace the published row.
 - The cuDNN SDPA build is excluded from public timing tables until the local
   cuDNN runtime symbol issue is resolved on this H200 environment.
 

@@ -1,10 +1,10 @@
 schema_version: 1
-site_id: local-h200
-description: Local path overrides for the H200 benchmark machine.
+site_id: local-h200-readme-build
+description: Local H200 paths with edge-dit.cpp defaulting to the README main-table build.
 paths:
   edge_dit_repo: /export/home/liuyiming54/edge-dit.cpp
-  edge_dit_cli: /export/home/liuyiming54/edge-dit.cpp/build-cuda-norm-rope-mod/bin/ed-cli
-  edge_dit_sample: /export/home/liuyiming54/edge-dit.cpp/build-cuda-norm-rope-mod/bin/ed-sample
+  edge_dit_cli: /export/home/liuyiming54/edge-dit.cpp/build-cuda/bin/ed-cli
+  edge_dit_sample: /export/home/liuyiming54/edge-dit.cpp/build-cuda/bin/ed-sample
   edge_dit_cli_cudnn: /export/home/liuyiming54/edge-dit.cpp/build-cuda/bin/ed-cli
   edge_dit_sample_cudnn: /export/home/liuyiming54/edge-dit.cpp/build-cuda/bin/ed-sample
   edge_dit_cli_generic: /export/home/liuyiming54/edge-dit.cpp/build-cuda-generic/bin/ed-cli
@@ -34,5 +34,5 @@ paths:
 hardware:
   config: ../hardware/h200-local.yaml
 notes:
-  - This local config is the only benchmark config allowed to contain machine-specific paths.
-  - Public suite, workload, system, and hardware configs must use path references instead of local absolute paths.
+  - The default edge-dit.cpp CLI and sample binaries intentionally match the README main-table build.
+  - Build-variant refs are retained for CUDA ablation suites only.

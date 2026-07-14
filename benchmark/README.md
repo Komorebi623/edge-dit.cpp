@@ -85,13 +85,12 @@ Performance table and uses FLUX.1-dev, Stable Diffusion 3 Medium, and
 Qwen-Image with the same 1024x1024, 50-step, BF16, batch-1 setting:
 
 ```bash
-BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/readme-main-table.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --output-root benchmark/results/readme-main-table-YYYYMMDD
+bash benchmark/scripts/run_readme_main_table.sh
 ```
+
+Add a fourth real 1024x1024, 50-step text-to-image workload to the README
+main-table suite before publishing a four-model table. The script checks the
+expanded workload count before it runs.
 
 Run the reproducible FLUX.1-dev single-GPU e2e suite:
 
@@ -120,7 +119,6 @@ roots into a `performance-page` summary.
 bash benchmark/scripts/build_cuda_ablation_matrix.sh
 
 # Task coverage: T2I, image editing, and video.
-BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
 python3 benchmark/orchestration/run_suite.py \
   --suite benchmark/configs/suites/task-coverage.yaml \
   --site benchmark/configs/local/site-h200.yaml \
@@ -128,7 +126,6 @@ python3 benchmark/orchestration/run_suite.py \
   --output-root benchmark/results/perf-task-coverage-YYYYMMDD
 
 # CFG scaling. This intentionally uses SD3 Medium, not FLUX distilled guidance.
-BENCHMARK_CUDA_VISIBLE_DEVICES=3,4 \
 python3 benchmark/orchestration/run_suite.py \
   --suite benchmark/configs/suites/cfg-parallel.yaml \
   --site benchmark/configs/local/site-h200.yaml \
@@ -136,7 +133,6 @@ python3 benchmark/orchestration/run_suite.py \
   --output-root benchmark/results/perf-cfg-parallel-YYYYMMDD
 
 # Sequence-parallel scaling, including short and long sequence workloads.
-BENCHMARK_CUDA_VISIBLE_DEVICES=3,4,5,6 \
 python3 benchmark/orchestration/run_suite.py \
   --suite benchmark/configs/suites/sp-parallel.yaml \
   --site benchmark/configs/local/site-h200.yaml \
@@ -145,7 +141,6 @@ python3 benchmark/orchestration/run_suite.py \
   --output-root benchmark/results/perf-sp-parallel-YYYYMMDD
 
 # Cache speed-quality. This is the only suite that gates public quality metrics.
-BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
 python3 benchmark/orchestration/run_suite.py \
   --suite benchmark/configs/suites/cache-quality.yaml \
   --site benchmark/configs/local/site-h200.yaml \
@@ -155,7 +150,6 @@ python3 benchmark/orchestration/run_suite.py \
 
 # Resource, quantization, VAE tiling, and CUDA optimization trade-offs.
 for suite in resource-profiles quantization vae-tiling cuda-optimization-ablation; do
-  BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
   python3 benchmark/orchestration/run_suite.py \
     --suite "benchmark/configs/suites/${suite}.yaml" \
     --site benchmark/configs/local/site-h200.yaml \
@@ -195,7 +189,6 @@ Run the public model smoke suite across all locally configured public-preview
 model families:
 
 ```bash
-BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
 python3 benchmark/orchestration/run_suite.py \
   --suite benchmark/configs/suites/model-smoke.yaml \
   --site benchmark/configs/local/site-h200.yaml \
@@ -207,7 +200,6 @@ python3 benchmark/orchestration/run_suite.py \
 Run memory-constrained and optimization probe suites:
 
 ```bash
-BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
 python3 benchmark/orchestration/run_suite.py \
   --suite benchmark/configs/suites/memory.yaml \
   --site benchmark/configs/local/site-h200.yaml \
@@ -215,7 +207,6 @@ python3 benchmark/orchestration/run_suite.py \
   --systems edge-dit.cpp \
   --output-root benchmark/results/memory-YYYYMMDD
 
-BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
 python3 benchmark/orchestration/run_suite.py \
   --suite benchmark/configs/suites/ablation.yaml \
   --site benchmark/configs/local/site-h200.yaml \
@@ -229,7 +220,6 @@ Generate the local SenCache profile and run the repeated cache-mode matrix:
 ```bash
 mkdir -p benchmark/cache
 
-BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
 python3 benchmark/orchestration/run_suite.py \
   --suite benchmark/configs/suites/cache-calibration-smoke.yaml \
   --site benchmark/configs/local/site-h200.yaml \
@@ -237,7 +227,6 @@ python3 benchmark/orchestration/run_suite.py \
   --systems edge-dit.cpp \
   --output-root benchmark/results/cache-calibration-smoke-YYYYMMDD
 
-BENCHMARK_CUDA_VISIBLE_DEVICES=3 \
 python3 benchmark/orchestration/run_suite.py \
   --suite benchmark/configs/suites/cache-matrix.yaml \
   --site benchmark/configs/local/site-h200.yaml \
@@ -249,7 +238,6 @@ python3 benchmark/orchestration/run_suite.py \
 Run quick edge-dit.cpp parallel smoke suites:
 
 ```bash
-BENCHMARK_CUDA_VISIBLE_DEVICES=3,4,5,6 \
 python3 benchmark/orchestration/run_suite.py \
   --suite benchmark/configs/suites/parallel-smoke.yaml \
   --site benchmark/configs/local/site-h200.yaml \
@@ -257,7 +245,6 @@ python3 benchmark/orchestration/run_suite.py \
   --systems edge-dit.cpp \
   --output-root benchmark/results/parallel-smoke-YYYYMMDD
 
-BENCHMARK_CUDA_VISIBLE_DEVICES=3,4 \
 python3 benchmark/orchestration/run_suite.py \
   --suite benchmark/configs/suites/cfg-smoke.yaml \
   --site benchmark/configs/local/site-h200.yaml \
@@ -270,30 +257,13 @@ For unattended official FLUX runs, use the release script. It waits for enough
 free GPU memory, runs the 50-step suite, and regenerates the benchmark report:
 
 ```bash
-WAIT_TIMEOUT_SEC=7200 \
-RESULTS_ROOT=benchmark/results/release-v1-s50-YYYYMMDD \
 bash benchmark/scripts/run_flux_s50_release.sh single
 ```
 
 For 1/2/4 GPU sequence-parallel and xDiT runs:
 
 ```bash
-WAIT_TIMEOUT_SEC=7200 \
-RESULTS_ROOT=benchmark/results/release-v1-s50-YYYYMMDD \
 bash benchmark/scripts/run_flux_s50_release.sh parallel
-```
-
-To avoid busy devices, provide an ordered device list. Each run consumes the
-first `gpu_count` entries from the list:
-
-```bash
-BENCHMARK_CUDA_VISIBLE_DEVICES=1,2,3,4 \
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/flux-parallel-e2e.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --systems edge-dit.cpp \
-  --output-root benchmark/results/nightly-YYYYMMDD
 ```
 
 Run the reproducible FLUX.1-dev parallel e2e suite for edge-dit.cpp:
