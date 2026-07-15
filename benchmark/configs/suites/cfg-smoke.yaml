@@ -1,8 +1,8 @@
 schema_version: 1
 suite_id: cfg-smoke
 description: >
-  Quick FLUX.1-dev CFG-parallel smoke suite for edge-dit.cpp. CFG parallelism
-  currently targets a two-GPU split of conditional and unconditional branches.
+  Quick SD3 Medium CFG-parallel smoke suite for edge-dit.cpp. CFG parallelism
+  targets a two-GPU split of conditional and unconditional branches.
 mode: smoke
 defaults:
   warmup_runs: 0
@@ -16,7 +16,7 @@ systems:
     - ../systems/edge-dit.yaml
 workloads:
   parallel:
-    - ../workloads/flux1-dev-t2i.yaml
+    - ../workloads/sd3-medium-t2i.yaml
 parallel_matrix:
   gpu_counts: [2]
   modes:

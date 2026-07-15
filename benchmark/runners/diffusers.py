@@ -119,13 +119,17 @@ print(json.dumps(versions, sort_keys=True))
     ) -> list[str]:
         if gpu_count != 1:
             raise NotImplementedError("Diffusers single-GPU benchmark only")
+        if workload["task"] != "text-to-image":
+            raise NotImplementedError(
+                "Diffusers load-once e2e adapter currently supports text-to-image only"
+            )
         model_ref = workload["model"]["local_path_ref"]
         model_path = self.resolve_path(model_ref)
         if model_path is None or not model_path.exists():
             raise NotImplementedError(f"missing Diffusers model path for {model_ref}: {model_path}")
         generation = dict(workload["generation"])
         generation.update({k: v for k, v in run_options.items() if k in generation})
-        prompt = workload.get("resolved_prompt", {}).get("prompt", "")
+        prompt = self.prompt_text(workload, run_options)
         return [
             self.python_executable(),
             str(self.repo_root / "benchmark" / "scripts" / "run_diffusers_e2e.py"),
@@ -171,7 +175,7 @@ print(json.dumps(versions, sort_keys=True))
         if model_path is None or not model_path.exists():
             raise NotImplementedError(f"missing Diffusers model path for {model_ref}: {model_path}")
         generation = workload["generation"]
-        prompt = workload.get("resolved_prompt", {}).get("prompt", "")
+        prompt = self.prompt_text(workload, run_options)
         return [
             self.python_executable(),
             "-m",

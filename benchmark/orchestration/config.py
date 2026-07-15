@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import itertools
 import json
 from typing import Any
 
@@ -47,6 +48,19 @@ def load_prompt(prompt_file: Path, prompt_id: str) -> dict[str, Any]:
     raise ValueError(f"prompt_id {prompt_id!r} not found in {prompt_file}")
 
 
+def load_prompt_set(prompt_file: Path) -> dict[str, dict[str, Any]]:
+    prompts: dict[str, dict[str, Any]] = {}
+    with prompt_file.open("r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            prompt_id = item.get("prompt_id")
+            if isinstance(prompt_id, str) and prompt_id:
+                prompts[prompt_id] = item
+    return prompts
+
+
 def has_private_path(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8", errors="replace")
     return [pattern for pattern in PRIVATE_PATH_PATTERNS if pattern in text]
@@ -73,6 +87,7 @@ def load_suite_graph(suite_path: Path, site_path: Path | None) -> dict[str, Any]
             workload = load_yaml(workload_path)
             prompt_path = resolve_config_ref(workload_path, workload["prompt_set"])
             workload["resolved_prompt"] = load_prompt(prompt_path, workload["prompt_id"])
+            workload["resolved_prompt_set"] = load_prompt_set(prompt_path)
             workloads[workload["workload_id"]] = {
                 "path": workload_path,
                 "config": workload,
@@ -166,4 +181,21 @@ def suite_run_options(suite: dict[str, Any]) -> list[dict[str, Any]]:
             }
             for stack in suite["ablation_stacks"]
         ]
+    if suite.get("scenario_matrix"):
+        axes = suite["scenario_matrix"].get("axes", [])
+        rows: list[dict[str, Any]] = []
+        for combination in itertools.product(*(axis.get("values", []) for axis in axes)):
+            ids: list[str] = []
+            options: dict[str, Any] = {}
+            for value in combination:
+                value_id = str(value["id"])
+                ids.append(value_id)
+                options.update(value.get("options", {}))
+            rows.append(
+                {
+                    "scenario_id": "_".join(ids),
+                    "options": options,
+                }
+            )
+        return rows
     return [{"scenario_id": "default", "options": {}}]

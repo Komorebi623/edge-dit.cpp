@@ -45,15 +45,26 @@ class EdgeDitRunner(BenchmarkRunner):
     def requires_runner_metrics(self) -> bool:
         return True
 
-    def edge_sample_binary(self) -> Path | None:
+    def edge_sample_binary(self, run_options: dict[str, Any] | None = None) -> Path | None:
+        run_options = run_options or {}
+        sample_override = run_options.get("edge_sample_ref") or run_options.get("edge_sample_binary_ref")
+        if sample_override:
+            return self.resolve_path(str(sample_override))
         sample_ref = self.system_config.get("sample_binary", {}).get("path_ref")
         sample_binary = self.resolve_path(sample_ref)
         if sample_binary is not None:
             return sample_binary
-        binary = self.resolve_path(self.system_config.get("binary", {}).get("path_ref"))
+        binary = self.edge_cli_binary(run_options)
         if binary is None:
             return None
         return binary.parent / "ed-sample"
+
+    def edge_cli_binary(self, run_options: dict[str, Any] | None = None) -> Path | None:
+        run_options = run_options or {}
+        binary_override = run_options.get("edge_cli_ref") or run_options.get("edge_binary_ref")
+        if binary_override:
+            return self.resolve_path(str(binary_override))
+        return self.resolve_path(self.system_config.get("binary", {}).get("path_ref"))
 
     def build_execution_command(
         self,
@@ -75,7 +86,7 @@ class EdgeDitRunner(BenchmarkRunner):
                 warmup_runs,
                 measured_runs,
             )
-        sample_binary = self.edge_sample_binary()
+        sample_binary = self.edge_sample_binary(run_options)
         model_ref = workload["model"]["local_path_ref"]
         model_path = self.resolve_path(model_ref)
         if sample_binary is None:
@@ -85,7 +96,7 @@ class EdgeDitRunner(BenchmarkRunner):
 
         generation = dict(workload["generation"])
         generation.update({k: v for k, v in run_options.items() if k in generation})
-        prompt = workload_prompt(workload)
+        prompt = self.prompt_text(workload, run_options)
         command = [
             "python3",
             str(self.repo_root / "benchmark" / "scripts" / "run_edge_e2e.py"),
@@ -139,7 +150,7 @@ class EdgeDitRunner(BenchmarkRunner):
         warmup_runs: int,
         measured_runs: int,
     ) -> list[str]:
-        binary = self.resolve_path(self.system_config.get("binary", {}).get("path_ref"))
+        binary = self.edge_cli_binary(run_options)
         model_ref = workload["model"]["local_path_ref"]
         model_path = self.resolve_path(model_ref)
         if binary is None:
@@ -149,7 +160,7 @@ class EdgeDitRunner(BenchmarkRunner):
 
         generation = dict(workload["generation"])
         generation.update({k: v for k, v in run_options.items() if k in generation})
-        prompt = workload_prompt(workload)
+        prompt = self.prompt_text(workload, run_options)
         command = [
             "python3",
             str(self.repo_root / "benchmark" / "scripts" / "run_edge_cli_once.py"),
@@ -212,7 +223,8 @@ class EdgeDitRunner(BenchmarkRunner):
         parallel_mode: str | None = None,
         run_options: dict[str, Any] | None = None,
     ) -> list[str]:
-        binary = self.resolve_path(self.system_config.get("binary", {}).get("path_ref"))
+        run_options = run_options or {}
+        binary = self.edge_cli_binary(run_options)
         model_ref = workload["model"]["local_path_ref"]
         model_path = self.resolve_path(model_ref)
         if binary is None:
@@ -220,10 +232,9 @@ class EdgeDitRunner(BenchmarkRunner):
         if model_path is None or not model_path.exists():
             raise NotImplementedError(f"missing model path for {model_ref}: {model_path}")
 
-        run_options = run_options or {}
         generation = dict(workload["generation"])
         generation.update({k: v for k, v in run_options.items() if k in generation})
-        prompt = workload_prompt(workload)
+        prompt = self.prompt_text(workload, run_options)
         command = [
             str(binary),
             "--backend",
@@ -277,6 +288,10 @@ class EdgeDitRunner(BenchmarkRunner):
             command.append("--qwen-image-zero-cond-t")
         if options.get("vae_tiling"):
             command.append("--vae-tiling")
+        if options.get("vae_tile_size") is not None:
+            command.extend(["--vae-tile-size", str(options["vae_tile_size"])])
+        if options.get("tensor_type_rules"):
+            command.extend(["--tensor-type-rules", str(options["tensor_type_rules"])])
         if options.get("offload_to_cpu"):
             command.append("--offload-to-cpu")
         if options.get("keep_text_encoder_on_cpu"):
@@ -299,6 +314,10 @@ class EdgeDitRunner(BenchmarkRunner):
             command.append("--qwen-image-zero-cond-t")
         if options.get("vae_tiling"):
             command.append("--vae-tiling")
+        if options.get("vae_tile_size") is not None:
+            command.extend(["--vae-tile-size", str(options["vae_tile_size"])])
+        if options.get("tensor_type_rules"):
+            command.extend(["--tensor-type-rules", str(options["tensor_type_rules"])])
         if options.get("offload_to_cpu"):
             command.append("--offload-to-cpu")
         if options.get("keep_text_encoder_on_cpu"):
@@ -374,13 +393,6 @@ class EdgeDitRunner(BenchmarkRunner):
         for key, flag in bool_flags:
             if options.get(key):
                 command.append(flag)
-
-
-def workload_prompt(workload: dict[str, Any]) -> str:
-    # The orchestrator resolves prompts before command construction.
-    return workload.get("resolved_prompt", {}).get("prompt", "")
-
-
 def edge_device_csv(gpu_count: int) -> str:
     """Return physical device ids for edge's MPI launcher."""
     value = os.environ.get("BENCHMARK_CUDA_VISIBLE_DEVICES")

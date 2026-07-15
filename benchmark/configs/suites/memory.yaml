@@ -16,28 +16,49 @@ workloads:
   single_gpu:
     - ../workloads/flux1-dev-t2i.yaml
 scenarios:
-  - scenario_id: flux_unlimited_bf16
+  - scenario_id: performance_bf16
     vram_constraint_gib: null
     options:
       precision: bf16
-  - scenario_id: flux_24g_bf16_tiling
-    vram_constraint_gib: 24
-    options:
-      precision: bf16
-      vae_tiling: true
-  - scenario_id: flux_16g_q8_graph_cut
-    vram_constraint_gib: 16
+      profile_label: Performance
+  - scenario_id: memory_balanced_q8
+    vram_constraint_gib: null
     options:
       precision: q8_0
-      max_vram_gib: 16
-      profile_graph_cuts: true
-  - scenario_id: flux_12g_q4_offload
+      profile_label: Memory-balanced
+  - scenario_id: profile_24gb_q4_text_cpu
+    vram_constraint_gib: 24
+    options:
+      precision: q4_k
+      keep_text_encoder_on_cpu: true
+      profile_label: 24 GB
+  - scenario_id: profile_16gb_q4_text_cpu_vae_tiling
+    vram_constraint_gib: 16
+    options:
+      precision: q4_k
+      keep_text_encoder_on_cpu: true
+      vae_tiling: true
+      profile_label: 16 GB
+  - scenario_id: profile_12gb_q4_offload_graph_budget_vae_tiling
     vram_constraint_gib: 12
     options:
-      precision: q4_0
+      precision: q4_k
       offload_to_cpu: true
       keep_text_encoder_on_cpu: true
-      keep_vae_on_cpu: true
+      max_vram_gib: 12
+      vae_tiling: true
+      profile_graph_cuts: true
+      profile_label: 12 GB
+  - scenario_id: profile_8gb_q4_offload_graph_budget_vae_tiling
+    vram_constraint_gib: 8
+    options:
+      precision: q4_k
+      offload_to_cpu: true
+      keep_text_encoder_on_cpu: true
+      max_vram_gib: 8
+      vae_tiling: true
+      profile_graph_cuts: true
+      profile_label: 8 GB experimental
 reporting:
   table: memory_constrained_execution
   require_graph_cut_metrics: true

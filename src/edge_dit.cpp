@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <new>
 #include <string>
@@ -89,7 +90,7 @@ void ed_sample_params_init(ed_sample_params_t * params) {
     params->cache_reset_error_on_compute = true;
     params->cache_Fn_compute_blocks = 8;
     params->cache_Bn_compute_blocks = 0;
-    params->cache_residual_diff_threshold = 0.08f;
+    params->cache_residual_diff_threshold = std::numeric_limits<float>::quiet_NaN();
     params->cache_max_accumulated_residual_diff = -1.0f;
     params->cache_max_warmup_steps = 8;
     params->cache_max_cached_steps = -1;

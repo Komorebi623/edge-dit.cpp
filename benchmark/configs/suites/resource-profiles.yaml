@@ -1,0 +1,65 @@
+schema_version: 1
+suite_id: resource-profiles
+description: >
+  FLUX.1-dev resource-constrained execution profiles for quantization,
+  component placement, CPU offload, graph VRAM budgets, and VAE tiling.
+mode: official
+defaults:
+  warmup_runs: 1
+  measured_runs: 5
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux1-dev-t2i-1024-s50.yaml
+scenarios:
+  - scenario_id: performance_bf16
+    options:
+      precision: bf16
+      profile_label: Performance
+  - scenario_id: memory_balanced_q8
+    options:
+      precision: q8_0
+      profile_label: Memory-balanced
+  - scenario_id: profile_24gb_q4_text_cpu
+    vram_constraint_gib: 24
+    options:
+      precision: q4_k
+      keep_text_encoder_on_cpu: true
+      profile_label: 24 GiB target
+  - scenario_id: profile_16gb_q4_text_cpu_vae_tiling
+    vram_constraint_gib: 16
+    options:
+      precision: q4_k
+      keep_text_encoder_on_cpu: true
+      vae_tiling: true
+      profile_label: 16 GiB target
+  - scenario_id: profile_12gb_q4_offload_graph_budget_vae_tiling
+    vram_constraint_gib: 12
+    options:
+      precision: q4_k
+      offload_to_cpu: true
+      keep_text_encoder_on_cpu: true
+      max_vram_gib: 12
+      vae_tiling: true
+      profile_graph_cuts: true
+      profile_label: 12 GiB graph-budget diagnostic
+  - scenario_id: profile_8gb_q4_offload_graph_budget_vae_tiling
+    vram_constraint_gib: 8
+    options:
+      precision: q4_k
+      offload_to_cpu: true
+      keep_text_encoder_on_cpu: true
+      max_vram_gib: 8
+      vae_tiling: true
+      profile_graph_cuts: true
+      profile_label: 8 GiB budget experimental
+reporting:
+  table: resource_constrained_profiles
+  require_quality_metrics: false
+  allow_oom_rows: true

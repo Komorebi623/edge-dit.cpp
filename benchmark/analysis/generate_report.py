@@ -35,17 +35,13 @@ def main() -> int:
         f"- Systems: {', '.join(systems) if systems else '-'}",
         "",
     ]
-    if table_sections.get("Single-GPU Inference"):
-        lines.append("## Single-GPU Performance")
-        lines.append("")
-        lines.append(table_sections["Single-GPU Inference"])
-        lines.append("")
-    if table_sections.get("Parallel Scaling"):
-        lines.append("## Parallel Scaling")
-        lines.append("")
-        lines.append(table_sections["Parallel Scaling"])
-        lines.append("")
-    if not table_sections:
+    if table_sections:
+        for title, body in table_sections.items():
+            lines.append(f"## {title}")
+            lines.append("")
+            lines.append(body)
+            lines.append("")
+    else:
         lines.append("No benchmark rows found.")
         lines.append("")
     args.output.parent.mkdir(parents=True, exist_ok=True)

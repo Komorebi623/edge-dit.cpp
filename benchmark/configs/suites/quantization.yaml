@@ -1,0 +1,43 @@
+schema_version: 1
+suite_id: quantization
+description: >
+  FLUX.1-dev weight quantization and mixed tensor placement trade-off suite.
+mode: official
+defaults:
+  warmup_runs: 1
+  measured_runs: 5
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux1-dev-t2i-1024-s50.yaml
+scenarios:
+  - scenario_id: bf16
+    options:
+      precision: bf16
+      weight_type_label: BF16
+  - scenario_id: q8_0
+    options:
+      precision: q8_0
+      weight_type_label: Q8_0
+  - scenario_id: q6_k
+    options:
+      precision: q6_k
+      weight_type_label: Q6_K
+  - scenario_id: q4_k
+    options:
+      precision: q4_k
+      weight_type_label: Q4_K
+  - scenario_id: q4_k_precision_rules
+    options:
+      precision: q4_k
+      tensor_type_rules: norm=f16,bias=f32
+      weight_type_label: Q4_K + precision rules
+reporting:
+  table: quantization_tradeoff
+  require_quality_metrics: false

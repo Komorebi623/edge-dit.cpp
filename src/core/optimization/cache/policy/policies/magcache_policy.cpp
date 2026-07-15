@@ -217,6 +217,9 @@ public:
         // retains only its scalar decision state (accumulated ratio / has_residual)
         // and, on a calibrate run, the previous-step feature.
         (void)seg;
+        const char* substep_env = std::getenv("ED_CACHE_SUBSTEP");
+        substep_env_on_ = substep_env != nullptr && substep_env[0] != '\0' && substep_env[0] != '0';
+        substep_device_available_ = false;  // set by set_substep_device_available()
         return detail::make_feature_reuse_program("MagCache", seg, /*device_backed=*/true);
     }
 
@@ -225,37 +228,51 @@ public:
     RuntimeDecision decide(const StepContext&, const CacheRuntimeMetrics& m) override {
         RuntimeDecision d;
         d.variant = kVariantFull;
-        if (!enabled() || calibrating_ || current_step_index_ < retention_steps_) {
-            return d;
-        }
-        Branch& b = branch_for(m.condition_key);
-        if (!b.has_residual) {
-            return d;
-        }
-        const int cnt = current_step_index_;
-        const float cur_scale = (cnt >= 0 && cnt < static_cast<int>(mag_ratios_.size()))
-                                    ? mag_ratios_[static_cast<size_t>(cnt)]
-                                    : 1.0f;
-        const float accum_ratio = b.accumulated_ratio * cur_scale;
-        const float accum_err = b.accumulated_err + std::fabs(1.0f - accum_ratio);
-        const int accum_steps = b.accumulated_steps + 1;
-
-        if (accum_err <= config_.mag_thresh && accum_steps <= config_.max_skip_steps) {
-            b.accumulated_ratio = accum_ratio;
-            b.accumulated_err = accum_err;
-            b.accumulated_steps = accum_steps;
+        if (decide_skip_(m.condition_key)) {
             d.variant = kVariantReuse;
-            // Count the skip here (not in reconstruct) so the GPU inject path —
-            // which bypasses reconstruct() — is also counted. The host path's
-            // reconstruct() no longer increments; a rare reconstruct-fail falls
-            // back to a full compute but is a negligible miscount.
-            total_steps_skipped_++;
-            return d;
         }
-        b.accumulated_ratio = 1.0f;
-        b.accumulated_err = 0.0f;
-        b.accumulated_steps = 0;
         return d;
+    }
+
+    // ---- Substep interface. Same decision math as decide(); reuse => a single
+    // zero-block ApplyResidual substep, compute => a full-stack substep that
+    // captures the residual slot. The GPU feature-reuse path (device slot) is
+    // driven by the adapter exactly as before; the host substep path (no store —
+    // Wan) reconstructs the residual on host and injects via hooks.inject. Both are
+    // supported, so gate only on the env opt-in.
+    bool supports_substep() const override { return substep_env_on_; }
+
+    void set_substep_device_available(bool available) override { substep_device_available_ = available; }
+
+    void begin_substeps(const StepContext& step, const void* condition_key) override {
+        current_step_index_ = step.step_index;
+        substep_done_ = false;
+        substep_branch_key_ = condition_key;
+    }
+
+    std::optional<SubstepPlan> next_substep() override {
+        if (substep_done_) {
+            return std::nullopt;
+        }
+        substep_done_ = true;
+        SubstepPlan p;
+        p.input = InputSource{InputSource::FreshLatent, -1};
+        p.produces_output = true;
+        if (decide_skip_(substep_branch_key_)) {
+            p.blocks = BlockRange{0, 0};  // zero blocks
+            p.op = SubstepOp{SubstepOpKind::ApplyResidual, {0}, {}};
+        } else {
+            p.blocks = BlockRange{0, -1};  // whole stack
+            p.writes = {0};
+            p.taps = {AnchorRef::model_in(), AnchorRef::model_out()};
+        }
+        return p;
+    }
+
+    void observe_substep(const SubstepResult&) override {
+        // MagCache's ratio is table-driven (mag_ratios_), not measured in-graph, so
+        // there is nothing to fold from indicators on the substep path. The
+        // residual availability is recorded by the adapter via observe().
     }
 
     void observe(const CacheObservation& obs) override {
@@ -286,16 +303,26 @@ public:
             return;
         }
         // Normal run: the residual tensor is stored into the state-manager slot by
-        // the lowering's declarative STORE action. The policy only records that a
-        // residual is now available so decide() will consider reuse.
+        // the lowering's declarative STORE action (device path). On the host substep
+        // path (no device slot — Wan) the residual arrives here as a host tensor;
+        // keep it so reconstruct() can serve the reuse inject.
         b.branch = obs.branch;
+        b.residual.assign(obs.feature->data(), obs.feature->data() + obs.feature->numel());
+        b.shape = obs.feature->shape();
         b.has_residual = true;
     }
 
-    sd::Tensor<float> reconstruct(const CacheReconstructContext&) override {
-        // Reuse is served declaratively (LOAD slot -> hooks.inject) by the
-        // lowering; the policy no longer reconstructs the residual on the host.
-        return {};
+    sd::Tensor<float> reconstruct(const CacheReconstructContext& ctx) override {
+        // Device path: reuse is served declaratively (inject_from_slot) and this
+        // returns empty. Host substep path (Wan): rebuild the stored residual tensor
+        // so the lowering injects x_before + residual.
+        Branch& b = branch_for(ctx.condition_key);
+        if (!b.has_residual || b.residual.empty() || b.shape.empty()) {
+            return {};
+        }
+        sd::Tensor<float> feature(b.shape);
+        std::copy(b.residual.begin(), b.residual.end(), feature.data());
+        return feature;
     }
 
     void end_step(const StepContext& step) override {
@@ -336,6 +363,38 @@ private:
         int calib_count = 0;
         CacheBranch branch = CacheBranch::Main;
     };
+
+    // Shared skip decision (used by both decide() and the substep path). Mutates
+    // the branch's accumulators and skip counter exactly as the original decide()
+    // did, so the two paths produce byte-identical skip sequences.
+    bool decide_skip_(const void* condition_key) {
+        if (!enabled() || calibrating_ || current_step_index_ < retention_steps_) {
+            return false;
+        }
+        Branch& b = branch_for(condition_key);
+        if (!b.has_residual) {
+            return false;
+        }
+        const int cnt = current_step_index_;
+        const float cur_scale = (cnt >= 0 && cnt < static_cast<int>(mag_ratios_.size()))
+                                    ? mag_ratios_[static_cast<size_t>(cnt)]
+                                    : 1.0f;
+        const float accum_ratio = b.accumulated_ratio * cur_scale;
+        const float accum_err = b.accumulated_err + std::fabs(1.0f - accum_ratio);
+        const int accum_steps = b.accumulated_steps + 1;
+
+        if (accum_err <= config_.mag_thresh && accum_steps <= config_.max_skip_steps) {
+            b.accumulated_ratio = accum_ratio;
+            b.accumulated_err = accum_err;
+            b.accumulated_steps = accum_steps;
+            total_steps_skipped_++;
+            return true;
+        }
+        b.accumulated_ratio = 1.0f;
+        b.accumulated_err = 0.0f;
+        b.accumulated_steps = 0;
+        return false;
+    }
 
     void record_calibration_ratio(Branch& b, const sd::Tensor<float>& feature) {
         if (b.calib_ratios.empty()) {
@@ -434,6 +493,10 @@ private:
     int total_steps_skipped_ = 0;
     std::vector<float> mag_ratios_;
     std::unordered_map<const void*, Branch> states_;
+    bool substep_done_ = false;
+    const void* substep_branch_key_ = nullptr;
+    bool substep_env_on_ = false;
+    bool substep_device_available_ = false;
 
     Branch& branch_for(const void* cond) { return states_[cond]; }
 };

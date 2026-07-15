@@ -55,10 +55,149 @@ public:
         // gamma blend weights), and injects the declarative blend of the ring. The
         // default on-GPU path leaves inject_gpu set, so it takes the legacy seam
         // control flow (which this same program also drives).
+        // Substep path opt-in: gated by ED_CACHE_SUBSTEP AND a viable on-device
+        // metric path (a device store wired by the runner). Wan has no device store,
+        // so its host DiCache stays on the legacy path. The engine calls
+        // set_substep_gpu_path() after init with the device-store signal; here we
+        // only record the env opt-in, ANDed in supports_substep().
+        const char* substep_env = std::getenv("ED_CACHE_SUBSTEP");
+        substep_env_on_ = substep_env != nullptr && substep_env[0] != '\0' && substep_env[0] != '0';
+        substep_gpu_path_ = false;  // set true by set_substep_gpu_path() when a store exists
         return detail::make_dicache_program("DiCache", seg, std::max(1, config_.probe_depth));
     }
 
     void begin_step(const StepContext& step) override { current_step_index_ = step.step_index; }
+
+    // ---- Substep interface (ED_CACHE_SUBSTEP). DiCache is the two-yield case that
+    // proves the uniform loop: substep 1 = probe (measures delta_y/gamma on-device,
+    // produces no output), then observe_substep folds the scalars via the same
+    // decide_after_probe math; substep 2 = reuse (Extrapolate with gamma) or a
+    // capturing full compute. Both paths are migrated: the on-device metric path
+    // (Qwen/Flux, device store) and the tap-driven host path (Wan, no store, uses
+    // observe_substep_probe_host + host reconstruct). Gate only on the env opt-in.
+    bool supports_substep() const override { return substep_env_on_; }
+
+    void set_substep_device_available(bool available) override { substep_gpu_path_ = available; }
+
+    void begin_substeps(const StepContext& step, const void* condition_key) override {
+        current_step_index_ = step.step_index;
+        substep_key_ = condition_key;
+        substep_phase_ = probe_eligible_() ? SubstepPhase::Probe : SubstepPhase::SingleFull;
+        substep_reuse_ = false;
+        substep_gamma_ = 1.0f;
+        substep_host_reuse_ = false;
+        substep_host_coeffs_.clear();
+    }
+
+    std::optional<SubstepPlan> next_substep() override {
+        switch (substep_phase_) {
+            case SubstepPhase::SingleFull: {
+                substep_phase_ = SubstepPhase::Done;
+                SubstepPlan p;
+                p.input = InputSource{InputSource::FreshLatent, -1};
+                p.blocks = BlockRange{0, -1};
+                p.produces_output = true;
+                p.writes = {0};  // capture residual into the ring
+                return p;
+            }
+            case SubstepPhase::Probe: {
+                substep_phase_ = SubstepPhase::Continue;
+                SubstepPlan p;
+                p.input = InputSource{InputSource::FreshLatent, -1};
+                p.blocks = BlockRange{0, std::max(1, config_.probe_depth)};
+                p.op = SubstepOp{SubstepOpKind::Stash, {}, {}};
+                p.produces_output = false;
+                // Indicators are computed on-device by the seam (delta_y/gamma) and
+                // surfaced through the adapter as substep-result scalars.
+                p.indicators.push_back(Indicator{"delta_y", Indicator::RelL1, {}, {}, false});
+                p.indicators.push_back(Indicator{"gamma", Indicator::RelL1, {}, {}, false});
+                return p;
+            }
+            case SubstepPhase::Continue: {
+                substep_phase_ = SubstepPhase::Done;
+                SubstepPlan p;
+                p.input = InputSource{InputSource::FreshLatent, -1};
+                p.produces_output = true;
+                if (substep_reuse_) {
+                    p.blocks = BlockRange{0, 0};  // zero compute; reuse the cached residual
+                    if (substep_host_reuse_) {
+                        // Host reuse (Wan): the lowering calls reconstruct() for the
+                        // gamma-blended residual and injects x_before + residual.
+                        p.op = SubstepOp{SubstepOpKind::ApplyResidual, {0}, {}};
+                    } else {
+                        // Device reuse (Qwen/Flux): on-device gamma-blend via inject_gpu.
+                        p.op = SubstepOp{SubstepOpKind::Extrapolate, {0}, {substep_gamma_}};
+                    }
+                } else {
+                    p.blocks = BlockRange{0, -1};
+                    p.writes = {0};
+                }
+                return p;
+            }
+            default:
+                return std::nullopt;
+        }
+    }
+
+    void observe_substep(const SubstepResult& r) override {
+        // Only meaningful after the probe substep. Reproduces decide_after_probe's
+        // GPU-scalar branch: accumulate the trajectory error, skip when under
+        // threshold, and clamp gamma for the reuse blend.
+        if (substep_phase_ != SubstepPhase::Continue) {
+            return;
+        }
+        const float dy = r.get("delta_y", std::numeric_limits<float>::quiet_NaN());
+        if (std::isnan(dy)) {
+            substep_reuse_ = false;
+            return;
+        }
+        Branch& b = branch_for(substep_key_);
+        if (!b.gpu_has_history) {
+            b.gpu_has_history = true;  // first probe-eligible step seeds via capture
+            substep_reuse_ = false;
+            return;
+        }
+        const float dx = r.get("delta_x", std::numeric_limits<float>::quiet_NaN());
+        const float error = config_.error_choice == DiCacheErrorChoice::DeltaMinus && !std::isnan(dx)
+                                ? std::fabs(dy - dx)
+                                : dy;
+        b.accumulated_rel_l1 += error;
+        if (b.accumulated_rel_l1 < config_.rel_l1_thresh) {
+            substep_reuse_ = true;
+            const float g = r.get("gamma", 1.0f);
+            substep_gamma_ = std::max(1.0f, std::min(1.5f, g));
+            total_steps_skipped_++;
+        } else {
+            b.accumulated_rel_l1 = 0.0f;
+            substep_reuse_ = false;
+        }
+    }
+
+    // Host substep probe: the tap-driven probe handed back the before/probe host
+    // tensors. Delegate to decide_after_probe (the verified host metric + gamma
+    // logic), then translate its decision into the substep reuse flag + host reuse
+    // coeffs the continuation uses. No divergence from the legacy host path — same
+    // code computes the decision.
+    void observe_substep_probe_host(const sd::Tensor<float>* before,
+                                    const sd::Tensor<float>* probe,
+                                    const StepContext& step,
+                                    const void* condition_key) override {
+        if (substep_phase_ != SubstepPhase::Continue) {
+            return;
+        }
+        CacheObservation obs;
+        obs.kind = CacheObservation::Kind::Probe;
+        obs.step = step;
+        obs.condition_key = condition_key;
+        obs.before = before;
+        obs.probe = probe;
+        // delta_y/delta_x/gamma stay NaN so decide_after_probe takes the host branch.
+        const RuntimeDecision d = decide_after_probe(step, obs);
+        const bool reuse = (d.variant == kVariantReuse);
+        substep_reuse_ = reuse;
+        substep_host_reuse_ = reuse;
+        substep_host_coeffs_ = d.reuse_coeffs;  // [gamma, 1-gamma] over ring depths [1,2]
+    }
 
     RuntimeDecision decide(const StepContext&, const CacheRuntimeMetrics& m) override {
         RuntimeDecision d;
@@ -163,11 +302,29 @@ public:
         commit_probe_history(b);
     }
 
-    sd::Tensor<float> reconstruct(const CacheReconstructContext&) override {
-        // Reuse is served declaratively: the REUSE variant blends the residual ring
-        // (slot depths 1,2) with the weights compute_blend_coeffs() supplied via the
-        // decision. The policy no longer reconstructs the residual on the host.
-        return {};
+    sd::Tensor<float> reconstruct(const CacheReconstructContext& ctx) override {
+        // Device path: reuse is served declaratively (inject_gpu) and this returns
+        // empty. Host substep path (Wan): blend the residual ring on host with the
+        // coeffs observe_substep_probe_host stored — w1*resid_prev1 + w2*resid_prev2.
+        if (!substep_host_reuse_ || substep_host_coeffs_.empty()) {
+            return {};
+        }
+        Branch& b = branch_for(ctx.condition_key);
+        if (!b.has_residual || b.resid_prev1.empty() || b.shape.empty()) {
+            return {};
+        }
+        const float w1 = substep_host_coeffs_[0];
+        const float w2 = substep_host_coeffs_.size() > 1 ? substep_host_coeffs_[1] : 0.0f;
+        const bool have2 = b.have_resid2 && b.resid_prev2.size() == b.resid_prev1.size();
+        sd::Tensor<float> feature(b.shape);
+        float* out = feature.data();
+        const float* r1 = b.resid_prev1.data();
+        const float* r2 = have2 ? b.resid_prev2.data() : nullptr;
+        const size_t n = b.resid_prev1.size();
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = have2 ? (w1 * r1[i] + w2 * r2[i]) : r1[i];
+        }
+        return feature;
     }
 
     void end_step(const StepContext&) override {}
@@ -192,6 +349,16 @@ public:
     }
 
 private:
+    // Same probe-eligibility gate as decide(): skip the retention prefix and the
+    // final step. The substep path uses this to choose Probe vs a plain full step.
+    bool probe_eligible_() const {
+        if (!enabled()) {
+            return false;
+        }
+        return !(current_step_index_ <= retention_steps_ ||
+                 current_step_index_ >= num_steps_ - 1);
+    }
+
     struct Branch {
         std::vector<float> prev_input;
         std::vector<float> prev_probe;
@@ -275,6 +442,19 @@ private:
     int current_step_index_ = -1;
     int total_steps_skipped_ = 0;
     std::unordered_map<const void*, Branch> states_;
+
+    // Substep state (ED_CACHE_SUBSTEP GPU path).
+    enum class SubstepPhase { Probe, Continue, SingleFull, Done };
+    bool substep_env_on_ = false;
+    bool substep_gpu_path_ = false;
+    SubstepPhase substep_phase_ = SubstepPhase::Done;
+    const void* substep_key_ = nullptr;
+    bool substep_reuse_ = false;
+    float substep_gamma_ = 1.0f;
+    // Host substep reuse (Wan): the continuation injects a host-reconstructed
+    // gamma-blend residual instead of the on-device inject_gpu path.
+    bool substep_host_reuse_ = false;
+    std::vector<float> substep_host_coeffs_;
 
     Branch& branch_for(const void* cond) { return states_[cond]; }
 };

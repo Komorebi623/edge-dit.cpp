@@ -59,6 +59,27 @@ class BenchmarkRunner:
             return None
         return Path(value)
 
+    def prompt_text(
+        self,
+        workload: dict[str, Any],
+        run_options: dict[str, Any] | None = None,
+    ) -> str:
+        run_options = run_options or {}
+        prompt = run_options.get("prompt")
+        if isinstance(prompt, str):
+            return prompt
+        prompt_id = run_options.get("prompt_id")
+        if isinstance(prompt_id, str):
+            prompt_set = workload.get("resolved_prompt_set", {})
+            if isinstance(prompt_set, dict):
+                item = prompt_set.get(prompt_id)
+                if isinstance(item, dict):
+                    return str(item.get("prompt", ""))
+            raise NotImplementedError(
+                f"prompt_id {prompt_id!r} is not available in workload prompt set"
+            )
+        return str(workload.get("resolved_prompt", {}).get("prompt", ""))
+
     def git_commit(self, repo: Path) -> str | None:
         try:
             return subprocess.check_output(

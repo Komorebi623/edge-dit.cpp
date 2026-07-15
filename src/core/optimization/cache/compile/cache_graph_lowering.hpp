@@ -31,16 +31,10 @@ struct CacheRunnerHooks {
     // residual ring using a host-clamped gamma. (gamma, region_start, region_end).
     // Empty result => insufficient history; lowering falls back to a full step.
     std::function<sd::Tensor<float>(float, int, int)> inject_gpu;
-    // Feature-granularity on-GPU reuse (MagCache/TaylorSeer): inject
-    // x_before + last_captured_residual straight from device memory, avoiding the
-    // host reconstruct copy + H2D upload the plain `inject` hook pays. When set,
-    // the `capture` hook also snapshots the residual to device. (start, end).
-    // Empty result => no residual captured yet -> lowering falls back to full.
-    std::function<sd::Tensor<float>(int, int)> inject_feature_gpu;
     // ---- Declarative device-slot seam (B2). When the CacheStateManager backs a
     // Feature slot with a device tensor, the lowering drives store/reuse through
-    // these instead of the legacy inject_feature_gpu path. The void* is the slot's
-    // opaque ggml_tensor* (from CacheSlotHandle::buffer).
+    // these (the on-GPU feature-reuse path for MagCache/TaylorSeer). The void* is
+    // the slot's opaque ggml_tensor* (from CacheSlotHandle::buffer).
     //   capture_to_slot: full compute; AFTER the block-stack residual shape is
     //     known, calls alloc_slot(residual_shape) to obtain the device slot tensor
     //     (the StateManager allocates it at that shape), copies the residual into
@@ -52,6 +46,33 @@ struct CacheRunnerHooks {
     std::function<sd::Tensor<float>(
         const std::function<void*(const std::vector<int64_t>&)>&, int, int)> capture_to_slot;
     std::function<sd::Tensor<float>(void*, int, int)> inject_from_slot;  // (slot, start, end)
+
+    // Substep-path (ED_CACHE_SUBSTEP) tap-driven capture: same contract as
+    // capture_to_slot (alloc_slot returns the device slot for the residual shape)
+    // but the runner drives it through the TapRegistry, not CacheGraphScope. Null
+    // on the legacy path.
+    std::function<sd::Tensor<float>(
+        const std::function<void*(const std::vector<int64_t>&)>&)> substep_capture;
+
+    // Substep-path (ED_CACHE_SUBSTEP) tap-driven DiCache probe: runs the shallow
+    // prefix and returns delta_y/delta_x/gamma computed on-device from taps +
+    // persistent operands, via the TapRegistry (no CacheGraphScope). (probe_depth).
+    // Null on the legacy path.
+    std::function<sd::DiffusionCacheResult(int)> substep_probe;
+
+    // Host-path substep variants (models with no device slot — Wan). Tap-driven like
+    // the device ones, but the residual / probe tensors are read back to host.
+    // substep_capture_host: full forward, host feature (ModelOut-ModelIn).
+    // substep_probe_host: shallow prefix, host before/probe. Null on device/legacy.
+    std::function<sd::DiffusionCacheResult()> substep_capture_host;
+    std::function<sd::DiffusionCacheResult(int)> substep_probe_host;
+    // Host reuse (Wan): tap-driven inject of a host-reconstructed residual. (feature).
+    std::function<sd::Tensor<float>(const sd::Tensor<float>&)> substep_inject_host;
+    // Device reuse tap-driven inject (Qwen/Flux), replacing inject_from_slot /
+    // inject_gpu on the substep path. slot: MagCache single residual; gpu: DiCache
+    // gamma-blend. Both drive the forward's registry inject (no CacheGraphScope).
+    std::function<sd::Tensor<float>(void*, int, int)> substep_inject_slot;   // (slot, start, end)
+    std::function<sd::Tensor<float>(float, int, int)> substep_inject_gpu;    // (gamma, start, end)
 };
 
 // Executes one chosen GraphVariantPlan against the runner hooks, using the
@@ -60,18 +81,19 @@ struct CacheRunnerHooks {
 // (Option A lowering — see the plan's "Key architectural decision").
 class CacheGraphLowering {
 public:
-    // Run `variant` for one CFG branch. Returns the model output for the branch
-    // (possibly a cache reconstruction). Always falls back to hooks.full() when
-    // the seam is unavailable or a cache step can't be served.
-    static sd::Tensor<float> execute(ICachePolicy& policy,
-                                     const CacheProgram& program,
-                                     const RuntimeDecision& decision,
-                                     const StepContext& step,
-                                     const void* condition_key,
-                                     CacheBranch branch,
-                                     const CacheRunnerHooks& hooks,
-                                     CacheStateManager& state,
-                                     const CacheOperatorRegistry& operators);
+    // The substep loop: drive the policy's next_substep() for one CFG branch,
+    // translating each SubstepPlan into the runner hooks (tap-driven capture/probe/
+    // inject, or the host/device reuse paths). The only execution path — every cache
+    // method implements next_substep(). Falls back to hooks.full() when a substep
+    // can't be served.
+    static sd::Tensor<float> execute_substeps(ICachePolicy& policy,
+                                              const CacheProgram& program,
+                                              const StepContext& step,
+                                              const void* condition_key,
+                                              CacheBranch branch,
+                                              const CacheRunnerHooks& hooks,
+                                              CacheStateManager& state,
+                                              const CacheOperatorRegistry& operators);
 };
 
 }  // namespace cache

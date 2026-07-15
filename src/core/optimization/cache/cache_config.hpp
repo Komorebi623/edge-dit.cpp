@@ -14,7 +14,7 @@ struct DBCacheConfig {
     int bn_compute_blocks = 0;
     float start_percent = 0.15f;
     float end_percent = 0.95f;
-    float residual_diff_threshold = 0.08f;
+    float residual_diff_threshold = 0.08f;  // DBCache/CacheDiT default
     int max_warmup_steps = 8;
     int max_cached_steps = -1;
     int max_continuous_cached_steps = -1;

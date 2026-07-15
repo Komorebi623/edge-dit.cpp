@@ -1,0 +1,62 @@
+schema_version: 1
+suite_id: cache-quality-sencache-retuned
+description: >
+  FLUX.1-dev SenCache retune suite under the cache-quality prompt and seed
+  matrix. Uses the 1024x1024 50-step SenCache profile so the profile, workload,
+  and public cache baseline use the same setting.
+mode: diagnostic
+defaults:
+  warmup_runs: 1
+  measured_runs: 5
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux1-dev-t2i-1024-s50.yaml
+scenario_matrix:
+  axes:
+    - axis: cache_method
+      values:
+        - id: sencache_t060
+          options:
+            cache: sencache
+            cache_profile_ref: flux_sencache_profile_s50
+            cache_residual_threshold: 0.60
+            quality_role: target
+            cache_granularity: feature
+    - axis: prompt
+      values:
+        - id: p00
+          options: {prompt_id: cache_glass_teapot}
+        - id: p01
+          options: {prompt_id: cache_city_robot}
+        - id: p02
+          options: {prompt_id: cache_library_atrium}
+        - id: p03
+          options: {prompt_id: cache_bicycle_rain}
+        - id: p04
+          options: {prompt_id: cache_greenhouse}
+        - id: p05
+          options: {prompt_id: cache_workbench}
+        - id: p06
+          options: {prompt_id: cache_ceramic_bowl}
+        - id: p07
+          options: {prompt_id: cache_lighthouse}
+    - axis: seed
+      values:
+        - id: s0
+          options: {seed: 0}
+        - id: s1
+          options: {seed: 1}
+        - id: s2
+          options: {seed: 2}
+reporting:
+  table: cache_speed_quality
+  require_quality_metrics: true
+  required_quality_metrics: [psnr, lpips]
+  optional_quality_metrics: [clip]

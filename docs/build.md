@@ -20,6 +20,13 @@ If the checkout already exists:
 bash scripts/bootstrap.sh
 ```
 
+When updating an existing checkout:
+
+```bash
+git pull --recurse-submodules
+git submodule update --init --recursive
+```
+
 `scripts/bootstrap.sh` verifies that the current directory is a Git checkout,
 runs:
 

@@ -68,6 +68,8 @@ def main() -> int:
     parser.add_argument("--cache-dynamic-scm", action="store_true")
     parser.add_argument("--qwen-image-zero-cond-t", action="store_true")
     parser.add_argument("--vae-tiling", action="store_true")
+    parser.add_argument("--vae-tile-size")
+    parser.add_argument("--tensor-type-rules")
     parser.add_argument("--offload-to-cpu", action="store_true")
     parser.add_argument("--keep-text-encoder-on-cpu", action="store_true")
     parser.add_argument("--keep-vae-on-cpu", action="store_true")
@@ -131,6 +133,10 @@ def main() -> int:
         command.append("--qwen-image-zero-cond-t")
     if args.vae_tiling:
         command.append("--vae-tiling")
+    if args.vae_tile_size is not None:
+        command.extend(["--vae-tile-size", str(args.vae_tile_size)])
+    if args.tensor_type_rules:
+        command.extend(["--tensor-type-rules", str(args.tensor_type_rules)])
     if args.offload_to_cpu:
         command.append("--offload-to-cpu")
     if args.keep_text_encoder_on_cpu:

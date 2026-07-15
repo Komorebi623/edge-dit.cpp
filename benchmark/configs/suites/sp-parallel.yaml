@@ -1,0 +1,30 @@
+schema_version: 1
+suite_id: sp-parallel
+description: >
+  Official sequence-parallel scaling suite. It includes a standard 1024x1024
+  FLUX workload and longer image/video token sequences so edge-dit.cpp
+  communication overhead and memory savings are both visible.
+mode: official
+defaults:
+  warmup_runs: 1
+  measured_runs: 5
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  parallel:
+    - ../systems/edge-dit.yaml
+workloads:
+  parallel:
+    - ../workloads/flux1-dev-t2i-1024-s50.yaml
+    - ../workloads/flux1-dev-t2i-2048-s50.yaml
+    - ../workloads/wan2-t2v.yaml
+parallel_matrix:
+  gpu_counts: [1, 2, 4]
+  modes:
+    edge-dit.cpp: [sequence]
+reporting:
+  table: sequence_parallel_scaling
+  require_quality_metrics: false
+  require_communication_breakdown: true

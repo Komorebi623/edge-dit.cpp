@@ -92,6 +92,28 @@ struct DiffusionModel {
                                                int /*probe_depth*/) {
         return {};
     }
+
+    // Substep-path (ED_CACHE_SUBSTEP) tap-driven host variants — models without a
+    // device slot (Wan). capture: full forward, host residual (ModelOut-ModelIn)
+    // via taps; probe: shallow prefix, host before/probe via taps. Default no-op.
+    virtual DiffusionCacheResult compute_substep_capture_host(int /*n_threads*/,
+                                                              const DiffusionParams& /*params*/) {
+        return {};
+    }
+    virtual DiffusionCacheResult compute_substep_probe_host(int /*n_threads*/,
+                                                            const DiffusionParams& /*params*/,
+                                                            int /*probe_depth*/) {
+        return {};
+    }
+    // Tap-driven host inject (reuse): x_before + feature over [start,end), region's
+    // blocks skipped. No CacheGraphScope. Default no-op.
+    virtual sd::Tensor<float> compute_substep_inject_host(int /*n_threads*/,
+                                                          const DiffusionParams& /*params*/,
+                                                          const sd::Tensor<float>& /*feature*/,
+                                                          int /*region_start*/ = 0,
+                                                          int /*region_end*/ = -1) {
+        return {};
+    }
 };
 
 struct UNetModel : public DiffusionModel {
@@ -260,6 +282,22 @@ struct MMDiTModel : public DiffusionModel {
     DiffusionCacheResult compute_probe(int n_threads, const DiffusionParams& p, int probe_depth) override {
         return mmdit.compute_probe(n_threads, *p.x, *p.timesteps,
                                    tensor_or_empty(p.context), tensor_or_empty(p.y), probe_depth);
+    }
+
+    DiffusionCacheResult compute_substep_capture_host(int n_threads, const DiffusionParams& p) override {
+        return mmdit.compute_substep_capture(n_threads, *p.x, *p.timesteps,
+                                             tensor_or_empty(p.context), tensor_or_empty(p.y));
+    }
+    DiffusionCacheResult compute_substep_probe_host(int n_threads, const DiffusionParams& p, int probe_depth) override {
+        return mmdit.compute_substep_probe(n_threads, *p.x, *p.timesteps,
+                                           tensor_or_empty(p.context), tensor_or_empty(p.y), probe_depth);
+    }
+    sd::Tensor<float> compute_substep_inject_host(int n_threads, const DiffusionParams& p,
+                                                  const sd::Tensor<float>& feature,
+                                                  int region_start = 0, int region_end = -1) override {
+        return mmdit.compute_substep_inject(n_threads, *p.x, *p.timesteps,
+                                            tensor_or_empty(p.context), tensor_or_empty(p.y),
+                                            feature, region_start, region_end);
     }
 };
 
@@ -550,6 +588,22 @@ struct WanModel : public DiffusionModel {
     DiffusionCacheResult compute_probe(int n_threads, const DiffusionParams& p, int probe_depth) override {
         return wan.compute_probe(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
                                  tensor_or_empty(p.y), tensor_or_empty(p.c_concat), probe_depth);
+    }
+
+    DiffusionCacheResult compute_substep_capture_host(int n_threads, const DiffusionParams& p) override {
+        return wan.compute_substep_capture(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                           tensor_or_empty(p.y), tensor_or_empty(p.c_concat));
+    }
+    DiffusionCacheResult compute_substep_probe_host(int n_threads, const DiffusionParams& p, int probe_depth) override {
+        return wan.compute_substep_probe(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                         tensor_or_empty(p.y), tensor_or_empty(p.c_concat), probe_depth);
+    }
+    sd::Tensor<float> compute_substep_inject_host(int n_threads, const DiffusionParams& p,
+                                                  const sd::Tensor<float>& feature,
+                                                  int region_start = 0, int region_end = -1) override {
+        return wan.compute_substep_inject(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                          tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
+                                          feature, region_start, region_end);
     }
 };
 

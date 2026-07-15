@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <limits>
 #include <string>
@@ -164,12 +165,14 @@ public:
         const int seg = topo.block_stack() ? topo.block_stack()->id : 1;
         // Declarative Feature program for the reuse (non-calibrating) path: the
         // block-stack residual lives in the CacheStateManager slot, injected by the
-        // lowering. Calibration never reuses, so it keeps the plain (no-action)
-        // program and drives forward-evaluator passes instead.
+        // lowering. Calibration never reuses, but it still needs the captured
+        // host feature so the pipeline can measure finite-difference Jacobians.
         CacheProgram program = calibrating_
-            ? detail::make_reuse_program("SenCache", seg, SegmentExecutionMode::LOAD_CACHED,
-                                         detail::make_slot(0, "block_stack_residual"))
-            : detail::make_feature_reuse_program("SenCache", seg);
+            ? detail::make_feature_capture_program("SenCache", seg)
+            : detail::make_feature_reuse_program("SenCache", seg, /*device_backed=*/true);
+
+        const char* substep_env = std::getenv("ED_CACHE_SUBSTEP");
+        substep_env_on_ = substep_env != nullptr && substep_env[0] != '\0' && substep_env[0] != '0';
 
         if (calibrating_) {
             initialized_ = true;
@@ -203,17 +206,22 @@ public:
         RuntimeDecision d;
         d.variant = kVariantFull;
         if (!enabled() || calibrating_ || current_step_index_ < retention_steps_) {
+            debug_decision("disabled/calibrating/retention", step, 0.0, 0.0f, nullptr);
             return d;
         }
         if (m.input == nullptr || m.input->empty()) {
+            debug_decision("missing_input", step, 0.0, 0.0f, nullptr);
             return d;
         }
         Branch& b = branch_for(m.condition_key);
         if (!b.has_residual || !b.has_reference) {
+            debug_decision(!b.has_residual ? "missing_residual" : "missing_reference",
+                           step, 0.0, 0.0f, &b);
             return d;
         }
         const int64_t numel = m.input->numel();
         if (numel <= 0 || static_cast<int64_t>(b.cached_z.size()) != numel) {
+            debug_decision("shape_mismatch", step, 0.0, 0.0f, &b);
             return d;
         }
         const float* z = m.input->data();
@@ -227,6 +235,7 @@ public:
         const double error =
             (b.cached_j_z * norm_dz + b.cached_j_t * norm_dt) / std::sqrt(static_cast<double>(numel));
         const float threshold = current_step_index_ < switch_step_ ? config_.thresh_start : config_.thresh_main;
+        debug_decision("check", step, error, threshold, &b);
         if (error < threshold && b.accumulated_skips < config_.max_skip_steps) {
             b.accumulated_skips++;
             // Count the skip here (reconstruct no longer runs on the declarative
@@ -241,14 +250,20 @@ public:
     }
 
     void observe(const CacheObservation& obs) override {
-        if (obs.kind != CacheObservation::Kind::Feature || obs.feature == nullptr || obs.feature->empty()) {
+        if (!enabled()) {
             return;
         }
-        if (!enabled()) {
+        if (obs.kind != CacheObservation::Kind::Feature) {
+            return;
+        }
+        if ((obs.feature == nullptr || obs.feature->empty()) && !obs.feature_on_device) {
             return;
         }
         Branch& b = branch_for(obs.condition_key);
         if (calibrating_) {
+            if (obs.feature == nullptr || obs.feature->empty()) {
+                return;
+            }
             b.branch = obs.branch;
             // Calibration keeps the residual on the host (plain program, no slot).
             b.residual.assign(obs.feature->data(), obs.feature->data() + obs.feature->numel());
@@ -273,6 +288,34 @@ public:
         (void)ctx;
         return {};
     }
+
+    // ---- Substep interface (ED_CACHE_SUBSTEP). Feature method (single-residual
+    // reuse): one substep, reuse (LOAD slot -> inject) or compute (capture + STORE);
+    // decision reuses decide(). ----
+    bool supports_substep() const override { return substep_env_on_; }
+    void set_substep_input(const sd::Tensor<float>* input) override { substep_input_ = input; }
+    void begin_substeps(const StepContext& step, const void* condition_key) override {
+        begin_step(step);
+        substep_done_ = false;
+        substep_key_ = condition_key;
+        substep_step_ = step;
+    }
+    std::optional<SubstepPlan> next_substep() override {
+        if (substep_done_) {
+            return std::nullopt;
+        }
+        substep_done_ = true;
+        CacheRuntimeMetrics m;
+        m.condition_key = substep_key_;
+        m.input = substep_input_;
+        const RuntimeDecision d = decide(substep_step_, m);
+        SubstepPlan p;
+        p.produces_output = true;
+        p.op.kind = (d.variant == kVariantReuse) ? SubstepOpKind::FeatureReuse
+                                                 : SubstepOpKind::FeatureCompute;
+        return p;
+    }
+    void observe_substep(const SubstepResult&) override {}
 
     CalibrationSpec calibration_spec() const override {
         CalibrationSpec spec;
@@ -462,8 +505,40 @@ private:
     std::vector<float> sigmas_;
     SenCacheProfile profile_;
     std::unordered_map<const void*, Branch> states_;
+    bool substep_env_on_ = false;
+    bool substep_done_ = false;
+    const void* substep_key_ = nullptr;
+    const sd::Tensor<float>* substep_input_ = nullptr;
+    StepContext substep_step_;
 
     Branch& branch_for(const void* cond) { return states_[cond]; }
+
+    static bool debug_enabled() {
+        const char* v = std::getenv("ED_SENCACHE_DEBUG");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }
+
+    void debug_decision(const char* reason,
+                        const StepContext& step,
+                        double error,
+                        float threshold,
+                        const Branch* b) const {
+        if (!debug_enabled()) {
+            return;
+        }
+        LOG_INFO("SenCache debug step=%d reason=%s error=%.6f threshold=%.6f "
+                 "has_residual=%d has_reference=%d cached_z=%zu skips=%d jz=%.6f jt=%.6f",
+                 step.step_index,
+                 reason,
+                 error,
+                 threshold,
+                 b != nullptr && b->has_residual ? 1 : 0,
+                 b != nullptr && b->has_reference ? 1 : 0,
+                 b != nullptr ? b->cached_z.size() : 0,
+                 b != nullptr ? b->accumulated_skips : 0,
+                 b != nullptr ? b->cached_j_z : 0.0f,
+                 b != nullptr ? b->cached_j_t : 0.0f);
+    }
 };
 
 }  // namespace

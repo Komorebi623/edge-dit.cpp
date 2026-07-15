@@ -63,7 +63,7 @@ static void print_usage(const char* prog) {
         "  --cache-fn-blocks <int>   DBCache/CacheDiT front compute blocks, default: 8\n"
         "  --cache-bn-blocks <int>   DBCache/CacheDiT back compute blocks, default: 0\n"
         "  --cache-residual-threshold <float>\n"
-        "                            DBCache residual diff threshold, default: 0.08\n"
+        "                            Override method residual threshold; DBCache/CacheDiT default: 0.08\n"
         "  --cache-max-accumulated-residual-diff <float>\n"
         "                            Disable DBCache after accumulated diff reaches this value, -1 means unlimited\n"
         "  --cache-warmup-steps <int>\n"

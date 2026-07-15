@@ -265,6 +265,36 @@ if [[ -z "${CUDA_ARCHITECTURES}" || ! "${CUDA_ARCHITECTURES}" =~ ^[0-9]+$ ]]; th
   CUDA_ARCHITECTURES="75;80;86;89;90"
 fi
 
+cache_value() {
+  local cache="$1"
+  local key="$2"
+  [[ -f "${cache}" ]] || return 1
+  awk -F= -v key="${key}" '
+    $1 ~ "^" key ":" { print $2; found=1; exit }
+    END { exit found ? 0 : 1 }
+  ' "${cache}"
+}
+
+maybe_clear_stale_compiler_cache() {
+  local cache="${BUILD_DIR}/CMakeCache.txt"
+  [[ -f "${cache}" ]] || return 0
+
+  local cached_cc cached_cxx cached_cuda
+  cached_cc="$(cache_value "${cache}" CMAKE_C_COMPILER || true)"
+  cached_cxx="$(cache_value "${cache}" CMAKE_CXX_COMPILER || true)"
+  cached_cuda="$(cache_value "${cache}" CMAKE_CUDA_COMPILER || true)"
+
+  if [[ "${cached_cc}" != "${CC_EXE}" ||
+        "${cached_cxx}" != "${CXX_EXE}" ||
+        ( -n "${cached_cuda}" && "${cached_cuda}" != "${NVCC_EXE}" ) ]]; then
+    echo "CMake compiler cache changed; clearing ${BUILD_DIR}/CMakeCache.txt and ${BUILD_DIR}/CMakeFiles before configure." >&2
+    rm -f -- "${cache}"
+    rm -rf -- "${BUILD_DIR}/CMakeFiles"
+  fi
+}
+
+maybe_clear_stale_compiler_cache
+
 CMAKE_ARGS=(
   -S .
   -B "${BUILD_DIR}"
@@ -347,6 +377,8 @@ CUDNN_VERSION="n/a"
 CUDNN_PATH_DISPLAY="n/a"
 CUDNN_LD_PATHS=()
 if truthy "${ED_ENABLE_CUDNN_SDPA}"; then
+  [[ -d "${CUDA_ROOT}/lib64" ]] && CUDNN_LD_PATHS+=("${CUDA_ROOT}/lib64")
+  [[ -d "${CUDA_ROOT}/lib" ]] && CUDNN_LD_PATHS+=("${CUDA_ROOT}/lib")
   if [[ -z "${CUDNN_ROOT:-}" ]] && truthy "${ED_INSTALL_CUDNN}"; then
     install_python_cudnn
     NVIDIA_PY_ROOT="$(discover_python_nvidia_root)"

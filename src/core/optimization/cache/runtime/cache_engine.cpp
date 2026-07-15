@@ -30,7 +30,8 @@ bool CacheEngine::init(const ed_sample_params_t& sample_params,
                        SDVersion version,
                        const std::vector<float>& sigmas,
                        bool seam_available,
-                       ICacheDeviceStore* device_store) {
+                       ICacheDeviceStore* device_store,
+                       bool cfg_parallel) {
     config_ = cache_config_from_sample_params(sample_params);
     version_ = version;
     num_steps_ = sigmas.size() >= 2 ? static_cast<int>(sigmas.size() - 1) : 0;
@@ -55,6 +56,24 @@ bool CacheEngine::init(const ed_sample_params_t& sample_params,
         return false;
     }
 
+    // Reject Output-granularity caching under CFG-parallel. Feature/Probe methods
+    // are already refused above (seam_available=false), but Output methods need no
+    // seam and would otherwise run per-rank. rank0 (uncond) and rank1 (cond) hold
+    // independent policy state and decide skips from their own branch's metrics, so
+    // they can diverge (one reuses while the other computes); the CFG combine then
+    // mixes a stale-cached branch with a fresh one and silently drifts. Disable
+    // explicitly rather than corrupt output — matches the warn-and-disable contract.
+    if (cfg_parallel && reqs.granularity == CacheGranularity::Output &&
+        config_.mode != CacheMode::Disabled) {
+        LOG_WARN("cache disabled: Output-granularity caching (mode=%s) is not supported "
+                 "under CFG-parallel (per-rank skip decisions could diverge across the "
+                 "cond/uncond ranks and corrupt the CFG combine).",
+                 cache_mode_name(config_.mode));
+        policy_.reset();
+        contract_.reset();
+        return false;
+    }
+
     InferenceConfig inf;
     inf.config = &config_;
     inf.sigmas = &sigmas;
@@ -63,6 +82,10 @@ bool CacheEngine::init(const ed_sample_params_t& sample_params,
                        contract_->schema().family == ModelFamily::WanVideo;
 
     program_ = policy_->compile(contract_->schema(), contract_->topology(), inf);
+    // Tell the policy whether an on-device metric path exists this run (a device
+    // store was wired). DiCache gates its substep path on this so a host-only model
+    // (Wan, no store) keeps its verified legacy host path.
+    policy_->set_substep_device_available(device_store != nullptr);
     // Wire the device store BEFORE initialize() so device_backed slots allocate
     // on-device. Null store (CPU/SP/mmdit/wan) leaves every slot host-backed.
     state_.set_device_store(device_store);
@@ -150,14 +173,11 @@ sd::Tensor<float> CacheEngine::run_branch(CacheBranch branch,
     }
     const StepContext step = make_step_context();
 
-    CacheRuntimeMetrics metrics;
-    metrics.branch = branch;
-    metrics.condition_key = condition_key;
-    metrics.input = hooks.input;
-
-    const RuntimeDecision decision = policy_->decide(step, metrics);
-    return CacheGraphLowering::execute(*policy_, program_, decision, step,
-                                       condition_key, branch, hooks, state_, operators_);
+    // The substep loop is the only path: every cache method implements next_substep()
+    // (the middle layer translates each SubstepPlan into the runner hooks).
+    return CacheGraphLowering::execute_substeps(*policy_, program_, step,
+                                                condition_key, branch, hooks,
+                                                state_, operators_);
 }
 
 }  // namespace cache

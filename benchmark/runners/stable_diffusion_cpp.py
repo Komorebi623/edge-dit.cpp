@@ -98,7 +98,7 @@ class StableDiffusionCppRunner(BenchmarkRunner):
 
         generation = dict(workload["generation"])
         generation.update({k: v for k, v in run_options.items() if k in generation})
-        prompt = workload.get("resolved_prompt", {}).get("prompt", "")
+        prompt = self.prompt_text(workload, run_options)
         cfg_scale, distilled_guidance = sd_cpp_guidance(workload, generation)
         command = [
             str(binary),
@@ -153,7 +153,7 @@ class StableDiffusionCppRunner(BenchmarkRunner):
         run_options = run_options or {}
         generation = dict(workload["generation"])
         generation.update({k: v for k, v in run_options.items() if k in generation})
-        prompt = workload.get("resolved_prompt", {}).get("prompt", "")
+        prompt = self.prompt_text(workload, run_options)
         command = [
             str(binary),
             "--model",

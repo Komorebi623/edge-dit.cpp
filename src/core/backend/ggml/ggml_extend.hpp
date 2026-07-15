@@ -35,6 +35,8 @@
 #include "backend/ggml/ggml_graph_cut.h"
 #include "optimization/cache/cache_graph_scope.hpp"
 #include "optimization/cache/state/cache_device_store.hpp"
+#include "optimization/cache/model/tap_registry.hpp"
+#include "optimization/cache/compile/indicator_lowering.hpp"
 
 #include "edge-dit.h"
 #include "core/runtime/model_loader.h"
@@ -1834,7 +1836,53 @@ struct GGMLRunnerContext {
     std::shared_ptr<WeightAdapter> weight_adapter = nullptr;
     // Build-time cache seam; null on the uncached path (graph is then identical).
     sd::CacheGraphScope* cache_scope              = nullptr;
+    // Substep tap registry; null on the legacy/uncached path (no taps recorded,
+    // graph identical). When set, the model's forward() conditionally taps
+    // structural anchors it requests (see cache/model/tap_registry.hpp).
+    edgedit::cache::TapRegistry* tap_registry     = nullptr;
 };
+
+// Model-facing tap primitive. Called by a model's forward() at a structural
+// landmark (model input, block output k, model output). Conditional: a no-op
+// unless the middle layer requested this anchor this substep, so unrequested
+// anchors are never pinned as graph outputs (ggml_set_output pins the buffer and
+// perturbs gallocr — only pin what is actually read back). When requested, names
+// the node and records it; the runner promotes recorded taps into its
+// named-tensor index (see expand_tap_registry_nodes) for readback.
+inline void tap(GGMLRunnerContext* ctx, const edgedit::cache::AnchorRef& a, ggml_tensor* t) {
+    if (ctx == nullptr || ctx->tap_registry == nullptr || t == nullptr) {
+        return;
+    }
+    if (!ctx->tap_registry->wants(a)) {
+        return;
+    }
+    ctx->tap_registry->put(a, t);
+}
+
+// Reconstruct the reuse output for a tap-driven inject: x_before + <residual>,
+// where the residual depends on the registry's inject kind (host feature / device
+// single residual / device gamma-blend). Mirrors CacheGraphScope::add_injected but
+// registry-driven. Called by a model forward at the inject region start.
+inline ggml_tensor* build_tap_inject(GGMLRunnerContext* ctx, ggml_tensor* x_before) {
+    using edgedit::cache::TapRegistry;
+    ggml_context* c = ctx->ggml_ctx;
+    TapRegistry* reg = ctx->tap_registry;
+    switch (reg->inject_kind()) {
+        case TapRegistry::InjectKind::HostFeature:
+            return ggml_add(c, x_before, reg->inject_input());
+        case TapRegistry::InjectKind::DeviceResidual:
+            return ggml_add(c, x_before, reg->inject_resid1());
+        case TapRegistry::InjectKind::DeviceBlend: {
+            // x_before + resid2 + gamma*(resid1 - resid2)  (matches add_injected).
+            ggml_tensor* diff = ggml_sub(c, reg->inject_resid1(), reg->inject_resid2());
+            ggml_tensor* scaled = ggml_mul(c, diff, reg->inject_gamma());
+            ggml_tensor* aligned = ggml_add(c, reg->inject_resid2(), scaled);
+            return ggml_add(c, x_before, aligned);
+        }
+        default:
+            return x_before;
+    }
+}
 
 // Device backing for CacheStateManager slots (implements the cache core's
 // abstract ICacheDeviceStore). Owns one persistent ggml_context + backend buffer,
@@ -2278,6 +2326,11 @@ protected:
     // When null, get_context() leaves ctx.cache_scope null and the model graph
     // is byte-identical to the uncached path.
     sd::CacheGraphScope* cache_scope_ = nullptr;
+
+    // Non-owning substep tap registry; set before a substep-path build, cleared
+    // after. Null on legacy/uncached builds (graph identical). Threaded onto the
+    // GGMLRunnerContext so the model's tap() calls land here.
+    edgedit::cache::TapRegistry* tap_registry_ = nullptr;
 
     // Device backing for CacheStateManager slots (on-GPU residual reuse). Created
     // lazily on the runtime backend; handed to the engine's state manager via
@@ -4644,8 +4697,83 @@ protected:
         if (cache_scope_ != nullptr && ggml_graph_n_nodes(gf) > 0) {
             expand_cache_scope_nodes(gf);
         }
+        if (tap_registry_ != nullptr && ggml_graph_n_nodes(gf) > 0) {
+            expand_tap_registry_nodes(gf);
+        }
         prepare_build_in_tensor_after(gf);
         return gf;
+    }
+
+    // Promote the substep's recorded taps + woven indicator scalars into the
+    // named-tensor index so they can be read back post-compute (mirrors
+    // expand_cache_scope_nodes, but the set is dynamic and plan-driven rather than
+    // fixed *_node fields). Each tapped anchor is pinned as a graph output under a
+    // stable name; indicator scalar nodes name themselves (cache_ind:<name>) and
+    // are expanded here too. The registry only holds anchors the model actually
+    // tapped this build.
+    void expand_tap_registry_nodes(ggml_cgraph* gf) {
+        auto expand_named = [&](ggml_tensor* node, const std::string& name) {
+            if (node == nullptr) {
+                return;
+            }
+            ggml_set_name(node, name.c_str());
+            ggml_set_output(node);
+            cache(name, node);
+            ggml_build_forward_expand(gf, node);
+        };
+        // Weave indicators + residual capture HERE (after the final-result node was
+        // named at prepare-time), so the model output stays the graph's result and
+        // these aux nodes are appended without stealing the result slot — mirrors
+        // expand_cache_scope_nodes' ordering.
+        for (const auto& ind : tap_registry_->indicators()) {
+            ggml_tensor* s = edgedit::cache::lower_indicator(compute_ctx, ind, *tap_registry_);
+            if (s != nullptr) {
+                expand_named(s, s->name);
+            }
+        }
+        if (tap_registry_->capture_residual()) {
+            ggml_tensor* min = tap_registry_->get(edgedit::cache::AnchorRef::model_in());
+            ggml_tensor* mout = tap_registry_->get(edgedit::cache::AnchorRef::model_out());
+            if (min != nullptr && mout != nullptr) {
+                ggml_tensor* feat = ggml_sub(compute_ctx, mout, min);
+                expand_named(feat, "ed_cache_feature");
+            }
+        }
+        // DiCache probe metrics (delta_y/delta_x/gamma): weave the exact
+        // build_probe_metrics form from the tapped probe (BlockOut[m]) + before
+        // (ModelIn) anchors and the runner-owned persistent operands. Only the
+        // scalars are read back.
+        if (tap_registry_->probe_metrics()) {
+            ggml_tensor* probe = tap_registry_->get(tap_registry_->probe_anchor());
+            ggml_tensor* before = tap_registry_->get(tap_registry_->before_anchor());
+            const auto& ops = tap_registry_->probe_ops();
+            auto rel = [&](ggml_tensor* cur, ggml_tensor* ref) -> ggml_tensor* {
+                ggml_tensor* num = ggml_sum(compute_ctx, ggml_abs(compute_ctx, ggml_sub(compute_ctx, cur, ref)));
+                ggml_tensor* den = ggml_sum(compute_ctx, ggml_abs(compute_ctx, ref));
+                return ggml_div(compute_ctx, num, den);
+            };
+            if (probe != nullptr && before != nullptr) {
+                if (ops.prev_probe != nullptr) {
+                    expand_named(rel(probe, ops.prev_probe), "cache_ind:delta_y");
+                }
+                if (ops.want_delta_x && ops.prev_input != nullptr) {
+                    expand_named(rel(before, ops.prev_input), "cache_ind:delta_x");
+                }
+                if (ops.want_gamma && ops.probe_prev1 != nullptr && ops.probe_prev2 != nullptr) {
+                    ggml_tensor* cur_resid = ggml_sub(compute_ctx, probe, before);
+                    ggml_tensor* num = ggml_sum(compute_ctx, ggml_abs(compute_ctx,
+                        ggml_sub(compute_ctx, cur_resid, ops.probe_prev2)));
+                    ggml_tensor* den = ggml_sum(compute_ctx, ggml_abs(compute_ctx,
+                        ggml_sub(compute_ctx, ops.probe_prev1, ops.probe_prev2)));
+                    expand_named(ggml_div(compute_ctx, num, den), "cache_ind:gamma");
+                }
+            }
+        }
+        // Also pin the raw taps (so a method that reads an anchor tensor directly
+        // can). Indicator/feature operands are already expanded above.
+        for (const auto& kv : tap_registry_->recorded()) {
+            expand_named(kv.second, kv.first);
+        }
     }
 
     // Names used to read back the cache seam's aux tensors post-compute.
@@ -5970,6 +6098,7 @@ public:
         runner_ctx.circular_y_enabled    = circular_y_enabled;
         runner_ctx.weight_adapter        = weight_adapter;
         runner_ctx.cache_scope           = cache_scope_;
+        runner_ctx.tap_registry          = tap_registry_;
         return runner_ctx;
     }
 
@@ -6254,6 +6383,74 @@ public:
         return result;
     }
 
+    // ---- Substep-path pass (ED_CACHE_SUBSTEP). Tap-driven analogue of
+    // run_cache_pass: the middle layer configures a TapRegistry (requested anchors,
+    // indicators, stop-after-block) before calling; the model forward() taps the
+    // anchors and build_graph weaves the indicator scalars. This reads back the
+    // requested indicator scalars by name and, when a residual capture is asked for,
+    // the ModelOut/ModelIn tapped tensors. Model-agnostic. ----
+    struct SubstepPassResult {
+        sd::Tensor<float> output;
+        std::unordered_map<std::string, float> indicators;  // name -> scalar
+        // Host readbacks for the host-path (no device slot): the captured residual
+        // (ModelOut - ModelIn) and the probe/before tap tensors. Empty unless the
+        // caller asks via read_feature / read_taps.
+        sd::Tensor<float> feature;
+        sd::Tensor<float> before;
+        sd::Tensor<float> probe;
+    };
+    SubstepPassResult run_substep_pass(get_graph_cb_t get_graph,
+                                       int n_threads,
+                                       edgedit::cache::TapRegistry* registry,
+                                       size_t expected_dim,
+                                       const std::vector<std::string>& indicator_names,
+                                       const std::function<void()>& post_readback = nullptr,
+                                       bool read_feature = false,
+                                       bool read_taps = false) {
+        SubstepPassResult result;
+        set_tap_registry(registry);
+        auto out = GGMLRunner::compute<float>(get_graph, n_threads, /*free=*/false);
+        result.output = restore_trailing_singleton_dims(std::move(out), expected_dim);
+
+        for (const auto& name : indicator_names) {
+            const std::string node = "cache_ind:" + name;
+            ggml_tensor* t = get_cache_tensor_by_name(node);
+            float v = std::numeric_limits<float>::quiet_NaN();
+            if (t != nullptr) {
+                ggml_backend_tensor_get(t, &v, 0, sizeof(float));
+            }
+            result.indicators[name] = v;
+        }
+
+        // Host-path readbacks (no device slot): the captured residual and the
+        // probe/before tap tensors, read back to host for the host cache path.
+        if (read_feature) {
+            ggml_tensor* feat = get_cache_tensor_by_name("ed_cache_feature");
+            if (feat != nullptr) {
+                result.feature = sd::make_sd_tensor_from_ggml<float>(feat);
+            }
+        }
+        if (read_taps && registry != nullptr) {
+            ggml_tensor* before = registry->get(registry->before_anchor());
+            ggml_tensor* probe = registry->get(registry->probe_anchor());
+            if (before != nullptr) {
+                result.before = sd::make_sd_tensor_from_ggml<float>(before);
+            }
+            if (probe != nullptr) {
+                result.probe = sd::make_sd_tensor_from_ggml<float>(probe);
+            }
+        }
+
+        set_tap_registry(nullptr);
+        // Device-to-device handoff (residual capture into a persistent slot, etc.)
+        // while the named tap tensors are still resident.
+        if (post_readback) {
+            post_readback();
+        }
+        reset_graph_cut_run_cache();
+        return result;
+    }
+
     template <typename T>
     std::optional<sd::Tensor<T>> compute(get_graph_cb_t get_graph,
                                          int n_threads,
@@ -6444,6 +6641,12 @@ public:
     // Attach/detach the build-time cache seam consulted by model forward().
     void set_cache_scope(sd::CacheGraphScope* scope) {
         cache_scope_ = scope;
+    }
+    void set_tap_registry(edgedit::cache::TapRegistry* reg) {
+        tap_registry_ = reg;
+    }
+    edgedit::cache::TapRegistry* tap_registry() const {
+        return tap_registry_;
     }
     sd::CacheGraphScope* cache_scope() const {
         return cache_scope_;

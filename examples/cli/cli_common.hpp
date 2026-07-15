@@ -497,7 +497,7 @@ struct FluxCliArgs {
     bool cache_reset_error_on_compute = true;
     int cache_Fn_compute_blocks = 8;
     int cache_Bn_compute_blocks = 0;
-    float cache_residual_diff_threshold = 0.08f;
+    float cache_residual_diff_threshold = std::numeric_limits<float>::quiet_NaN();
     float cache_max_accumulated_residual_diff = -1.0f;
     int cache_max_warmup_steps = 8;
     int cache_max_cached_steps = -1;
@@ -868,7 +868,8 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         return false;
     }
 
-    if (args->cache_residual_diff_threshold < 0.0f) {
+    if (std::isfinite(args->cache_residual_diff_threshold) &&
+        args->cache_residual_diff_threshold < 0.0f) {
         std::fprintf(stderr, "cache residual threshold must be non-negative\n");
         return false;
     }

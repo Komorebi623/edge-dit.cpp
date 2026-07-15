@@ -75,6 +75,10 @@ static float cache_reuse_threshold(const ed_sample_params_t& params, CacheMode m
     return std::max(0.0f, threshold);
 }
 
+static bool has_positive_threshold(float threshold) {
+    return std::isfinite(threshold) && threshold > 0.0f;
+}
+
 CacheConfig cache_config_from_sample_params(const ed_sample_params_t& params) {
     CacheConfig cfg;
     cfg.mode = cache_mode_from_ld(params.cache_mode);
@@ -99,7 +103,9 @@ CacheConfig cache_config_from_sample_params(const ed_sample_params_t& params) {
     cfg.dbcache.bn_compute_blocks = params.cache_Bn_compute_blocks;
     cfg.dbcache.start_percent = start_percent;
     cfg.dbcache.end_percent = end_percent;
-    cfg.dbcache.residual_diff_threshold = params.cache_residual_diff_threshold;
+    if (has_positive_threshold(params.cache_residual_diff_threshold)) {
+        cfg.dbcache.residual_diff_threshold = params.cache_residual_diff_threshold;
+    }
     cfg.dbcache.max_accumulated_residual_diff = params.cache_max_accumulated_residual_diff;
     cfg.dbcache.max_warmup_steps = params.cache_max_warmup_steps;
     cfg.dbcache.max_cached_steps = params.cache_max_cached_steps;
@@ -115,7 +121,7 @@ CacheConfig cache_config_from_sample_params(const ed_sample_params_t& params) {
     cfg.taylorseer.end_percent = end_percent;
 
     cfg.magcache.enabled = cfg.mode == CacheMode::MagCache;
-    if (std::isfinite(params.cache_residual_diff_threshold) && params.cache_residual_diff_threshold > 0.0f) {
+    if (has_positive_threshold(params.cache_residual_diff_threshold)) {
         cfg.magcache.mag_thresh = params.cache_residual_diff_threshold;
     }
     if (params.cache_max_continuous_cached_steps > 0) {
@@ -142,14 +148,14 @@ CacheConfig cache_config_from_sample_params(const ed_sample_params_t& params) {
         }
         cfg.dicache.probe_depth = probe_depth;
     }
-    if (std::isfinite(params.cache_residual_diff_threshold) && params.cache_residual_diff_threshold > 0.0f) {
+    if (has_positive_threshold(params.cache_residual_diff_threshold)) {
         cfg.dicache.rel_l1_thresh = params.cache_residual_diff_threshold;
     }
     cfg.dicache.start_percent = start_percent;
     cfg.dicache.end_percent = end_percent;
 
     cfg.sencache.enabled = cfg.mode == CacheMode::SenCache;
-    if (std::isfinite(params.cache_residual_diff_threshold) && params.cache_residual_diff_threshold > 0.0f) {
+    if (has_positive_threshold(params.cache_residual_diff_threshold)) {
         cfg.sencache.thresh_main = params.cache_residual_diff_threshold;
     }
     if (params.cache_max_continuous_cached_steps > 0) {

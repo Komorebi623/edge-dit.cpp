@@ -117,7 +117,7 @@ class XditRunner(BenchmarkRunner):
 
         generation = dict(workload["generation"])
         generation.update({k: v for k, v in run_options.items() if k in generation})
-        prompt = workload.get("resolved_prompt", {}).get("prompt", "")
+        prompt = self.prompt_text(workload, run_options)
         ulysses_degree = gpu_count if parallel_mode in (None, "ulysses") else 1
         command = [
             sys.executable,
@@ -187,8 +187,10 @@ class XditRunner(BenchmarkRunner):
         if not cli.exists():
             raise NotImplementedError("xDiT has no xfuser CLI entrypoint in this checkout")
 
-        generation = workload["generation"]
-        prompt = workload.get("resolved_prompt", {}).get("prompt", "")
+        run_options = run_options or {}
+        generation = dict(workload["generation"])
+        generation.update({k: v for k, v in run_options.items() if k in generation})
+        prompt = self.prompt_text(workload, run_options)
         ulysses_degree = gpu_count if parallel_mode in (None, "ulysses") else 1
         return [
             "python3",

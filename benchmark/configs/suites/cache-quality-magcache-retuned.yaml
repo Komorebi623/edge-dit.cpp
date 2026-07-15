@@ -1,0 +1,65 @@
+schema_version: 1
+suite_id: cache-quality-magcache-retuned
+description: >
+  FLUX.1-dev cache retune suite for MagCache and DiCache under the cache-quality
+  prompt and seed matrix. This suite reuses the cache-quality workload contract
+  but limits execution to retuned cache points.
+mode: diagnostic
+defaults:
+  warmup_runs: 1
+  measured_runs: 5
+  output_encoding_in_core_latency: false
+  memory_measurement: external
+hardware:
+  - ../hardware/h200-local.yaml
+systems:
+  single_gpu:
+    - ../systems/edge-dit.yaml
+workloads:
+  single_gpu:
+    - ../workloads/flux1-dev-t2i-1024-s50.yaml
+scenario_matrix:
+  axes:
+    - axis: cache_method
+      values:
+        - id: magcache_default
+          options:
+            cache: magcache
+            quality_role: target
+            cache_granularity: feature
+        - id: dicache_default
+          options:
+            cache: dicache
+            quality_role: target
+            cache_granularity: probe
+    - axis: prompt
+      values:
+        - id: p00
+          options: {prompt_id: cache_glass_teapot}
+        - id: p01
+          options: {prompt_id: cache_city_robot}
+        - id: p02
+          options: {prompt_id: cache_library_atrium}
+        - id: p03
+          options: {prompt_id: cache_bicycle_rain}
+        - id: p04
+          options: {prompt_id: cache_greenhouse}
+        - id: p05
+          options: {prompt_id: cache_workbench}
+        - id: p06
+          options: {prompt_id: cache_ceramic_bowl}
+        - id: p07
+          options: {prompt_id: cache_lighthouse}
+    - axis: seed
+      values:
+        - id: s0
+          options: {seed: 0}
+        - id: s1
+          options: {seed: 1}
+        - id: s2
+          options: {seed: 2}
+reporting:
+  table: cache_speed_quality
+  require_quality_metrics: true
+  required_quality_metrics: [psnr, lpips]
+  optional_quality_metrics: [clip]

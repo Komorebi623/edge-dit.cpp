@@ -419,7 +419,8 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
     const bool cache_seam_available =
         !cache_use_cfg_parallel && diffusion_->supports_feature_cache();
     const bool cache_enabled =
-        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available);
+        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, nullptr,
+                           cache_use_cfg_parallel);
     const int64_t sample_start_ms = ggml_time_ms();
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {
@@ -477,11 +478,26 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
                     p.y = &cond_in.c_vector;
                     return diffusion_->compute_capture(n_threads, p, region_start, region_end);
                 };
+                // Substep-path tap-driven host capture (ED_CACHE_SUBSTEP): residual
+                // via ModelIn/ModelOut taps, read back to host. No CacheGraphScope.
+                hooks.substep_capture_host = [&, cond_in]() {
+                    DiffusionParams p = diffusion_params;
+                    p.context = &cond_in.c_crossattn;
+                    p.y = &cond_in.c_vector;
+                    return diffusion_->compute_substep_capture_host(n_threads, p);
+                };
                 hooks.inject = [&, cond_in](const sd::Tensor<float>& feat, int region_start, int region_end) {
                     DiffusionParams p = diffusion_params;
                     p.context = &cond_in.c_crossattn;
                     p.y = &cond_in.c_vector;
                     return diffusion_->compute_inject(n_threads, p, feat, region_start, region_end);
+                };
+                // Substep-path tap-driven host inject (ED_CACHE_SUBSTEP).
+                hooks.substep_inject_host = [&, cond_in](const sd::Tensor<float>& feat) {
+                    DiffusionParams p = diffusion_params;
+                    p.context = &cond_in.c_crossattn;
+                    p.y = &cond_in.c_vector;
+                    return diffusion_->compute_substep_inject_host(n_threads, p, feat, 0, -1);
                 };
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
                     hooks.probe = [&, cond_in](int depth) {
@@ -489,6 +505,13 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
                         p.context = &cond_in.c_crossattn;
                         p.y = &cond_in.c_vector;
                         return diffusion_->compute_probe(n_threads, p, depth);
+                    };
+                    // Substep-path tap-driven host probe (ED_CACHE_SUBSTEP).
+                    hooks.substep_probe_host = [&, cond_in](int depth) {
+                        DiffusionParams p = diffusion_params;
+                        p.context = &cond_in.c_crossattn;
+                        p.y = &cond_in.c_vector;
+                        return diffusion_->compute_substep_probe_host(n_threads, p, depth);
                     };
                 }
             }

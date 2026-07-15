@@ -16,6 +16,7 @@ systems:
 workloads:
   parallel:
     - ../workloads/flux1-dev-t2i-1024-s50.yaml
+    - ../workloads/flux1-dev-t2i-2048-s20.yaml
     - ../workloads/wan2-t2v.yaml
 parallel_matrix:
   gpu_counts: [1, 2, 4]

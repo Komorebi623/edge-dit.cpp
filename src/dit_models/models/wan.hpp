@@ -4632,6 +4632,9 @@ namespace WAN {
             sd::CacheGraphScope* cache_scope =
                 (use_sp_mainline || c != nullptr) ? nullptr : ctx->cache_scope;
             const bool cache_inject = cache_scope != nullptr && cache_scope->inject_mode();
+            // Substep tap: block-stack input anchor (ModelIn). Conditional no-op
+            // unless requested. Coexists with the legacy cache_scope path.
+            tap(ctx, edgedit::cache::AnchorRef::model_in(), x_orig);
             ggml_tensor* sp_prepared_pe = nullptr;
             if (use_sp_mainline) {
                 sp_prepared_pe = wan_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx,
@@ -4641,6 +4644,14 @@ namespace WAN {
             }
 
             for (int i = 0; i < params.num_layers; i++) {
+                // Tap-driven inject (substep reuse): at the region start, replace the
+                // stream with x_before + inject_input and jump past the region — no
+                // CacheGraphScope. x_orig is the block-stack input (ModelIn).
+                if (ctx->tap_registry != nullptr && ctx->tap_registry->inject_at(i)) {
+                    x = build_tap_inject(ctx, x_orig);
+                    i = ctx->tap_registry->inject_resume() - 1;
+                    continue;
+                }
                 if (cache_inject) {
                     if (ggml_tensor* injected = cache_scope->step_inject_region(ctx->ggml_ctx, i, x)) {
                         x = injected;
@@ -4691,6 +4702,12 @@ namespace WAN {
                 if (c != nullptr) {
                     sd::ggml_graph_cut::mark_graph_cut(c, "wan.blocks." + std::to_string(i), "c");
                 }
+                // Substep tap: block output k (BlockOut[i]) — the DiCache probe point.
+                // Conditional no-op unless requested; also drives the substep probe stop.
+                tap(ctx, edgedit::cache::AnchorRef::block_out(i), x);
+                if (ctx->tap_registry != nullptr && ctx->tap_registry->stop_after(i)) {
+                    return x;
+                }
                 if (cache_scope != nullptr) {
                     cache_scope->end_region(ctx->ggml_ctx, i, params.num_layers, x);
                     if (cache_scope->stop_after_block(i)) {
@@ -4699,6 +4716,11 @@ namespace WAN {
                     }
                 }
             }
+
+            // Substep tap: block-stack output anchor (ModelOut) — the residual's
+            // "after" point (after the block loop, before head). Conditional no-op
+            // unless requested.
+            tap(ctx, edgedit::cache::AnchorRef::model_out(), x);
 
             if (use_sp_mainline && wan_sp_local_head_before_gather_enabled()) {
                 x = head->forward(ctx, x, e);  // local [N, shard_tokens, pt*ph*pw*out_dim]
@@ -5121,6 +5143,84 @@ namespace WAN {
             out.probe = pass.probe.empty() ? std::move(pass.output) : std::move(pass.probe);
             out.before = std::move(pass.before);
             return out;
+        }
+
+        // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven capture (host path). Wan
+        // has no device slot, so the residual is read back to host (feature). The
+        // runner weaves (ModelOut - ModelIn) from the taps; no CacheGraphScope. ----
+        sd::DiffusionCacheResult compute_substep_capture(int n_threads,
+                                                         const sd::Tensor<float>& x,
+                                                         const sd::Tensor<float>& timesteps,
+                                                         const sd::Tensor<float>& context,
+                                                         const sd::Tensor<float>& clip_fea,
+                                                         const sd::Tensor<float>& c_concat) {
+            edgedit::cache::TapRegistry reg;
+            reg.set_requested({edgedit::cache::AnchorRef::model_in(),
+                               edgedit::cache::AnchorRef::model_out()});
+            reg.set_capture_residual(true);
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {},
+                                         nullptr, /*read_feature=*/true, /*read_taps=*/false);
+            sd::DiffusionCacheResult out;
+            out.output = std::move(pass.output);
+            out.feature = std::move(pass.feature);
+            return out;
+        }
+
+        // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven probe (host path). Requests
+        // ModelIn + BlockOut[m-1] taps, stops after m blocks, reads the before/probe
+        // tensors back to host for the host DiCache metric. No CacheGraphScope. ----
+        sd::DiffusionCacheResult compute_substep_probe(int n_threads,
+                                                       const sd::Tensor<float>& x,
+                                                       const sd::Tensor<float>& timesteps,
+                                                       const sd::Tensor<float>& context,
+                                                       const sd::Tensor<float>& clip_fea,
+                                                       const sd::Tensor<float>& c_concat,
+                                                       int probe_depth) {
+            const int m = std::max(1, probe_depth);
+            edgedit::cache::TapRegistry reg;
+            const auto probe_anchor = edgedit::cache::AnchorRef::block_out(m - 1);
+            const auto before_anchor = edgedit::cache::AnchorRef::model_in();
+            reg.set_requested({before_anchor, probe_anchor});
+            reg.set_stop_after(m - 1);
+            // Record the anchor roles so run_substep_pass's read_taps returns them.
+            reg.set_probe_metrics(probe_anchor, before_anchor, {});
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {},
+                                         nullptr, /*read_feature=*/false, /*read_taps=*/true);
+            sd::DiffusionCacheResult out;
+            out.probe = pass.probe.empty() ? std::move(pass.output) : std::move(pass.probe);
+            out.before = std::move(pass.before);
+            return out;
+        }
+
+        // ---- Substep-path (ED_CACHE_SUBSTEP) tap-driven inject (host reuse). Uploads
+        // the host residual as a graph input and drives the forward's registry inject:
+        // at the region start the stream becomes x_before + inject_input and the
+        // region's blocks are skipped. No CacheGraphScope. ----
+        sd::Tensor<float> compute_substep_inject(int n_threads,
+                                                 const sd::Tensor<float>& x,
+                                                 const sd::Tensor<float>& timesteps,
+                                                 const sd::Tensor<float>& context,
+                                                 const sd::Tensor<float>& clip_fea,
+                                                 const sd::Tensor<float>& c_concat,
+                                                 const sd::Tensor<float>& feature,
+                                                 int region_start,
+                                                 int region_end) {
+            edgedit::cache::TapRegistry reg;
+            inject_feature_host_ = feature;
+            const int resume = region_end < 0 ? wan_params.num_layers : region_end;
+            auto get_graph = [&]() -> ggml_cgraph* {
+                ggml_tensor* inject_input = make_input(inject_feature_host_);
+                reg.set_inject_host(inject_input, region_start, resume);
+                return build_graph(x, timesteps, context, clip_fea, c_concat, {}, {}, 1.f);
+            };
+            auto pass = run_substep_pass(get_graph, n_threads, &reg, x.dim(), {});
+            return std::move(pass.output);
         }
 
         void test() {
