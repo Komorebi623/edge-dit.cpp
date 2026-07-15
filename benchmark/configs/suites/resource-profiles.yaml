@@ -16,7 +16,7 @@ systems:
     - ../systems/edge-dit.yaml
 workloads:
   single_gpu:
-    - ../workloads/flux1-dev-t2i.yaml
+    - ../workloads/flux1-dev-t2i-1024-s50.yaml
 scenarios:
   - scenario_id: performance_bf16
     options:
@@ -31,14 +31,14 @@ scenarios:
     options:
       precision: q4_k
       keep_text_encoder_on_cpu: true
-      profile_label: 24 GB
+      profile_label: 24 GiB target
   - scenario_id: profile_16gb_q4_text_cpu_vae_tiling
     vram_constraint_gib: 16
     options:
       precision: q4_k
       keep_text_encoder_on_cpu: true
       vae_tiling: true
-      profile_label: 16 GB
+      profile_label: 16 GiB target
   - scenario_id: profile_12gb_q4_offload_graph_budget_vae_tiling
     vram_constraint_gib: 12
     options:
@@ -48,7 +48,7 @@ scenarios:
       max_vram_gib: 12
       vae_tiling: true
       profile_graph_cuts: true
-      profile_label: 12 GB
+      profile_label: 12 GiB graph-budget diagnostic
   - scenario_id: profile_8gb_q4_offload_graph_budget_vae_tiling
     vram_constraint_gib: 8
     options:
@@ -58,7 +58,7 @@ scenarios:
       max_vram_gib: 8
       vae_tiling: true
       profile_graph_cuts: true
-      profile_label: 8 GB experimental
+      profile_label: 8 GiB budget experimental
 reporting:
   table: resource_constrained_profiles
   require_quality_metrics: false

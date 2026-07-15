@@ -107,6 +107,10 @@ available in [Performance and benchmarks](docs/performance.md).
 | | Diffusers | 25.220 | 9.558 | 9.565 | 60935 |
 | | stable-diffusion.cpp | 1.782 | 62.671 | 62.728 | 61879 |
 
+Load time follows each runtime's reported initialization boundary and may
+reflect different weight materialization or memory-mapping strategies.
+Generation latency is the primary cross-runtime performance metric.
+
 ## Open-Source Interfaces
 
 edge-dit.cpp exposes the same runtime through several public integration
@@ -135,6 +139,14 @@ If the repository was cloned without submodules:
 
 ```bash
 bash scripts/bootstrap.sh
+```
+
+When updating an existing checkout, pull the superproject and submodule state
+together:
+
+```bash
+git pull --recurse-submodules
+git submodule update --init --recursive
 ```
 
 Build the default CUDA performance profile:

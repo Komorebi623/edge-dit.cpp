@@ -16,7 +16,7 @@ systems:
     - ../systems/edge-dit.yaml
 workloads:
   single_gpu:
-    - ../workloads/flux1-dev-t2i-2048-s20.yaml
+    - ../workloads/flux1-dev-t2i-2048-s50.yaml
 scenarios:
   - scenario_id: untiled
     options:

@@ -82,15 +82,14 @@ bash scripts/build_cuda.sh
 
 Run the README main-table suite. This is the source for the root README
 Performance table and uses FLUX.1-dev, Stable Diffusion 3 Medium, and
-Qwen-Image with the same 1024x1024, 50-step, BF16, batch-1 setting:
+Qwen-Image with the same 1024x1024, 50-step, batch-1 setting:
 
 ```bash
 bash benchmark/scripts/run_readme_main_table.sh
 ```
 
-Add a fourth real 1024x1024, 50-step text-to-image workload to the README
-main-table suite before publishing a four-model table. The script checks the
-expanded workload count before it runs.
+The current README snapshot evaluates three representative text-to-image
+workloads.
 
 Run the reproducible FLUX.1-dev single-GPU e2e suite:
 
@@ -103,10 +102,12 @@ python3 benchmark/orchestration/run_suite.py \
 ```
 
 The README main-table workloads are the `*-1024-s50` text-to-image configs:
-1024x1024, 50 denoising steps, seed 0, batch 1, BF16. Shorter 20-step
-workloads are smoke or diagnostic only and must not be aggregated into README
-or main-table performance numbers. The local H200 config currently has Stable
-Diffusion 3 Medium, not a real SD3.5 Large checkpoint.
+1024x1024, 50 denoising steps, seed 0, batch 1. FLUX.1-dev and Qwen-Image use
+BF16; Stable Diffusion 3 Medium uses the matched precision available to each
+runtime. Shorter 20-step workloads are smoke or diagnostic only and must not be
+aggregated into README or main-table performance numbers. This snapshot
+evaluates Stable Diffusion 3 Medium; Stable Diffusion 3.5 Large is not
+included.
 
 ## Full Performance Page Suites
 
@@ -125,20 +126,28 @@ python3 benchmark/orchestration/run_suite.py \
   --execute \
   --output-root benchmark/results/perf-task-coverage-YYYYMMDD
 
-# CFG scaling. This intentionally uses SD3 Medium, not FLUX distilled guidance.
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/cfg-parallel.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --output-root benchmark/results/perf-cfg-parallel-YYYYMMDD
+# Parallel scaling: SD3 Medium CFG-2 plus FLUX SP-1/SP-2/SP-4.
+bash benchmark/scripts/run_parallel_tables.sh \
+  --edge-build-dir build-cuda \
+  --output-root benchmark/results/perf-parallel-YYYYMMDD
 
-# Sequence-parallel scaling, including short and long sequence workloads.
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/sp-parallel.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --force-external-update \
-  --output-root benchmark/results/perf-sp-parallel-YYYYMMDD
+# Low-VRAM deployment profiles. The runner waits for a clean single GPU by
+# default because the public table reports peak VRAM.
+bash benchmark/scripts/run_resource_profiles_table.sh \
+  --edge-build-dir build-cuda \
+  --output-root benchmark/results/perf-resource-profiles-YYYYMMDD
+
+# Quantization latency and memory trade-offs under the same FLUX 50-step
+# workload used by the resource profiles table.
+bash benchmark/scripts/run_quantization_table.sh \
+  --edge-build-dir build-cuda \
+  --output-root benchmark/results/perf-quantization-YYYYMMDD
+
+# High-resolution VAE tiling memory trade-offs under a 2048x2048, 50-step FLUX
+# workload.
+bash benchmark/scripts/run_vae_tiling_table.sh \
+  --edge-build-dir build-cuda \
+  --output-root benchmark/results/perf-vae-tiling-YYYYMMDD
 
 # Cache speed-quality. This is the only suite that gates public quality metrics.
 python3 benchmark/orchestration/run_suite.py \
@@ -148,8 +157,8 @@ python3 benchmark/orchestration/run_suite.py \
   --systems edge-dit.cpp \
   --output-root benchmark/results/perf-cache-quality-YYYYMMDD
 
-# Resource, quantization, VAE tiling, and CUDA optimization trade-offs.
-for suite in resource-profiles quantization vae-tiling cuda-optimization-ablation; do
+# CUDA optimization trade-offs.
+for suite in cuda-optimization-ablation cuda-optimization-ablation-qwen; do
   python3 benchmark/orchestration/run_suite.py \
     --suite "benchmark/configs/suites/${suite}.yaml" \
     --site benchmark/configs/local/site-h200.yaml \
@@ -174,13 +183,13 @@ Finally aggregate the frozen roots:
 python3 benchmark/analysis/aggregate.py \
   --results-dir benchmark/results/perf-main-table-YYYYMMDD \
   --results-dir benchmark/results/perf-task-coverage-YYYYMMDD \
-  --results-dir benchmark/results/perf-cfg-parallel-YYYYMMDD \
-  --results-dir benchmark/results/perf-sp-parallel-YYYYMMDD \
+  --results-dir benchmark/results/perf-parallel-YYYYMMDD \
   --results-dir benchmark/results/perf-cache-quality-YYYYMMDD \
   --results-dir benchmark/results/perf-resource-profiles-YYYYMMDD \
   --results-dir benchmark/results/perf-quantization-YYYYMMDD \
   --results-dir benchmark/results/perf-vae-tiling-YYYYMMDD \
   --results-dir benchmark/results/perf-cuda-optimization-ablation-YYYYMMDD \
+  --results-dir benchmark/results/perf-cuda-optimization-ablation-qwen-YYYYMMDD \
   --suite-id performance-page \
   --output benchmark/results/performance-page-YYYYMMDD/summary.json
 ```
