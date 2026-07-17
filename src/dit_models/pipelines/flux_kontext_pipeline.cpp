@@ -963,9 +963,21 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
                                         parallel::cfg_parallel_available(runtime_->parallel_context());
     const bool cache_seam_available =
         !cache_use_cfg_parallel && flux_runner_->feature_cache_available();
+    // Wire the device store when an on-GPU device path is active: MagCache
+    // feature-reuse (ED_FEATURE_CACHE_GPU) OR DiCache rings (ED_DICACHE_GPU, face C).
+    cache::ICacheDeviceStore* cache_store =
+        (cache_seam_available && flux_runner_ != nullptr &&
+         (Flux::FluxRunner::feature_gpu_enabled() || Flux::FluxRunner::dicache_gpu_enabled()))
+            ? flux_runner_->cache_device_store()
+            : nullptr;
     const bool cache_enabled =
-        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, nullptr,
+        cache_runtime.init(params->sample, version_, sigmas, cache_seam_available, cache_store,
                            cache_use_cfg_parallel);
+    // GPU DiCache (ED_DICACHE_GPU): set the probe depth for the capture snapshot.
+    // Per-generation ring state is owned + freed by CacheStateManager::reset() (face C).
+    if (cache_enabled && flux_runner_ != nullptr) {
+        flux_runner_->dicache_probe_depth_ = cache_runtime.dicache_probe_depth();
+    }
     const int64_t sample_start_ms = ggml_time_ms();
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {
@@ -1016,26 +1028,47 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
                                              guidance, ref_latents);
             };
             const bool seam_ok = !use_cfg_parallel && flux_runner_->feature_cache_available();
-            hooks.feature_supported = seam_ok;
             if (seam_ok) {
-                hooks.capture = [&](int region_start, int region_end) {
-                    return flux_runner_->compute_capture(n_threads, noised_input, timesteps,
-                                                         cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                         guidance, ref_latents, false,
-                                                         region_start, region_end);
-                };
-                hooks.inject = [&](const sd::Tensor<float>& feat, int region_start, int region_end) {
-                    return flux_runner_->compute_inject(n_threads, noised_input, timesteps,
-                                                        cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                        guidance, ref_latents, false, feat,
-                                                        region_start, region_end);
-                };
-                if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
-                    hooks.probe = [&](int depth) {
-                        return flux_runner_->compute_probe(n_threads, noised_input, timesteps,
-                                                           cond_in.c_crossattn, {}, cond_in.c_vector,
-                                                           guidance, ref_latents, false, depth);
+                const void* branch_key = static_cast<const void*>(&cond_in);
+                const bool is_probe = cache_runtime.granularity() == cache::CacheGranularity::Probe;
+                const bool feature_gpu = !is_probe &&
+                    cache_runtime.granularity() == cache::CacheGranularity::Feature &&
+                    Flux::FluxRunner::feature_gpu_enabled();
+                if (feature_gpu) {
+                    hooks.substep_capture = [&](std::vector<cache::GraphExtension> exts) {
+                        return flux_runner_->compute_substep_capture(
+                            n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
+                            cond_in.c_vector, guidance, ref_latents, false, std::move(exts));
                     };
+                    hooks.substep_inject_slot = [&](std::vector<cache::GraphExtension> exts) {
+                        return flux_runner_->compute_substep_inject_slot(
+                            n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
+                            cond_in.c_vector, guidance, ref_latents, false, std::move(exts));
+                    };
+                }
+                if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
+                    const bool delta_minus = cache_runtime.dicache_delta_minus();
+                    hooks.substep_probe = [&, branch_key, delta_minus](int depth, const cache::CacheOperatorRegistry& operators,
+                                                                       const cache::DiCacheSlotBridge& bridge) {
+                        return flux_runner_->compute_substep_probe(n_threads, noised_input, timesteps,
+                                                                   cond_in.c_crossattn, {}, cond_in.c_vector,
+                                                                   guidance, ref_latents, false, depth, branch_key,
+                                                                   delta_minus, operators, bridge);
+                    };
+                    if (Flux::FluxRunner::dicache_gpu_enabled()) {
+                        hooks.substep_inject_gpu = [&](std::vector<cache::GraphExtension> exts,
+                                                       const cache::DiCacheSlotBridge& bridge) {
+                            return flux_runner_->compute_substep_inject_gpu(n_threads, noised_input, timesteps,
+                                                                            cond_in.c_crossattn, {}, cond_in.c_vector,
+                                                                            guidance, ref_latents, false, std::move(exts), bridge);
+                        };
+                        const int probe_depth = cache_runtime.dicache_probe_depth();
+                        hooks.substep_capture_probe = [&, probe_depth](const cache::DiCacheSlotBridge& bridge) {
+                            return flux_runner_->compute_substep_capture_probe(
+                                n_threads, noised_input, timesteps, cond_in.c_crossattn, {}, cond_in.c_vector,
+                                guidance, ref_latents, false, probe_depth, bridge);
+                        };
+                    }
                 }
             }
             return hooks;

@@ -7,6 +7,7 @@
 
 #include "core/optimization/cache/model/anchor.hpp"
 #include "core/optimization/cache/ir/indicator.hpp"
+#include "core/optimization/cache/ir/graph_extension.hpp"
 
 struct ggml_tensor;
 
@@ -66,8 +67,14 @@ public:
         recorded_.clear();
         indicator_nodes_.clear();
         indicators_.clear();
+        extensions_.clear();
+        override_start_ = 0;
+        override_resume_ = -1;
+        override_active_ = false;
         stop_after_block_ = -1;
         capture_residual_ = false;
+        capture_writeback_ = false;
+        writeback_probe_depth_ = 0;
         inject_active_ = false;
         inject_kind_ = InjectKind::None;
         inject_input_ = nullptr;
@@ -92,12 +99,50 @@ public:
     void set_indicators(const std::vector<Indicator>& inds) { indicators_ = inds; }
     const std::vector<Indicator>& indicators() const { return indicators_; }
 
+    // ---- Cache-layer graph extensions. The cache lowering hands the runner a set
+    // of operator invocations to weave over the tapped tensors (residual capture,
+    // reuse blend). The runner executes them blindly via op->lower() — it does not
+    // know the math. Replaces the hardcoded ggml_sub residual weave. ----
+    void set_extensions(std::vector<GraphExtension> exts) { extensions_ = std::move(exts); }
+    const std::vector<GraphExtension>& extensions() const { return extensions_; }
+
+    // ---- ReplaceStream override region. Structural counterpart to the extensions:
+    // extensions() say WHAT stream replaces the region; this says WHICH region and
+    // WHERE to resume. The model forward skips the block interval [start, resume)
+    // and substitutes build_stream_override()'s output at the entry. The resume
+    // index is the model's own (it knows its block count); the cache only asks for
+    // a semantic whole-stack / sub-range. Kept separate from the legacy
+    // inject_* fields (DiCache DeviceBlend / Wan HostFeature still use those). ----
+    void set_override_region(int start, int resume) {
+        override_start_ = start;
+        override_resume_ = resume;
+        override_active_ = true;
+    }
+    bool has_stream_override() const { return override_active_ && !extensions_.empty(); }
+    bool override_at(int i) const { return override_active_ && i == override_start_; }
+    int override_resume() const { return override_resume_; }
+
     // Residual capture: when set, build_graph weaves (ModelOut - ModelIn) as a named
     // node "ed_cache_feature" so the pass can d2d-copy it into a device slot (the
     // block-stack residual for Feature/Probe reuse). Requires ModelIn + ModelOut
     // taps to be requested.
     void set_capture_residual(bool on) { capture_residual_ = on; }
     bool capture_residual() const { return capture_residual_; }
+
+    // Capture-writeback (DiCache device seed): on top of the ModelOut-ModelIn
+    // residual (set_capture_residual), also weave the probe residual
+    // (BlockOut[probe_depth-1] - ModelIn) as a named node "ed_cache_probe_resid" so
+    // the pass's post-readback can d2d it (plus the raw probe/before taps) into the
+    // runner's persistent DiCache ring. Symmetric to set_probe_metrics but for the
+    // capture direction. Only probe_depth is needed here: the destination ring
+    // tensors are allocated by the runner AFTER forward (their shape is the packed
+    // block-stack seq shape, unknown at set time), so they can't be passed in now.
+    void set_capture_writeback(int probe_depth) {
+        capture_writeback_ = true;
+        writeback_probe_depth_ = probe_depth;
+    }
+    bool capture_writeback() const { return capture_writeback_; }
+    int writeback_probe_depth() const { return writeback_probe_depth_; }
 
     // ---- Tap-driven inject (reuse). Replaces cache_scope->step_inject_region in the
     // model forward: when active, at block `inject_start` the forward replaces the
@@ -174,8 +219,14 @@ private:
     std::unordered_map<std::string, ggml_tensor*> recorded_;
     std::vector<ggml_tensor*> indicator_nodes_;
     std::vector<Indicator> indicators_;
+    std::vector<GraphExtension> extensions_;
+    int override_start_ = 0;
+    int override_resume_ = -1;
+    bool override_active_ = false;
     int stop_after_block_ = -1;
     bool capture_residual_ = false;
+    bool capture_writeback_ = false;
+    int writeback_probe_depth_ = 0;
     bool inject_active_ = false;
     InjectKind inject_kind_ = InjectKind::None;
     ggml_tensor* inject_input_ = nullptr;   // HostFeature
