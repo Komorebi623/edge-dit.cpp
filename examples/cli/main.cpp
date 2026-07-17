@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <csignal>
 #include <cstdint>
@@ -637,7 +638,15 @@ int main(int argc, char** argv) {
         ctx_params.vae_tiling.rel_size_y = args.vae_tile_size;
     }
 
+    using ed_wall_clock = std::chrono::steady_clock;
+    auto ed_wall_ms = [](ed_wall_clock::time_point a, ed_wall_clock::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    double ed_wall_load = 0, ed_wall_gen = 0, ed_wall_save = 0, ed_wall_free = 0;
+
+    auto ed_wall_t0 = ed_wall_clock::now();
     ed_context_t* ctx = ed_create_context(&ctx_params);
+    ed_wall_load = ed_wall_ms(ed_wall_t0, ed_wall_clock::now());
     if (ctx == nullptr) {
         std::fprintf(stderr, "failed to create edge-dit context\n");
         return 2;
@@ -663,7 +672,9 @@ int main(int argc, char** argv) {
         apply_cache_args(args, &gen_params.sample);
 
         ed_video_t output;
+        auto ed_wall_gen0 = ed_wall_clock::now();
         ed_status_t status = ed_generate_video(ctx, &gen_params, &output);
+        ed_wall_gen = ed_wall_ms(ed_wall_gen0, ed_wall_clock::now());
         if (status != ED_STATUS_OK) {
             std::fprintf(stderr, "ed_generate_video failed, status=%d\n", static_cast<int>(status));
             const char* err = ed_get_last_error(ctx);
@@ -687,7 +698,10 @@ int main(int argc, char** argv) {
         }
 
         const std::string output_path = video_output_path(args.output_path, args.video_format);
-        if (!save_video(output_path.c_str(), output, args.fps)) {
+        auto ed_wall_save0 = ed_wall_clock::now();
+        bool ed_save_ok = save_video(output_path.c_str(), output, args.fps);
+        ed_wall_save = ed_wall_ms(ed_wall_save0, ed_wall_clock::now());
+        if (!ed_save_ok) {
             std::fprintf(stderr, "failed to save output video: %s\n", output_path.c_str());
             ed_free_video(&output);
             ed_free_context(ctx);
@@ -789,7 +803,13 @@ int main(int argc, char** argv) {
             ed_free_image(&input_image);
         }
     }
+    auto ed_wall_free0 = ed_wall_clock::now();
     ed_free_context(ctx);
+    ed_wall_free = ed_wall_ms(ed_wall_free0, ed_wall_clock::now());
+
+    std::printf("[ED_WALL] load=%.0fms gen=%.0fms save=%.0fms free=%.0fms (sum=%.0fms)\n",
+                ed_wall_load, ed_wall_gen, ed_wall_save, ed_wall_free,
+                ed_wall_load + ed_wall_gen + ed_wall_save + ed_wall_free);
 
     return 0;
 }

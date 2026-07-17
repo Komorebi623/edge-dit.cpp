@@ -19,7 +19,8 @@ MODELS = {
     "sd3":             ("/mnt/cfs/9n-das-admin/llm_models/stable-diffusion-3-medium-diffusers", "StableDiffusion3Pipeline"),
     "flux":            ("/mnt/cfs/9n-das-admin/llm_models/flux-dev",                            "FluxPipeline"),
     "qwen-image":      ("/mnt/cfs/9n-das-admin/llm_models/qwen-image",                          "QwenImagePipeline"),
-    "qwen-image-edit": ("/mnt/cfs/9n-das-admin/llm_models/Qwen-Image-Edit-2509",                "QwenImageEditPipeline"),
+    "qwen-image-edit": ("/mnt/cfs/9n-das-admin/llm_models/wty_models/dit_models/Qwen-Image-Edit", "QwenImageEditPlusPipeline"),
+    "flux-kontext":    ("/mnt/cfs/9n-das-admin/llm_models/flux-kontext-dev",                     "FluxKontextPipeline"),
 }
 
 MODEL_KEY = os.environ.get("MODEL_KEY", "flux")
@@ -65,13 +66,30 @@ def main():
         common.update(guidance_scale=7.0)
     elif MODEL_KEY in ("qwen-image", "qwen-image-edit"):
         common.update(true_cfg_scale=4.0)
+    elif MODEL_KEY == "flux-kontext":
+        common.update(guidance_scale=2.5, max_sequence_length=512)
+    # 编辑模型需要输入图, 用与 edge 相同的占位图文件(口径一致)
+    if MODEL_KEY == "flux-kontext":
+        from PIL import Image
+        edit_input = os.environ.get("EDIT_INPUT", "bench_results/edit_input.png")
+        img = Image.open(edit_input).convert("RGB") if os.path.exists(edit_input) \
+              else Image.new("RGB", (W, H), (127, 127, 127))
+        common["image"] = img.resize((W, H), Image.LANCZOS)
     # qwen-image-edit 需要输入图, 用与 edge 相同的占位图文件(口径一致)
     if MODEL_KEY == "qwen-image-edit":
         from PIL import Image
-        common.pop("width", None); common.pop("height", None)
+        # QwenImageEditPlusPipeline(2511 官方指定的类): 生成分辨率跟随 width/height,
+        # 但内部 condition 图恒按 CONDITION_IMAGE_SIZE=384^2 (喂 Qwen2.5-VL text encoder)、
+        # VAE condition latent 恒按 VAE_IMAGE_SIZE=1024^2 (喂 DiT) 两路独立处理, 与传入图
+        # 尺寸无关. 我们只需保证生成分辨率 width/height=512 与 edge (-W512 -H512) 一致.
+        # 注意: edge 的 VAE condition latent 目前按生成分辨率(512^2)编码, 与官方 1024^2 有偏差
+        # (用户确认本轮先不改 edge), 所以 diffusers DiT 会因 1024^2 condition 多算 token —
+        # 这是 edge 少喂 condition 的真实体现, 不是负载噪声.
+        common["width"], common["height"] = W, H
         edit_input = os.environ.get("EDIT_INPUT", "bench_results/edit_input.png")
-        common["image"] = Image.open(edit_input).convert("RGB") if os.path.exists(edit_input) \
-                          else Image.new("RGB", (W, H), (127, 127, 127))
+        img = Image.open(edit_input).convert("RGB") if os.path.exists(edit_input) \
+              else Image.new("RGB", (W, H), (127, 127, 127))
+        common["image"] = img.resize((W, H), Image.LANCZOS)
 
     if WARMUP:
         log("warmup 1 step ...")
