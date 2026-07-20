@@ -91,6 +91,46 @@ struct DiffusionModel {
                                                           int /*region_end*/ = -1) {
         return {};
     }
+
+    // ---- On-GPU device-slot cache path (MagCache). Models with a device slot
+    // (Flux/Qwen/SD3) override these; the default reports no store so the
+    // lowering keeps to the host path above. ----
+    virtual edgedit::cache::ICacheDeviceStore* cache_device_store() { return nullptr; }
+    virtual sd::Tensor<float> compute_substep_capture_slot(int /*n_threads*/,
+                                                           const DiffusionParams& /*params*/,
+                                                           std::vector<edgedit::cache::GraphExtension> /*exts*/) {
+        return {};
+    }
+    virtual sd::Tensor<float> compute_substep_inject_slot(int /*n_threads*/,
+                                                          const DiffusionParams& /*params*/,
+                                                          std::vector<edgedit::cache::GraphExtension> /*exts*/) {
+        return {};
+    }
+
+    // ---- On-GPU DiCache path (Probe granularity). Models with device DiCache
+    // (Flux/Qwen/SD3) override these; the default no-ops so the lowering keeps to
+    // the host DiCache path (substep_*_host). ----
+    virtual sd::Tensor<float> compute_substep_capture_probe(int /*n_threads*/,
+                                                            const DiffusionParams& /*params*/,
+                                                            int /*probe_depth*/,
+                                                            const edgedit::cache::DiCacheSlotBridge& /*bridge*/) {
+        return {};
+    }
+    virtual DiffusionCacheResult compute_substep_probe_gpu(int /*n_threads*/,
+                                                           const DiffusionParams& /*params*/,
+                                                           int /*probe_depth*/,
+                                                           const void* /*branch_key*/,
+                                                           bool /*delta_minus*/,
+                                                           const edgedit::cache::CacheOperatorRegistry& /*operators*/,
+                                                           const edgedit::cache::DiCacheSlotBridge& /*bridge*/) {
+        return {};
+    }
+    virtual sd::Tensor<float> compute_substep_inject_gpu(int /*n_threads*/,
+                                                         const DiffusionParams& /*params*/,
+                                                         std::vector<edgedit::cache::GraphExtension> /*exts*/,
+                                                         const edgedit::cache::DiCacheSlotBridge& /*bridge*/) {
+        return {};
+    }
 };
 
 struct UNetModel : public DiffusionModel {
@@ -255,6 +295,43 @@ struct MMDiTModel : public DiffusionModel {
         return mmdit.compute_substep_inject(n_threads, *p.x, *p.timesteps,
                                             tensor_or_empty(p.context), tensor_or_empty(p.y),
                                             feature, region_start, region_end);
+    }
+    edgedit::cache::ICacheDeviceStore* cache_device_store() override {
+        return mmdit.cache_device_store();
+    }
+    sd::Tensor<float> compute_substep_capture_slot(int n_threads, const DiffusionParams& p,
+                                                   std::vector<edgedit::cache::GraphExtension> exts) override {
+        return mmdit.compute_substep_capture_slot(n_threads, *p.x, *p.timesteps,
+                                                  tensor_or_empty(p.context), tensor_or_empty(p.y),
+                                                  std::move(exts));
+    }
+    sd::Tensor<float> compute_substep_inject_slot(int n_threads, const DiffusionParams& p,
+                                                  std::vector<edgedit::cache::GraphExtension> exts) override {
+        return mmdit.compute_substep_inject_slot(n_threads, *p.x, *p.timesteps,
+                                                 tensor_or_empty(p.context), tensor_or_empty(p.y),
+                                                 std::move(exts));
+    }
+    sd::Tensor<float> compute_substep_capture_probe(int n_threads, const DiffusionParams& p,
+                                                    int probe_depth,
+                                                    const edgedit::cache::DiCacheSlotBridge& bridge) override {
+        return mmdit.compute_substep_capture_probe(n_threads, *p.x, *p.timesteps,
+                                                   tensor_or_empty(p.context), tensor_or_empty(p.y),
+                                                   probe_depth, bridge);
+    }
+    DiffusionCacheResult compute_substep_probe_gpu(int n_threads, const DiffusionParams& p,
+                                                   int probe_depth, const void* branch_key, bool delta_minus,
+                                                   const edgedit::cache::CacheOperatorRegistry& operators,
+                                                   const edgedit::cache::DiCacheSlotBridge& bridge) override {
+        return mmdit.compute_substep_probe(n_threads, *p.x, *p.timesteps,
+                                           tensor_or_empty(p.context), tensor_or_empty(p.y),
+                                           probe_depth, branch_key, delta_minus, operators, bridge);
+    }
+    sd::Tensor<float> compute_substep_inject_gpu(int n_threads, const DiffusionParams& p,
+                                                 std::vector<edgedit::cache::GraphExtension> exts,
+                                                 const edgedit::cache::DiCacheSlotBridge& bridge) override {
+        return mmdit.compute_substep_inject_gpu(n_threads, *p.x, *p.timesteps,
+                                                tensor_or_empty(p.context), tensor_or_empty(p.y),
+                                                std::move(exts), bridge);
     }
 };
 
@@ -511,6 +588,43 @@ struct WanModel : public DiffusionModel {
         return wan.compute_substep_inject(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
                                           tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
                                           feature, region_start, region_end);
+    }
+    edgedit::cache::ICacheDeviceStore* cache_device_store() override {
+        return wan.cache_device_store();
+    }
+    sd::Tensor<float> compute_substep_capture_slot(int n_threads, const DiffusionParams& p,
+                                                   std::vector<edgedit::cache::GraphExtension> exts) override {
+        return wan.compute_substep_capture_slot(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                                tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
+                                                std::move(exts));
+    }
+    sd::Tensor<float> compute_substep_inject_slot(int n_threads, const DiffusionParams& p,
+                                                  std::vector<edgedit::cache::GraphExtension> exts) override {
+        return wan.compute_substep_inject_slot(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                               tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
+                                               std::move(exts));
+    }
+    sd::Tensor<float> compute_substep_capture_probe(int n_threads, const DiffusionParams& p,
+                                                    int probe_depth,
+                                                    const edgedit::cache::DiCacheSlotBridge& bridge) override {
+        return wan.compute_substep_capture_probe(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                                 tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
+                                                 probe_depth, bridge);
+    }
+    DiffusionCacheResult compute_substep_probe_gpu(int n_threads, const DiffusionParams& p,
+                                                   int probe_depth, const void* branch_key, bool delta_minus,
+                                                   const edgedit::cache::CacheOperatorRegistry& operators,
+                                                   const edgedit::cache::DiCacheSlotBridge& bridge) override {
+        return wan.compute_substep_probe(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                         tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
+                                         probe_depth, branch_key, delta_minus, operators, bridge);
+    }
+    sd::Tensor<float> compute_substep_inject_gpu(int n_threads, const DiffusionParams& p,
+                                                 std::vector<edgedit::cache::GraphExtension> exts,
+                                                 const edgedit::cache::DiCacheSlotBridge& bridge) override {
+        return wan.compute_substep_inject_gpu(n_threads, *p.x, *p.timesteps, tensor_or_empty(p.context),
+                                              tensor_or_empty(p.y), tensor_or_empty(p.c_concat),
+                                              std::move(exts), bridge);
     }
 };
 

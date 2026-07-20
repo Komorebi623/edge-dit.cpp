@@ -959,8 +959,20 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
     // (active model + c_concat), so this only needs the loop-invariant part.
     const bool cache_seam_available =
         !cache_use_cfg_parallel && cache_vace_ok && diffusion_->supports_feature_cache();
+    // Wire the device store whenever the block-stack seam is usable: the on-GPU
+    // cache path (MagCache feature reuse + DiCache rings) is the only cache path.
+    // Host hooks stay wired below so TaylorSeer/SenCache (Feature methods with no
+    // device path) still reach the host capture/inject path.
+    // ⚠️ VRAM: Wan's video residuals are large — the DiCache rings can reach several
+    // GB at 14B on long videos. Use chunked generation for long runs.
+    cache::ICacheDeviceStore* cache_store =
+        cache_seam_available
+            ? model->cache_device_store()
+            : nullptr;
+    LOG_INFO("wan cache device path: store=%s",
+             cache_store != nullptr ? "on" : "off");
     const bool cache_enabled =
-        cache_runtime.init(sample_params, version_, sigmas, cache_seam_available, nullptr,
+        cache_runtime.init(sample_params, version_, sigmas, cache_seam_available, cache_store,
                            cache_use_cfg_parallel);
 
     sd::Tensor<float> x = x_start;
@@ -1067,6 +1079,53 @@ sd::Tensor<float> WanPipeline::euler_denoise(const std::shared_ptr<DiffusionMode
                     hooks.substep_probe_host = [&, set_params](int depth) {
                         set_params();
                         return model->compute_substep_probe_host(runtime_->n_threads(), diffusion_params, depth);
+                    };
+                    // On-GPU DiCache: probe metric + gamma-blend reuse + seed
+                    // capture all run on-device — this is the only DiCache path now.
+                    // The host DiCache hooks above (probe/capture/inject) remain wired
+                    // so the cache engine can fall back if a device hook is ever unset,
+                    // and so TaylorSeer/SenCache (Feature methods, no device path)
+                    // still reach the host capture/inject path.
+                    {
+                        const void* branch_key = static_cast<const void*>(&cond_in);
+                        const bool delta_minus = cache_runtime.dicache_delta_minus();
+                        const int probe_depth = cache_runtime.dicache_probe_depth();
+                        hooks.substep_probe = [&, set_params, branch_key, delta_minus](
+                                int depth, const cache::CacheOperatorRegistry& operators,
+                                const cache::DiCacheSlotBridge& bridge) {
+                            set_params();
+                            return model->compute_substep_probe_gpu(runtime_->n_threads(), diffusion_params,
+                                                                    depth, branch_key, delta_minus,
+                                                                    operators, bridge);
+                        };
+                        hooks.substep_inject_gpu = [&, set_params](std::vector<cache::GraphExtension> exts,
+                                                                   const cache::DiCacheSlotBridge& bridge) {
+                            set_params();
+                            return model->compute_substep_inject_gpu(runtime_->n_threads(), diffusion_params,
+                                                                     std::move(exts), bridge);
+                        };
+                        hooks.substep_capture_probe = [&, set_params, probe_depth](
+                                const cache::DiCacheSlotBridge& bridge) {
+                            set_params();
+                            return model->compute_substep_capture_probe(runtime_->n_threads(), diffusion_params,
+                                                                        probe_depth, bridge);
+                        };
+                    }
+                }
+                // On-GPU MagCache device-slot path (Feature granularity only).
+                // Dual-wired alongside the host hooks: the cache engine prefers the
+                // device slot when the store is non-null and falls back to host
+                // otherwise (and for TaylorSeer/SenCache, which have no device path).
+                const bool feature_gpu =
+                    cache_runtime.granularity() == cache::CacheGranularity::Feature;
+                if (feature_gpu) {
+                    hooks.substep_capture = [&, set_params](std::vector<cache::GraphExtension> exts) {
+                        set_params();
+                        return model->compute_substep_capture_slot(runtime_->n_threads(), diffusion_params, std::move(exts));
+                    };
+                    hooks.substep_inject_slot = [&, set_params](std::vector<cache::GraphExtension> exts) {
+                        set_params();
+                        return model->compute_substep_inject_slot(runtime_->n_threads(), diffusion_params, std::move(exts));
                     };
                 }
             }
