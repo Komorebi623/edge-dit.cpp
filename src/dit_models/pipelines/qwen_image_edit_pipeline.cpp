@@ -567,6 +567,7 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
     ConditionerParams cond_params;
     cond_params.text = params->prompt != nullptr ? params->prompt : "";
     cond_params.ref_images = &condition_ref_images;
+    emit_phase_marker("encode", "begin");
     const int64_t ed_gen_t0 = ggml_time_ms();
     const int64_t ed_enc_t0 = ed_gen_t0;
     SDCondition condition = conditioner_->get_learned_condition(n_threads, cond_params);
@@ -728,6 +729,8 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         diffusion_->dicache_probe_depth_ = cache_runtime.dicache_probe_depth();
     }
     const int64_t sample_start_ms = ggml_time_ms();
+    emit_phase_marker("encode", "end");
+    emit_phase_marker("denoise", "begin");
     GenerationControl* control = runtime_ != nullptr ? runtime_->generation_control() : nullptr;
     for (int step = 0; step < steps; ++step) {
         if (control != nullptr && control->should_cancel()) {
@@ -909,12 +912,14 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
     }
     const int64_t sample_end_ms = ggml_time_ms();
     LOG_INFO("qwen-image-edit sampling completed, taking %.2fs", (sample_end_ms - sample_start_ms) / 1000.0f);
+    emit_phase_marker("denoise", "end");
     diffusion_->free_compute_buffer();
 
     if (runtime_->parallel_context() != nullptr && !runtime_->parallel_context()->is_root()) {
         return true;
     }
 
+    emit_phase_marker("decode", "begin");
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
     const int64_t ed_dec_t0 = ggml_time_ms();
     sd::Tensor<float> decoded = vae_->decode(n_threads,
@@ -924,6 +929,7 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
                                              false,
                                              false);
     const int64_t ed_dec_ms = ggml_time_ms() - ed_dec_t0;
+    emit_phase_marker("decode", "end");
     if (decoded.empty()) {
         if (error != nullptr) {
             *error = "Qwen-Image-Edit VAE decode failed";
