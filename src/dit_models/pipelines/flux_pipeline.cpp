@@ -613,6 +613,16 @@ bool FluxPipeline::can_generate_image() const {
     return runtime_weights_loaded_ && flux_runner_ != nullptr && conditioner_ != nullptr && vae_ != nullptr;
 }
 
+int FluxPipeline::resolve_steps(int requested_steps) const {
+    if (requested_steps > 0) {
+        return requested_steps;
+    }
+    // Auto: FLUX.1-schnell (guidance-distilled, no guidance_in weights ->
+    // guidance_embed=false) is a 4-step model; the dev variant defaults to 20.
+    const bool distilled = flux_runner_ != nullptr && !flux_runner_->flux_params.guidance_embed;
+    return distilled ? 4 : 20;
+}
+
 bool FluxPipeline::validate_image_params(const ed_image_generation_params_t* params, std::string* error) const {
     if (params == nullptr) {
         if (error != nullptr) {
@@ -680,7 +690,7 @@ ed_status_t FluxPipeline::generate_image(const ed_image_generation_params_t* par
     }
 
     const int count = params->batch_count > 0 ? params->batch_count : 1;
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    const int steps = resolve_steps(params->sample.steps);
     if (GenerationControl* control = runtime_->generation_control()) {
         control->start(count * steps);
     }
@@ -819,7 +829,7 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
              format_tensor_shape(condition.c_crossattn).c_str(),
              format_tensor_shape(condition.c_vector).c_str());
 
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    const int steps = resolve_steps(params->sample.steps);
     float flow_shift = params->sample.flow_shift;
     if (!(flow_shift > 0.0f) || !std::isfinite(flow_shift)) {
         flow_shift = flux_runner_->flux_params.guidance_embed ? 1.15f : 1.0f;

@@ -480,7 +480,7 @@ struct FluxCliArgs {
     int height = 1024;
     int frames = 1;
     int fps = 16;
-    int steps = 20;
+    int steps = -1;  // -1 = auto: distilled models (e.g. FLUX schnell) default to few steps, others to 20
     int threads = 0;
 
     int64_t seed = -1;
@@ -841,8 +841,8 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         return false;
     }
 
-    if (args->steps <= 0) {
-        std::fprintf(stderr, "steps must be positive\n");
+    if (args->steps == 0 || args->steps < -1) {
+        std::fprintf(stderr, "steps must be positive (or -1 for auto)\n");
         return false;
     }
 
