@@ -188,6 +188,7 @@ private:
     bool init_threads(const ed_context_params_t& params, std::string* error);
     bool init_flags(const ed_context_params_t& params, std::string* error);
     bool init_backends(const ed_context_params_t& params, std::string* error);
+    void maybe_enable_vae_tiling_for_low_vram();
     bool init_rng(const ed_context_params_t& params, std::string* error);
 
     void release_backends();

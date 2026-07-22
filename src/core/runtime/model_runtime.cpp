@@ -278,7 +278,40 @@ bool ModelRuntime::init_backends(const ed_context_params_t& params, std::string*
         LOG_INFO("ControlNet backend: CPU");
     }
 
+    maybe_enable_vae_tiling_for_low_vram();
+
     return true;
+}
+
+// On a memory-constrained GPU, VAE decode is the single largest transient VRAM
+// spike. Auto-enable tiling with a small tile when the user did not request it,
+// so consumer cards stay under their VRAM wall without a manual flag.
+void ModelRuntime::maybe_enable_vae_tiling_for_low_vram() {
+    if (vae_tiling_.enabled) {
+        return;  // user asked for tiling explicitly; respect their settings
+    }
+    if (backends_.vae_backend == nullptr || ggml_backend_is_cpu(backends_.vae_backend)) {
+        return;  // VAE runs on CPU, GPU tiling does not apply
+    }
+    ggml_backend_dev_t dev = ggml_backend_get_device(backends_.vae_backend);
+    if (dev == nullptr || ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU) {
+        return;
+    }
+    size_t free_bytes = 0, total_bytes = 0;
+    ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
+    const double total_gib = static_cast<double>(total_bytes) / (1024.0 * 1024.0 * 1024.0);
+    constexpr double kLowVramThresholdGiB = 16.0;
+    if (total_bytes == 0 || total_gib > kLowVramThresholdGiB) {
+        return;  // large GPU: leave VAE untiled for max throughput
+    }
+    vae_tiling_.enabled        = true;
+    vae_tiling_.rel_size_x     = 5.0f;  // ~32x32 latent tile: matches min VAE peak (empirically measured)
+    vae_tiling_.rel_size_y     = 5.0f;
+    if (vae_tiling_.target_overlap <= 0.0f) {
+        vae_tiling_.target_overlap = 0.25f;
+    }
+    LOG_INFO("auto-enabled VAE tiling (GPU total VRAM %.1f GiB <= %.0f GiB threshold)",
+             total_gib, kLowVramThresholdGiB);
 }
 
 void ModelRuntime::reset() {
