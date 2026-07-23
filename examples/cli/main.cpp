@@ -96,6 +96,7 @@ static void print_usage(const char* prog) {
         "  --vae-tile-size <float>   VAE tile relative size, default: 2.0 (2x2 grid). Larger = finer tiles = less VRAM\n"
         "  --offload-to-cpu          Keep model weights on CPU, copy to GPU per-compute (saves VRAM)\n"
         "  --keep-text-encoder-on-cpu  Run text encoder on CPU backend\n"
+        "  --text-encoder-offload    Keep text-encoder weights on CPU, stage to GPU per encode (compute on GPU)\n"
         "  --keep-vae-on-cpu         Run VAE on CPU backend\n"
         "  --max-vram <GB>           Limit VRAM usage for compute graphs (e.g. 8.0)\n"
         "  --flash-attention         Enable flash attention, default: on\n"
@@ -607,6 +608,7 @@ int main(int argc, char** argv) {
     ctx_params.flash_attention = args.flash_attention;
     ctx_params.offload_params_to_cpu = args.offload_to_cpu;
     ctx_params.keep_text_encoder_on_cpu = args.keep_text_encoder_on_cpu;
+    ctx_params.text_encoder_offload = args.text_encoder_offload;
     ctx_params.keep_vae_on_cpu = args.keep_vae_on_cpu;
     if (args.max_vram > 0.0f) {
         ctx_params.max_vram_gb = args.max_vram;

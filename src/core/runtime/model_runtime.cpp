@@ -209,6 +209,7 @@ bool ModelRuntime::init_flags(const ed_context_params_t& params, std::string* er
     (void)error;
     use_mmap_ = params.use_mmap;
     offload_params_to_cpu_ = params.offload_params_to_cpu;
+    text_encoder_offload_ = params.text_encoder_offload;
     free_params_immediately_ = false;
     max_vram_ = params.max_vram_gb;
     max_graph_vram_bytes_ = max_vram_ <= 0.0f
@@ -346,6 +347,7 @@ void ModelRuntime::reset() {
     n_threads_ = 0;
     use_mmap_ = false;
     offload_params_to_cpu_ = false;
+    text_encoder_offload_ = false;
     free_params_immediately_ = false;
     max_vram_ = 0.0f;
     max_graph_vram_bytes_ = 0;

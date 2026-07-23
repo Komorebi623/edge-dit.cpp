@@ -320,7 +320,7 @@ bool QwenImageEditPipeline::build_components(const ed_context_params_t& params,
     const auto& storage = loader.get_tensor_storage_map();
     const bool offload = runtime_->offload_params_to_cpu();
     conditioner_ = std::make_shared<LLMEmbedder>(runtime_->clip_backend(),
-                                                 offload,
+                                                 runtime_->clip_offload_params_to_cpu(),
                                                  storage,
                                                  version_,
                                                  "",

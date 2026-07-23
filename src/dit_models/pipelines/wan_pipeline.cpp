@@ -286,7 +286,7 @@ bool WanPipeline::build_components(const ModelLoader& loader, std::string* error
     const bool vae_decode_only = true;
 
     conditioner_ = std::make_shared<T5CLIPEmbedder>(runtime_->clip_backend(),
-                                                    offload,
+                                                    runtime_->clip_offload_params_to_cpu(),
                                                     storage,
                                                     true,
                                                     0,
@@ -310,7 +310,7 @@ bool WanPipeline::build_components(const ModelLoader& loader, std::string* error
         diffusion_->get_desc() == "Wan2.1-FLF2V-14B" ||
         diffusion_->get_desc() == "Wan2.1-I2V-1.3B") {
         clip_vision_ = std::make_shared<FrozenCLIPVisionEmbedder>(runtime_->backend(),
-                                                                  offload,
+                                                                  runtime_->clip_offload_params_to_cpu(),
                                                                   storage);
     }
 

@@ -513,6 +513,7 @@ struct FluxCliArgs {
     float vae_tile_size = 0.0f;
     bool offload_to_cpu = false;
     bool keep_text_encoder_on_cpu = false;
+    bool text_encoder_offload = false;
     bool keep_vae_on_cpu = false;
     float max_vram = 0.0f;
 
@@ -750,6 +751,8 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->offload_to_cpu = true;
         } else if (std::strcmp(key, "--keep-text-encoder-on-cpu") == 0) {
             args->keep_text_encoder_on_cpu = true;
+        } else if (std::strcmp(key, "--text-encoder-offload") == 0) {
+            args->text_encoder_offload = true;
         } else if (std::strcmp(key, "--keep-vae-on-cpu") == 0) {
             args->keep_vae_on_cpu = true;
         } else if (std::strcmp(key, "--max-vram") == 0) {

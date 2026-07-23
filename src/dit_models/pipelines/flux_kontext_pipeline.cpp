@@ -630,7 +630,7 @@ bool FluxKontextPipeline::prepare_flux_runtime_weights(const ModelLoader& loader
         conditioner_backend_ = text_backend;
 
         conditioner_ = std::make_shared<FluxCLIPEmbedder>(conditioner_backend_,
-                                                          offload_params_to_cpu,
+                                                          runtime_->clip_offload_params_to_cpu(),
                                                           loader.get_tensor_storage_map());
 
         conditioner_->alloc_params_buffer();

@@ -108,7 +108,7 @@ bool SD3Pipeline::build_components(const ModelLoader& loader, std::string* error
 
     const auto& storage = loader.get_tensor_storage_map();
     const bool offload = runtime_->offload_params_to_cpu();
-    conditioner_ = std::make_shared<SD3CLIPEmbedder>(runtime_->clip_backend(), offload, storage);
+    conditioner_ = std::make_shared<SD3CLIPEmbedder>(runtime_->clip_backend(), runtime_->clip_offload_params_to_cpu(), storage);
     diffusion_ = std::make_shared<MMDiTModel>(runtime_->backend(), offload, storage);
     vae_ = std::make_shared<AutoEncoderKL>(runtime_->vae_backend(),
                                            offload,

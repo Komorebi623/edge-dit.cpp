@@ -123,6 +123,9 @@ public:
     int n_threads() const { return n_threads_; }
     bool use_mmap() const { return use_mmap_; }
     bool offload_params_to_cpu() const { return offload_params_to_cpu_; }
+    // Text encoder should offload (weights on CPU, staged to GPU per encode) when
+    // either the global offload flag or the TE-specific flag is set.
+    bool clip_offload_params_to_cpu() const { return offload_params_to_cpu_ || text_encoder_offload_; }
     bool free_params_immediately() const { return free_params_immediately_; }
     float max_vram() const { return max_vram_; }
     size_t max_graph_vram_bytes() const { return max_graph_vram_bytes_; }
@@ -168,6 +171,7 @@ private:
     int n_threads_ = 0;
     bool use_mmap_ = false;
     bool offload_params_to_cpu_ = false;
+    bool text_encoder_offload_ = false;
     bool free_params_immediately_ = false;
 
     float max_vram_ = 0.0f;

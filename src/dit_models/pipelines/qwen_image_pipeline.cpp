@@ -289,7 +289,7 @@ bool QwenImagePipeline::build_components(const ed_context_params_t& params,
     const bool enable_vision = params.llm_vision_path != nullptr && params.llm_vision_path[0] != '\0';
 
     conditioner_ = std::make_shared<LLMEmbedder>(runtime_->clip_backend(),
-                                                 offload,
+                                                 runtime_->clip_offload_params_to_cpu(),
                                                  storage,
                                                  version_,
                                                  "",

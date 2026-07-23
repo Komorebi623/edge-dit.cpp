@@ -252,6 +252,22 @@ if(ED_ENABLE_CUDA_MODULATION AND ED_GGML_CUDA)
     )
 endif()
 
+if(ED_GGML_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    target_sources(ggml-cuda
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda/ed_async_offload.cu
+    )
+    target_compile_definitions(ggml-cuda PRIVATE ED_ENABLE_ASYNC_OFFLOAD)
+    target_include_directories(ggml-cuda
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cuda
+    )
+endif()
+
 if(ED_ENABLE_CUDNN_SDPA)
     target_sources(ggml-cuda
         PRIVATE
@@ -360,6 +376,12 @@ endif()
 
 if(ED_ENABLE_CUDA_MODULATION AND ED_GGML_CUDA)
     target_compile_definitions(edgedit PRIVATE ED_ENABLE_CUDA_MODULATION)
+endif()
+
+if(ED_GGML_CUDA)
+    target_compile_definitions(edgedit PRIVATE ED_ENABLE_ASYNC_OFFLOAD)
+    target_include_directories(edgedit PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda)
 endif()
 
 if(ED_ENABLE_PARALLEL)
