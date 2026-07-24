@@ -1248,14 +1248,19 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_conv_3d(ggml_context* ctx,
     int64_t OC = w->ne[3] / IC;
     int64_t N  = x->ne[3] / IC;
     if (direct) {
+#if !defined(ED_ENABLE_CUDNN_CONV3D)
         // Same AMX win as conv2d: a bf16 conv kernel makes the internal CONV_3D
         // im2col GEMM route through oneDNN (Intel AMX bf16). Cast the f16 kernel
         // to bf16 once here. Default on; set ED_CONV_BF16=0 to keep the f16 path
         // (non-AMX / non-oneDNN builds).
+        // Guarded out of cuDNN-conv3d builds: there the cuDNN path only accepts
+        // (f32,f16,f32) or all-same dtype, so an f16->bf16 cast yields a
+        // (f32,bf16,f32) CONV_3D node that cuDNN rejects and native conv3d aborts on.
         const char* conv_bf16 = std::getenv("ED_CONV_BF16");
         if ((!conv_bf16 || conv_bf16[0] != '0') && w->type == GGML_TYPE_F16) {
             w = ggml_cast(ctx, w, GGML_TYPE_BF16);
         }
+#endif
     }
     x          = direct ? ggml_conv_3d_direct(ctx, w, x, s0, s1, s2, p0, p1, p2, d0, d1, d2, (int)IC, (int)N, (int)OC)
                         : ggml_conv_3d(ctx, w, x, IC, s0, s1, s2, p0, p1, p2, d0, d1, d2);
