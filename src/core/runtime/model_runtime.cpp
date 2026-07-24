@@ -286,7 +286,7 @@ bool ModelRuntime::init_backends(const ed_context_params_t& params, std::string*
     // offload_all_params() copies every weight back to the GPU at once, which OOMs
     // for large DiTs (e.g. FLUX ~22.7GB on a 24GB card). Segment the compute graph
     // against most of the device's free VRAM instead of failing.
-    if (offload_params_to_cpu_ && max_graph_vram_bytes_ == 0 &&
+    if ((offload_params_to_cpu_ || text_encoder_offload_) && max_graph_vram_bytes_ == 0 &&
         backends_.backend != nullptr && !ggml_backend_is_cpu(backends_.backend)) {
         ggml_backend_dev_t dev = ggml_backend_get_device(backends_.backend);
         if (dev != nullptr) {

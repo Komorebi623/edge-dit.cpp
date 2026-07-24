@@ -633,6 +633,7 @@ bool FluxKontextPipeline::prepare_flux_runtime_weights(const ModelLoader& loader
                                                           runtime_->clip_offload_params_to_cpu(),
                                                           loader.get_tensor_storage_map());
 
+        conditioner_->set_max_graph_vram_bytes(runtime_->max_graph_vram_bytes());
         conditioner_->alloc_params_buffer();
         conditioner_->get_param_tensors(registry.tensors());
     }

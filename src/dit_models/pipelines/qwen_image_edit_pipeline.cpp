@@ -348,6 +348,10 @@ bool QwenImageEditPipeline::build_components(const ed_context_params_t& params,
                                                false,
                                                version_);
 
+    const size_t max_graph_vram = runtime_->max_graph_vram_bytes();
+    conditioner_->set_max_graph_vram_bytes(max_graph_vram);
+    diffusion_->set_max_graph_vram_bytes(max_graph_vram);
+    vae_->set_max_graph_vram_bytes(max_graph_vram);
     conditioner_->set_flash_attention_enabled(false);
     diffusion_->set_flash_attention_enabled(false);
     vae_->set_flash_attention_enabled(false);
