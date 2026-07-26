@@ -5759,10 +5759,26 @@ protected:
             return true;
         }
 
-        return max_graph_vram_bytes > 0 &&
-               plan.segments.size() > 1 &&
-               params_backend != runtime_backend &&
-               !ggml_backend_is_cpu(runtime_backend);
+        const bool offload_active = max_graph_vram_bytes > 0 &&
+                                    params_backend != runtime_backend &&
+                                    !ggml_backend_is_cpu(runtime_backend);
+        if (!offload_active) {
+            return false;
+        }
+        if (plan.segments.size() > 1) {
+            return true;
+        }
+        // Single segment: the whole-graph fallback path (execute_graph with an empty
+        // runtime_param list) calls offload_all_params(), which stages EVERY weight in
+        // params_ctx to the GPU at once. When that full set exceeds the budget, staging
+        // it whole spikes VRAM past the cap (e.g. qwen-image-edit's vision encode stages
+        // all 7979MB though the segment only references ~800MB). Route the single segment
+        // through the segmented path too so it partial-offloads just the weights it uses.
+        // If the full set already fits the budget, whole-graph offload is cheaper (no
+        // per-segment overhead), so keep the fallback.
+        const size_t full_param_bytes =
+            params_buffer != nullptr ? ggml_backend_buffer_get_size(params_buffer) : 0;
+        return full_param_bytes > max_graph_vram_bytes;
     }
 
     bool can_attempt_graph_cut_segmented_compute() const {

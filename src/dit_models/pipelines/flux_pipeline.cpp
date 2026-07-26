@@ -262,9 +262,22 @@ bool FluxPipeline::prepare(const ed_context_params_t& params,
     if (!validate(error)) {
         return false;
     }
+
+    // Auto-allocate: seed tally with hard-cap budget min(--max-vram, free); finalize after.
+    // On a 24G card a 12G flux DiT fits -> resident (no regression); only offload if it
+    // genuinely does not fit the budget.
+    runtime_->reset_auto_allocate_state();
+    const size_t eff_budget = runtime_->effective_budget_bytes();
+    size_t remaining_free = eff_budget;
+    const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
+    const bool te_offload = runtime_->clip_offload_params_to_cpu() ||
+                            runtime_->plan_component_offload(loader, "text_encoders", remaining_free);
+    const bool vae_offload = runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
+    runtime_->finalize_auto_segment_budget(eff_budget);
+
     if (!initialize_flux_transformer_spec(loader,
                                           runtime_->backend(),
-                                          runtime_->offload_params_to_cpu(),
+                                          diffusion_offload,
                                           error)) {
         return false;
     }
@@ -273,7 +286,9 @@ bool FluxPipeline::prepare(const ed_context_params_t& params,
                                         runtime_->backend(),
                                         runtime_->clip_backend(),
                                         runtime_->vae_backend(),
-                                        runtime_->offload_params_to_cpu(),
+                                        diffusion_offload,
+                                        te_offload,
+                                        vae_offload,
                                         registry,
                                         error);
 }
@@ -516,7 +531,9 @@ bool FluxPipeline::prepare_flux_runtime_weights(const ModelLoader& loader,
                                            ggml_backend_t diffusion_backend,
                                            ggml_backend_t text_backend,
                                            ggml_backend_t vae_backend,
-                                           bool offload_params_to_cpu,
+                                           bool diffusion_offload,
+                                           bool te_offload,
+                                           bool vae_offload,
                                            PipelineTensorRegistry& registry,
                                            std::string* error) {
     if (!ed_version_is_flux(version_) && !ed_version_is_flux2(version_)) {
@@ -530,7 +547,7 @@ bool FluxPipeline::prepare_flux_runtime_weights(const ModelLoader& loader,
     if (flux_runner_ == nullptr || (diffusion_backend != nullptr && flux_backend_ != diffusion_backend)) {
         if (!initialize_flux_transformer_spec(loader,
                                               diffusion_backend,
-                                              offload_params_to_cpu,
+                                              diffusion_offload,
                                               error)) {
             return false;
         }
@@ -562,7 +579,7 @@ bool FluxPipeline::prepare_flux_runtime_weights(const ModelLoader& loader,
         conditioner_backend_ = text_backend;
 
         conditioner_ = std::make_shared<FluxCLIPEmbedder>(conditioner_backend_,
-                                                          runtime_->clip_offload_params_to_cpu(),
+                                                          te_offload,
                                                           loader.get_tensor_storage_map());
 
         conditioner_->set_max_graph_vram_bytes(runtime_->max_graph_vram_bytes());
@@ -580,7 +597,7 @@ bool FluxPipeline::prepare_flux_runtime_weights(const ModelLoader& loader,
         vae_backend_ = vae_backend;
 
         vae_ = std::make_shared<AutoEncoderKL>(vae_backend_,
-                                               offload_params_to_cpu,
+                                               vae_offload,
                                                loader.get_tensor_storage_map(),
                                                "first_stage_model",
                                                true,

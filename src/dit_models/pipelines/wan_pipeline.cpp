@@ -285,22 +285,34 @@ bool WanPipeline::build_components(const ModelLoader& loader, std::string* error
     const bool offload = runtime_->offload_params_to_cpu();
     const bool vae_decode_only = true;
 
+    // Auto-allocate: seed tally with hard-cap budget min(--max-vram, free); finalize after.
+    // wan's DiT is small (~1.5GB q8) so it typically stays resident. Special components
+    // (high_noise / clip_vision / preview_vae, only for I2V/14B) keep the global flag.
+    runtime_->reset_auto_allocate_state();
+    const size_t eff_budget = runtime_->effective_budget_bytes();
+    size_t remaining_free = eff_budget;
+    const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
+    const bool te_offload = runtime_->clip_offload_params_to_cpu() ||
+                            runtime_->plan_component_offload(loader, "text_encoders", remaining_free);
+    const bool vae_offload = runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
+    runtime_->finalize_auto_segment_budget(eff_budget);
+
     conditioner_ = std::make_shared<T5CLIPEmbedder>(runtime_->clip_backend(),
-                                                    runtime_->clip_offload_params_to_cpu(),
+                                                    te_offload,
                                                     storage,
                                                     true,
                                                     0,
                                                     true);
 
     diffusion_ = std::make_shared<WanModel>(runtime_->backend(),
-                                            offload,
+                                            diffusion_offload,
                                             storage,
                                             "model.diffusion_model",
                                             version_);
 
     if (has_prefix(loader, "model.high_noise_diffusion_model.")) {
         high_noise_diffusion_ = std::make_shared<WanModel>(runtime_->backend(),
-                                                           offload,
+                                                           diffusion_offload,
                                                            storage,
                                                            "model.high_noise_diffusion_model",
                                                            version_);
@@ -317,14 +329,14 @@ bool WanPipeline::build_components(const ModelLoader& loader, std::string* error
     using_tae_for_main_ = loader.use_tae() && !loader.tae_preview_only();
     if (using_tae_for_main_) {
         vae_ = std::make_shared<TinyVideoAutoEncoder>(runtime_->vae_backend(),
-                                                      offload,
+                                                      vae_offload,
                                                       storage,
                                                       "decoder",
                                                       vae_decode_only,
                                                       version_);
     } else {
         vae_ = std::make_shared<WAN::WanVAERunner>(runtime_->vae_backend(),
-                                                   offload,
+                                                   vae_offload,
                                                    storage,
                                                    "first_stage_model",
                                                    vae_decode_only,

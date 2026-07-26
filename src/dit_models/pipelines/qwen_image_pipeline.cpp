@@ -285,18 +285,29 @@ bool QwenImagePipeline::build_components(const ed_context_params_t& params,
     }
 
     const auto& storage = loader.get_tensor_storage_map();
-    const bool offload = runtime_->offload_params_to_cpu();
     const bool enable_vision = params.llm_vision_path != nullptr && params.llm_vision_path[0] != '\0';
 
+    // Auto-allocate: seed the tally with the hard-cap budget min(--max-vram, free) and
+    // decide each component's placement (DiT->TE->VAE priority), then finalize the segment
+    // budget for whatever offloaded. Outside --auto-allocate these are no-ops / legacy flag.
+    runtime_->reset_auto_allocate_state();
+    const size_t eff_budget = runtime_->effective_budget_bytes();
+    size_t remaining_free = eff_budget;
+    const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
+    const bool te_offload = runtime_->clip_offload_params_to_cpu() ||
+                            runtime_->plan_component_offload(loader, "text_encoders", remaining_free);
+    const bool vae_offload = runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
+    runtime_->finalize_auto_segment_budget(eff_budget);
+
     conditioner_ = std::make_shared<LLMEmbedder>(runtime_->clip_backend(),
-                                                 runtime_->clip_offload_params_to_cpu(),
+                                                 te_offload,
                                                  storage,
                                                  version_,
                                                  "",
                                                  enable_vision);
 
     diffusion_.reset(new Qwen::QwenImageRunner(runtime_->backend(),
-                                               offload,
+                                               diffusion_offload,
                                                storage,
                                                "model.diffusion_model",
                                                version_,
@@ -312,7 +323,7 @@ bool QwenImagePipeline::build_components(const ed_context_params_t& params,
         }
     }
     vae_ = std::make_shared<WAN::WanVAERunner>(runtime_->vae_backend(),
-                                               offload,
+                                               vae_offload,
                                                storage,
                                                "first_stage_model",
                                                true,

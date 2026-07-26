@@ -94,7 +94,9 @@ private:
                                       ggml_backend_t diffusion_backend,
                                       ggml_backend_t text_backend,
                                       ggml_backend_t vae_backend,
-                                      bool offload_params_to_cpu,
+                                      bool diffusion_offload,
+                                      bool te_offload,
+                                      bool vae_offload,
                                       PipelineTensorRegistry& registry,
                                       std::string* error);
 

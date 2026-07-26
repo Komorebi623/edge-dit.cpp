@@ -99,6 +99,9 @@ static void print_usage(const char* prog) {
         "  --text-encoder-offload    Keep text-encoder weights on CPU, stage to GPU per encode (compute on GPU)\n"
         "  --keep-vae-on-cpu         Run VAE on CPU backend\n"
         "  --max-vram <GB>           Limit VRAM usage for compute graphs (e.g. 8.0)\n"
+        "  --auto-allocate           Auto per-component placement under a hard VRAM cap\n"
+        "                            = min(--max-vram, free); keeps components resident\n"
+        "                            when they fit, offloads (segments) the rest\n"
         "  --flash-attention         Enable flash attention, default: on\n"
         "  --no-flash-attention      Disable flash attention\n"
         "  --cfg-parallel-size <n>   Split CFG cond/uncond branches across n GPUs, currently supports 1 or 2\n"
@@ -609,6 +612,7 @@ int main(int argc, char** argv) {
     ctx_params.offload_params_to_cpu = args.offload_to_cpu;
     ctx_params.keep_text_encoder_on_cpu = args.keep_text_encoder_on_cpu;
     ctx_params.text_encoder_offload = args.text_encoder_offload;
+    ctx_params.auto_allocate = args.auto_allocate;
     ctx_params.keep_vae_on_cpu = args.keep_vae_on_cpu;
     if (args.max_vram > 0.0f) {
         ctx_params.max_vram_gb = args.max_vram;

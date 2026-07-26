@@ -55,6 +55,7 @@ void ed_context_params_init(ed_context_params_t * params) {
     params->n_threads = 0;
     params->weight_type = ED_DTYPE_AUTO;
     params->use_mmap = true;
+    params->auto_allocate = false;
     params->flash_attention = true;
     params->qwen_image_zero_cond_t = false;
     params->max_vram_gb = 0.0f;

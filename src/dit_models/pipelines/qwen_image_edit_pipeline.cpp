@@ -318,16 +318,26 @@ bool QwenImageEditPipeline::build_components(const ed_context_params_t& params,
     }
 
     const auto& storage = loader.get_tensor_storage_map();
-    const bool offload = runtime_->offload_params_to_cpu();
+
+    // Auto-allocate: seed tally with hard-cap budget min(--max-vram, free); finalize after.
+    runtime_->reset_auto_allocate_state();
+    const size_t eff_budget = runtime_->effective_budget_bytes();
+    size_t remaining_free = eff_budget;
+    const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
+    const bool te_offload = runtime_->clip_offload_params_to_cpu() ||
+                            runtime_->plan_component_offload(loader, "text_encoders", remaining_free);
+    const bool vae_offload = runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
+    runtime_->finalize_auto_segment_budget(eff_budget);
+
     conditioner_ = std::make_shared<LLMEmbedder>(runtime_->clip_backend(),
-                                                 runtime_->clip_offload_params_to_cpu(),
+                                                 te_offload,
                                                  storage,
                                                  version_,
                                                  "",
                                                  true);
 
     diffusion_.reset(new Qwen::QwenImageRunner(runtime_->backend(),
-                                               offload,
+                                               diffusion_offload,
                                                storage,
                                                "model.diffusion_model",
                                                version_,
@@ -342,7 +352,7 @@ bool QwenImageEditPipeline::build_components(const ed_context_params_t& params,
     }
 
     vae_ = std::make_shared<WAN::WanVAERunner>(runtime_->vae_backend(),
-                                               offload,
+                                               vae_offload,
                                                storage,
                                                "first_stage_model",
                                                false,
@@ -624,8 +634,7 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         return false;
     }
 
-    ed_tiling_params_t tiling_params{};
-    sd::Tensor<float> encoded = vae_->encode(n_threads, input_image_tensor, tiling_params, false, false);
+    sd::Tensor<float> encoded = vae_->encode(n_threads, input_image_tensor, runtime_->vae_tiling(), false, false);
     if (encoded.empty()) {
         if (error != nullptr) {
             *error = "Qwen-Image-Edit VAE encode failed";
@@ -928,7 +937,7 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
     const int64_t ed_dec_t0 = ggml_time_ms();
     sd::Tensor<float> decoded = vae_->decode(n_threads,
                                              vae_latents,
-                                             tiling_params,
+                                             runtime_->vae_tiling(),
                                              false,
                                              false,
                                              false);

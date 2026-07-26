@@ -107,11 +107,21 @@ bool SD3Pipeline::build_components(const ModelLoader& loader, std::string* error
     }
 
     const auto& storage = loader.get_tensor_storage_map();
-    const bool offload = runtime_->offload_params_to_cpu();
-    conditioner_ = std::make_shared<SD3CLIPEmbedder>(runtime_->clip_backend(), runtime_->clip_offload_params_to_cpu(), storage);
-    diffusion_ = std::make_shared<MMDiTModel>(runtime_->backend(), offload, storage);
+
+    // Auto-allocate: seed tally with hard-cap budget min(--max-vram, free); finalize after.
+    runtime_->reset_auto_allocate_state();
+    const size_t eff_budget = runtime_->effective_budget_bytes();
+    size_t remaining_free = eff_budget;
+    const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
+    const bool te_offload = runtime_->clip_offload_params_to_cpu() ||
+                            runtime_->plan_component_offload(loader, "text_encoders", remaining_free);
+    const bool vae_offload = runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
+    runtime_->finalize_auto_segment_budget(eff_budget);
+
+    conditioner_ = std::make_shared<SD3CLIPEmbedder>(runtime_->clip_backend(), te_offload, storage);
+    diffusion_ = std::make_shared<MMDiTModel>(runtime_->backend(), diffusion_offload, storage);
     vae_ = std::make_shared<AutoEncoderKL>(runtime_->vae_backend(),
-                                           offload,
+                                           vae_offload,
                                            storage,
                                            "first_stage_model",
                                            true,
