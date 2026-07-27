@@ -248,6 +248,19 @@ int detect_distilled_default_steps(const std::vector<std::string>& file_paths,
     return 0;
 }
 
+// Reverse of ed_version_name(): map a version string (as stored in GGUF
+// metadata by ed-convert) back to an SDVersion. Returns VERSION_COUNT if the
+// string matches no known version. Derived from ed_version_name so the two can
+// never drift apart.
+static SDVersion ed_version_from_name(const std::string& name) {
+    for (int v = 0; v < VERSION_COUNT; ++v) {
+        if (name == ed_version_name(static_cast<SDVersion>(v))) {
+            return static_cast<SDVersion>(v);
+        }
+    }
+    return VERSION_COUNT;
+}
+
 static bool has_suffix(const std::string& path, const std::string& suffix) {
     std::string lower = path;
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
@@ -567,7 +580,21 @@ static void i64_to_i32_vec(int64_t* src, int32_t* dst, int64_t n) {
     }
 }
 
-static bool convert_tensor_data(void* src, ggml_type src_type, void* dst, ggml_type dst_type, int nrows, int n_per_row) {
+// Builds the per-input-channel importance vector handed to ggml_quantize_chunk.
+// When `imatrix_override` is non-null AND its length matches n_per_row (the
+// in_features dimension the quantizer weights over), it is used verbatim (the imatrix
+// path). Otherwise a length-n_per_row all-ones vector is returned, reproducing the
+// historical on-the-fly behavior exactly. This keeps runtime quantization (which
+// never sets an override) byte-for-byte unchanged.
+static std::vector<float> build_quant_imatrix(int n_per_row, const std::vector<float>* imatrix_override) {
+    if (imatrix_override != nullptr && static_cast<int>(imatrix_override->size()) == n_per_row) {
+        return *imatrix_override;
+    }
+    return std::vector<float>(static_cast<size_t>(n_per_row), 1.0f);
+}
+
+static bool convert_tensor_data(void* src, ggml_type src_type, void* dst, ggml_type dst_type, int nrows, int n_per_row,
+                                const std::vector<float>* imatrix_override = nullptr) {
     const int n = nrows * n_per_row;
     if (src_type == dst_type) {
         const size_t nbytes = static_cast<size_t>(n) * ggml_type_size(src_type) / ggml_blck_size(src_type);
@@ -579,7 +606,7 @@ static bool convert_tensor_data(void* src, ggml_type src_type, void* dst, ggml_t
             ggml_fp32_to_fp16_row(static_cast<float*>(src), static_cast<ggml_fp16_t*>(dst), n);
             return true;
         }
-        std::vector<float> imatrix(static_cast<size_t>(n_per_row), 1.0f);
+        std::vector<float> imatrix = build_quant_imatrix(n_per_row, imatrix_override);
         return ggml_quantize_chunk(dst_type, static_cast<float*>(src), dst, 0, nrows, n_per_row, imatrix.data()) >= 0;
     }
     if (dst_type == GGML_TYPE_F32) {
@@ -605,7 +632,7 @@ static bool convert_tensor_data(void* src, ggml_type src_type, void* dst, ggml_t
         ggml_fp32_to_fp16_row(tmp.data(), static_cast<ggml_fp16_t*>(dst), n);
         return true;
     }
-    std::vector<float> imatrix(static_cast<size_t>(n_per_row), 1.0f);
+    std::vector<float> imatrix = build_quant_imatrix(n_per_row, imatrix_override);
     return ggml_quantize_chunk(dst_type, tmp.data(), dst, 0, nrows, n_per_row, imatrix.data()) >= 0;
 }
 
@@ -958,6 +985,23 @@ bool ModelLoader::init_from_file(const std::string& file_path, const std::string
     }
     if (is_gguf_file(resolved_path)) {
         LOG_INFO("load %s using gguf format", resolved_path.c_str());
+        // FLUX-Kontext and Qwen-Image-Edit are architecturally identical to their
+        // base variants (plain FLUX / Qwen-Image) -- same tensor names and shapes --
+        // so get_ld_version() cannot tell them apart. Diffusers loading distinguishes
+        // them via config.json, but a converted GGUF has no config. Seed a version
+        // hint from the file name (the only surviving signal); finalize_names_and_version
+        // keeps this hint when tensor inference falls back to the base variant.
+        if (prefix.empty()) {
+            std::string lower_name = fs::path(resolved_path).filename().string();
+            std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            if (contains(lower_name, "kontext")) {
+                version_ = VERSION_FLUX_KONTEXT;
+            } else if (contains(lower_name, "qwen") && contains(lower_name, "edit")) {
+                version_ = VERSION_QWEN_IMAGE_EDIT;
+            }
+        }
         return init_from_gguf_file(resolved_path, prefix);
     }
     if (is_safetensors_file(resolved_path)) {
@@ -1016,9 +1060,25 @@ bool ModelLoader::init_from_file_and_convert_name(const std::string& file_path, 
 bool ModelLoader::init_from_gguf_file(const std::string& file_path, const std::string& prefix) {
     std::vector<TensorStorage> tensor_storages;
     std::string error;
-    if (!read_gguf_file(file_path, tensor_storages, &error)) {
+    std::string metadata_version;
+    if (!read_gguf_file(file_path, tensor_storages, &error, &metadata_version)) {
         set_error(error);
         return false;
+    }
+
+    // Prefer the explicit version stored in the GGUF metadata (written by
+    // ed-convert) over the file-name keyword hint seeded in init_from_file.
+    // This is what lets a renamed FLUX-Kontext / Qwen-Image-Edit GGUF still be
+    // recognized. Older GGUFs lack this key, so the file-name fallback stays.
+    if (prefix.empty() && !metadata_version.empty()) {
+        const SDVersion meta_version = ed_version_from_name(metadata_version);
+        if (meta_version != VERSION_COUNT) {
+            version_ = meta_version;
+            LOG_INFO("gguf metadata model version: %s", metadata_version.c_str());
+        } else {
+            LOG_WARN("gguf metadata has unknown model version '%s'; falling back to file-name hint",
+                     metadata_version.c_str());
+        }
     }
 
     file_paths_.push_back(file_path);
@@ -1238,6 +1298,14 @@ SDVersion ModelLoader::get_ld_version() {
         }
         if (contains(name, "model.diffusion_model.transformer_blocks.0.img_mod.1.weight")) {
             return VERSION_QWEN_IMAGE;
+        }
+        // Wan video DiT: blocks carry a cross_attn sub-module (text conditioning)
+        // that no other supported architecture uses, and a 3-D patch_embedding.
+        // Diffusers loading recognizes Wan via config.json's "Wan" class, but a
+        // converted GGUF has no config, so infer it from these signature tensors.
+        // All Wan sub-variants map to VERSION_WAN2 here, matching infer_diffusers_version.
+        if (contains(name, "model.diffusion_model.blocks.") && contains(name, ".cross_attn.")) {
+            return VERSION_WAN2;
         }
         if (contains(name, "model.diffusion_model.double_blocks.") || contains(name, "transformer.double_blocks.")) {
             has_flux_double = true;
@@ -1524,12 +1592,26 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_thread
                             failed = true;
                             break;
                         }
+                        // imatrix lookup (offline convert only; map is empty at
+                        // runtime). tensor_storage.name is already canonical here, and
+                        // imatrix_map_ is keyed by canonical name, so a direct lookup
+                        // aligns. build_quant_imatrix() falls back to all-ones when the
+                        // entry is missing or its length != ne[0], so this never breaks
+                        // a tensor. Read-only concurrent access is safe (set once before).
+                        const std::vector<float>* imatrix_override = nullptr;
+                        if (!imatrix_map_.empty()) {
+                            auto it = imatrix_map_.find(tensor_storage.name);
+                            if (it != imatrix_map_.end()) {
+                                imatrix_override = &it->second;
+                            }
+                        }
                         if (!convert_tensor_data(target_buf,
                                                  tensor_storage.type,
                                                  convert_buf,
                                                  dst_tensor->type,
                                                  static_cast<int>(tensor_storage.nelements() / tensor_storage.ne[0]),
-                                                 static_cast<int>(tensor_storage.ne[0]))) {
+                                                 static_cast<int>(tensor_storage.ne[0]),
+                                                 imatrix_override)) {
                             failed = true;
                             break;
                         }
@@ -1584,6 +1666,12 @@ bool ModelLoader::load_tensors(std::map<std::string, ggml_tensor*>& tensors,
         auto it = tensors.find(name);
         if (it != tensors.end()) {
             ggml_tensor* real = it->second;
+            if (getenv("ED_DUMP_TENSOR_DTYPE")) {
+                fprintf(stderr, "EDDUMP\t%s\tstorage=%s\tgraph=%s\tndims=%d\tne0=%lld\n",
+                        name.c_str(), ggml_type_name(tensor_storage.type),
+                        ggml_type_name(real->type), tensor_storage.n_dims,
+                        (long long)tensor_storage.ne[0]);
+            }
             if (!tensor_shape_matches_ggml(real, tensor_storage)) {
                 int concat_dim = -1;
                 if (!find_split_concat_dim(real, tensor_storage, &concat_dim)) {
@@ -1686,6 +1774,21 @@ bool ModelLoader::tensor_should_be_converted(const TensorStorage& tensor_storage
     }
     if (contains(name, "img_in.") || contains(name, "txt_in.") || contains(name, "time_in.") ||
         contains(name, "vector_in.") || contains(name, "guidance_in.") || contains(name, "final_layer.")) {
+        return false;
+    }
+    // SD3/MMDiT conditioning-injection + positional layers run at F32 at runtime
+    // (Linear force_f32 / PatchEmbed pos_embed). The engine graph overrides the
+    // stored type, but a pre-quantized GGUF has no graph, so these must not be
+    // quantized on disk or the GGUF diverges from on-the-fly (see H Bug#1).
+    if (contains(name, "context_embedder") || contains(name, "t_embedder.") ||
+        contains(name, "y_embedder.") || contains(name, "x_embedder.") ||
+        contains(name, "pos_embed")) {
+        return false;
+    }
+    // Text-encoder projections and T5 shared embedding stay float at runtime
+    // (CLIPTextModel::init_params uses the source type; Embedding::init_params
+    // falls back to F32 for get_rows). convert has no graph, so exclude by name.
+    if (ends_with(name, ".text_projection") || ends_with(name, ".shared.weight")) {
         return false;
     }
     return true;

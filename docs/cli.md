@@ -29,6 +29,7 @@ Common entry points:
 | `ed-cli` | Single image, editing, or video generation run |
 | `ed-sample` | Prompt-file based sampling and timing helper |
 | `ed-server` | Native HTTP server around the C API |
+| `ed-convert` | Offline weight quantization: convert a model to a pre-quantized GGUF |
 
 For build directories used by CPU, Metal, and Vulkan builds, see
 [Build and installation](build.md).
@@ -281,6 +282,69 @@ Memory-oriented flags:
 
 These options are workload dependent. Validate output quality and latency for
 the exact model and resolution you plan to run.
+
+### Pre-quantized GGUF with `ed-convert`
+
+`--type` quantizes weights on every load. `ed-convert` runs the quantization
+once and writes a self-contained GGUF, so later runs load the pre-quantized
+weights directly and skip on-load conversion. The GGUF is also a portable
+artifact: share it and others can run it on edge-dit.cpp without the original
+model or a conversion step.
+
+```bash
+# convert once (any quant type; --tensor-type-rules works too)
+./build-cuda/bin/ed-convert --model /path/to/FLUX.1-dev --type q4_k --output flux-q4k.gguf
+
+# then load the GGUF like any model
+./build-cuda/bin/ed-cli --backend cuda --model flux-q4k.gguf --prompt "..." --output flux.png
+```
+
+Notes:
+
+- Accepts the same `--type` values and `--tensor-type-rules` as on-load
+  quantization; the quantized weights are bit-identical to the on-load path.
+- Works across model families: SD3, FLUX, Qwen-Image, editing (FLUX-Kontext,
+  Qwen-Image-Edit), and video (Wan).
+- The model family is recorded in the GGUF metadata, so the correct pipeline is
+  selected on load regardless of the file name (editing variants included).
+- Most useful for large models, where on-load quantization can take tens of
+  seconds to minutes while a pre-quantized GGUF loads in seconds.
+
+### Activation-calibrated imatrix quantization
+
+Low-bit quantization (notably `q4_k`) loses quality because every weight column
+is quantized with the same uniform importance. With an *importance matrix*
+(imatrix) the quantizer instead weights each input channel by how much it drives
+the layer output -- measured offline as the mean squared activation `E[x^2]`
+over a few calibration prompts (using activations as the saliency signal is an
+idea borrowed from AWQ; this is a per-channel imatrix weighting, not AWQ's
+per-channel scaling). `ed-convert` accepts this importance vector via
+`--imatrix`:
+
+```bash
+# 1) calibrate: run the model over a few prompts to collect per-channel importance
+python tools/imatrix/calibrate.py --model /path/to/sd3-medium --outdir imatrix-out \
+    --steps 6 --nprompts 16
+# -> writes imatrix-out/imatrix.gguf
+
+# 2) convert with the importance vector (works with any low-bit --type)
+./build-cuda/bin/ed-convert --model /path/to/sd3-medium --type q4_k \
+    --imatrix imatrix-out/imatrix.gguf --output sd3-q4k-imatrix.gguf
+```
+
+Notes:
+
+- `--imatrix` only affects the offline conversion; load and inference speed are
+  identical to a plain `q4_k` GGUF (the importance vector is not stored).
+- Without `--imatrix`, or when a channel's entry is missing/mismatched, the
+  quantizer falls back to the uniform (all-ones) weighting, so plain conversion
+  is byte-for-byte unchanged.
+- The quality gain is real but modest and prompt-dependent (on SD3 `q4_k`,
+  roughly sub-dB to ~1 dB PSNR versus plain `q4_k`); it does not raise the
+  fundamental `q4_k` quality ceiling. For a larger quality jump, prefer a higher
+  bit width (`q6_k`/`q8_0`) or mixed precision via `--tensor-type-rules`.
+- `calibrate.py` ships a SD3 calibration pipeline; other model families need the
+  calibration pass adapted to their loader.
 
 ## Performance Flags
 

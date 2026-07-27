@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -38,7 +39,8 @@ bool is_gguf_file(const std::string& file_path) {
 
 bool read_gguf_file(const std::string& file_path,
                     std::vector<TensorStorage>& tensor_storages,
-                    std::string* error) {
+                    std::string* error,
+                    std::string* model_version) {
     tensor_storages.clear();
 
     gguf_context* ctx_gguf_ = nullptr;
@@ -88,19 +90,73 @@ bool read_gguf_file(const std::string& file_path,
         tensor_storages.push_back(tensor_storage);
     }
 
+    if (model_version != nullptr) {
+        int64_t version_key_id = gguf_find_key(ctx_gguf_, "edgedit.model_version");
+        if (version_key_id >= 0 && gguf_get_kv_type(ctx_gguf_, version_key_id) == GGUF_TYPE_STRING) {
+            *model_version = gguf_get_val_str(ctx_gguf_, version_key_id);
+        }
+    }
+
     gguf_free(ctx_gguf_);
     ggml_free(ctx_meta_);
 
     return true;
 }
 
+bool read_imatrix_gguf(const std::string& file_path,
+                       std::map<std::string, std::vector<float>>& imatrix,
+                       std::string* error) {
+    imatrix.clear();
+
+    ggml_context* ctx_meta = nullptr;
+    // no_alloc = false: allocate and load tensor data so we can read the F32 vectors.
+    gguf_context* ctx_gguf = gguf_init_from_file(file_path.c_str(), {false, &ctx_meta});
+    if (ctx_gguf == nullptr) {
+        set_error(error, "failed to open imatrix GGUF '" + file_path + "'");
+        return false;
+    }
+
+    int n_tensors = static_cast<int>(gguf_get_n_tensors(ctx_gguf));
+    int n_skipped = 0;
+    for (int i = 0; i < n_tensors; i++) {
+        std::string name   = gguf_get_tensor_name(ctx_gguf, i);
+        ggml_tensor* tensor = ggml_get_tensor(ctx_meta, name.c_str());
+        if (tensor == nullptr || tensor->data == nullptr) {
+            ++n_skipped;
+            continue;
+        }
+        if (tensor->type != GGML_TYPE_F32) {
+            LOG_WARN("imatrix tensor '%s' is not F32 (type=%d); skipping", name.c_str(), (int)tensor->type);
+            ++n_skipped;
+            continue;
+        }
+        const int64_t n = ggml_nelements(tensor);
+        const float* src = static_cast<const float*>(tensor->data);
+        imatrix.emplace(name, std::vector<float>(src, src + n));
+    }
+
+    LOG_INFO("read imatrix GGUF '%s': %zu vectors (%d skipped)",
+             file_path.c_str(), imatrix.size(), n_skipped);
+
+    gguf_free(ctx_gguf);
+    ggml_free(ctx_meta);
+    return true;
+}
+
 bool write_gguf_file(const std::string& file_path,
                      const std::vector<TensorWriteInfo>& tensors,
+                     const std::string& model_version,
                      std::string* error) {
     gguf_context* gguf_ctx = gguf_init_empty();
     if (gguf_ctx == nullptr) {
         set_error(error, "gguf_init_empty failed");
         return false;
+    }
+
+    // Stamp the true model version (from ed-convert) into GGUF metadata so the
+    // loader need not guess it from the file name.
+    if (!model_version.empty()) {
+        gguf_set_val_str(gguf_ctx, "edgedit.model_version", model_version.c_str());
     }
 
     for (const TensorWriteInfo& write_tensor : tensors) {

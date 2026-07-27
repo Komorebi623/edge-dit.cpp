@@ -2036,6 +2036,27 @@ static inline ggml_tensor* mmdit_fused_pair_pack_attention(GGMLRunnerContext* ct
     // while k/v are decoded per their type. The pack emits all-f16, so q must be
     // cast back to f32 or the kernel reinterprets f16 bytes as f32 -> NaN. Flux's
     // working path keeps q f32 and only casts k/v to f16 (flux.hpp:584/614).
+    // SageAttention2-style INT8-QK + F16-PV fast path (opt-in via ED_SAGE_ATTN).
+    // q/k/v here are [head_dim, total_seq, n_head] (N==1). The sage custom op
+    // outputs [head_dim, n_head, total_seq, 1] -- byte-identical to
+    // ggml_flash_attn_ext -- so the view/reshape below is unchanged.
+    // Layer-skip policy keeps the first/last few blocks in F16 for accuracy.
+    if (edgedit::ggml_ext::sage_attn_enabled() && (head_dim == 64 || head_dim == 128) &&
+        sd_backend_is(ctx->backend, "CUDA") &&
+        !edgedit::ggml_ext::sage_attn_skip_layer(ctx->sage_layer_idx, ctx->sage_total_layers)) {
+        if (auto sage = edgedit::ggml_ext::sage_attn_custom(ctx->ggml_ctx, q, k, v, n_head)) {
+            if (ggml_backend_supports_op(ctx->backend, sage)) {
+                auto out = ggml_view_3d(ctx->ggml_ctx, sage, head_dim, n_head, total_seq, sage->nb[1], sage->nb[2], 0);
+                out = ggml_reshape_3d(ctx->ggml_ctx, out, head_dim * n_head, total_seq, 1);
+                return out;
+            }
+        }
+    }
+
+    // The CPU flash kernel reads q's bytes unconditionally as f32 (ops.cpp:8412),
+    // while k/v are decoded per their type. The pack emits all-f16, so q must be
+    // cast back to f32 or the kernel reinterprets f16 bytes as f32 -> NaN. Flux's
+    // working path keeps q f32 and only casts k/v to f16 (flux.hpp:584/614).
     if (q->type != GGML_TYPE_F32) {
         q = ggml_cast(ctx->ggml_ctx, q, GGML_TYPE_F32);
     }
@@ -3322,6 +3343,11 @@ public:
             }
 
             auto block = std::dynamic_pointer_cast<JointBlock>(blocks["joint_blocks." + std::to_string(i)]);
+
+            // Expose the current block index to the sage attention fast path so
+            // it can keep the first/last few layers in F16 (layer-skip policy).
+            ctx->sage_layer_idx    = i;
+            ctx->sage_total_layers = depth;
 
             std::pair<ggml_tensor*, ggml_tensor*> context_x;
             if (use_sp_mainline) {

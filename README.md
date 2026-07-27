@@ -17,6 +17,9 @@ edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for loc
 
 ## Latest News
 
+- **2026-07-27:** 🚀 Added optional **SageAttention** (INT8-QK + F16-PV) for SD3 and Wan self-attention (`ED_SAGE_ATTN=1`): a loss-free, opt-in attention speedup (~5–6% on SD3). See [attention optimization](docs/optimization/graph-and-operator-optimization.md#quantized-attention-sageattention-optional).
+- **2026-07-24:** 🚀 Added **activation-calibrated imatrix quantization** to `ed-convert` (`--imatrix`): an offline calibration pass weights low-bit (q4_k) quantization toward the most important input channels. See [CLI usage](docs/cli.md#activation-calibrated-imatrix-quantization).
+- **2026-07-23:** 🚀 Added **`ed-convert`** for **offline weight quantization** — convert any supported model once into a portable, self-identifying pre-quantized GGUF, then load it directly and skip on-load quantization. Works across image, editing, and video models. See [CLI usage](docs/cli.md#pre-quantized-gguf-with-ed-convert).
 - **2026-07-11:** 🚀 **edge-dit.cpp v0.1.0-alpha** enters **public preview**.
 - **2026-07-08:** 🚀 Added the **managed development console** for the
   **Python job server**.
@@ -48,6 +51,7 @@ edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for loc
 - **System-level optimization for efficient DiT inference**
   - **[Model representation and precision](docs/optimization/model-representation-and-precision.md)**
     - Quantization, mixed precision, and per-tensor dtype control
+    - Offline quantization to portable pre-quantized GGUF (\`ed-convert\`)
   - **[Memory-efficient execution](docs/optimization/memory-efficient-execution.md)**
     - CPU offload, graph VRAM control, VAE tiling, and component placement
   - **[Graph and operator optimization](docs/optimization/graph-and-operator-optimization.md)**

@@ -1,10 +1,15 @@
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <regex>
+#include <string>
 #include <vector>
 
+#include "core/runtime/model_loader.h"
+#include "utils/model_io/convert.h"
 #include "utils/model_io/gguf_io.h"
 #include "utils/model_io/safetensors_io.h"
+#include "utils/name_conversion.h"
 #include "utils/util.h"
 
 #include "ggml-cpu.h"
@@ -25,7 +30,24 @@ static ggml_type get_export_tensor_type(ModelLoader& model_loader,
         }
     }
 
-    if (model_loader.tensor_should_be_converted(tensor_storage, dst_type)) {
+    // Only quantize tensors that the runtime model would also quantize.
+    //
+    // The engine's model graph always allocates 1-D tensors -- biases,
+    // LayerNorm/RMSNorm scales, and the fused-QKV split biases the SD3/MMDiT
+    // name mapping produces (e.g. "...qkv.bias.1", "...qkv.bias.2") -- at float
+    // precision (see Linear::init_params in ggml_extend.hpp, which forces the
+    // bias to F32), overriding the on-disk storage type when it binds weights.
+    // A converter has no such graph: whatever type we pick here is baked into
+    // the output file permanently. ModelLoader::tensor_should_be_converted only
+    // skips the *exact* ".bias"/".scale" suffixes, so it still quantizes split
+    // biases ("...bias.1") and 1-D norm ".weight" vectors. Quantizing those
+    // sensitive 1-D vectors to q8_0/q4_k is very lossy and, worse, diverges from
+    // the runtime (which keeps them float), so a pre-quantized GGUF would score
+    // measurably worse than on-the-fly quantization. Guard on dimensionality --
+    // matching llama.cpp / stable-diffusion.cpp, which only quantize 2-D+
+    // tensors -- so convert reproduces the runtime's effective precision.
+    const bool is_multi_dim = tensor_storage.n_dims >= 2;
+    if (is_multi_dim && model_loader.tensor_should_be_converted(tensor_storage, dst_type)) {
         tensor_type = dst_type;
     }
 
@@ -75,12 +97,66 @@ static bool load_tensors_for_export(ModelLoader& model_loader,
     return success;
 }
 
+// Loads an activation-calibrated imatrix GGUF and remaps its keys into edge's canonical tensor-name
+// space so lookups during load_tensors line up.
+//
+// The imatrix file stores importance vectors under ORIGINAL diffusers weight names
+// (e.g. "transformer_blocks.0.attn.to_q.weight"), because it is produced by a pure
+// PyTorch/diffusers calibration pass. Edge, however, quantizes tensors under their
+// canonical names (e.g. "model.diffusion_model.joint_blocks.0.x_block.attn.qkv.weight"),
+// which convert_tensor_name() derives only AFTER the diffusers loader prepends the
+// component prefix ("transformer." for the SD3 transformer). So we reproduce that
+// exact two-step transform here: prepend "transformer." (matching
+// init_from_diffusers_directory's sd_prefix), then run convert_tensor_name() for the
+// model's version. For SD3 this also folds to_q/to_k/to_v into the shared
+// "...qkv.weight"/".weight.1"/".weight.2" storage names -- all three share the same
+// in_features, so the vector length still equals ne[0] and the quantizer accepts it.
+// Any key that fails to remap keeps its original name too, so already-canonical
+// imatrix files also work. Entries whose length mismatches a tensor's ne[0] are
+// silently ignored at quantization time (all-ones fallback).
+static std::map<std::string, std::vector<float>> load_and_remap_imatrix(const char* imatrix_path,
+                                                                        SDVersion version) {
+    std::map<std::string, std::vector<float>> canonical;
+    if (imatrix_path == nullptr || std::strlen(imatrix_path) == 0) {
+        return canonical;
+    }
+
+    std::map<std::string, std::vector<float>> raw;
+    std::string error;
+    if (!read_imatrix_gguf(imatrix_path, raw, &error)) {
+        LOG_WARN("failed to read imatrix '%s': %s -- proceeding with plain quantization",
+                 imatrix_path, error.c_str());
+        return canonical;
+    }
+
+    size_t remapped = 0;
+    for (const auto& kv : raw) {
+        const std::string& orig = kv.first;
+        // Reproduce the loader's diffusers -> canonical transform. Prepending
+        // "transformer." is what makes convert_tensor_name trigger the DiT prefix
+        // maps (they only match "transformer."/"unet."/... prefixes).
+        std::string canon = convert_tensor_name("transformer." + orig, version);
+        canonical[canon] = kv.second;
+        if (canon != orig) {
+            ++remapped;
+        }
+        // Also keep the original name as a fallback (harmless: separate key), so a
+        // pre-canonicalized imatrix or a non-DiT tensor still resolves.
+        canonical.emplace(orig, kv.second);
+    }
+
+    LOG_INFO("loaded imatrix '%s': %zu raw vectors, %zu remapped to canonical names (version=%s)",
+             imatrix_path, raw.size(), remapped, ed_version_name(version));
+    return canonical;
+}
+
 bool convert(const char* input_path,
              const char* vae_path,
              const char* output_path,
-             ed_type_t output_type,
+             ed_dtype_t output_type,
              const char* tensor_type_rules,
-             bool convert_name) {
+             bool convert_name,
+             const char* imatrix_path) {
     ModelLoader model_loader;
 
     if (!model_loader.init_from_file(input_path)) {
@@ -98,13 +174,35 @@ bool convert(const char* input_path,
         model_loader.convert_tensors_name();
     }
 
+    // Install the imatrix (if any) AFTER names are canonicalized: the map is
+    // keyed by canonical names, matching tensor_storage.name during load_tensors.
+    if (imatrix_path != nullptr && std::strlen(imatrix_path) > 0) {
+        // Resolve the version the same way convert_tensors_name() does (it uses a
+        // local and does not persist it), so the DiT name mapping is applied.
+        SDVersion version = model_loader.version();
+        if (version == VERSION_COUNT) {
+            version = model_loader.get_ld_version();
+        }
+        auto imatrix_map = load_and_remap_imatrix(imatrix_path, version);
+        if (!imatrix_map.empty()) {
+            model_loader.set_imatrix_map(std::move(imatrix_map));
+        }
+    }
+
     ggml_type type             = (ggml_type)output_type;
     bool output_is_safetensors = ends_with(output_path, ".safetensors");
-    TensorTypeRules type_rules = parse_tensor_type_rules(tensor_type_rules);
+    TensorTypeRules type_rules = parse_tensor_type_rules(tensor_type_rules != nullptr ? tensor_type_rules : "");
 
     auto backend    = ggml_backend_cpu_init();
-    size_t mem_size = 1 * 1024 * 1024;  // for padding
-    mem_size += model_loader.get_tensor_storage_map().size() * ggml_tensor_overhead();
+    // Padding note: get_params_mem_size() sizes quantizable tensors at `type`,
+    // but get_export_tensor_type() above keeps 1-D tensors (norms/biases) at
+    // their original float type, which is larger than a quantized estimate. Add
+    // a generous per-tensor slack (>> any single 1-D vector's float-vs-quant byte
+    // delta) on top of the flat pad so the ggml context never under-allocates.
+    // (Under-allocation would be a clean failure -- ggml_new_tensor returns null
+    // -- not corruption, but the slack keeps convert working for large models.)
+    size_t mem_size = 1 * 1024 * 1024;  // flat padding
+    mem_size += model_loader.get_tensor_storage_map().size() * (ggml_tensor_overhead() + 256 * 1024);
     mem_size += model_loader.get_params_mem_size(backend, type);
     LOG_INFO("model tensors mem size: %.2fMB", mem_size / 1024.f / 1024.f);
     ggml_context* ggml_ctx = ggml_init({mem_size, nullptr, false});
@@ -124,7 +222,12 @@ bool convert(const char* input_path,
         if (output_is_safetensors) {
             success = write_safetensors_file(output_path, tensors, &error);
         } else {
-            success = write_gguf_file(output_path, tensors, &error);
+            // Persist the true model version (known from the diffusers config.json
+            // that ModelLoader read on init) into the GGUF metadata, so the loader
+            // no longer has to guess FLUX-Kontext / Qwen-Image-Edit from the file name.
+            const SDVersion version     = model_loader.version();
+            const std::string model_ver = version != VERSION_COUNT ? ed_version_name(version) : "";
+            success = write_gguf_file(output_path, tensors, model_ver, &error);
         }
     }
 
