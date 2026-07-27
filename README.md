@@ -17,6 +17,8 @@ edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for loc
 
 ## Latest News
 
+- **2026-07-27:** 🚀 Added **`--auto-allocate`** adaptive VRAM placement — under a hard budget (`--max-vram`), the runtime decides per-component (DiT/text-encoder/VAE) what stays resident vs. streams from host, so large models run within a fixed budget on consumer GPUs. Validated across 6 families x 3 budgets (24/16/8 GiB) on an RTX 4090. See [consumer-GPU benchmarks](docs/consumer-gpu-benchmarks.md).
+- **2026-07-27:** 🚀 Added **few-step distilled model** auto-detection — Turbo/Lightning/schnell-class checkpoints are recognized and default to a 4–8 step schedule (2.5–5x fewer forwards) when `--steps` is unset, with the explicit value always taking precedence. See [few-step distilled models](docs/optimization/few-step-distilled-models.md).
 - **2026-07-27:** 🚀 Added optional **SageAttention** (INT8-QK + F16-PV) for SD3 and Wan self-attention (`ED_SAGE_ATTN=1`): a loss-free, opt-in attention speedup (~5–6% on SD3). See [attention optimization](docs/optimization/graph-and-operator-optimization.md#quantized-attention-sageattention-optional).
 - **2026-07-24:** 🚀 Added **activation-calibrated imatrix quantization** to `ed-convert` (`--imatrix`): an offline calibration pass weights low-bit (q4_k) quantization toward the most important input channels. See [CLI usage](docs/cli.md#activation-calibrated-imatrix-quantization).
 - **2026-07-23:** 🚀 Added **`ed-convert`** for **offline weight quantization** — convert any supported model once into a portable, self-identifying pre-quantized GGUF, then load it directly and skip on-load quantization. Works across image, editing, and video models. See [CLI usage](docs/cli.md#pre-quantized-gguf-with-ed-convert).
@@ -58,6 +60,8 @@ edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for loc
     - cuDNN SDPA, DiT-specific CUDA operators, and tensor-layout optimization
   - **[Computation reuse](docs/optimization/computation-reuse.md)**
     - Timestep- and block-level cache reuse with output, feature, and probe policies
+  - **[Few-step distilled models](docs/optimization/few-step-distilled-models.md)**
+    - Automatic detection of Turbo/Lightning/schnell checkpoints with few-step scheduling
   - **[Parallel execution](docs/optimization/parallel-execution.md)**
     - CFG parallelism, sequence parallelism, and NCCL/MPI multi-worker execution
 

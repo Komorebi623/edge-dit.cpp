@@ -372,6 +372,7 @@ full-compute outputs after generation.
 ## Related Documentation
 
 - [Benchmark harness](../benchmark/README.md)
+- [Consumer-GPU budget benchmarks (RTX 4090)](consumer-gpu-benchmarks.md)
 - [Build and installation](build.md)
 - [Supported models and usage](models.md)
 - [Command line usage](cli.md)
