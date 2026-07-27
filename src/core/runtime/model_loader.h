@@ -145,6 +145,14 @@ using TensorTypeRules = std::vector<std::pair<std::string, ggml_type>>;
 TensorTypeRules parse_tensor_type_rules(const std::string& tensor_type_rules);
 const char* ed_version_name(SDVersion version);
 
+// Detect a few-step distilled checkpoint from model/DiT file paths (turbo /
+// lightning / schnell / lightx2v / distill / hyper / N-step keywords). Returns
+// the default step count for a detected distilled model (4 for schnell-class,
+// 8 otherwise), or 0 when no distill signal is found. Used only when the user
+// did not pass an explicit --steps, so a miss just falls back to the base default.
+int detect_distilled_default_steps(const std::vector<std::string>& file_paths,
+                                   const char* diffusion_model_path);
+
 class ModelLoader final {
 public:
     using TensorMap = std::map<std::string, ggml_tensor*>;

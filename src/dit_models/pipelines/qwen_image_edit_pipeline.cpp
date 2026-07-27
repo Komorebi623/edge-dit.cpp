@@ -276,6 +276,15 @@ void QwenImageEditPipeline::reset() {
     runtime_weights_loaded_ = false;
 }
 
+int QwenImageEditPipeline::resolve_steps(int requested_steps) const {
+    if (requested_steps > 0) {
+        return requested_steps;
+    }
+    // Auto (--steps not set): few-step distilled checkpoints (Qwen-Image-Edit-
+    // Lightning etc.) default to their distilled step count; base defaults to 50.
+    return distilled_default_steps_ > 0 ? distilled_default_steps_ : 50;
+}
+
 bool QwenImageEditPipeline::prepare(const ed_context_params_t& params,
                                     ModelRuntime& runtime,
                                     const ModelLoader& loader,
@@ -285,6 +294,8 @@ bool QwenImageEditPipeline::prepare(const ed_context_params_t& params,
     runtime_ = &runtime;
     version_ = loader.version();
     reset();
+    distilled_default_steps_ = detect_distilled_default_steps(loader.file_paths(),
+                                                              params.diffusion_model_path);
 
     if (!ed_version_is_qwen_image_edit(version_)) {
         if (error != nullptr) {
@@ -485,7 +496,7 @@ ed_status_t QwenImageEditPipeline::generate_image(const ed_image_generation_para
     }
 
     const int count = params->batch_count > 0 ? params->batch_count : 1;
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 50;
+    const int steps = resolve_steps(params->sample.steps);
     if (GenerationControl* control = runtime_->generation_control()) {
         control->start(count * steps);
     }
@@ -647,7 +658,7 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
     }
     std::vector<sd::Tensor<float>> ref_latents = {image_latent};
 
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 50;
+    const int steps = resolve_steps(params->sample.steps);
     const int image_seq_len = (latent_w / patch_size) * (latent_h / patch_size);
     // The image_seq_len>=4096 gate is a CUDA-era heuristic; keep it for CUDA and
     // any non-CPU backend (do not change their behavior). On CPU it forced the

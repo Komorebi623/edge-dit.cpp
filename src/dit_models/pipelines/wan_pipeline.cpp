@@ -124,8 +124,13 @@ static float resolve_eta(const ed_sample_params_t& params) {
     }
 }
 
-static int resolve_steps(int steps) {
-    return steps > 0 ? steps : kWanDefaultSteps;
+static int resolve_steps(int steps, int distilled_default = 0) {
+    if (steps > 0) {
+        return steps;
+    }
+    // Auto (--steps not set): few-step distilled checkpoints default to their
+    // distilled step count; the base model defaults to kWanDefaultSteps (20).
+    return distilled_default > 0 ? distilled_default : kWanDefaultSteps;
 }
 
 static float resolve_cfg(float cfg) {
@@ -244,7 +249,7 @@ bool WanPipeline::has_prefix(const ModelLoader& loader, const std::string& prefi
     return false;
 }
 
-bool WanPipeline::prepare(const ed_context_params_t&,
+bool WanPipeline::prepare(const ed_context_params_t& params,
                           ModelRuntime& runtime,
                           const ModelLoader& loader,
                           PipelineTensorRegistry& registry,
@@ -253,6 +258,8 @@ bool WanPipeline::prepare(const ed_context_params_t&,
     runtime_ = &runtime;
     version_ = loader.version();
     registry.clear();
+    distilled_default_steps_ = detect_distilled_default_steps(loader.file_paths(),
+                                                              params.diffusion_model_path);
 
     if (!ed_version_is_wan(version_)) {
         return set_error(error, "WanPipeline got non-Wan model version");
@@ -1298,7 +1305,7 @@ sd::Tensor<float> WanPipeline::sample_video_latent(const ed_video_generation_par
                                                    const sd::Tensor<float>& denoise_mask,
                                                    const sd::Tensor<float>& vace_context,
                                                    std::string* error) {
-    const int low_steps = resolve_steps(params->sample.steps);
+    const int low_steps = resolve_steps(params->sample.steps, distilled_default_steps_);
     int high_steps = high_noise_diffusion_ != nullptr ? params->high_noise_sample.steps : 0;
     const int total_steps = low_steps + std::max(0, high_steps);
 
@@ -1473,7 +1480,7 @@ ed_status_t WanPipeline::generate_video(const ed_video_generation_params_t* para
     sampler_rng_->manual_seed(seed);
     set_flow_shift(params->sample.flow_shift);
 
-    const int low_steps = resolve_steps(params->sample.steps);
+    const int low_steps = resolve_steps(params->sample.steps, distilled_default_steps_);
     const int high_steps = high_noise_diffusion_ != nullptr ? params->high_noise_sample.steps : 0;
     const int total_steps = low_steps + std::max(0, high_steps);
     if (GenerationControl* control = runtime_->generation_control()) {

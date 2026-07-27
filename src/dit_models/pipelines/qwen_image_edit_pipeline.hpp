@@ -53,12 +53,16 @@ private:
     bool diffusion_bf16_ = false;
     ModelRuntime* runtime_ = nullptr;
     SDVersion version_ = VERSION_QWEN_IMAGE_EDIT;
+    // >0 when the loaded checkpoint looks like a few-step distill (Lightning etc.);
+    // used as the default step count when the user does not pass --steps.
+    int distilled_default_steps_ = 0;
 
     std::shared_ptr<Conditioner> conditioner_;
     std::shared_ptr<VAE> vae_;
     std::unique_ptr<Qwen::QwenImageRunner> diffusion_;
 
     void reset();
+    int resolve_steps(int requested_steps) const;
     bool build_components(const ed_context_params_t& params,
                           const ModelLoader& loader,
                           std::string* error);

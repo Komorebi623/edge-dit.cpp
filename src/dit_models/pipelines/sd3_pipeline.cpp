@@ -70,7 +70,7 @@ SD3Pipeline::SD3Pipeline(SDVersion version)
     : version_(version) {
 }
 
-bool SD3Pipeline::prepare(const ed_context_params_t&,
+bool SD3Pipeline::prepare(const ed_context_params_t& params,
                           ModelRuntime& runtime,
                           const ModelLoader& loader,
                           PipelineTensorRegistry& registry,
@@ -79,6 +79,8 @@ bool SD3Pipeline::prepare(const ed_context_params_t&,
     runtime_ = &runtime;
     version_ = loader.version();
     registry.clear();
+    distilled_default_steps_ = detect_distilled_default_steps(loader.file_paths(),
+                                                              params.diffusion_model_path);
 
     if (version_ != VERSION_SD3) {
         if (error != nullptr) {
@@ -95,6 +97,15 @@ bool SD3Pipeline::prepare(const ed_context_params_t&,
     }
     build_ignore_tensors(registry);
     return true;
+}
+
+int SD3Pipeline::resolve_steps(int requested_steps) const {
+    if (requested_steps > 0) {
+        return requested_steps;
+    }
+    // Auto (--steps not set): few-step distilled checkpoints (SD3.5-turbo etc.)
+    // default to their distilled step count; the base model defaults to 20.
+    return distilled_default_steps_ > 0 ? distilled_default_steps_ : 20;
 }
 
 bool SD3Pipeline::build_components(const ModelLoader& loader, std::string* error) {
@@ -223,7 +234,7 @@ ed_status_t SD3Pipeline::generate_image(const ed_image_generation_params_t* para
     }
 
     const int count = params->batch_count > 0 ? params->batch_count : 1;
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    const int steps = resolve_steps(params->sample.steps);
     if (GenerationControl* control = runtime_->generation_control()) {
         control->start(count * steps);
     }
@@ -372,7 +383,7 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
 
     const int latent_w = params->width / vae_scale_factor;
     const int latent_h = params->height / vae_scale_factor;
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    const int steps = resolve_steps(params->sample.steps);
     const ed_sampler_t sampler = params->sample.sampler == ED_SAMPLER_AUTO
                                      ? default_sample_method()
                                      : params->sample.sampler;

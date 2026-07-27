@@ -234,6 +234,15 @@ void QwenImagePipeline::reset() {
     runtime_weights_loaded_ = false;
 }
 
+int QwenImagePipeline::resolve_steps(int requested_steps) const {
+    if (requested_steps > 0) {
+        return requested_steps;
+    }
+    // Auto (--steps not set): few-step distilled checkpoints (Qwen-Image-Lightning
+    // etc.) default to their distilled step count; the base model defaults to 20.
+    return distilled_default_steps_ > 0 ? distilled_default_steps_ : 20;
+}
+
 bool QwenImagePipeline::has_prefix(const ModelLoader& loader, const std::string& prefix) const {
     for (const auto& item : loader.get_tensor_storage_map()) {
         if (starts_with(item.second.name, prefix)) {
@@ -252,6 +261,8 @@ bool QwenImagePipeline::prepare(const ed_context_params_t& params,
     runtime_ = &runtime;
     version_ = loader.version();
     reset();
+    distilled_default_steps_ = detect_distilled_default_steps(loader.file_paths(),
+                                                              params.diffusion_model_path);
 
     if (!ed_version_is_qwen_image(version_)) {
         if (error != nullptr) {
@@ -457,7 +468,7 @@ ed_status_t QwenImagePipeline::generate_image(const ed_image_generation_params_t
     }
 
     const int count = params->batch_count > 0 ? params->batch_count : 1;
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    const int steps = resolve_steps(params->sample.steps);
     if (GenerationControl* control = runtime_->generation_control()) {
         control->start(count * steps);
     }
@@ -580,7 +591,7 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
         return false;
     }
 
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    const int steps = resolve_steps(params->sample.steps);
     const bool has_explicit_flow_shift = params->sample.flow_shift > 0.0f &&
                                          std::isfinite(params->sample.flow_shift);
 

@@ -61,6 +61,9 @@ private:
     bool ready_ = false;
     ModelRuntime* runtime_ = nullptr;
     SDVersion version_ = VERSION_COUNT;
+    // >0 when the loaded checkpoint looks like a few-step distill (turbo etc.);
+    // used as the default step count when the user does not pass --steps.
+    int distilled_default_steps_ = 0;
 
     std::vector<KontextPipelineComponent> components_;
     std::unique_ptr<Flux::FluxRunner> flux_runner_;
@@ -98,6 +101,7 @@ private:
                                       PipelineTensorRegistry& registry,
                                       std::string* error);
     bool can_generate_image() const;
+    int resolve_steps(int requested_steps) const;
 
     bool validate_image_params(const ed_image_generation_params_t* params,
                                std::string* error) const;
