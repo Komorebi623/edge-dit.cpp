@@ -38,6 +38,16 @@ The simplest path is a model directory. Component loading is useful when
 weights are stored separately. See [Command line usage](cli.md#model-loading)
 for both forms.
 
+### Step-distilled variants
+
+Each supported family has step-distilled variants (FLUX.1-schnell, SD3.5-Turbo,
+Qwen-Image-Lightning, Wan distill, …) that generate in 4–8 steps instead of 20+.
+They load through the same pipeline as the base model; the runtime auto-detects
+them and applies a few-step default when `--steps` is unset. Full-weight
+distilled checkpoints load directly (`--model` or `--diffusion-model`);
+LoRA-form distills must be merged into the base weights offline first. See
+[Few-step distilled models](optimization/few-step-distilled-models.md).
+
 ## Text-to-Image
 
 ### FLUX.1

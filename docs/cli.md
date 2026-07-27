@@ -63,7 +63,11 @@ Common generation flags:
 `--backend gpu` is an alias for the available GPU backend selected by the
 build/runtime environment. `--gpu` is a shorthand for `--backend gpu`.
 
-## Model Loading
+`--steps` accepts `-1` (or may be omitted) to let the runtime pick the step
+count: step-distilled checkpoints (FLUX.1-schnell, Turbo, Lightning, …) default
+to a few-step schedule (4 or 8), other models default to 20 (Qwen-Image-Edit
+50). An explicit `--steps N` always overrides this. See
+[Few-step distilled models](optimization/few-step-distilled-models.md).
 
 ### Diffusers Directory
 
@@ -243,6 +247,44 @@ Video flags:
 The CLI uses `ED_FFMPEG` when set and can also find imageio-ffmpeg binaries in
 an active Python environment. Wan 2.x is available in public preview and is
 still being optimized for memory use and runtime behavior.
+
+## Few-Step Distilled Models
+
+Step-distilled checkpoints (FLUX.1-schnell, SD3.5-Turbo, Qwen-Image-Lightning,
+Wan distill, …) generate in 4-8 steps. Pass `--steps -1` (or omit `--steps`) to
+let the runtime detect the distilled model and choose the few-step default; an
+explicit `--steps N` always overrides. Distilled models are guidance-distilled,
+so leave `--cfg-scale` at its default (single forward) rather than raising it.
+
+Full-weight distilled directory (auto step count):
+
+```bash
+./build-cuda/bin/ed-cli \
+  --backend cuda --type q8_0 \
+  --model /path/to/sd3.5-medium-turbo \
+  --steps -1 \
+  --auto-allocate --vae-tiling \
+  --prompt "a glass teapot on a wooden table" \
+  --output turbo.png
+```
+
+Distilled DiT weights combined with a base model's VAE and text encoders via
+`--diffusion-model` (the base directory supplies the non-DiT components):
+
+```bash
+./build-cuda/bin/ed-cli \
+  --backend cuda --type q8_0 \
+  --model /path/to/qwen-image \
+  --diffusion-model /path/to/qwen-image-lightning/transformer/diffusion_pytorch_model.safetensors.index.json \
+  --steps -1 --cfg-scale 1.0 \
+  --auto-allocate --vae-tiling \
+  --prompt "a red apple on a wooden table" \
+  --output lightning.png
+```
+
+Distilled variants shipped as LoRA adapters must be merged into the base weights
+offline before use; the CLI loads full weights, not LoRA deltas. See
+[Few-step distilled models](optimization/few-step-distilled-models.md).
 
 ## Quantization and Memory
 
