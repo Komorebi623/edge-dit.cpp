@@ -32,6 +32,9 @@
 #include "backend/ggml/ed_ggml_attention_ext.hpp"
 #include "backend/ggml/ed_ggml_sage_attn_ext.hpp"
 #include "backend/ggml/ed_ggml_sp_flux_ext.hpp"
+#if defined(ED_ENABLE_ASYNC_OFFLOAD)
+#include "backend/ggml/cuda/ed_async_offload.h"
+#endif
 #include "backend/ggml/ggml_extend_backend.hpp"
 #include "backend/ggml/ggml_graph_cut.h"
 #include "optimization/cache/cache_graph_scope.hpp"
@@ -1197,6 +1200,19 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_conv_2d(ggml_context* ctx,
     }
 
     if (direct) {
+#if !defined(ED_ENABLE_CUDNN_CONV2D)
+        // On CPU with oneDNN, a bf16 conv kernel makes the internal im2col GEMM
+        // run on Intel AMX (this box has amx_bf16 but not amx_fp16), which is a
+        // large VAE-decode win. Cast the f16 kernel to bf16 once here. Default on;
+        // set ED_CONV_BF16=0 to keep the f16 path (non-AMX / non-oneDNN builds).
+        // Guarded out of cuDNN-conv2d builds: there the cuDNN path only accepts
+        // (f32,f16,f32) or all-same dtype, so an f16->bf16 cast yields a
+        // (f32,bf16,f32) node that cuDNN rejects and native conv2d aborts on.
+        const char* conv_bf16 = std::getenv("ED_CONV_BF16");
+        if ((!conv_bf16 || conv_bf16[0] != '0') && w->type == GGML_TYPE_F16) {
+            w = ggml_cast(ctx, w, GGML_TYPE_BF16);
+        }
+#endif
         x = ggml_conv_2d_direct(ctx, w, x, s0, s1, p0, p1, d0, d1);
     } else {
         x = ggml_conv_2d(ctx, w, x, s0, s1, p0, p1, d0, d1);
@@ -1232,6 +1248,21 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_conv_3d(ggml_context* ctx,
                                                 bool direct = false) {
     int64_t OC = w->ne[3] / IC;
     int64_t N  = x->ne[3] / IC;
+    if (direct) {
+#if !defined(ED_ENABLE_CUDNN_CONV3D)
+        // Same AMX win as conv2d: a bf16 conv kernel makes the internal CONV_3D
+        // im2col GEMM route through oneDNN (Intel AMX bf16). Cast the f16 kernel
+        // to bf16 once here. Default on; set ED_CONV_BF16=0 to keep the f16 path
+        // (non-AMX / non-oneDNN builds).
+        // Guarded out of cuDNN-conv3d builds: there the cuDNN path only accepts
+        // (f32,f16,f32) or all-same dtype, so an f16->bf16 cast yields a
+        // (f32,bf16,f32) CONV_3D node that cuDNN rejects and native conv3d aborts on.
+        const char* conv_bf16 = std::getenv("ED_CONV_BF16");
+        if ((!conv_bf16 || conv_bf16[0] != '0') && w->type == GGML_TYPE_F16) {
+            w = ggml_cast(ctx, w, GGML_TYPE_BF16);
+        }
+#endif
+    }
     x          = direct ? ggml_conv_3d_direct(ctx, w, x, s0, s1, s2, p0, p1, p2, d0, d1, d2, (int)IC, (int)N, (int)OC)
                         : ggml_conv_3d(ctx, w, x, IC, s0, s1, s2, p0, p1, p2, d0, d1, d2);
 
@@ -1430,6 +1461,13 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
         d_head    = C / n_head;
         n_kv_head = k->ne[0] / d_head;
 
+        // q/k/v may arrive as non-contiguous views (e.g. MMDiT-x dual-attention
+        // splits the second QKV projection into strided views). ggml_reshape_4d
+        // asserts contiguity, so materialize first when needed.
+        if (!ggml_is_contiguous(q)) { q = ggml_cont(ctx, q); }
+        if (!ggml_is_contiguous(k)) { k = ggml_cont(ctx, k); }
+        if (!ggml_is_contiguous(v)) { v = ggml_cont(ctx, v); }
+
         q = ggml_reshape_4d(ctx, q, d_head, n_head, L_q, N);       // [N, L_q, n_head, d_head]
         q = ggml_ext_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));  // [N, n_head, L_q, d_head]
         q = ggml_reshape_3d(ctx, q, d_head, L_q, n_head * N);      // [N * n_head, L_q, d_head]
@@ -1564,7 +1602,15 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
 
         bool can_use_flash_attn = true;
         const bool prefer_cudnn_unpadded = ggml_ext_prefer_cudnn_sdpa_unpadded(backend, L_q, L_k, d_head, mask);
-        if (pad_kv_for_flash_attn && can_use_flash_attn && !prefer_cudnn_unpadded && L_k % 256 != 0) {
+        // KV-256 padding is a CUDA-flash constraint. On CPU the oneDNN brgemm flash
+        // kernel tiles kvBlk internally and zero-pads its last tile, so it handles
+        // arbitrary L_k with no mask — padding here would instead build a -inf mask
+        // that disqualifies the oneDNN path (mask must be null) and forces the slow
+        // native f32 fallback. This is why Qwen (L_k=1031, not a 256-multiple) ran
+        // attention at ~1844 GFLOP/s while Flux (L_k=1536=6*256, no pad) hit AMX.
+        const bool cpu_skip_pad = mask == nullptr && sd_backend_is(backend, "CPU") &&
+                                  !ggml_ext_env_flag_enabled("ED_CPU_FLASH_NOPAD_OFF");
+        if (pad_kv_for_flash_attn && can_use_flash_attn && !prefer_cudnn_unpadded && !cpu_skip_pad && L_k % 256 != 0) {
             kv_pad = GGML_PAD(L_k, 256) - static_cast<int>(L_k);
         }
 
@@ -2338,6 +2384,32 @@ protected:
     ggml_backend_buffer_t partial_runtime_params_buffer = nullptr;
     std::vector<std::pair<ggml_tensor*, ggml_tensor*>> partial_offload_pairs;
     size_t max_graph_vram_bytes = 0;
+
+    // --- P0-A Phase 2-3: async double-buffered weight prefetch ---
+    // ED_ASYNC_OFFLOAD gates the ladder: 0=off(single-slot, Phase 0),
+    // 1=structural double-slot with conservative sync, 2=copy-stream+event_sync,
+    // 3=true overlap (streamWaitEvent). Default 0.
+    struct AsyncOffloadSlot {
+        ggml_context*         ctx    = nullptr;
+        ggml_backend_buffer_t buffer = nullptr;
+        size_t                buffer_capacity = 0;  // persistent buffer size (reused across segments)
+        std::vector<std::pair<ggml_tensor*, ggml_tensor*>> pairs;  // {orig_param, gpu_dup}
+        void*  copy_done_event = nullptr;  // ed_copy_event_t (opaque cudaEvent*)
+        size_t seg_idx = SIZE_MAX;
+        bool   applied = false;            // swap into live params done
+        bool   active  = false;            // slot currently holds a prefetched segment
+    };
+    AsyncOffloadSlot async_slots_[2];
+    void* async_copy_stream_ = nullptr;    // ed_copy_stream_t (opaque cudaStream*)
+    std::unordered_map<ggml_tensor*, void*> async_cpu_src_;  // orig param -> stable CPU data ptr
+
+    static int async_offload_level() {
+        static const int lvl = [] {
+            const char* e = std::getenv("ED_ASYNC_OFFLOAD");
+            return (e != nullptr && e[0] != '\0') ? std::atoi(e) : 0;
+        }();
+        return lvl;
+    }
 
     std::shared_ptr<WeightAdapter> weight_adapter = nullptr;
 
@@ -5448,11 +5520,15 @@ protected:
             ggml_tensor* tensor         = pair.first;
             ggml_tensor* offload_tensor = pair.second;
 
-            ggml_backend_tensor_copy(tensor, offload_tensor);
+            // Async H2D from pinned params (Phase 0: still synced below before use).
+            ggml_backend_tensor_set_async(runtime_backend, offload_tensor, tensor->data, 0, ggml_nbytes(tensor));
             std::swap(tensor->buffer, offload_tensor->buffer);
             std::swap(tensor->data, offload_tensor->data);
             std::swap(tensor->extra, offload_tensor->extra);
         }
+        // Phase 0 conservative barrier: guarantee all async copies land before
+        // compute reads the weights. Removed once double-buffering overlaps copy/compute.
+        ggml_backend_synchronize(runtime_backend);
 
         size_t params_buffer_size = ggml_backend_buffer_get_size(partial_runtime_params_buffer);
         LOG_DEBUG("%s offload partial params (%6.2f MB, %zu tensors) to runtime backend (%s)",
@@ -5490,6 +5566,179 @@ protected:
         }
         params_on_runtime_backend = false;
     }
+
+#if defined(ED_ENABLE_ASYNC_OFFLOAD)
+    static bool async_offload_debug() {
+        static const bool dbg = [] {
+            const char* e = std::getenv("ED_ASYNC_OFFLOAD_DEBUG");
+            return e != nullptr && e[0] == '1';
+        }();
+        return dbg;
+    }
+
+    // Prefetch one segment's weights into `slot`: dup tensors, alloc GPU buffer,
+    // async H2D from the STABLE cpu source (async_cpu_src_), record completion event.
+    // No swap here — swap happens in async_apply_slot after the event is waited.
+    bool async_prefetch_slot(AsyncOffloadSlot& slot,
+                             const std::vector<ggml_tensor*>& tensors,
+                             size_t seg_idx) {
+        const int lvl = async_offload_level();
+        // dedup within this segment
+        std::vector<ggml_tensor*> uniq;
+        std::unordered_set<ggml_tensor*> seen;
+        for (ggml_tensor* t : tensors) {
+            if (t != nullptr && seen.insert(t).second) uniq.push_back(t);
+        }
+        if (uniq.empty()) {
+            slot.seg_idx = seg_idx;
+            slot.active  = true;
+            slot.applied = false;
+            return true;
+        }
+
+        ggml_init_params ip;
+        ip.mem_size   = std::max<size_t>(1, uniq.size()) * ggml_tensor_overhead();
+        ip.mem_buffer = nullptr;
+        ip.no_alloc   = true;
+        const int64_t t_pf0 = async_offload_debug() ? ggml_time_us() : 0;
+        slot.ctx = ggml_init(ip);
+        GGML_ASSERT(slot.ctx != nullptr);
+        slot.pairs.clear();
+        slot.pairs.reserve(uniq.size());
+        for (ggml_tensor* t : uniq) {
+            GGML_ASSERT(t->view_src == nullptr);
+            ggml_tensor* dup = ggml_dup_tensor(slot.ctx, t);
+            ggml_set_name(dup, t->name);
+            slot.pairs.push_back({t, dup});
+        }
+        const int64_t t_pf_dup = async_offload_debug() ? ggml_time_us() : 0;
+        // Reuse a persistent per-slot GPU buffer. Allocating a fresh buffer every
+        // segment triggers a synchronizing cudaMalloc that stalls the compute stream
+        // (profiled: compute 277ms -> 8674ms). Compute needed size exactly as
+        // ggml_tallocr would (per-tensor alloc_size padded to buffer alignment).
+        ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(runtime_backend);
+        const size_t talign = ggml_backend_buft_get_alignment(buft);
+        size_t need = 0;
+        for (auto& pr : slot.pairs) {
+            need += GGML_PAD(ggml_backend_buft_get_alloc_size(buft, pr.second), talign);
+        }
+        need += talign;  // headroom for the initial aligned_offset in ggml_tallocr
+        if (slot.buffer == nullptr || slot.buffer_capacity < need) {
+            if (slot.buffer != nullptr) ggml_backend_buffer_free(slot.buffer);
+            slot.buffer = ggml_backend_buft_alloc_buffer(buft, need);
+            slot.buffer_capacity = (slot.buffer != nullptr) ? need : 0;
+        }
+        const int64_t t_pf_alloc = async_offload_debug() ? ggml_time_us() : 0;
+        if (slot.buffer == nullptr) {
+            LOG_ERROR("%s async_prefetch_slot: alloc buffer failed (seg=%zu, %zu tensors, need=%.1fMB)",
+                      get_desc().c_str(), seg_idx, uniq.size(), need / (1024.0 * 1024.0));
+            ggml_free(slot.ctx);
+            slot.ctx = nullptr;
+            slot.pairs.clear();
+            return false;
+        }
+        ggml_backend_buffer_set_usage(slot.buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+        // Bind each dup into the persistent buffer (tallocr resets offset to 0 each call).
+        {
+            struct ggml_tallocr talloc = ggml_tallocr_new(slot.buffer);
+            for (auto& pr : slot.pairs) {
+                const enum ggml_status st = ggml_tallocr_alloc(&talloc, pr.second);
+                GGML_ASSERT(st == GGML_STATUS_SUCCESS);
+            }
+        }
+
+        size_t bytes = 0;
+        for (auto& pr : slot.pairs) {
+            ggml_tensor* orig = pr.first;
+            ggml_tensor* dup  = pr.second;
+            // STABLE cpu source: never read orig->data (may already be swapped to GPU
+            // by an adjacent slot); use the precomputed map.
+            void* cpu_src = async_cpu_src_.count(orig) ? async_cpu_src_[orig] : orig->data;
+            const size_t n = ggml_nbytes(orig);
+            if (lvl >= 2 && async_copy_stream_ != nullptr) {
+                ed_async_offload_h2d(dup->data, cpu_src, n, async_copy_stream_);  // copy stream
+            } else {
+                // Ladder 1: use ggml async on the compute stream (no independent stream yet)
+                ggml_backend_tensor_set_async(runtime_backend, dup, cpu_src, 0, n);
+            }
+            bytes += n;
+        }
+        if (lvl >= 2 && async_copy_stream_ != nullptr) {
+            if (slot.copy_done_event == nullptr) slot.copy_done_event = ed_async_offload_event_create();
+            ed_async_offload_event_record(slot.copy_done_event, async_copy_stream_);
+        }
+        slot.seg_idx = seg_idx;
+        slot.active  = true;
+        slot.applied = false;
+        if (async_offload_debug()) {
+            const int64_t t_pf_copy = ggml_time_us();
+            LOG_INFO("%s [async] prefetch seg=%zu tensors=%zu bytes=%.1fMB lvl=%d | dup=%.0fus alloc=%.0fus copy_issue=%.0fus",
+                     get_desc().c_str(), seg_idx, slot.pairs.size(), bytes / (1024.0 * 1024.0), lvl,
+                     (double)(t_pf_dup - t_pf0), (double)(t_pf_alloc - t_pf_dup), (double)(t_pf_copy - t_pf_alloc));
+        }
+        return true;
+    }
+
+    // Ensure the slot's H2D is complete, then swap the GPU dups into the live params.
+    void async_apply_slot(AsyncOffloadSlot& slot) {
+        if (!slot.active || slot.applied) return;
+        const int lvl = async_offload_level();
+        const int64_t t_ap0 = async_offload_debug() ? ggml_time_us() : 0;
+        if (lvl >= 3 && slot.copy_done_event != nullptr) {
+            ed_async_offload_compute_wait(runtime_backend, slot.copy_done_event);  // true overlap
+        } else if (lvl == 2 && slot.copy_done_event != nullptr) {
+            ed_async_offload_event_synchronize(slot.copy_done_event);
+        } else {
+            // Ladder 1: conservative full barrier (proves swap/dedup/lifecycle bookkeeping)
+            ggml_backend_synchronize(runtime_backend);
+        }
+        const int64_t t_ap_wait = async_offload_debug() ? ggml_time_us() : 0;
+        for (auto& pr : slot.pairs) {
+            ggml_tensor* orig = pr.first;
+            ggml_tensor* dup  = pr.second;
+            std::swap(orig->buffer, dup->buffer);
+            std::swap(orig->data, dup->data);
+            std::swap(orig->extra, dup->extra);
+        }
+        slot.applied = true;
+        if (async_offload_debug()) {
+            LOG_INFO("%s [async] apply  seg=%zu wait=%.0fus swap=%.0fus",
+                     get_desc().c_str(), slot.seg_idx,
+                     (double)(t_ap_wait - t_ap0), (double)(ggml_time_us() - t_ap_wait));
+        }
+    }
+
+    // Swap CPU pointers back. Keeps the slot's GPU buffer alive for reuse (freeing
+    // it per-segment triggers a synchronizing cudaFree that serializes the pipeline);
+    // buffers are released once at loop end via async_free_slot_buffers().
+    void async_restore_slot(AsyncOffloadSlot& slot) {
+        if (!slot.active) return;
+        if (slot.applied) {
+            for (auto& pr : slot.pairs) {
+                ggml_tensor* orig = pr.first;
+                ggml_tensor* dup  = pr.second;
+                orig->buffer = dup->buffer;
+                orig->data   = dup->data;
+                orig->extra  = dup->extra;
+                dup->buffer = nullptr;
+                dup->data   = nullptr;
+                dup->extra  = nullptr;
+            }
+        }
+        // Do NOT free slot.buffer here — persistent for reuse; freed at loop end.
+        if (slot.ctx != nullptr) {
+            ggml_free(slot.ctx);
+            slot.ctx = nullptr;
+        }
+        if (async_offload_debug()) {
+            LOG_INFO("%s [async] restore seg=%zu (buffer kept)", get_desc().c_str(), slot.seg_idx);
+        }
+        slot.pairs.clear();
+        slot.applied = false;
+        slot.active  = false;
+        slot.seg_idx = SIZE_MAX;
+    }
+#endif  // ED_ENABLE_ASYNC_OFFLOAD
 
     void restore_partial_params() {
         if (partial_offload_pairs.empty()) {
@@ -5549,10 +5798,26 @@ protected:
             return true;
         }
 
-        return max_graph_vram_bytes > 0 &&
-               plan.segments.size() > 1 &&
-               params_backend != runtime_backend &&
-               !ggml_backend_is_cpu(runtime_backend);
+        const bool offload_active = max_graph_vram_bytes > 0 &&
+                                    params_backend != runtime_backend &&
+                                    !ggml_backend_is_cpu(runtime_backend);
+        if (!offload_active) {
+            return false;
+        }
+        if (plan.segments.size() > 1) {
+            return true;
+        }
+        // Single segment: the whole-graph fallback path (execute_graph with an empty
+        // runtime_param list) calls offload_all_params(), which stages EVERY weight in
+        // params_ctx to the GPU at once. When that full set exceeds the budget, staging
+        // it whole spikes VRAM past the cap (e.g. qwen-image-edit's vision encode stages
+        // all 7979MB though the segment only references ~800MB). Route the single segment
+        // through the segmented path too so it partial-offloads just the weights it uses.
+        // If the full set already fits the budget, whole-graph offload is cheaper (no
+        // per-segment overhead), so keep the fallback.
+        const size_t full_param_bytes =
+            params_buffer != nullptr ? ggml_backend_buffer_get_size(params_buffer) : 0;
+        return full_param_bytes > max_graph_vram_bytes;
     }
 
     bool can_attempt_graph_cut_segmented_compute() const {
@@ -5668,14 +5933,20 @@ protected:
                                             const std::unordered_set<std::string>* cache_keep_names = nullptr,
                                             post_compute_cb_t post_compute_cb                      = nullptr,
                                             pre_compute_cb_t pre_compute_cb                        = nullptr,
-                                            GraphExecuteProfile* profile_out                       = nullptr) {
+                                            GraphExecuteProfile* profile_out                       = nullptr,
+                                            bool params_already_resident                           = false) {
         if (profile_out != nullptr) {
             *profile_out = GraphExecuteProfile{};
         }
         int64_t t_execute_begin              = ggml_time_ms();
-        const bool use_partial_param_offload = !runtime_param_tensors.empty();
+        // params_already_resident: the segment loop (double-buffer prefetch) has
+        // already swapped this segment's weights onto the GPU, so skip the internal
+        // offload/restore entirely. Default false keeps every other caller identical.
+        const bool use_partial_param_offload = !runtime_param_tensors.empty() && !params_already_resident;
         int64_t t_offload_begin              = ggml_time_ms();
-        if (use_partial_param_offload) {
+        if (params_already_resident) {
+            // weights pre-swapped by caller; nothing to offload here
+        } else if (use_partial_param_offload) {
             if (!offload_partial_params(runtime_param_tensors)) {
                 LOG_ERROR("%s offload partial params to runtime backend failed", get_desc().c_str());
                 return std::nullopt;
@@ -5859,6 +6130,41 @@ protected:
         reset_graph_cut_run_cache();
 
         std::optional<sd::Tensor<T>> output = sd::Tensor<T>();
+
+#if defined(ED_ENABLE_ASYNC_OFFLOAD)
+        // P0-A Phase 2-3: async double-buffered weight prefetch across segments.
+        // Only engages when offloading (params on CPU) and ED_ASYNC_OFFLOAD >= 1.
+        const int async_lvl = async_offload_level();
+        const bool async_prefetch_on =
+            async_lvl >= 1 && params_backend != runtime_backend && plan.segments.size() > 1;
+        std::vector<std::vector<ggml_tensor*>> async_seg_params;
+        if (async_prefetch_on) {
+            // Precompute every segment's param list + a STABLE cpu-source map
+            // (a tensor's own ->data is clobbered by swap, so snapshot it now).
+            async_seg_params.resize(plan.segments.size());
+            async_cpu_src_.clear();
+            for (size_t i = 0; i < plan.segments.size(); ++i) {
+                async_seg_params[i] =
+                    sd::ggml_graph_cut::runtime_param_tensors(gf, plan.segments[i], get_desc().c_str());
+                for (ggml_tensor* t : async_seg_params[i]) {
+                    if (t != nullptr) async_cpu_src_.emplace(t, t->data);
+                }
+            }
+            if (async_lvl >= 2 && async_copy_stream_ == nullptr) {
+                ggml_backend_dev_t dev = ggml_backend_get_device(runtime_backend);
+                int devidx = 0;  // single-GPU path; multi-GPU would map dev->index
+                (void)dev;
+                async_copy_stream_ = ed_async_offload_stream_create(devidx);
+            }
+            if (async_offload_debug()) {
+                LOG_INFO("%s [async] prefetch ENABLED lvl=%d segments=%zu copy_stream=%p",
+                         get_desc().c_str(), async_lvl, plan.segments.size(), async_copy_stream_);
+            }
+            // Prefetch segment 0 before the loop.
+            async_prefetch_slot(async_slots_[0], async_seg_params[0], 0);
+        }
+#endif
+
         for (size_t seg_idx = 0; seg_idx < plan.segments.size(); ++seg_idx) {
             int64_t t_segment_begin = ggml_time_ms();
             const auto& segment     = plan.segments[seg_idx];
@@ -6019,6 +6325,20 @@ protected:
                 segment_profile.runtime_param_ms = t_runtime_param_end - t_runtime_param_begin;
             }
             GraphExecuteProfile execute_profile;
+#if defined(ED_ENABLE_ASYNC_OFFLOAD)
+            bool async_this_segment = false;
+            if (async_prefetch_on) {
+                AsyncOffloadSlot& cur = async_slots_[seg_idx & 1];
+                // (a) ensure this segment's weights are resident (wait event + swap)
+                async_apply_slot(cur);
+                // (b) launch next segment's prefetch NOW (overlaps this segment's compute)
+                if (seg_idx + 1 < plan.segments.size()) {
+                    async_prefetch_slot(async_slots_[(seg_idx + 1) & 1],
+                                        async_seg_params[seg_idx + 1], seg_idx + 1);
+                }
+                async_this_segment = true;
+            }
+#endif
             auto segment_output             = execute_graph<T>(segment_graph,
                                        n_threads,
                                        false,
@@ -6028,7 +6348,19 @@ protected:
                                        &future_cut_names,
                                        segment_post_compute_cb,
                                        segment_pre_compute_cb,
-                                       collect_profile ? &execute_profile : nullptr);
+                                       collect_profile ? &execute_profile : nullptr,
+#if defined(ED_ENABLE_ASYNC_OFFLOAD)
+                                       /*params_already_resident=*/async_this_segment);
+#else
+                                       /*params_already_resident=*/false);
+#endif
+#if defined(ED_ENABLE_ASYNC_OFFLOAD)
+            if (async_prefetch_on && seg_idx >= 1) {
+                // (d) deferred restore of the previous segment's slot (compute of this
+                // segment is already enqueued; safe to swap-back + free seg_idx-1)
+                async_restore_slot(async_slots_[(seg_idx - 1) & 1]);
+            }
+#endif
             const int64_t t_segment_graph_free_begin = collect_profile ? ggml_time_us() : 0;
             ggml_free(segment_graph_ctx);
             const int64_t t_segment_graph_free_end = collect_profile ? ggml_time_us() : 0;
@@ -6058,6 +6390,25 @@ protected:
                 segment_profiles.push_back(std::move(segment_profile));
             }
         }
+
+#if defined(ED_ENABLE_ASYNC_OFFLOAD)
+        if (async_prefetch_on) {
+            // Restore the last segment's slot (its compute is done) + drain both slots.
+            const size_t last = plan.segments.size() - 1;
+            async_restore_slot(async_slots_[last & 1]);
+            async_restore_slot(async_slots_[(last + 1) & 1]);  // no-op if inactive
+            // Free the persistent per-slot buffers + events now that the run is done.
+            for (auto& s : async_slots_) {
+                if (s.buffer != nullptr) { ggml_backend_buffer_free(s.buffer); s.buffer = nullptr; }
+                s.buffer_capacity = 0;
+                if (s.copy_done_event != nullptr) { ed_async_offload_event_destroy(s.copy_done_event); s.copy_done_event = nullptr; }
+            }
+            async_cpu_src_.clear();
+            if (async_offload_debug()) {
+                LOG_INFO("%s [async] prefetch loop done, slots drained", get_desc().c_str());
+            }
+        }
+#endif
 
         if (collect_profile) {
             log_graph_cut_profile(segment_profiles, plan_ms, plan_ms + ggml_time_ms() - t_profile_begin);
@@ -6208,7 +6559,25 @@ public:
 
     bool alloc_params_buffer() {
         size_t num_tensors = ggml_tensor_num(params_ctx);
-        params_buffer      = ggml_backend_alloc_ctx_tensors(params_ctx, params_backend);
+        // When params live on CPU for offload (params_backend != runtime_backend),
+        // allocate them from the runtime device's pinned host buffer type so the
+        // per-segment H2D copy can go async (cudaMemcpyAsync from pageable memory
+        // silently serializes). Falls back to the normal CPU buffer otherwise.
+        ggml_backend_buffer_type_t pinned_buft = nullptr;
+        if (params_backend != runtime_backend && runtime_backend != nullptr) {
+            ggml_backend_dev_t dev = ggml_backend_get_device(runtime_backend);
+            if (dev != nullptr) {
+                pinned_buft = ggml_backend_dev_host_buffer_type(dev);
+            }
+        }
+        params_buffer = pinned_buft != nullptr
+                            ? ggml_backend_alloc_ctx_tensors_from_buft(params_ctx, pinned_buft)
+                            : ggml_backend_alloc_ctx_tensors(params_ctx, params_backend);
+        if (params_buffer == nullptr && pinned_buft != nullptr) {
+            // pinned allocation failed (e.g. too large to lock) -> fall back to pageable
+            LOG_WARN("%s pinned params buffer alloc failed, falling back to pageable", get_desc().c_str());
+            params_buffer = ggml_backend_alloc_ctx_tensors(params_ctx, params_backend);
+        }
         if (params_buffer == nullptr) {
             LOG_ERROR("%s alloc params backend buffer failed, num_tensors = %i",
                       get_desc().c_str(),
@@ -6469,7 +6838,8 @@ public:
                      static_cast<long long>(t_alloc_end - t_alloc_begin));
         }
         GraphExecuteProfile runner_profile;
-        return execute_graph<T>(gf,
+        const int64_t t_rprof_begin = rprof ? ggml_time_ms() : 0;
+        auto rprof_result = execute_graph<T>(gf,
                                 n_threads,
                                 free_compute_buffer_immediately,
                                 {},
@@ -6478,7 +6848,24 @@ public:
                                 nullptr,
                                 nullptr,
                                 nullptr,
-                                runner_profile_enabled() ? &runner_profile : nullptr);
+                                rprof ? &runner_profile : nullptr);
+        if (rprof) {
+            const int64_t t_rprof_end = ggml_time_ms();
+            const int64_t wall = t_rprof_end - t_rprof_begin;
+            const int64_t known = runner_profile.offload_ms + runner_profile.alloc_ms +
+                                  runner_profile.copy_ms + runner_profile.compute_ms +
+                                  runner_profile.post_ms;
+            LOG_INFO("%s runner profile: wall=%lldms offload=%lldms alloc=%lldms copy=%lldms compute=%lldms post=%lldms other=%lldms",
+                     get_desc().c_str(),
+                     (long long) wall,
+                     (long long) runner_profile.offload_ms,
+                     (long long) runner_profile.alloc_ms,
+                     (long long) runner_profile.copy_ms,
+                     (long long) runner_profile.compute_ms,
+                     (long long) runner_profile.post_ms,
+                     (long long) (wall - known));
+        }
+        return rprof_result;
     }
 
     // Experimental build-once / reuse-across-steps path (ED_CACHE_COMPILED_GRAPHS).

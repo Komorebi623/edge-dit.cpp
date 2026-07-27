@@ -3308,6 +3308,16 @@ namespace WAN {
             auto runner_ctx = get_context();
             runner_ctx.conv2d_auto_direct_enabled = decode_graph && should_use_cuda_auto_conv2d();
             runner_ctx.conv3d_auto_direct_enabled = decode_graph && should_use_cuda_auto_conv3d();
+#if !defined(ED_ENABLE_CUDNN_CONV2D) && !defined(ED_ENABLE_CUDNN_CONV3D)
+            // CPU backend (no cuDNN): Wan/Qwen VAE is dominated by 3x3x3 CausalConv3d over large
+            // feature maps; im2col+GEMM materializes a huge buffer and is bandwidth bound. Enable
+            // ggml's direct conv (conv2d for resample/attn 1x1, conv3d for the main trunk). Applies
+            // to both encode (img2img/edit input encoding, ~13s otherwise) and decode. The conv3d
+            // use_direct gate (ggml_extend.hpp) guards on kernel 3x3x3 / in_channels>=64 /
+            // spatial>=128 / w f16, so early small convs fall back automatically.
+            runner_ctx.conv2d_direct_enabled      = true;
+            runner_ctx.conv3d_auto_direct_enabled = true;
+#endif
 
             ggml_tensor* out = decode_graph ? ae.decode(&runner_ctx, z) : ae.encode(&runner_ctx, z);
 

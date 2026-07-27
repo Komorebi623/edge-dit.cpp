@@ -13,6 +13,8 @@
 #include "utils/rng.hpp"
 
 
+class ModelLoader;
+
 namespace edgedit {
 
 using ed_ctx_params_t = ed_context_params_t;
@@ -123,9 +125,31 @@ public:
     int n_threads() const { return n_threads_; }
     bool use_mmap() const { return use_mmap_; }
     bool offload_params_to_cpu() const { return offload_params_to_cpu_; }
+    // Text encoder should offload (weights on CPU, staged to GPU per encode) when
+    // either the global offload flag or the TE-specific flag is set.
+    bool clip_offload_params_to_cpu() const { return offload_params_to_cpu_ || text_encoder_offload_; }
+    bool auto_allocate() const { return auto_allocate_; }
     bool free_params_immediately() const { return free_params_immediately_; }
     float max_vram() const { return max_vram_; }
     size_t max_graph_vram_bytes() const { return max_graph_vram_bytes_; }
+    void set_max_graph_vram_bytes(size_t bytes) { max_graph_vram_bytes_ = bytes; }
+    // Auto-allocate per-component placement (only active under --auto-allocate). Given a
+    // component's weight prefix, decide resident-on-GPU vs offload-to-CPU by comparing its
+    // quantized weight size against the running budget tally (remaining_free_bytes, seeded
+    // with min(--max-vram, live free)). Resident debits the tally and accumulates into an
+    // internal resident total. Returns true if the component must offload. Outside
+    // auto-allocate mode, returns the legacy global offload flag (no behavior change).
+    bool plan_component_offload(const ::ModelLoader& loader,
+                                const std::string& weight_prefix,
+                                size_t& remaining_free_bytes);
+    // Call once after all components are decided: sets the graph VRAM budget for offloaded
+    // components to (effective_budget - resident_total - compute headroom). No-op outside
+    // auto-allocate. Resets the internal resident accumulator for the next model load.
+    void finalize_auto_segment_budget(size_t effective_budget_bytes);
+    void reset_auto_allocate_state() { resident_bytes_total_ = 0; }
+    // Hard-cap budget = min(user --max-vram, live free VRAM). If no --max-vram, = live free.
+    // Used to seed the auto-allocate tally and finalize_auto_segment_budget. 0 if CPU backend.
+    size_t effective_budget_bytes() const;
     bool flash_attention() const { return flash_attention_; }
     bool circular_x() const { return circular_x_; }
     bool circular_y() const { return circular_y_; }
@@ -168,6 +192,9 @@ private:
     int n_threads_ = 0;
     bool use_mmap_ = false;
     bool offload_params_to_cpu_ = false;
+    bool text_encoder_offload_ = false;
+    bool auto_allocate_ = false;
+    size_t resident_bytes_total_ = 0;  // auto-allocate: bytes decided resident this load
     bool free_params_immediately_ = false;
 
     float max_vram_ = 0.0f;
@@ -188,6 +215,7 @@ private:
     bool init_threads(const ed_context_params_t& params, std::string* error);
     bool init_flags(const ed_context_params_t& params, std::string* error);
     bool init_backends(const ed_context_params_t& params, std::string* error);
+    void maybe_enable_vae_tiling_for_low_vram();
     bool init_rng(const ed_context_params_t& params, std::string* error);
 
     void release_backends();

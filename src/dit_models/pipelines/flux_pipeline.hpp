@@ -94,11 +94,16 @@ private:
                                       ggml_backend_t diffusion_backend,
                                       ggml_backend_t text_backend,
                                       ggml_backend_t vae_backend,
-                                      bool offload_params_to_cpu,
+                                      bool diffusion_offload,
+                                      bool te_offload,
+                                      bool vae_offload,
                                       PipelineTensorRegistry& registry,
                                       std::string* error);
 
     bool can_generate_image() const;
+    // Resolve sampling steps: honor an explicit positive value, otherwise pick a
+    // default by model variant (FLUX schnell is 4-step guidance-distilled, dev is 20).
+    int resolve_steps(int requested_steps) const;
     bool generate_one_image(const ed_image_generation_params_t* params,
                             int batch_index,
                             int n_threads,

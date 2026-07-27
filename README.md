@@ -135,6 +135,24 @@ The v0.x API, ABI, CLI flags, and HTTP schemas are public but not yet stable.
 
 Clone the repository with submodules:
 
+首次克隆后先拉取子模块（ggml + oneDNN）：
+
+```bash
+git submodule update --init --recursive
+```
+
+CPU 后端用 oneDNN 提供 bf16 AMX 矩阵乘加速（源码在 `third_party/onednn`，固定 v3.7）。
+先编 oneDNN（一次即可，产物装到 `third_party/onednn/install`），再编 edge-dit：
+
+```bash
+bash ./scripts/build_onednn.sh   # 编 oneDNN（Release/THREADPOOL/UKERNEL），几分钟
+bash ./scripts/build_cpu.sh      # 自动探测上面的 install 并启用 GGML_ONEDNN
+```
+
+`build_cpu.sh` 会自动从 `third_party/onednn/install` 找到 dnnl；用 `ED_ONEDNN=0 bash ./scripts/build_cpu.sh`
+可关闭 oneDNN（退回 stock ggml，慢但无外部依赖）。运行时若报找不到 `libdnnl.so`，加：
+`LD_LIBRARY_PATH=third_party/onednn/install/lib64`。
+
 ```bash
 git clone --recursive https://github.com/THU-MIG/edge-dit.cpp
 cd edge-dit.cpp

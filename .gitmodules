@@ -2,3 +2,6 @@
 	path = third_party/ggml
 	url = https://github.com/yiming-l21/ggml.git
 	branch = edge-cudnn-sdpa
+[submodule "third_party/onednn"]
+	path = third_party/onednn
+	url = https://github.com/uxlfoundation/oneDNN.git

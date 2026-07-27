@@ -70,7 +70,7 @@ SD3Pipeline::SD3Pipeline(SDVersion version)
     : version_(version) {
 }
 
-bool SD3Pipeline::prepare(const ed_context_params_t&,
+bool SD3Pipeline::prepare(const ed_context_params_t& params,
                           ModelRuntime& runtime,
                           const ModelLoader& loader,
                           PipelineTensorRegistry& registry,
@@ -79,6 +79,8 @@ bool SD3Pipeline::prepare(const ed_context_params_t&,
     runtime_ = &runtime;
     version_ = loader.version();
     registry.clear();
+    distilled_default_steps_ = detect_distilled_default_steps(loader.file_paths(),
+                                                              params.diffusion_model_path);
 
     if (version_ != VERSION_SD3) {
         if (error != nullptr) {
@@ -97,6 +99,15 @@ bool SD3Pipeline::prepare(const ed_context_params_t&,
     return true;
 }
 
+int SD3Pipeline::resolve_steps(int requested_steps) const {
+    if (requested_steps > 0) {
+        return requested_steps;
+    }
+    // Auto (--steps not set): few-step distilled checkpoints (SD3.5-turbo etc.)
+    // default to their distilled step count; the base model defaults to 20.
+    return distilled_default_steps_ > 0 ? distilled_default_steps_ : 20;
+}
+
 bool SD3Pipeline::build_components(const ModelLoader& loader, std::string* error) {
     if (runtime_ == nullptr || runtime_->backend() == nullptr ||
         runtime_->clip_backend() == nullptr || runtime_->vae_backend() == nullptr) {
@@ -107,11 +118,21 @@ bool SD3Pipeline::build_components(const ModelLoader& loader, std::string* error
     }
 
     const auto& storage = loader.get_tensor_storage_map();
-    const bool offload = runtime_->offload_params_to_cpu();
-    conditioner_ = std::make_shared<SD3CLIPEmbedder>(runtime_->clip_backend(), offload, storage);
-    diffusion_ = std::make_shared<MMDiTModel>(runtime_->backend(), offload, storage);
+
+    // Auto-allocate: seed tally with hard-cap budget min(--max-vram, free); finalize after.
+    runtime_->reset_auto_allocate_state();
+    const size_t eff_budget = runtime_->effective_budget_bytes();
+    size_t remaining_free = eff_budget;
+    const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
+    const bool te_offload = runtime_->clip_offload_params_to_cpu() ||
+                            runtime_->plan_component_offload(loader, "text_encoders", remaining_free);
+    const bool vae_offload = runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
+    runtime_->finalize_auto_segment_budget(eff_budget);
+
+    conditioner_ = std::make_shared<SD3CLIPEmbedder>(runtime_->clip_backend(), te_offload, storage);
+    diffusion_ = std::make_shared<MMDiTModel>(runtime_->backend(), diffusion_offload, storage);
     vae_ = std::make_shared<AutoEncoderKL>(runtime_->vae_backend(),
-                                           offload,
+                                           vae_offload,
                                            storage,
                                            "first_stage_model",
                                            true,
@@ -213,7 +234,7 @@ ed_status_t SD3Pipeline::generate_image(const ed_image_generation_params_t* para
     }
 
     const int count = params->batch_count > 0 ? params->batch_count : 1;
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    const int steps = resolve_steps(params->sample.steps);
     if (GenerationControl* control = runtime_->generation_control()) {
         control->start(count * steps);
     }
@@ -337,7 +358,10 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
     cond_params.height = params->height;
     cond_params.adm_in_channels = static_cast<int>(diffusion_->get_adm_in_channels());
     emit_phase_marker("encode", "begin");
+    const int64_t ed_gen_t0 = ggml_time_ms();
+    const int64_t ed_enc_t0 = ed_gen_t0;
     SDCondition cond = conditioner_->get_learned_condition(runtime_->n_threads(), cond_params);
+    const int64_t ed_enc_ms = ggml_time_ms() - ed_enc_t0;
     if (cond.empty()) {
         if (error != nullptr) {
             *error = "SD3 prompt encoding returned empty condition";
@@ -359,7 +383,7 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
 
     const int latent_w = params->width / vae_scale_factor;
     const int latent_h = params->height / vae_scale_factor;
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    const int steps = resolve_steps(params->sample.steps);
     const ed_sampler_t sampler = params->sample.sampler == ED_SAMPLER_AUTO
                                      ? default_sample_method()
                                      : params->sample.sampler;
@@ -668,12 +692,14 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
 
     emit_phase_marker("decode", "begin");
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
+    const int64_t ed_dec_t0 = ggml_time_ms();
     sd::Tensor<float> decoded = vae_->decode(runtime_->n_threads(),
                                              vae_latents,
                                              runtime_->vae_tiling(),
                                              false,
                                              runtime_->circular_x(),
                                              runtime_->circular_y());
+    const int64_t ed_dec_ms = ggml_time_ms() - ed_dec_t0;
     emit_phase_marker("decode", "end");
     if (decoded.empty()) {
         if (error != nullptr) {
@@ -689,6 +715,11 @@ bool SD3Pipeline::generate_one_image(const ed_image_generation_params_t* params,
         }
         return false;
     }
+    const int64_t ed_total_ms = ggml_time_ms() - ed_gen_t0;
+    const int64_t ed_sample_ms = sample_end_ms - sample_start_ms;
+    LOG_INFO("sd3 generate breakdown: total=%.2fs | text_encode=%.2fs sampling=%.2fs vae_decode=%.2fs other=%.2fs",
+             ed_total_ms/1000.0f, ed_enc_ms/1000.0f, ed_sample_ms/1000.0f, ed_dec_ms/1000.0f,
+             (ed_total_ms - ed_enc_ms - ed_sample_ms - ed_dec_ms)/1000.0f);
     return true;
 }
 

@@ -95,11 +95,6 @@ inline float rope_pe_at(const ggml_tensor* pe, int64_t seq, int64_t pair, int64_
 }
 
 inline void rope_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdata) {
-    if (ith != 0) {
-        return;
-    }
-    GGML_UNUSED(nth);
-
     const RopeCustomParams params = rope_params_from_userdata(userdata);
     GGML_ASSERT(rope_params_valid(params));
     GGML_ASSERT(dst->src[0] != nullptr && dst->src[1] != nullptr);
@@ -126,8 +121,15 @@ inline void rope_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdat
         heads_total = x->ne[2];
     }
 
-    for (int64_t h = 0; h < heads_total; ++h) {
-        for (int64_t s = 0; s < seq; ++s) {
+    // Parallelize over the flattened (head, seq) index space: each (h,s,p) writes
+    // an independent dst location, so a static ith/nth split is race-free. Flattening
+    // h*seq (vs h alone) gives heads_total*seq tasks — enough to fill many cores even
+    // when heads_total is small (Flux has only 24 heads; seq ~1536 → ~37k tasks).
+    const int64_t work_total = heads_total * seq;
+    for (int64_t idx = ith; idx < work_total; idx += nth) {
+        const int64_t h = idx / seq;
+        const int64_t s = idx % seq;
+        {
             for (int64_t p = 0; p < half; ++p) {
                 float x0 = 0.0f;
                 float x1 = 0.0f;

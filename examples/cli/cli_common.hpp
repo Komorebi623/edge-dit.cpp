@@ -480,7 +480,7 @@ struct FluxCliArgs {
     int height = 1024;
     int frames = 1;
     int fps = 16;
-    int steps = 20;
+    int steps = -1;  // -1 = auto: distilled models (e.g. FLUX schnell) default to few steps, others to 20
     int threads = 0;
 
     int64_t seed = -1;
@@ -513,6 +513,8 @@ struct FluxCliArgs {
     float vae_tile_size = 0.0f;
     bool offload_to_cpu = false;
     bool keep_text_encoder_on_cpu = false;
+    bool text_encoder_offload = false;
+    bool auto_allocate = false;
     bool keep_vae_on_cpu = false;
     float max_vram = 0.0f;
 
@@ -750,6 +752,10 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->offload_to_cpu = true;
         } else if (std::strcmp(key, "--keep-text-encoder-on-cpu") == 0) {
             args->keep_text_encoder_on_cpu = true;
+        } else if (std::strcmp(key, "--text-encoder-offload") == 0) {
+            args->text_encoder_offload = true;
+        } else if (std::strcmp(key, "--auto-allocate") == 0) {
+            args->auto_allocate = true;
         } else if (std::strcmp(key, "--keep-vae-on-cpu") == 0) {
             args->keep_vae_on_cpu = true;
         } else if (std::strcmp(key, "--max-vram") == 0) {
@@ -841,8 +847,8 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         return false;
     }
 
-    if (args->steps <= 0) {
-        std::fprintf(stderr, "steps must be positive\n");
+    if (args->steps == 0 || args->steps < -1) {
+        std::fprintf(stderr, "steps must be positive (or -1 for auto)\n");
         return false;
     }
 

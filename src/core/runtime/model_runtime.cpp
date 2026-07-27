@@ -4,10 +4,14 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <set>
 #include <thread>
+#include <utility>
 
 #include "utils/rng_philox.hpp"
 #include "utils/util.h"
+#include "runtime/model_loader.h"
 
 namespace edgedit {
 namespace {
@@ -156,11 +160,70 @@ bool ModelRuntime::init(const ed_context_params_t& params, std::string* error) {
     return true;
 }
 
+namespace {
+// Auto-allocate: VRAM to reserve beyond a resident component's weights, for its own
+// compute buffer + activations + allocator fragmentation. A resident (non-segmented)
+// component's compute buffer is NOT covered by graph_cut_segment_vram_bytes (that only
+// bounds offloaded/segmented components), so a component may only stay resident if its
+// weights PLUS this headroom fit the budget. Measured DiT compute activations at
+// 1024²/20steps/double-forward: sd3 ~3.4G, flux ~1.9G; 4 GiB covers the upper end with
+// margin. Undersized headroom is what let sd3 8g全常驻 peak at 10.3G > 8G budget.
+constexpr size_t kResidentComputeHeadroom = static_cast<size_t>(4) * 1024 * 1024 * 1024;
+// Smallest plausible standalone component (VAE ~0.15-0.5G); used by the all-offload
+// fallback: if the budget can't even fit one small component + compute headroom,
+// offload everything (equivalent to legacy --offload-to-cpu, safest).
+constexpr size_t kMinResidentComponentBytes = static_cast<size_t>(512) * 1024 * 1024;
+// Fragmentation + large-segment compute slack subtracted when sizing the SEGMENT
+// budget for offloaded components. 2 GiB: an offloaded component's segment carries
+// several GB of transient compute/activation on top of its weights that
+// graph_cut_segment_vram_bytes underestimates. Shrinking the segment budget further
+// (tried 3 GiB) does NOT lower qwen-edit 8g's residual 8292 peak: that peak is two
+// text-encode partial segments co-resident during staging, not one oversized segment,
+// so a smaller split just makes more segments at the same summed footprint. 2 GiB is
+// the sweet spot that keeps other models' segments large (fewer staging round-trips).
+constexpr size_t kSegmentBudgetSlack = static_cast<size_t>(2) * 1024 * 1024 * 1024;
+// Physical core count (excludes SMT/hyperthreads). On this dual-socket Xeon,
+// running matmul-heavy graphs on all 192 logical cores is ~2x SLOWER than on the
+// running matmul-heavy graphs on all 192 logical cores is ~2x SLOWER than on the
+// 96 physical cores: hyperthreads contend for shared AVX-512/AMX vector units and
+// extra threads inflate per-node barrier sync. Parse /proc/cpuinfo for distinct
+// (physical id, core id) pairs; fall back to hardware_concurrency() if unavailable.
+static int detect_physical_cores() {
+    std::ifstream f("/proc/cpuinfo");
+    if (!f.is_open()) {
+        return 0;
+    }
+    std::set<std::pair<int, int>> cores;
+    int phys = -1;
+    int core = -1;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind("physical id", 0) == 0) {
+            auto pos = line.find(':');
+            if (pos != std::string::npos) { phys = std::atoi(line.c_str() + pos + 1); }
+        } else if (line.rfind("core id", 0) == 0) {
+            auto pos = line.find(':');
+            if (pos != std::string::npos) { core = std::atoi(line.c_str() + pos + 1); }
+        } else if (line.empty()) {
+            if (phys >= 0 && core >= 0) { cores.insert({phys, core}); }
+            phys = -1;
+            core = -1;
+        }
+    }
+    if (phys >= 0 && core >= 0) { cores.insert({phys, core}); }
+    return static_cast<int>(cores.size());
+}
+}  // namespace
+
 bool ModelRuntime::init_threads(const ed_context_params_t& params, std::string* error) {
     (void)error;
     n_threads_ = params.n_threads;
     if (n_threads_ <= 0) {
-        n_threads_ = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+        int physical = detect_physical_cores();
+        int logical  = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+        n_threads_   = physical > 0 ? physical : logical;
+        LOG_INFO("auto thread count: %d (physical cores=%d, logical=%d)",
+                 n_threads_, physical, logical);
     }
     return true;
 }
@@ -169,6 +232,8 @@ bool ModelRuntime::init_flags(const ed_context_params_t& params, std::string* er
     (void)error;
     use_mmap_ = params.use_mmap;
     offload_params_to_cpu_ = params.offload_params_to_cpu;
+    text_encoder_offload_ = params.text_encoder_offload;
+    auto_allocate_ = params.auto_allocate;
     free_params_immediately_ = false;
     max_vram_ = params.max_vram_gb;
     max_graph_vram_bytes_ = max_vram_ <= 0.0f
@@ -238,12 +303,14 @@ bool ModelRuntime::init_backends(const ed_context_params_t& params, std::string*
         LOG_INFO("ControlNet backend: CPU");
     }
 
+    maybe_enable_vae_tiling_for_low_vram();
+
     // Auto-derive a VRAM budget when the user enabled weight offload but gave no
     // explicit --max-vram. Without a budget, graph-cut segmentation is disabled and
     // offload_all_params() copies every weight back to the GPU at once, which OOMs
     // for large DiTs (e.g. FLUX ~22.7GB on a 24GB card). Segment the compute graph
     // against most of the device's free VRAM instead of failing.
-    if (offload_params_to_cpu_ && max_graph_vram_bytes_ == 0 &&
+    if ((offload_params_to_cpu_ || text_encoder_offload_) && max_graph_vram_bytes_ == 0 &&
         backends_.backend != nullptr && !ggml_backend_is_cpu(backends_.backend)) {
         ggml_backend_dev_t dev = ggml_backend_get_device(backends_.backend);
         if (dev != nullptr) {
@@ -264,6 +331,161 @@ bool ModelRuntime::init_backends(const ed_context_params_t& params, std::string*
     return true;
 }
 
+// Adaptive offload decision (see header). Called by each pipeline's build_components
+// once per major component (DiT / text-encoder / VAE), BEFORE the runner is
+// constructed, because a runner's params_backend (GPU-resident vs CPU-staged) is
+// fixed at construction. Only active under --auto-allocate; otherwise returns the
+// legacy global offload flag so existing behavior is untouched.
+//
+// The budget is a HARD cap: effective = min(user --max-vram, live free VRAM). Each
+// component's quantized weight bytes are compared against a running tally seeded with
+// that budget; a resident component debits the tally. Components are decided in
+// priority order DiT -> TE -> VAE (the caller passes them in that order), so the
+// largest / most-reused weights get first claim on resident VRAM. After all three are
+// decided the caller invokes finalize_auto_segment_budget() to set the graph VRAM
+// budget for whatever ended up offloaded, using the leftover (budget - resident).
+bool ModelRuntime::plan_component_offload(const ::ModelLoader& loader,
+                                          const std::string& weight_prefix,
+                                          size_t& remaining_free_bytes) {
+    // Not in auto-allocate mode: keep legacy behavior (global offload flag).
+    if (!auto_allocate_) {
+        return offload_params_to_cpu_;
+    }
+
+    // If the runtime backend is CPU there is no GPU to fit into; offload is moot and
+    // the resident path is correct (weights already live where compute happens).
+    if (backends_.backend == nullptr || ggml_backend_is_cpu(backends_.backend)) {
+        return offload_params_to_cpu_;
+    }
+
+    // Sum the component's weights using the EFFECTIVE (post-quantization) type:
+    // set_wtype_override records the target type in expected_type, so nbytes() alone
+    // (which uses `type`) would overestimate a q8/q4 component. Mirror the effective
+    // -type logic used by collect_wtype_stat (model_loader.cpp).
+    size_t comp_bytes = 0;
+    for (const auto& item : loader.get_tensor_storage_map()) {
+        if (item.first.rfind(weight_prefix, 0) != 0) {
+            continue;  // not in this component
+        }
+        TensorStorage ts = item.second;
+        if (ts.expected_type != GGML_TYPE_COUNT && ts.expected_type != ts.type) {
+            ts.type = ts.expected_type;  // account for quantization
+        }
+        comp_bytes += static_cast<size_t>(ts.nbytes());
+    }
+    if (comp_bytes == 0) {
+        // No weights matched this prefix (component absent) -> honor the global flag.
+        return offload_params_to_cpu_;
+    }
+
+    // All-offload fallback: if the budget can't even fit one small component plus the
+    // compute headroom, nothing can stay resident safely -> offload everything (legacy
+    // --offload-to-cpu behavior, safest). Prevents a tiny-budget全常驻 from overshooting.
+    if (remaining_free_bytes < kMinResidentComponentBytes + kResidentComputeHeadroom) {
+        LOG_INFO("auto-allocate: '%s' budget %.2f GB too small for resident+compute headroom "
+                 "-> OFFLOAD (all-offload fallback)",
+                 weight_prefix.c_str(),
+                 remaining_free_bytes / (1024.0 * 1024.0 * 1024.0));
+        return true;
+    }
+
+    // Resident iff weights PLUS compute headroom fit the remaining budget. The headroom
+    // (kResidentComputeHeadroom) covers the resident component's own compute buffer +
+    // activations, which are NOT bounded by the segment budget (that only bounds
+    // offloaded components). remaining_free_bytes is the running tally = effective_budget
+    // minus components already decided resident.
+    const bool fits = comp_bytes + kResidentComputeHeadroom <= remaining_free_bytes;
+
+    if (fits) {
+        remaining_free_bytes -= comp_bytes;   // this component sits resident on GPU
+        resident_bytes_total_ += comp_bytes;  // accumulated for finalize_auto_segment_budget()
+        LOG_INFO("auto-allocate: '%s' %.2f GB -> RESIDENT (%.2f GB budget left)",
+                 weight_prefix.c_str(),
+                 comp_bytes / (1024.0 * 1024.0 * 1024.0),
+                 remaining_free_bytes / (1024.0 * 1024.0 * 1024.0));
+        return false;
+    }
+
+    LOG_INFO("auto-allocate: '%s' %.2f GB > %.2f GB budget left -> OFFLOAD+segment",
+             weight_prefix.c_str(),
+             comp_bytes / (1024.0 * 1024.0 * 1024.0),
+             remaining_free_bytes / (1024.0 * 1024.0 * 1024.0));
+    return true;
+}
+
+// After all components of a pipeline have been decided via plan_component_offload,
+// set the graph VRAM budget for the offloaded ones: whatever budget is left after the
+// resident components, minus compute headroom. Because graph_cut_segment_vram_bytes
+// already counts each segment's compute + weights + IO, this cap keeps
+// (resident + max_segment) within the effective budget. No-op outside auto-allocate.
+void ModelRuntime::finalize_auto_segment_budget(size_t effective_budget_bytes) {
+    if (!auto_allocate_) {
+        return;
+    }
+    size_t leftover = 0;
+    if (effective_budget_bytes > resident_bytes_total_ + kSegmentBudgetSlack) {
+        leftover = effective_budget_bytes - resident_bytes_total_ - kSegmentBudgetSlack;
+    }
+    // Floor: if the leftover is tiny (resident nearly filled the budget) an offloaded
+    // component still needs *some* budget to segment against; use a 1 GB floor so a
+    // single segment can at least stage. Better a large segment than a hard abort.
+    const size_t kMinSegmentBudget = static_cast<size_t>(1) * 1024 * 1024 * 1024;
+    if (leftover < kMinSegmentBudget) {
+        leftover = kMinSegmentBudget;
+    }
+    max_graph_vram_bytes_ = leftover;
+    LOG_INFO("auto-allocate: segment budget = %.2f GB (effective %.2f GB - resident %.2f GB - headroom)",
+             max_graph_vram_bytes_ / (1024.0 * 1024.0 * 1024.0),
+             effective_budget_bytes / (1024.0 * 1024.0 * 1024.0),
+             resident_bytes_total_ / (1024.0 * 1024.0 * 1024.0));
+}
+
+size_t ModelRuntime::effective_budget_bytes() const {
+    if (backends_.backend == nullptr || ggml_backend_is_cpu(backends_.backend)) {
+        return 0;
+    }
+    size_t live_free = 0;
+    ggml_backend_dev_t dev = ggml_backend_get_device(backends_.backend);
+    if (dev != nullptr) {
+        size_t total_bytes = 0;
+        ggml_backend_dev_memory(dev, &live_free, &total_bytes);
+    }
+    // max_graph_vram_bytes_ holds the user's --max-vram (bytes) here, 0 if unset.
+    if (max_graph_vram_bytes_ > 0 && max_graph_vram_bytes_ < live_free) {
+        return max_graph_vram_bytes_;  // user budget is the tighter (hard) cap
+    }
+    return live_free;
+}
+
+// so consumer cards stay under their VRAM wall without a manual flag.
+void ModelRuntime::maybe_enable_vae_tiling_for_low_vram() {
+    if (vae_tiling_.enabled) {
+        return;  // user asked for tiling explicitly; respect their settings
+    }
+    if (backends_.vae_backend == nullptr || ggml_backend_is_cpu(backends_.vae_backend)) {
+        return;  // VAE runs on CPU, GPU tiling does not apply
+    }
+    ggml_backend_dev_t dev = ggml_backend_get_device(backends_.vae_backend);
+    if (dev == nullptr || ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU) {
+        return;
+    }
+    size_t free_bytes = 0, total_bytes = 0;
+    ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
+    const double total_gib = static_cast<double>(total_bytes) / (1024.0 * 1024.0 * 1024.0);
+    constexpr double kLowVramThresholdGiB = 16.0;
+    if (total_bytes == 0 || total_gib > kLowVramThresholdGiB) {
+        return;  // large GPU: leave VAE untiled for max throughput
+    }
+    vae_tiling_.enabled        = true;
+    vae_tiling_.rel_size_x     = 5.0f;  // ~32x32 latent tile: matches min VAE peak (empirically measured)
+    vae_tiling_.rel_size_y     = 5.0f;
+    if (vae_tiling_.target_overlap <= 0.0f) {
+        vae_tiling_.target_overlap = 0.25f;
+    }
+    LOG_INFO("auto-enabled VAE tiling (GPU total VRAM %.1f GiB <= %.0f GiB threshold)",
+             total_gib, kLowVramThresholdGiB);
+}
+
 void ModelRuntime::reset() {
     ready_ = false;
     rng_.reset();
@@ -273,6 +495,7 @@ void ModelRuntime::reset() {
     n_threads_ = 0;
     use_mmap_ = false;
     offload_params_to_cpu_ = false;
+    text_encoder_offload_ = false;
     free_params_immediately_ = false;
     max_vram_ = 0.0f;
     max_graph_vram_bytes_ = 0;

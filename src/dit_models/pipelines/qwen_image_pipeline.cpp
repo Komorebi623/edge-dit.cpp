@@ -234,6 +234,15 @@ void QwenImagePipeline::reset() {
     runtime_weights_loaded_ = false;
 }
 
+int QwenImagePipeline::resolve_steps(int requested_steps) const {
+    if (requested_steps > 0) {
+        return requested_steps;
+    }
+    // Auto (--steps not set): few-step distilled checkpoints (Qwen-Image-Lightning
+    // etc.) default to their distilled step count; the base model defaults to 20.
+    return distilled_default_steps_ > 0 ? distilled_default_steps_ : 20;
+}
+
 bool QwenImagePipeline::has_prefix(const ModelLoader& loader, const std::string& prefix) const {
     for (const auto& item : loader.get_tensor_storage_map()) {
         if (starts_with(item.second.name, prefix)) {
@@ -252,6 +261,8 @@ bool QwenImagePipeline::prepare(const ed_context_params_t& params,
     runtime_ = &runtime;
     version_ = loader.version();
     reset();
+    distilled_default_steps_ = detect_distilled_default_steps(loader.file_paths(),
+                                                              params.diffusion_model_path);
 
     if (!ed_version_is_qwen_image(version_)) {
         if (error != nullptr) {
@@ -285,18 +296,29 @@ bool QwenImagePipeline::build_components(const ed_context_params_t& params,
     }
 
     const auto& storage = loader.get_tensor_storage_map();
-    const bool offload = runtime_->offload_params_to_cpu();
     const bool enable_vision = params.llm_vision_path != nullptr && params.llm_vision_path[0] != '\0';
 
+    // Auto-allocate: seed the tally with the hard-cap budget min(--max-vram, free) and
+    // decide each component's placement (DiT->TE->VAE priority), then finalize the segment
+    // budget for whatever offloaded. Outside --auto-allocate these are no-ops / legacy flag.
+    runtime_->reset_auto_allocate_state();
+    const size_t eff_budget = runtime_->effective_budget_bytes();
+    size_t remaining_free = eff_budget;
+    const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
+    const bool te_offload = runtime_->clip_offload_params_to_cpu() ||
+                            runtime_->plan_component_offload(loader, "text_encoders", remaining_free);
+    const bool vae_offload = runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
+    runtime_->finalize_auto_segment_budget(eff_budget);
+
     conditioner_ = std::make_shared<LLMEmbedder>(runtime_->clip_backend(),
-                                                 offload,
+                                                 te_offload,
                                                  storage,
                                                  version_,
                                                  "",
                                                  enable_vision);
 
     diffusion_.reset(new Qwen::QwenImageRunner(runtime_->backend(),
-                                               offload,
+                                               diffusion_offload,
                                                storage,
                                                "model.diffusion_model",
                                                version_,
@@ -312,7 +334,7 @@ bool QwenImagePipeline::build_components(const ed_context_params_t& params,
         }
     }
     vae_ = std::make_shared<WAN::WanVAERunner>(runtime_->vae_backend(),
-                                               offload,
+                                               vae_offload,
                                                storage,
                                                "first_stage_model",
                                                true,
@@ -320,6 +342,10 @@ bool QwenImagePipeline::build_components(const ed_context_params_t& params,
 
     const bool text_flash = runtime_->flash_attention();
     const bool diffusion_flash = runtime_->flash_attention();
+    const size_t max_graph_vram = runtime_->max_graph_vram_bytes();
+    conditioner_->set_max_graph_vram_bytes(max_graph_vram);
+    diffusion_->set_max_graph_vram_bytes(max_graph_vram);
+    vae_->set_max_graph_vram_bytes(max_graph_vram);
     conditioner_->set_flash_attention_enabled(text_flash);
     diffusion_->set_flash_attention_enabled(diffusion_flash);
     vae_->set_flash_attention_enabled(text_flash);
@@ -442,7 +468,7 @@ ed_status_t QwenImagePipeline::generate_image(const ed_image_generation_params_t
     }
 
     const int count = params->batch_count > 0 ? params->batch_count : 1;
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    const int steps = resolve_steps(params->sample.steps);
     if (GenerationControl* control = runtime_->generation_control()) {
         control->start(count * steps);
     }
@@ -519,7 +545,10 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
     ConditionerParams cond_params;
     cond_params.text = params->prompt != nullptr ? params->prompt : "";
     emit_phase_marker("encode", "begin");
+    const int64_t ed_gen_t0 = ggml_time_ms();
+    const int64_t ed_enc_t0 = ed_gen_t0;
     SDCondition condition = conditioner_->get_learned_condition(n_threads, cond_params);
+    const int64_t ed_enc_ms = ggml_time_ms() - ed_enc_t0;
     if (condition.empty() || condition.c_crossattn.empty()) {
         if (error != nullptr) {
             *error = "Qwen-Image prompt encoding returned empty condition";
@@ -562,7 +591,7 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
         return false;
     }
 
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    const int steps = resolve_steps(params->sample.steps);
     const bool has_explicit_flow_shift = params->sample.flow_shift > 0.0f &&
                                          std::isfinite(params->sample.flow_shift);
 
@@ -874,12 +903,14 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
 
     emit_phase_marker("decode", "begin");
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
+    const int64_t ed_dec_t0 = ggml_time_ms();
     sd::Tensor<float> decoded = vae_->decode(n_threads,
                                              vae_latents,
                                              runtime_->vae_tiling(),
                                              false,
                                              false,
                                              false);
+    const int64_t ed_dec_ms = ggml_time_ms() - ed_dec_t0;
     emit_phase_marker("decode", "end");
     if (decoded.empty()) {
         if (error != nullptr) {
@@ -897,6 +928,11 @@ bool QwenImagePipeline::generate_one_image(const ed_image_generation_params_t* p
         }
         return false;
     }
+    const int64_t ed_total_ms = ggml_time_ms() - ed_gen_t0;
+    const int64_t ed_sample_ms = sample_end_ms - sample_start_ms;
+    LOG_INFO("qwen-image generate breakdown: total=%.2fs | text_encode=%.2fs sampling=%.2fs vae_decode=%.2fs other=%.2fs",
+             ed_total_ms/1000.0f, ed_enc_ms/1000.0f, ed_sample_ms/1000.0f, ed_dec_ms/1000.0f,
+             (ed_total_ms - ed_enc_ms - ed_sample_ms - ed_dec_ms)/1000.0f);
     return true;
 }
 

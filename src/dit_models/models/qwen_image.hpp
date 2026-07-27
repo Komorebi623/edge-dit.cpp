@@ -2642,31 +2642,49 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
             }
             mod_params          = ggml_reshape_1d(ctx, mod_params, ggml_nelements(mod_params));
             auto mod_params_vec = ggml_ext_chunk(ctx, mod_params, 12, 0);
-            index               = ggml_reshape_3d(ctx, index, 1, index->ne[0], index->ne[1]);                                      // [N, n_img_token, 1]
-            index               = ggml_repeat_4d(ctx, index, mod_params_vec[0]->ne[0], index->ne[1], index->ne[2], index->ne[3]);  // [N, n_img_token, hidden_size]
+            const int64_t hidden   = mod_params_vec[0]->ne[0];
+            const int64_t n_tok    = index->ne[0];
+            const int64_t n_batch  = index->ne[1];
+            // index: [n_img_token, N] 0/1 mask (0 -> mod_0, 1 -> mod_1).
+            ggml_tensor* index_b = ggml_reshape_4d(ctx, index, 1, n_tok, n_batch, 1);  // [1, n_tok, N, 1]
             std::vector<ggml_tensor*> mod_results;
+            const int64_t out_ne[4] = { hidden, n_tok, n_batch, 1 };
             for (int i = 0; i < 6; i++) {
                 auto mod_0 = mod_params_vec[i];
                 auto mod_1 = mod_params_vec[i + 6];
 
-                // mod_result = torch.where(index == 0, mod_0, mod_1)
-                // mod_result = (1 - index)*mod_0 + index*mod_1
-                mod_0           = ggml_sub(ctx, ggml_repeat(ctx, mod_0, index), ggml_mul(ctx, index, mod_0));  // [N, n_img_token, hidden_size]
-                mod_1           = ggml_mul(ctx, index, mod_1);                                                 // [N, n_img_token, hidden_size]
-                auto mod_result = ggml_add(ctx, mod_0, mod_1);
+                // mod_result = torch.where(index == 0, mod_0, mod_1) = mod_0 + index*(mod_1 - mod_0)
+                ggml_tensor* mod_0_b = ggml_reshape_4d(ctx, mod_0, hidden, 1, 1, 1);  // [hidden,1,1,1]
+                ggml_tensor* mod_1_b = ggml_reshape_4d(ctx, mod_1, hidden, 1, 1, 1);
+#ifdef ED_ENABLE_CUDA_MODULATION
+                // Fuse the where/select into one custom kernel (GPU) / parallel CPU op,
+                // replacing repeat+sub+mul+mul+add over the full [hidden,n_tok,N] tensor.
+                if (auto fused = edgedit::ggml_ext::fused_where_select_custom(ctx, index_b, mod_0_b, mod_1_b, out_ne)) {
+                    mod_results.push_back(fused);
+                    continue;
+                }
+#endif
+                ggml_tensor* index_full = ggml_repeat_4d(ctx, index_b, hidden, n_tok, n_batch, 1);  // [hidden,n_tok,N,1]
+                auto sel_0      = ggml_sub(ctx, ggml_repeat(ctx, mod_0_b, index_full), ggml_mul(ctx, index_full, mod_0_b));
+                auto sel_1      = ggml_mul(ctx, index_full, mod_1_b);
+                auto mod_result = ggml_add(ctx, sel_0, sel_1);
                 mod_results.push_back(mod_result);
             }
             return mod_results;
         }
 
         // residual + x * gate, fused into one CUDA kernel when shapes allow.
-        // gate is [dim, N] (2D) on the normal path or [dim, token, N] (3D) on the
-        // modulate_index path; reshape the 2D case to [dim, 1, N] so it broadcasts
-        // over the token axis exactly like the ggml_mul fallback below.
+        // gate is [dim, N] (per-batch, t2i path) or [dim, token, N] (per-token,
+        // modulate_index path). Only the per-batch case needs reshaping to
+        // [dim, 1, N] to broadcast over the token axis. The per-token gate is
+        // already token-aligned with x, so reshaping it (as ggml_n_dims==2 would
+        // trigger when N==1 makes it look 2D) would misalign and defeat the fused
+        // kernel -> detect by comparing the token dim against x.
         static ggml_tensor* residual_gate(ggml_context* ctx, ggml_tensor* residual, ggml_tensor* x, ggml_tensor* gate) {
 #ifdef ED_ENABLE_CUDA_MODULATION
             ggml_tensor* gate_b = gate;
-            if (ggml_n_dims(gate) == 2) {
+            const bool token_aligned = gate->ne[1] == x->ne[1];  // per-token gate already matches x
+            if (!token_aligned && ggml_n_dims(gate) == 2) {
                 gate_b = ggml_reshape_3d(ctx, gate, gate->ne[0], 1, gate->ne[1]);
             }
             if (auto fused = edgedit::ggml_ext::fused_residual_gate_custom(ctx, residual, x, gate_b)) {

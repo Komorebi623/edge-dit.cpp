@@ -262,9 +262,22 @@ bool FluxPipeline::prepare(const ed_context_params_t& params,
     if (!validate(error)) {
         return false;
     }
+
+    // Auto-allocate: seed tally with hard-cap budget min(--max-vram, free); finalize after.
+    // On a 24G card a 12G flux DiT fits -> resident (no regression); only offload if it
+    // genuinely does not fit the budget.
+    runtime_->reset_auto_allocate_state();
+    const size_t eff_budget = runtime_->effective_budget_bytes();
+    size_t remaining_free = eff_budget;
+    const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
+    const bool te_offload = runtime_->clip_offload_params_to_cpu() ||
+                            runtime_->plan_component_offload(loader, "text_encoders", remaining_free);
+    const bool vae_offload = runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
+    runtime_->finalize_auto_segment_budget(eff_budget);
+
     if (!initialize_flux_transformer_spec(loader,
                                           runtime_->backend(),
-                                          runtime_->offload_params_to_cpu(),
+                                          diffusion_offload,
                                           error)) {
         return false;
     }
@@ -273,7 +286,9 @@ bool FluxPipeline::prepare(const ed_context_params_t& params,
                                         runtime_->backend(),
                                         runtime_->clip_backend(),
                                         runtime_->vae_backend(),
-                                        runtime_->offload_params_to_cpu(),
+                                        diffusion_offload,
+                                        te_offload,
+                                        vae_offload,
                                         registry,
                                         error);
 }
@@ -516,7 +531,9 @@ bool FluxPipeline::prepare_flux_runtime_weights(const ModelLoader& loader,
                                            ggml_backend_t diffusion_backend,
                                            ggml_backend_t text_backend,
                                            ggml_backend_t vae_backend,
-                                           bool offload_params_to_cpu,
+                                           bool diffusion_offload,
+                                           bool te_offload,
+                                           bool vae_offload,
                                            PipelineTensorRegistry& registry,
                                            std::string* error) {
     if (!ed_version_is_flux(version_) && !ed_version_is_flux2(version_)) {
@@ -530,7 +547,7 @@ bool FluxPipeline::prepare_flux_runtime_weights(const ModelLoader& loader,
     if (flux_runner_ == nullptr || (diffusion_backend != nullptr && flux_backend_ != diffusion_backend)) {
         if (!initialize_flux_transformer_spec(loader,
                                               diffusion_backend,
-                                              offload_params_to_cpu,
+                                              diffusion_offload,
                                               error)) {
             return false;
         }
@@ -562,9 +579,10 @@ bool FluxPipeline::prepare_flux_runtime_weights(const ModelLoader& loader,
         conditioner_backend_ = text_backend;
 
         conditioner_ = std::make_shared<FluxCLIPEmbedder>(conditioner_backend_,
-                                                          offload_params_to_cpu,
+                                                          te_offload,
                                                           loader.get_tensor_storage_map());
 
+        conditioner_->set_max_graph_vram_bytes(runtime_->max_graph_vram_bytes());
         conditioner_->alloc_params_buffer();
         conditioner_->get_param_tensors(registry.tensors());
     }
@@ -579,7 +597,7 @@ bool FluxPipeline::prepare_flux_runtime_weights(const ModelLoader& loader,
         vae_backend_ = vae_backend;
 
         vae_ = std::make_shared<AutoEncoderKL>(vae_backend_,
-                                               offload_params_to_cpu,
+                                               vae_offload,
                                                loader.get_tensor_storage_map(),
                                                "first_stage_model",
                                                true,
@@ -612,6 +630,16 @@ bool FluxPipeline::prepare_flux_runtime_weights(const ModelLoader& loader,
 
 bool FluxPipeline::can_generate_image() const {
     return runtime_weights_loaded_ && flux_runner_ != nullptr && conditioner_ != nullptr && vae_ != nullptr;
+}
+
+int FluxPipeline::resolve_steps(int requested_steps) const {
+    if (requested_steps > 0) {
+        return requested_steps;
+    }
+    // Auto: FLUX.1-schnell (guidance-distilled, no guidance_in weights ->
+    // guidance_embed=false) is a 4-step model; the dev variant defaults to 20.
+    const bool distilled = flux_runner_ != nullptr && !flux_runner_->flux_params.guidance_embed;
+    return distilled ? 4 : 20;
 }
 
 bool FluxPipeline::validate_image_params(const ed_image_generation_params_t* params, std::string* error) const {
@@ -681,7 +709,7 @@ ed_status_t FluxPipeline::generate_image(const ed_image_generation_params_t* par
     }
 
     const int count = params->batch_count > 0 ? params->batch_count : 1;
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    const int steps = resolve_steps(params->sample.steps);
     if (GenerationControl* control = runtime_->generation_control()) {
         control->start(count * steps);
     }
@@ -792,7 +820,10 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
     cond_params.text = params->prompt != nullptr ? params->prompt : "";
     cond_params.clip_skip = -1;
     emit_phase_marker("encode", "begin");
+    const int64_t ed_gen_t0 = ggml_time_ms();
+    const int64_t ed_enc_t0 = ed_gen_t0;
     SDCondition condition = conditioner_->get_learned_condition(n_threads, cond_params);
+    const int64_t ed_enc_ms = ggml_time_ms() - ed_enc_t0;
     if (condition.empty()) {
         if (error != nullptr) {
             *error = "Flux prompt encoding returned empty condition";
@@ -818,7 +849,7 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
              format_tensor_shape(condition.c_crossattn).c_str(),
              format_tensor_shape(condition.c_vector).c_str());
 
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    const int steps = resolve_steps(params->sample.steps);
     float flow_shift = params->sample.flow_shift;
     if (!(flow_shift > 0.0f) || !std::isfinite(flow_shift)) {
         flow_shift = flux_runner_->flux_params.guidance_embed ? 1.15f : 1.0f;
@@ -1099,6 +1130,7 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
     }
 
     emit_phase_marker("decode", "begin");
+    const int64_t ed_dec_t0 = ggml_time_ms();
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
     sd::Tensor<float> decoded = vae_->decode(n_threads,
                                              vae_latents,
@@ -1113,6 +1145,7 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         }
         return false;
     }
+    const int64_t ed_dec_ms = ggml_time_ms() - ed_dec_t0;
 
     const ed_status_t status = ed_tensor_to_image(decoded, image);
     if (status != ED_STATUS_OK) {
@@ -1121,6 +1154,11 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
         }
         return false;
     }
+    const int64_t ed_total_ms = ggml_time_ms() - ed_gen_t0;
+    const int64_t ed_sample_ms = sample_end_ms - sample_start_ms;
+    LOG_INFO("flux generate breakdown: total=%.2fs | text_encode=%.2fs sampling=%.2fs vae_decode=%.2fs other=%.2fs",
+             ed_total_ms/1000.0f, ed_enc_ms/1000.0f, ed_sample_ms/1000.0f, ed_dec_ms/1000.0f,
+             (ed_total_ms - ed_enc_ms - ed_sample_ms - ed_dec_ms)/1000.0f);
     return true;
 }
 

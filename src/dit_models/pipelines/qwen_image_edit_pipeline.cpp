@@ -276,6 +276,15 @@ void QwenImageEditPipeline::reset() {
     runtime_weights_loaded_ = false;
 }
 
+int QwenImageEditPipeline::resolve_steps(int requested_steps) const {
+    if (requested_steps > 0) {
+        return requested_steps;
+    }
+    // Auto (--steps not set): few-step distilled checkpoints (Qwen-Image-Edit-
+    // Lightning etc.) default to their distilled step count; base defaults to 50.
+    return distilled_default_steps_ > 0 ? distilled_default_steps_ : 50;
+}
+
 bool QwenImageEditPipeline::prepare(const ed_context_params_t& params,
                                     ModelRuntime& runtime,
                                     const ModelLoader& loader,
@@ -285,6 +294,8 @@ bool QwenImageEditPipeline::prepare(const ed_context_params_t& params,
     runtime_ = &runtime;
     version_ = loader.version();
     reset();
+    distilled_default_steps_ = detect_distilled_default_steps(loader.file_paths(),
+                                                              params.diffusion_model_path);
 
     if (!ed_version_is_qwen_image_edit(version_)) {
         if (error != nullptr) {
@@ -318,16 +329,26 @@ bool QwenImageEditPipeline::build_components(const ed_context_params_t& params,
     }
 
     const auto& storage = loader.get_tensor_storage_map();
-    const bool offload = runtime_->offload_params_to_cpu();
+
+    // Auto-allocate: seed tally with hard-cap budget min(--max-vram, free); finalize after.
+    runtime_->reset_auto_allocate_state();
+    const size_t eff_budget = runtime_->effective_budget_bytes();
+    size_t remaining_free = eff_budget;
+    const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
+    const bool te_offload = runtime_->clip_offload_params_to_cpu() ||
+                            runtime_->plan_component_offload(loader, "text_encoders", remaining_free);
+    const bool vae_offload = runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
+    runtime_->finalize_auto_segment_budget(eff_budget);
+
     conditioner_ = std::make_shared<LLMEmbedder>(runtime_->clip_backend(),
-                                                 offload,
+                                                 te_offload,
                                                  storage,
                                                  version_,
                                                  "",
                                                  true);
 
     diffusion_.reset(new Qwen::QwenImageRunner(runtime_->backend(),
-                                               offload,
+                                               diffusion_offload,
                                                storage,
                                                "model.diffusion_model",
                                                version_,
@@ -342,12 +363,16 @@ bool QwenImageEditPipeline::build_components(const ed_context_params_t& params,
     }
 
     vae_ = std::make_shared<WAN::WanVAERunner>(runtime_->vae_backend(),
-                                               offload,
+                                               vae_offload,
                                                storage,
                                                "first_stage_model",
                                                false,
                                                version_);
 
+    const size_t max_graph_vram = runtime_->max_graph_vram_bytes();
+    conditioner_->set_max_graph_vram_bytes(max_graph_vram);
+    diffusion_->set_max_graph_vram_bytes(max_graph_vram);
+    vae_->set_max_graph_vram_bytes(max_graph_vram);
     conditioner_->set_flash_attention_enabled(false);
     diffusion_->set_flash_attention_enabled(false);
     vae_->set_flash_attention_enabled(false);
@@ -471,7 +496,7 @@ ed_status_t QwenImageEditPipeline::generate_image(const ed_image_generation_para
     }
 
     const int count = params->batch_count > 0 ? params->batch_count : 1;
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 50;
+    const int steps = resolve_steps(params->sample.steps);
     if (GenerationControl* control = runtime_->generation_control()) {
         control->start(count * steps);
     }
@@ -568,7 +593,10 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
     cond_params.text = params->prompt != nullptr ? params->prompt : "";
     cond_params.ref_images = &condition_ref_images;
     emit_phase_marker("encode", "begin");
+    const int64_t ed_gen_t0 = ggml_time_ms();
+    const int64_t ed_enc_t0 = ed_gen_t0;
     SDCondition condition = conditioner_->get_learned_condition(n_threads, cond_params);
+    const int64_t ed_enc_ms = ggml_time_ms() - ed_enc_t0;
     if (condition.empty() || condition.c_crossattn.empty()) {
         if (error != nullptr) {
             *error = "Qwen-Image-Edit prompt encoding returned empty condition";
@@ -617,8 +645,7 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         return false;
     }
 
-    ed_tiling_params_t tiling_params{};
-    sd::Tensor<float> encoded = vae_->encode(n_threads, input_image_tensor, tiling_params, false, false);
+    sd::Tensor<float> encoded = vae_->encode(n_threads, input_image_tensor, runtime_->vae_tiling(), false, false);
     if (encoded.empty()) {
         if (error != nullptr) {
             *error = "Qwen-Image-Edit VAE encode failed";
@@ -631,9 +658,17 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
     }
     std::vector<sd::Tensor<float>> ref_latents = {image_latent};
 
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 50;
+    const int steps = resolve_steps(params->sample.steps);
     const int image_seq_len = (latent_w / patch_size) * (latent_h / patch_size);
-    const bool diffusion_flash = runtime_->flash_attention() && image_seq_len >= 4096;
+    // The image_seq_len>=4096 gate is a CUDA-era heuristic; keep it for CUDA and
+    // any non-CPU backend (do not change their behavior). On CPU it forced the
+    // slow native f32 attention (512x512 -> seq 1024 < 4096); the shared
+    // QwenImageRunner + ggml_ext_attention_ext CPU flash (oneDNN AMX, KV-nopad)
+    // handles arbitrary seq/no-mask, so enable flash there whenever the runtime
+    // allows it — matching the t2i Qwen pipeline.
+    const bool is_cpu_backend = sd_backend_is(runtime_->backend(), "CPU");
+    const bool diffusion_flash = runtime_->flash_attention() &&
+                                 (is_cpu_backend || image_seq_len >= 4096);
     diffusion_->set_flash_attention_enabled(diffusion_flash);
     LOG_INFO("qwen-image-edit diffusion flash attention: %s (image_seq_len=%d)",
              diffusion_flash ? "on" : "off",
@@ -910,12 +945,14 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
 
     emit_phase_marker("decode", "begin");
     sd::Tensor<float> vae_latents = vae_->diffusion_to_vae_latents(x);
+    const int64_t ed_dec_t0 = ggml_time_ms();
     sd::Tensor<float> decoded = vae_->decode(n_threads,
                                              vae_latents,
-                                             tiling_params,
+                                             runtime_->vae_tiling(),
                                              false,
                                              false,
                                              false);
+    const int64_t ed_dec_ms = ggml_time_ms() - ed_dec_t0;
     emit_phase_marker("decode", "end");
     if (decoded.empty()) {
         if (error != nullptr) {
@@ -933,6 +970,11 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         }
         return false;
     }
+    const int64_t ed_total_ms = ggml_time_ms() - ed_gen_t0;
+    const int64_t ed_sample_ms = sample_end_ms - sample_start_ms;
+    LOG_INFO("qwen-image-edit generate breakdown: total=%.2fs | text_encode=%.2fs sampling=%.2fs vae_decode=%.2fs other=%.2fs",
+             ed_total_ms/1000.0f, ed_enc_ms/1000.0f, ed_sample_ms/1000.0f, ed_dec_ms/1000.0f,
+             (ed_total_ms - ed_enc_ms - ed_sample_ms - ed_dec_ms)/1000.0f);
     return true;
 }
 

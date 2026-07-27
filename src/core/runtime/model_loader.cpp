@@ -206,6 +206,48 @@ const char* ed_version_name(SDVersion version) {
     }
 }
 
+int detect_distilled_default_steps(const std::vector<std::string>& file_paths,
+                                   const char* diffusion_model_path) {
+    // Lowercase-scan model/DiT paths for few-step distill keywords. Conservative:
+    // keep the keyword list tight so a base checkpoint is not misread as distilled.
+    auto to_lower = [](const std::string& s) {
+        std::string out = s;
+        std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return out;
+    };
+
+    std::string haystack;
+    for (const std::string& p : file_paths) {
+        haystack += to_lower(p);
+        haystack += '\n';
+    }
+    if (diffusion_model_path != nullptr && diffusion_model_path[0] != '\0') {
+        haystack += to_lower(diffusion_model_path);
+    }
+    if (haystack.empty()) {
+        return 0;
+    }
+
+    auto has = [&](const char* kw) { return haystack.find(kw) != std::string::npos; };
+
+    // schnell-class distills target ~4 steps; turbo/lightning/hyper/distill ~8.
+    if (has("schnell")) {
+        return 4;
+    }
+    if (has("lightning") || has("lightx2v") || has("hyper") ||
+        has("turbo") || has("distill") ||
+        has("4step") || has("4steps") || has("8step") || has("8steps")) {
+        // 4-step variants (Lightning/Hyper commonly ship 4-step) -> 4, else 8.
+        if (has("4step") || has("4steps")) {
+            return 4;
+        }
+        return 8;
+    }
+    return 0;
+}
+
 // Reverse of ed_version_name(): map a version string (as stored in GGUF
 // metadata by ed-convert) back to an SDVersion. Returns VERSION_COUNT if the
 // string matches no known version. Derived from ed_version_name so the two can

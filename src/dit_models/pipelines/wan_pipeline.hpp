@@ -60,6 +60,9 @@ private:
     bool ready_ = false;
     ModelRuntime* runtime_ = nullptr;
     SDVersion version_ = VERSION_WAN2;
+    // >0 when the loaded checkpoint looks like a few-step distill (CausVid /
+    // lightx2v etc.); default step count when the user does not pass --steps.
+    int distilled_default_steps_ = 0;
 
     std::shared_ptr<Conditioner> conditioner_;
     std::shared_ptr<DiffusionModel> diffusion_;

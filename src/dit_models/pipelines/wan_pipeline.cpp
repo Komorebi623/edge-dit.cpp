@@ -124,8 +124,13 @@ static float resolve_eta(const ed_sample_params_t& params) {
     }
 }
 
-static int resolve_steps(int steps) {
-    return steps > 0 ? steps : kWanDefaultSteps;
+static int resolve_steps(int steps, int distilled_default = 0) {
+    if (steps > 0) {
+        return steps;
+    }
+    // Auto (--steps not set): few-step distilled checkpoints default to their
+    // distilled step count; the base model defaults to kWanDefaultSteps (20).
+    return distilled_default > 0 ? distilled_default : kWanDefaultSteps;
 }
 
 static float resolve_cfg(float cfg) {
@@ -244,7 +249,7 @@ bool WanPipeline::has_prefix(const ModelLoader& loader, const std::string& prefi
     return false;
 }
 
-bool WanPipeline::prepare(const ed_context_params_t&,
+bool WanPipeline::prepare(const ed_context_params_t& params,
                           ModelRuntime& runtime,
                           const ModelLoader& loader,
                           PipelineTensorRegistry& registry,
@@ -253,6 +258,8 @@ bool WanPipeline::prepare(const ed_context_params_t&,
     runtime_ = &runtime;
     version_ = loader.version();
     registry.clear();
+    distilled_default_steps_ = detect_distilled_default_steps(loader.file_paths(),
+                                                              params.diffusion_model_path);
 
     if (!ed_version_is_wan(version_)) {
         return set_error(error, "WanPipeline got non-Wan model version");
@@ -285,22 +292,34 @@ bool WanPipeline::build_components(const ModelLoader& loader, std::string* error
     const bool offload = runtime_->offload_params_to_cpu();
     const bool vae_decode_only = true;
 
+    // Auto-allocate: seed tally with hard-cap budget min(--max-vram, free); finalize after.
+    // wan's DiT is small (~1.5GB q8) so it typically stays resident. Special components
+    // (high_noise / clip_vision / preview_vae, only for I2V/14B) keep the global flag.
+    runtime_->reset_auto_allocate_state();
+    const size_t eff_budget = runtime_->effective_budget_bytes();
+    size_t remaining_free = eff_budget;
+    const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
+    const bool te_offload = runtime_->clip_offload_params_to_cpu() ||
+                            runtime_->plan_component_offload(loader, "text_encoders", remaining_free);
+    const bool vae_offload = runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
+    runtime_->finalize_auto_segment_budget(eff_budget);
+
     conditioner_ = std::make_shared<T5CLIPEmbedder>(runtime_->clip_backend(),
-                                                    offload,
+                                                    te_offload,
                                                     storage,
                                                     true,
                                                     0,
                                                     true);
 
     diffusion_ = std::make_shared<WanModel>(runtime_->backend(),
-                                            offload,
+                                            diffusion_offload,
                                             storage,
                                             "model.diffusion_model",
                                             version_);
 
     if (has_prefix(loader, "model.high_noise_diffusion_model.")) {
         high_noise_diffusion_ = std::make_shared<WanModel>(runtime_->backend(),
-                                                           offload,
+                                                           diffusion_offload,
                                                            storage,
                                                            "model.high_noise_diffusion_model",
                                                            version_);
@@ -310,21 +329,21 @@ bool WanPipeline::build_components(const ModelLoader& loader, std::string* error
         diffusion_->get_desc() == "Wan2.1-FLF2V-14B" ||
         diffusion_->get_desc() == "Wan2.1-I2V-1.3B") {
         clip_vision_ = std::make_shared<FrozenCLIPVisionEmbedder>(runtime_->backend(),
-                                                                  offload,
+                                                                  runtime_->clip_offload_params_to_cpu(),
                                                                   storage);
     }
 
     using_tae_for_main_ = loader.use_tae() && !loader.tae_preview_only();
     if (using_tae_for_main_) {
         vae_ = std::make_shared<TinyVideoAutoEncoder>(runtime_->vae_backend(),
-                                                      offload,
+                                                      vae_offload,
                                                       storage,
                                                       "decoder",
                                                       vae_decode_only,
                                                       version_);
     } else {
         vae_ = std::make_shared<WAN::WanVAERunner>(runtime_->vae_backend(),
-                                                   offload,
+                                                   vae_offload,
                                                    storage,
                                                    "first_stage_model",
                                                    vae_decode_only,
@@ -1286,7 +1305,7 @@ sd::Tensor<float> WanPipeline::sample_video_latent(const ed_video_generation_par
                                                    const sd::Tensor<float>& denoise_mask,
                                                    const sd::Tensor<float>& vace_context,
                                                    std::string* error) {
-    const int low_steps = resolve_steps(params->sample.steps);
+    const int low_steps = resolve_steps(params->sample.steps, distilled_default_steps_);
     int high_steps = high_noise_diffusion_ != nullptr ? params->high_noise_sample.steps : 0;
     const int total_steps = low_steps + std::max(0, high_steps);
 
@@ -1461,7 +1480,7 @@ ed_status_t WanPipeline::generate_video(const ed_video_generation_params_t* para
     sampler_rng_->manual_seed(seed);
     set_flow_shift(params->sample.flow_shift);
 
-    const int low_steps = resolve_steps(params->sample.steps);
+    const int low_steps = resolve_steps(params->sample.steps, distilled_default_steps_);
     const int high_steps = high_noise_diffusion_ != nullptr ? params->high_noise_sample.steps : 0;
     const int total_steps = low_steps + std::max(0, high_steps);
     if (GenerationControl* control = runtime_->generation_control()) {
