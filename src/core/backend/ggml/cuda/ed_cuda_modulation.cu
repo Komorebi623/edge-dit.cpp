@@ -295,6 +295,64 @@ __global__ void fused_residual_gate_f32_vec4_kernel(const float* residual,
     reinterpret_cast<float4*>(dst)[idx] = out;
 }
 
+// out[i0,i1,i2,i3] = mod_0 + index*(mod_1 - mod_0) == where(index==0, mod_0, mod_1).
+// Each input broadcasts per-dim via the *_b* flags (1 = size-1 dim, read index 0).
+__global__ void fused_where_select_f32_kernel(const float* index,
+                                              const float* mod_0,
+                                              const float* mod_1,
+                                              float* dst,
+                                              int64_t ne0,
+                                              int64_t ne1,
+                                              int64_t ne2,
+                                              int64_t ne3,
+                                              int64_t idx_s0,
+                                              int64_t idx_s1,
+                                              int64_t idx_s2,
+                                              int64_t idx_s3,
+                                              int64_t m0_s0,
+                                              int64_t m0_s1,
+                                              int64_t m0_s2,
+                                              int64_t m0_s3,
+                                              int64_t m1_s0,
+                                              int64_t m1_s1,
+                                              int64_t m1_s2,
+                                              int64_t m1_s3,
+                                              int idx_b0,
+                                              int idx_b1,
+                                              int idx_b2,
+                                              int idx_b3,
+                                              int m0_b0,
+                                              int m0_b1,
+                                              int m0_b2,
+                                              int m0_b3,
+                                              int m1_b0,
+                                              int m1_b1,
+                                              int m1_b2,
+                                              int m1_b3) {
+    const int64_t total = ne0 * ne1 * ne2 * ne3;
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total) {
+        return;
+    }
+
+    const int64_t i0 = idx % ne0;
+    int64_t rest = idx / ne0;
+    const int64_t i1 = rest % ne1;
+    rest /= ne1;
+    const int64_t i2 = rest % ne2;
+    const int64_t i3 = rest / ne2;
+
+    const int64_t index_idx = (idx_b0 ? 0 : i0) * idx_s0 + (idx_b1 ? 0 : i1) * idx_s1 +
+                              (idx_b2 ? 0 : i2) * idx_s2 + (idx_b3 ? 0 : i3) * idx_s3;
+    const int64_t m0_idx = (m0_b0 ? 0 : i0) * m0_s0 + (m0_b1 ? 0 : i1) * m0_s1 +
+                           (m0_b2 ? 0 : i2) * m0_s2 + (m0_b3 ? 0 : i3) * m0_s3;
+    const int64_t m1_idx = (m1_b0 ? 0 : i0) * m1_s0 + (m1_b1 ? 0 : i1) * m1_s1 +
+                           (m1_b2 ? 0 : i2) * m1_s2 + (m1_b3 ? 0 : i3) * m1_s3;
+
+    const float m0v = mod_0[m0_idx];
+    dst[idx] = __fadd_rn(m0v, __fmul_rn(index[index_idx], __fsub_rn(mod_1[m1_idx], m0v)));
+}
+
 } // namespace
 
 static bool ed_cuda_fused_modulate_op_supported(const ggml_tensor * dst) {
@@ -377,9 +435,94 @@ static bool ed_cuda_fused_residual_gate_op_supported(const ggml_tensor * dst) {
     return true;
 }
 
+static bool ed_cuda_fused_where_select_op_supported(const ggml_tensor * dst) {
+    if (dst == nullptr ||
+        dst->op != GGML_OP_CUSTOM ||
+        dst->src[0] == nullptr ||
+        dst->src[1] == nullptr ||
+        dst->src[2] == nullptr) {
+        return false;
+    }
+
+    struct ggml_custom_op_params {
+        ggml_custom_op_t fun;
+        int n_tasks;
+        void* userdata;
+    };
+    ggml_custom_op_params op_params{};
+    static_assert(sizeof(op_params) <= GGML_MAX_OP_PARAMS, "custom op params do not fit");
+    memcpy(&op_params, dst->op_params, sizeof(op_params));
+
+    const auto params = edgedit::ggml_ext::fused_where_select_params_from_userdata(op_params.userdata);
+    if (!edgedit::ggml_ext::fused_where_select_params_valid(params)) {
+        return false;
+    }
+
+    const ggml_tensor* index = dst->src[0];
+    const ggml_tensor* mod_0 = dst->src[1];
+    const ggml_tensor* mod_1 = dst->src[2];
+    if (!edgedit::ggml_ext::fused_where_select_shape_supported(dst, index, mod_0, mod_1)) {
+        return false;
+    }
+    if (!is_contiguous_f32_output(dst)) {
+        return false;
+    }
+    return true;
+}
+
+static bool ed_cuda_fused_where_select_op_compute(ggml_tensor * dst, ed_cuda_modulation_stream_t stream) {
+    if (!ed_cuda_fused_where_select_op_supported(dst)) {
+        return false;
+    }
+
+    const ggml_tensor* index = dst->src[0];
+    const ggml_tensor* mod_0 = dst->src[1];
+    const ggml_tensor* mod_1 = dst->src[2];
+
+    const int64_t total = ggml_nelements(dst);
+    constexpr int threads = 256;
+    auto cuda_stream = reinterpret_cast<cudaStream_t>(stream);
+    const int blocks = static_cast<int>((total + threads - 1) / threads);
+    fused_where_select_f32_kernel<<<blocks, threads, 0, cuda_stream>>>(
+        static_cast<const float*>(index->data),
+        static_cast<const float*>(mod_0->data),
+        static_cast<const float*>(mod_1->data),
+        static_cast<float*>(dst->data),
+        dst->ne[0],
+        dst->ne[1],
+        dst->ne[2],
+        dst->ne[3],
+        elem_stride(index, 0),
+        elem_stride(index, 1),
+        elem_stride(index, 2),
+        elem_stride(index, 3),
+        elem_stride(mod_0, 0),
+        elem_stride(mod_0, 1),
+        elem_stride(mod_0, 2),
+        elem_stride(mod_0, 3),
+        elem_stride(mod_1, 0),
+        elem_stride(mod_1, 1),
+        elem_stride(mod_1, 2),
+        elem_stride(mod_1, 3),
+        index->ne[0] == 1 ? 1 : 0,
+        index->ne[1] == 1 ? 1 : 0,
+        index->ne[2] == 1 ? 1 : 0,
+        index->ne[3] == 1 ? 1 : 0,
+        mod_0->ne[0] == 1 ? 1 : 0,
+        mod_0->ne[1] == 1 ? 1 : 0,
+        mod_0->ne[2] == 1 ? 1 : 0,
+        mod_0->ne[3] == 1 ? 1 : 0,
+        mod_1->ne[0] == 1 ? 1 : 0,
+        mod_1->ne[1] == 1 ? 1 : 0,
+        mod_1->ne[2] == 1 ? 1 : 0,
+        mod_1->ne[3] == 1 ? 1 : 0);
+    return true;
+}
+
 bool ed_cuda_fused_modulate_custom_supported(const ggml_tensor * dst) {
     return ed_cuda_fused_modulate_op_supported(dst) ||
-           ed_cuda_fused_residual_gate_op_supported(dst);
+           ed_cuda_fused_residual_gate_op_supported(dst) ||
+           ed_cuda_fused_where_select_op_supported(dst);
 }
 
 static bool ed_cuda_fused_modulate_op_compute(ggml_tensor * dst, ed_cuda_modulation_stream_t stream) {
@@ -525,5 +668,6 @@ static bool ed_cuda_fused_residual_gate_op_compute(ggml_tensor * dst, ed_cuda_mo
 
 bool ed_cuda_fused_modulate_custom_compute(ggml_tensor * dst, ed_cuda_modulation_stream_t stream) {
     return ed_cuda_fused_modulate_op_compute(dst, stream) ||
-           ed_cuda_fused_residual_gate_op_compute(dst, stream);
+           ed_cuda_fused_residual_gate_op_compute(dst, stream) ||
+           ed_cuda_fused_where_select_op_compute(dst, stream);
 }
