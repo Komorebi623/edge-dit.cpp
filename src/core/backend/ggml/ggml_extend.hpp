@@ -1458,6 +1458,13 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
         d_head    = C / n_head;
         n_kv_head = k->ne[0] / d_head;
 
+        // q/k/v may arrive as non-contiguous views (e.g. MMDiT-x dual-attention
+        // splits the second QKV projection into strided views). ggml_reshape_4d
+        // asserts contiguity, so materialize first when needed.
+        if (!ggml_is_contiguous(q)) { q = ggml_cont(ctx, q); }
+        if (!ggml_is_contiguous(k)) { k = ggml_cont(ctx, k); }
+        if (!ggml_is_contiguous(v)) { v = ggml_cont(ctx, v); }
+
         q = ggml_reshape_4d(ctx, q, d_head, n_head, L_q, N);       // [N, L_q, n_head, d_head]
         q = ggml_ext_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));  // [N, n_head, L_q, d_head]
         q = ggml_reshape_3d(ctx, q, d_head, L_q, n_head * N);      // [N * n_head, L_q, d_head]
