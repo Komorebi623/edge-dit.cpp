@@ -440,7 +440,10 @@ static bool save_mjpg_avi(const char* path, const ed_video_t& video, int fps, in
         AviIndexEntry entry{};
         std::memcpy(entry.fourcc, "00dc", 4);
         entry.flags = 0x10;
-        entry.offset = static_cast<uint32_t>(avi.size());
+        // idx1 offsets are relative to the start of the 'movi' chunk data (i.e. the
+        // byte after the "movi" FourCC), not absolute file offsets. movi_size_pos
+        // points at the LIST size field; +8 skips that size field and the "movi" tag.
+        entry.offset = static_cast<uint32_t>(avi.size() - (movi_size_pos + 8));
         entry.size = static_cast<uint32_t>(jpg.size());
 
         write_fourcc(avi, "00dc");
