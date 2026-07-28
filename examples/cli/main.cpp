@@ -92,8 +92,8 @@ static void print_usage(const char* prog) {
         "  --tensor-type-rules <csv> Per-tensor quant overrides (mixed quant), e.g. \"attn=q4_0,norm=f16\"\n"
         "                            Each rule is <name-regex>=<ggml-type-name>, comma-separated\n"
         "  --no-t5                   Skip loading T5XXL text encoder (SD3 only; reduces memory, degrades prompt adherence)\n"
-        "  --vae-tiling              Enable VAE tiled decode (reduces VRAM, default: off)\n"
-        "  --vae-tile-size <float>   VAE tile relative size, default: 2.0 (2x2 grid). Larger = finer tiles = less VRAM\n"
+        "  --vae-tiling <on|off|auto>  VAE tiled decode (reduces VRAM). auto=enable on low-VRAM GPUs (<=16G); default: auto\n"
+        "  --vae-tile-size <float>   VAE tile relative size, default: 5.0 (~32x32 tile). Larger = finer tiles = less VRAM\n"
         "  --offload-to-cpu          Keep model weights on CPU, copy to GPU per-compute (saves VRAM)\n"
         "  --keep-text-encoder-on-cpu  Run text encoder on CPU backend\n"
         "  --text-encoder-offload    Keep text-encoder weights on CPU, stage to GPU per encode (compute on GPU)\n"
@@ -637,6 +637,8 @@ int main(int argc, char** argv) {
     ctx_params.skip_t5 = args.no_t5;
     if (args.vae_tiling == 1) {
         ctx_params.vae_tiling.enabled = true;
+    } else if (args.vae_tiling == 0) {
+        ctx_params.vae_tiling.force_disable = true;  // explicit off: suppress low-VRAM auto-enable
     }
     if (args.vae_tile_size > 0.0f) {
         ctx_params.vae_tiling.enabled = true;

@@ -459,8 +459,8 @@ size_t ModelRuntime::effective_budget_bytes() const {
 
 // so consumer cards stay under their VRAM wall without a manual flag.
 void ModelRuntime::maybe_enable_vae_tiling_for_low_vram() {
-    if (vae_tiling_.enabled) {
-        return;  // user asked for tiling explicitly; respect their settings
+    if (vae_tiling_.enabled || vae_tiling_.force_disable) {
+        return;  // user explicitly set tiling on or off; respect it, skip low-VRAM auto-enable
     }
     if (backends_.vae_backend == nullptr || ggml_backend_is_cpu(backends_.vae_backend)) {
         return;  // VAE runs on CPU, GPU tiling does not apply
