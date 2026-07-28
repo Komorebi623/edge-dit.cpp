@@ -1478,6 +1478,26 @@ void ModelLoader::set_wtype_override(ggml_type wtype, std::string tensor_type_ru
              tensor_storage_map_.size());
 }
 
+size_t ModelLoader::override_component_wtype(const std::string& prefix, ggml_type dst_type) {
+    if (dst_type == GGML_TYPE_COUNT) {
+        return 0;
+    }
+    size_t changed = 0;
+    for (auto& item : tensor_storage_map_) {
+        if (item.first.rfind(prefix, 0) != 0) {
+            continue;  // not in this component
+        }
+        if (!tensor_should_be_converted(item.second, dst_type)) {
+            continue;  // biases/norms/embeds etc. stay as-is (mirrors set_wtype_override)
+        }
+        if (item.second.expected_type != dst_type) {
+            item.second.expected_type = dst_type;
+            ++changed;
+        }
+    }
+    return changed;
+}
+
 bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_threads_p, bool enable_mmap) {
     if (!on_new_tensor_cb) {
         set_error("load_tensors called without callback");

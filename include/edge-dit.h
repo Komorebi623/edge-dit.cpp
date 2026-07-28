@@ -163,6 +163,7 @@ typedef struct ed_context_params_t {
     bool keep_text_encoder_on_cpu;
     bool text_encoder_offload;  // TE weights on CPU, staged to GPU per encode (compute on GPU)
     bool auto_allocate;         // budget-capped auto placement: min(--max-vram, free) hard cap, per-component resident/offload
+    bool auto_fit;              // fully automatic: system picks DiT quantization (q8_0..q4_k) AND placement to fit budget; implies auto_allocate, ignores weight_type
     bool keep_control_net_on_cpu;
     bool keep_vae_on_cpu;
     bool skip_t5;

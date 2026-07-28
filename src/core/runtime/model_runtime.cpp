@@ -233,7 +233,11 @@ bool ModelRuntime::init_flags(const ed_context_params_t& params, std::string* er
     use_mmap_ = params.use_mmap;
     offload_params_to_cpu_ = params.offload_params_to_cpu;
     text_encoder_offload_ = params.text_encoder_offload;
-    auto_allocate_ = params.auto_allocate;
+    auto_fit_ = params.auto_fit;
+    // auto-fit is a superset of auto-allocate: it decides quantization AND placement, and
+    // the placement path (plan_component_offload) is gated on auto_allocate_. So enabling
+    // auto-fit implicitly enables auto-allocate; the user only needs one flag.
+    auto_allocate_ = params.auto_allocate || params.auto_fit;
     free_params_immediately_ = false;
     max_vram_ = params.max_vram_gb;
     max_graph_vram_bytes_ = max_vram_ <= 0.0f
@@ -344,6 +348,24 @@ bool ModelRuntime::init_backends(const ed_context_params_t& params, std::string*
 // largest / most-reused weights get first claim on resident VRAM. After all three are
 // decided the caller invokes finalize_auto_segment_budget() to set the graph VRAM
 // budget for whatever ended up offloaded, using the leftover (budget - resident).
+// Sum a component's weights using the EFFECTIVE (post-quantization) type: set_wtype_override
+// records the target type in expected_type, so nbytes() alone (which uses `type`) would
+// overestimate a q8/q4 component. Mirrors the effective-type logic in collect_wtype_stat.
+static size_t component_effective_bytes(const ::ModelLoader& loader, const std::string& weight_prefix) {
+    size_t comp_bytes = 0;
+    for (const auto& item : loader.get_tensor_storage_map()) {
+        if (item.first.rfind(weight_prefix, 0) != 0) {
+            continue;  // not in this component
+        }
+        TensorStorage ts = item.second;
+        if (ts.expected_type != GGML_TYPE_COUNT && ts.expected_type != ts.type) {
+            ts.type = ts.expected_type;  // account for quantization
+        }
+        comp_bytes += static_cast<size_t>(ts.nbytes());
+    }
+    return comp_bytes;
+}
+
 bool ModelRuntime::plan_component_offload(const ::ModelLoader& loader,
                                           const std::string& weight_prefix,
                                           size_t& remaining_free_bytes) {
@@ -358,21 +380,7 @@ bool ModelRuntime::plan_component_offload(const ::ModelLoader& loader,
         return offload_params_to_cpu_;
     }
 
-    // Sum the component's weights using the EFFECTIVE (post-quantization) type:
-    // set_wtype_override records the target type in expected_type, so nbytes() alone
-    // (which uses `type`) would overestimate a q8/q4 component. Mirror the effective
-    // -type logic used by collect_wtype_stat (model_loader.cpp).
-    size_t comp_bytes = 0;
-    for (const auto& item : loader.get_tensor_storage_map()) {
-        if (item.first.rfind(weight_prefix, 0) != 0) {
-            continue;  // not in this component
-        }
-        TensorStorage ts = item.second;
-        if (ts.expected_type != GGML_TYPE_COUNT && ts.expected_type != ts.type) {
-            ts.type = ts.expected_type;  // account for quantization
-        }
-        comp_bytes += static_cast<size_t>(ts.nbytes());
-    }
+    const size_t comp_bytes = component_effective_bytes(loader, weight_prefix);
     if (comp_bytes == 0) {
         // No weights matched this prefix (component absent) -> honor the global flag.
         return offload_params_to_cpu_;
@@ -438,6 +446,71 @@ void ModelRuntime::finalize_auto_segment_budget(size_t effective_budget_bytes) {
              max_graph_vram_bytes_ / (1024.0 * 1024.0 * 1024.0),
              effective_budget_bytes / (1024.0 * 1024.0 * 1024.0),
              resident_bytes_total_ / (1024.0 * 1024.0 * 1024.0));
+}
+
+void ModelRuntime::replan_dit_quant_for_budget(::ModelLoader& loader) {
+    // Only active under auto-fit, and only on a real GPU backend.
+    if (!auto_fit_) {
+        return;
+    }
+    if (backends_.backend == nullptr || ggml_backend_is_cpu(backends_.backend)) {
+        return;
+    }
+
+    const std::string kDiT = "model.diffusion_model";
+
+    const size_t budget = effective_budget_bytes();
+    if (budget == 0) {
+        return;
+    }
+
+    // auto-fit OWNS the DiT quantization: it ignores the user's --type and drives the DiT
+    // through the ladder q8_0 -> q4_k, picking the highest level that stays resident. On a
+    // 4090 q8_0 is the best starting point (bf16 is both larger and slower due to the
+    // FP32-accumulate penalty), so we never consider bf16.
+    const size_t bytes_before = component_effective_bytes(loader, kDiT);
+    loader.override_component_wtype(kDiT, GGML_TYPE_Q8_0);
+    const size_t q8_bytes = component_effective_bytes(loader, kDiT);
+    if (q8_bytes != bytes_before) {
+        LOG_INFO("auto-fit: DiT quant set to q8_0 (ignoring --type), %.2f GB",
+                 q8_bytes / (1024.0 * 1024.0 * 1024.0));
+    }
+
+    // DiT is decided FIRST in plan_component_offload (caller passes DiT -> TE -> VAE), so
+    // it gets first claim on the budget: it stays resident iff its weights + compute
+    // headroom fit. Mirror exactly that test (do NOT also subtract TE/VAE -- they compete
+    // for whatever is left AFTER DiT), matching plan_component_offload's
+    // `comp_bytes + kResidentComputeHeadroom <= remaining` with remaining == full budget.
+    if (budget <= kResidentComputeHeadroom) {
+        return;  // budget too small for even headroom; DiT can't be resident, leave at q8_0
+    }
+    const size_t dit_budget = budget - kResidentComputeHeadroom;
+
+    if (q8_bytes <= dit_budget) {
+        LOG_INFO("auto-fit: DiT q8_0 %.2f GB fits %.2f GB budget -> resident",
+                 q8_bytes / (1024.0 * 1024.0 * 1024.0),
+                 dit_budget / (1024.0 * 1024.0 * 1024.0));
+        return;  // q8_0 already fits -> keep it (highest precision in the ladder)
+    }
+
+    // q8_0 does not fit -> try q4_k (the floor). Keep it if it fits; else leave at q8_0
+    // and let plan_component_offload offload the DiT.
+    loader.override_component_wtype(kDiT, GGML_TYPE_Q4_K);
+    const size_t q4_bytes = component_effective_bytes(loader, kDiT);
+    if (q4_bytes <= dit_budget) {
+        LOG_INFO("auto-fit: DiT q8_0 %.2f GB -> q4_K %.2f GB to fit %.2f GB budget (resident)",
+                 q8_bytes / (1024.0 * 1024.0 * 1024.0),
+                 q4_bytes / (1024.0 * 1024.0 * 1024.0),
+                 dit_budget / (1024.0 * 1024.0 * 1024.0));
+        return;
+    }
+
+    // Even q4_k does not fit: revert to q8_0 (offloaded is better quality than a q4 that
+    // still has to offload anyway).
+    loader.override_component_wtype(kDiT, GGML_TYPE_Q8_0);
+    LOG_INFO("auto-fit: DiT does not fit %.2f GB budget even at q4_K (q4=%.2f GB) -> q8_0, will offload",
+             dit_budget / (1024.0 * 1024.0 * 1024.0),
+             q4_bytes / (1024.0 * 1024.0 * 1024.0));
 }
 
 size_t ModelRuntime::effective_budget_bytes() const {

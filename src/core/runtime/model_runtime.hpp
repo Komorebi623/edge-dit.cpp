@@ -142,6 +142,14 @@ public:
     bool plan_component_offload(const ::ModelLoader& loader,
                                 const std::string& weight_prefix,
                                 size_t& remaining_free_bytes);
+    // Auto-fit scheduler (only active under --auto-fit). Before offload planning, force
+    // the DiT ("model.diffusion_model") to the highest quant level in the ladder
+    // q8_0 -> q4_k that keeps it resident within the VRAM budget, ignoring the user's
+    // --type. On a 4090 a resident lower-quant DiT beats a higher-quant offloaded one
+    // (q4 ~= q8 in speed/quality; offload thrashes weights every step). If even q4_k does
+    // not fit, leaves the DiT at q8_0 and lets plan_component_offload offload it. No-op
+    // outside auto-fit. Takes a NON-const loader.
+    void replan_dit_quant_for_budget(::ModelLoader& loader);
     // Call once after all components are decided: sets the graph VRAM budget for offloaded
     // components to (effective_budget - resident_total - compute headroom). No-op outside
     // auto-allocate. Resets the internal resident accumulator for the next model load.
@@ -194,6 +202,7 @@ private:
     bool offload_params_to_cpu_ = false;
     bool text_encoder_offload_ = false;
     bool auto_allocate_ = false;
+    bool auto_fit_ = false;  // auto-fit: system chooses DiT quant + placement to fit budget
     size_t resident_bytes_total_ = 0;  // auto-allocate: bytes decided resident this load
     bool free_params_immediately_ = false;
 

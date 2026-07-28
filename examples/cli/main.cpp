@@ -102,6 +102,9 @@ static void print_usage(const char* prog) {
         "  --auto-allocate           Auto per-component placement under a hard VRAM cap\n"
         "                            = min(--max-vram, free); keeps components resident\n"
         "                            when they fit, offloads (segments) the rest\n"
+        "  --auto-fit                Fully automatic: choose DiT quantization (q8_0 down\n"
+        "                            to q4_k) AND placement to fit the VRAM budget.\n"
+        "                            Implies --auto-allocate; ignores --type. Off by default.\n"
         "  --flash-attention         Enable flash attention, default: on\n"
         "  --no-flash-attention      Disable flash attention\n"
         "  --cfg-parallel-size <n>   Split CFG cond/uncond branches across n GPUs, currently supports 1 or 2\n"
@@ -616,6 +619,7 @@ int main(int argc, char** argv) {
     ctx_params.keep_text_encoder_on_cpu = args.keep_text_encoder_on_cpu;
     ctx_params.text_encoder_offload = args.text_encoder_offload;
     ctx_params.auto_allocate = args.auto_allocate;
+    ctx_params.auto_fit = args.auto_fit;
     ctx_params.keep_vae_on_cpu = args.keep_vae_on_cpu;
     if (args.max_vram > 0.0f) {
         ctx_params.max_vram_gb = args.max_vram;
