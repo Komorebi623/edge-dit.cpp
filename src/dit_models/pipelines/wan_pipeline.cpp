@@ -296,6 +296,28 @@ bool WanPipeline::build_components(const ModelLoader& loader, std::string* error
     // wan's DiT is small (~1.5GB q8) so it typically stays resident. Special components
     // (high_noise / clip_vision / preview_vae, only for I2V/14B) keep the global flag.
     runtime_->reset_auto_allocate_state();
+
+    // Measure the DiT compute-buffer at the target video size (W/H/frames) for
+    // resident-headroom sizing (vs the fixed 4 GiB constant). Video activation scales
+    // with frames, so measure needs fit_frames; without it (0) we skip and fall back to
+    // the fixed headroom. Temporary WanModel spec (shapes only, no weights).
+    runtime_->set_measured_dit_headroom(0);
+    if (runtime_->auto_fit() && runtime_->fit_width() > 0 &&
+        runtime_->fit_height() > 0 && runtime_->fit_frames() > 0) {
+        auto measure_model = std::make_shared<WanModel>(
+            runtime_->backend(), false, storage, "model.diffusion_model", version_);
+        measure_model->set_flash_attention_enabled(runtime_->flash_attention());
+        const int latent_w = runtime_->fit_width() / 8;
+        const int latent_h = runtime_->fit_height() / 8;
+        const size_t measured =
+            measure_model->measure_compute_buffer_at(latent_w, latent_h, runtime_->fit_frames());
+        if (measured > 0) {
+            runtime_->set_measured_dit_headroom(measured);
+        }
+        LOG_INFO("auto-allocate: measured DiT compute buffer = %.2f GB at latent %dx%d frames=%d (fixed fallback = 4.00 GB)",
+                 measured / (1024.0 * 1024.0 * 1024.0), latent_w, latent_h, runtime_->fit_frames());
+    }
+
     const size_t eff_budget = runtime_->effective_budget_bytes();
     size_t remaining_free = eff_budget;
     const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);

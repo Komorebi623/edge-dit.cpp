@@ -4930,6 +4930,62 @@ protected:
         return true;
     }
 
+    // Measure this runner's compute buffer (activation) footprint for a given graph
+    // WITHOUT allocating any device memory or touching the real compute buffer. Used by
+    // the auto-allocate/auto-fit scheduler to size the resident headroom from the actual
+    // model+resolution instead of a fixed constant. Returns 0 on failure (caller falls
+    // back to the fixed headroom).
+    //
+    // Safe to call before alloc_params_buffer: the weight tensors exist as shapes but
+    // have data==NULL/buffer==NULL, which ggml_gallocr would otherwise COUNT as tensors
+    // needing allocation (inflating the result by the weight bytes). We temporarily set a
+    // non-null sentinel on each params_ctx tensor's ->data so the allocator treats them
+    // as externally-provided (weights excluded), then restore NULL. If params are already
+    // allocated (data/buffer set), the sentinel loop is a no-op and this measures pure
+    // activations directly. The sentinel is restored on every exit path via RAII.
+    size_t measure_compute_buffer(get_graph_cb_t get_graph) {
+        if (runtime_backend == nullptr || params_ctx == nullptr) {
+            return 0;
+        }
+
+        struct WeightSentinelGuard {
+            ggml_context* ctx;
+            std::vector<ggml_tensor*> patched;
+            explicit WeightSentinelGuard(ggml_context* c) : ctx(c) {
+                static char sentinel_byte = 0;
+                for (ggml_tensor* t = ggml_get_first_tensor(ctx); t != nullptr;
+                     t = ggml_get_next_tensor(ctx, t)) {
+                    if (t->data == nullptr && t->buffer == nullptr) {
+                        t->data = &sentinel_byte;  // any non-null pointer; never dereferenced
+                        patched.push_back(t);
+                    }
+                }
+            }
+            ~WeightSentinelGuard() {
+                for (ggml_tensor* t : patched) {
+                    t->data = nullptr;
+                }
+            }
+        } guard(params_ctx);
+
+        reset_compute_ctx();
+        ggml_cgraph* gf = get_compute_graph(get_graph);
+        if (gf == nullptr) {
+            sd::ggml_graph_cut::clear_comm_marks();
+            free_compute_ctx();
+            return 0;
+        }
+
+        ggml_gallocr_t allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(runtime_backend));
+        size_t sizes[1] = {0};
+        ggml_gallocr_reserve_n_size(allocr, gf, nullptr, nullptr, sizes);
+        const size_t buffer_size = sizes[0];
+        ggml_gallocr_free(allocr);
+
+        free_compute_ctx();  // clears backend_tensor_data_map + invalidates persistent graph
+        return buffer_size;
+    }
+
     void free_cache_buffer() {
         if (cache_buffer != nullptr) {
             ggml_backend_buffer_free(cache_buffer);

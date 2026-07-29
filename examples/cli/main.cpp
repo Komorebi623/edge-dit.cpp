@@ -620,6 +620,12 @@ int main(int argc, char** argv) {
     ctx_params.text_encoder_offload = args.text_encoder_offload;
     ctx_params.auto_allocate = args.auto_allocate;
     ctx_params.auto_fit = args.auto_fit;
+    // For auto-allocate/auto-fit compute-buffer measurement: use the requested
+    // generation size as the target resolution so the resident-headroom estimate
+    // reflects the real activation footprint. Harmless when neither mode is on.
+    ctx_params.fit_width = args.width;
+    ctx_params.fit_height = args.height;
+    ctx_params.fit_frames = args.frames;
     ctx_params.keep_vae_on_cpu = args.keep_vae_on_cpu;
     if (args.max_vram > 0.0f) {
         ctx_params.max_vram_gb = args.max_vram;

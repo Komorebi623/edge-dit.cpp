@@ -3531,6 +3531,26 @@ struct MMDiTRunner : public GGMLRunner {
         return gf;
     }
 
+    // Measure the DiT compute-buffer (activation) footprint at a target latent resolution
+    // without allocating device memory or loading weights, for the auto-fit/auto-allocate
+    // scheduler. Mirrors Flux::FluxRunner::measure_compute_buffer_at. SD3 constants are
+    // hardcoded (MMDiTRunner has-a MMDiT, cannot read its protected fields): latent
+    // channels=16, context_size=4096, adm_in_channels=2048; context tokens = clip 77 +
+    // t5 256 = 333. Returns 0 on failure (caller falls back to fixed headroom).
+    size_t measure_compute_buffer_at(int latent_w, int latent_h) {
+        if (latent_w <= 0 || latent_h <= 0) {
+            return 0;
+        }
+        sd::Tensor<float> x         = sd::zeros<float>({latent_w, latent_h, 16, 1});
+        sd::Tensor<float> timesteps = sd::zeros<float>({1});
+        sd::Tensor<float> context   = sd::zeros<float>({4096, 333, 1});
+        sd::Tensor<float> y         = sd::zeros<float>({2048, 1});
+        auto get_graph = [&]() -> ggml_cgraph* {
+            return build_graph(x, timesteps, context, y, {});
+        };
+        return measure_compute_buffer(get_graph);
+    }
+
     sd::Tensor<float> compute(int n_threads,
                               const sd::Tensor<float>& x,
                               const sd::Tensor<float>& timesteps,

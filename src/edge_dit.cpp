@@ -57,6 +57,9 @@ void ed_context_params_init(ed_context_params_t * params) {
     params->use_mmap = true;
     params->auto_allocate = false;
     params->auto_fit = false;
+    params->fit_width = 0;
+    params->fit_height = 0;
+    params->fit_frames = 0;
     params->flash_attention = true;
     params->qwen_image_zero_cond_t = false;
     params->max_vram_gb = 0.0f;
