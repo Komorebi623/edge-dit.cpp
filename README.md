@@ -18,6 +18,7 @@ edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for loc
 ## Latest News
 
 - **2026-07-29:** 🚀 Restructured the **cross-system benchmark**.
+- **2026-07-29:** 🚀 Added **`--auto-fit`** fully-automatic budgeting — one flag picks DiT quantization (`q8_0`/`q4_k`) *and* per-component placement to fit a hard VRAM budget (supersedes `--auto-allocate`).
 - **2026-07-27:** 🚀 Added **`--auto-allocate`** adaptive per-component VRAM placement under a hard budget.
 - **2026-07-27:** 🚀 Added **few-step distilled model** auto-detection (Turbo/Lightning/schnell default to 4–8 steps).
 - **2026-07-27:** 🚀 Added **unified-memory offload short-circuit** on Apple Silicon (`--offload-to-cpu` is a no-op on UMA).

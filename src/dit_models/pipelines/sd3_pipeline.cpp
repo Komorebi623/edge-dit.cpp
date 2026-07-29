@@ -121,6 +121,26 @@ bool SD3Pipeline::build_components(const ModelLoader& loader, std::string* error
 
     // Auto-allocate: seed tally with hard-cap budget min(--max-vram, free); finalize after.
     runtime_->reset_auto_allocate_state();
+
+    // Measure the DiT compute-buffer at the target resolution so the resident-headroom
+    // estimate reflects the real activation footprint (vs the fixed 4 GiB constant).
+    // Build the MMDiT spec first (shapes only, no weights loaded) to run the measure, then
+    // let it be rebuilt below with the decided offload flag. No-op unless auto_allocate +
+    // a target size is set; 0 measured -> caller falls back to fixed headroom.
+    runtime_->set_measured_dit_headroom(0);
+    if (runtime_->auto_fit() && runtime_->fit_width() > 0 && runtime_->fit_height() > 0) {
+        auto measure_model = std::make_shared<MMDiTModel>(runtime_->backend(), false, storage);
+        measure_model->set_flash_attention_enabled(runtime_->flash_attention());
+        const int latent_w = runtime_->fit_width() / 8;
+        const int latent_h = runtime_->fit_height() / 8;
+        const size_t measured = measure_model->measure_compute_buffer_at(latent_w, latent_h, 0);
+        if (measured > 0) {
+            runtime_->set_measured_dit_headroom(measured);
+        }
+        LOG_INFO("auto-allocate: measured DiT compute buffer = %.2f GB at latent %dx%d (fixed fallback = 4.00 GB)",
+                 measured / (1024.0 * 1024.0 * 1024.0), latent_w, latent_h);
+    }
+
     const size_t eff_budget = runtime_->effective_budget_bytes();
     size_t remaining_free = eff_budget;
     const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);

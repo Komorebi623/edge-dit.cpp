@@ -233,7 +233,14 @@ bool ModelRuntime::init_flags(const ed_context_params_t& params, std::string* er
     use_mmap_ = params.use_mmap;
     offload_params_to_cpu_ = params.offload_params_to_cpu;
     text_encoder_offload_ = params.text_encoder_offload;
-    auto_allocate_ = params.auto_allocate;
+    auto_fit_ = params.auto_fit;
+    // auto-fit is a superset of auto-allocate: it decides quantization AND placement, and
+    // the placement path (plan_component_offload) is gated on auto_allocate_. So enabling
+    // auto-fit implicitly enables auto-allocate; the user only needs one flag.
+    auto_allocate_ = params.auto_allocate || params.auto_fit;
+    fit_width_ = params.fit_width;
+    fit_height_ = params.fit_height;
+    fit_frames_ = params.fit_frames;
     free_params_immediately_ = false;
     max_vram_ = params.max_vram_gb;
     max_graph_vram_bytes_ = max_vram_ <= 0.0f
@@ -344,6 +351,43 @@ bool ModelRuntime::init_backends(const ed_context_params_t& params, std::string*
 // largest / most-reused weights get first claim on resident VRAM. After all three are
 // decided the caller invokes finalize_auto_segment_budget() to set the graph VRAM
 // budget for whatever ended up offloaded, using the leftover (budget - resident).
+// Sum a component's weights using the EFFECTIVE (post-quantization) type: set_wtype_override
+// records the target type in expected_type, so nbytes() alone (which uses `type`) would
+// overestimate a q8/q4 component. Mirrors the effective-type logic in collect_wtype_stat.
+size_t ModelRuntime::resident_headroom_bytes() const {
+    // Headroom = space reserved for a resident component's own compute buffer +
+    // activations (NOT bounded by the segment budget, which only covers offloaded
+    // components). Prefer the measured DiT compute buffer (real activation footprint at
+    // the target resolution) over the fixed 4 GiB constant.
+    //
+    // The DiT measure covers the DiT's activations, but the VAE decode allocates its own
+    // (larger, ~0.9 GB) compute buffer from the same budget, plus CUDA pool
+    // fragmentation. Add a fixed VAE+fragmentation allowance instead of a blind floor so
+    // the estimate tracks the measured value (small models get small headroom) while
+    // still covering the largest resident component. ~1.5 GiB covers VAE compute (~0.9)
+    // + fragmentation, and keeps flux at ~2.4 GiB (vs the old blanket 4).
+    if (measured_dit_headroom_ > 0) {
+        const size_t vae_and_frag_allowance = (static_cast<size_t>(3) * 1024 * 1024 * 1024) / 2;  // 1.5 GiB
+        return measured_dit_headroom_ + measured_dit_headroom_ / 10 + vae_and_frag_allowance;
+    }
+    return kResidentComputeHeadroom;
+}
+
+static size_t component_effective_bytes(const ::ModelLoader& loader, const std::string& weight_prefix) {
+    size_t comp_bytes = 0;
+    for (const auto& item : loader.get_tensor_storage_map()) {
+        if (item.first.rfind(weight_prefix, 0) != 0) {
+            continue;  // not in this component
+        }
+        TensorStorage ts = item.second;
+        if (ts.expected_type != GGML_TYPE_COUNT && ts.expected_type != ts.type) {
+            ts.type = ts.expected_type;  // account for quantization
+        }
+        comp_bytes += static_cast<size_t>(ts.nbytes());
+    }
+    return comp_bytes;
+}
+
 bool ModelRuntime::plan_component_offload(const ::ModelLoader& loader,
                                           const std::string& weight_prefix,
                                           size_t& remaining_free_bytes) {
@@ -358,21 +402,7 @@ bool ModelRuntime::plan_component_offload(const ::ModelLoader& loader,
         return offload_params_to_cpu_;
     }
 
-    // Sum the component's weights using the EFFECTIVE (post-quantization) type:
-    // set_wtype_override records the target type in expected_type, so nbytes() alone
-    // (which uses `type`) would overestimate a q8/q4 component. Mirror the effective
-    // -type logic used by collect_wtype_stat (model_loader.cpp).
-    size_t comp_bytes = 0;
-    for (const auto& item : loader.get_tensor_storage_map()) {
-        if (item.first.rfind(weight_prefix, 0) != 0) {
-            continue;  // not in this component
-        }
-        TensorStorage ts = item.second;
-        if (ts.expected_type != GGML_TYPE_COUNT && ts.expected_type != ts.type) {
-            ts.type = ts.expected_type;  // account for quantization
-        }
-        comp_bytes += static_cast<size_t>(ts.nbytes());
-    }
+    const size_t comp_bytes = component_effective_bytes(loader, weight_prefix);
     if (comp_bytes == 0) {
         // No weights matched this prefix (component absent) -> honor the global flag.
         return offload_params_to_cpu_;
@@ -381,20 +411,47 @@ bool ModelRuntime::plan_component_offload(const ::ModelLoader& loader,
     // All-offload fallback: if the budget can't even fit one small component plus the
     // compute headroom, nothing can stay resident safely -> offload everything (legacy
     // --offload-to-cpu behavior, safest). Prevents a tiny-budget fully-resident from overshooting.
-    if (remaining_free_bytes < kMinResidentComponentBytes + kResidentComputeHeadroom) {
+    const size_t headroom = resident_headroom_bytes();
+    if (remaining_free_bytes < kMinResidentComponentBytes + headroom) {
         LOG_INFO("auto-allocate: '%s' budget %.2f GB too small for resident+compute headroom "
                  "-> OFFLOAD (all-offload fallback)",
                  weight_prefix.c_str(),
                  remaining_free_bytes / (1024.0 * 1024.0 * 1024.0));
+        any_component_offloaded_ = true;
         return true;
     }
 
     // Resident iff weights PLUS compute headroom fit the remaining budget. The headroom
-    // (kResidentComputeHeadroom) covers the resident component's own compute buffer +
-    // activations, which are NOT bounded by the segment budget (that only bounds
-    // offloaded components). remaining_free_bytes is the running tally = effective_budget
-    // minus components already decided resident.
-    const bool fits = comp_bytes + kResidentComputeHeadroom <= remaining_free_bytes;
+    // covers the resident component's own compute buffer + activations (measured when a
+    // target resolution is known, else the fixed constant), which are NOT bounded by the
+    // segment budget (that only bounds offloaded components). remaining_free_bytes is the
+    // running tally = effective_budget minus components already decided resident.
+    bool fits = comp_bytes + headroom <= remaining_free_bytes;
+
+    // Segment-safety guard: if an earlier component was already offloaded (it streams in
+    // per-step segments), making THIS component resident shrinks the leftover segment
+    // budget = (remaining_free - comp_bytes - headroom). An offloaded component's segment
+    // needs room for its activations (~headroom) PLUS a meaningful weight chunk, or it
+    // over-commits VRAM at run time (resident set + segment peak > budget). This is what
+    // made kontext 8g overshoot: TE flipped to resident once measure shrank the headroom,
+    // squeezing the offloaded DiT's segment budget to ~1 GB. So: don't grant residency if
+    // it would drop the segment budget below a safe floor -- keep this component offloaded
+    // instead (its own offload cost is small; protecting the big DiT's segments matters
+    // more). Only active once something is already offloaded (image-only, all-resident
+    // budgets are unaffected).
+    if (fits && any_component_offloaded_) {
+        const size_t kSafeSegmentBudget = 2 * headroom;  // segment activation + a weight chunk
+        const size_t leftover_after = remaining_free_bytes - comp_bytes;  // before subtracting headroom
+        if (leftover_after < headroom + kSafeSegmentBudget) {
+            LOG_INFO("auto-allocate: '%s' %.2f GB fits but would squeeze offloaded segment budget "
+                     "(%.2f GB left < %.2f GB safe) -> OFFLOAD instead",
+                     weight_prefix.c_str(),
+                     comp_bytes / (1024.0 * 1024.0 * 1024.0),
+                     (leftover_after > headroom ? (leftover_after - headroom) : 0) / (1024.0 * 1024.0 * 1024.0),
+                     kSafeSegmentBudget / (1024.0 * 1024.0 * 1024.0));
+            fits = false;
+        }
+    }
 
     if (fits) {
         remaining_free_bytes -= comp_bytes;   // this component sits resident on GPU
@@ -410,6 +467,7 @@ bool ModelRuntime::plan_component_offload(const ::ModelLoader& loader,
              weight_prefix.c_str(),
              comp_bytes / (1024.0 * 1024.0 * 1024.0),
              remaining_free_bytes / (1024.0 * 1024.0 * 1024.0));
+    any_component_offloaded_ = true;
     return true;
 }
 
@@ -438,6 +496,91 @@ void ModelRuntime::finalize_auto_segment_budget(size_t effective_budget_bytes) {
              max_graph_vram_bytes_ / (1024.0 * 1024.0 * 1024.0),
              effective_budget_bytes / (1024.0 * 1024.0 * 1024.0),
              resident_bytes_total_ / (1024.0 * 1024.0 * 1024.0));
+}
+
+void ModelRuntime::replan_dit_quant_for_budget(::ModelLoader& loader) {
+    // Only active under auto-fit, and only on a real GPU backend.
+    if (!auto_fit_) {
+        return;
+    }
+    if (backends_.backend == nullptr || ggml_backend_is_cpu(backends_.backend)) {
+        return;
+    }
+
+    const std::string kDiT = "model.diffusion_model";
+    const std::string kTE  = "text_encoders";
+
+    const size_t budget = effective_budget_bytes();
+    if (budget == 0) {
+        return;
+    }
+
+    // auto-fit also OWNS the text-encoder quantization. TE (CLIP+T5) is often bf16 and
+    // large (~9 GB for flux's T5), but its compute time is negligible vs the DiT, so
+    // quantizing it to q8_0 is near-lossless in quality, costs no speed, and halves its
+    // footprint. Forcing TE -> q8_0 frees budget so the DiT can stay resident without the
+    // DiT+TE bf16 pair overflowing VRAM (the 24G OOM cause). Unconditional: q8_0 TE has no
+    // downside here. tensor_should_be_converted already protects embeddings/projections.
+    const size_t te_before = component_effective_bytes(loader, kTE);
+    if (te_before > 0) {
+        loader.override_component_wtype(kTE, GGML_TYPE_Q8_0);
+        const size_t te_after = component_effective_bytes(loader, kTE);
+        if (te_after != te_before) {
+            LOG_INFO("auto-fit: TE quant set to q8_0 (ignoring --type), %.2f GB -> %.2f GB",
+                     te_before / (1024.0 * 1024.0 * 1024.0),
+                     te_after / (1024.0 * 1024.0 * 1024.0));
+        }
+    }
+
+    // auto-fit OWNS the DiT quantization: it ignores the user's --type and drives the DiT
+    // through the ladder q8_0 -> q4_k, picking the highest level that stays resident. On a
+    // 4090 q8_0 is the best starting point (bf16 is both larger and slower due to the
+    // FP32-accumulate penalty), so we never consider bf16.
+    const size_t bytes_before = component_effective_bytes(loader, kDiT);
+    loader.override_component_wtype(kDiT, GGML_TYPE_Q8_0);
+    const size_t q8_bytes = component_effective_bytes(loader, kDiT);
+    if (q8_bytes != bytes_before) {
+        LOG_INFO("auto-fit: DiT quant set to q8_0 (ignoring --type), %.2f GB",
+                 q8_bytes / (1024.0 * 1024.0 * 1024.0));
+    }
+
+    // DiT is decided FIRST in plan_component_offload (caller passes DiT -> TE -> VAE), so
+    // it gets first claim on the budget: it stays resident iff its weights + compute
+    // headroom fit. Mirror exactly that test (do NOT also subtract TE/VAE -- they compete
+    // for whatever is left AFTER DiT), matching plan_component_offload's
+    // `comp_bytes + headroom <= remaining` with remaining == full budget. Use the same
+    // resident_headroom_bytes() (measured when a target resolution is known).
+    const size_t headroom = resident_headroom_bytes();
+    if (budget <= headroom) {
+        return;  // budget too small for even headroom; DiT can't be resident, leave at q8_0
+    }
+    const size_t dit_budget = budget - headroom;
+
+    if (q8_bytes <= dit_budget) {
+        LOG_INFO("auto-fit: DiT q8_0 %.2f GB fits %.2f GB budget -> resident",
+                 q8_bytes / (1024.0 * 1024.0 * 1024.0),
+                 dit_budget / (1024.0 * 1024.0 * 1024.0));
+        return;  // q8_0 already fits -> keep it (highest precision in the ladder)
+    }
+
+    // q8_0 does not fit -> try q4_k (the floor). Keep it if it fits; else leave at q8_0
+    // and let plan_component_offload offload the DiT.
+    loader.override_component_wtype(kDiT, GGML_TYPE_Q4_K);
+    const size_t q4_bytes = component_effective_bytes(loader, kDiT);
+    if (q4_bytes <= dit_budget) {
+        LOG_INFO("auto-fit: DiT q8_0 %.2f GB -> q4_K %.2f GB to fit %.2f GB budget (resident)",
+                 q8_bytes / (1024.0 * 1024.0 * 1024.0),
+                 q4_bytes / (1024.0 * 1024.0 * 1024.0),
+                 dit_budget / (1024.0 * 1024.0 * 1024.0));
+        return;
+    }
+
+    // Even q4_k does not fit: revert to q8_0 (offloaded is better quality than a q4 that
+    // still has to offload anyway).
+    loader.override_component_wtype(kDiT, GGML_TYPE_Q8_0);
+    LOG_INFO("auto-fit: DiT does not fit %.2f GB budget even at q4_K (q4=%.2f GB) -> q8_0, will offload",
+             dit_budget / (1024.0 * 1024.0 * 1024.0),
+             q4_bytes / (1024.0 * 1024.0 * 1024.0));
 }
 
 size_t ModelRuntime::effective_budget_bytes() const {

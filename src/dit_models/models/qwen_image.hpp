@@ -3269,6 +3269,26 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
             return gf;
         }
 
+        // Measure DiT compute-buffer footprint at a target latent resolution without
+        // device alloc or weight load, for the auto-fit/auto-allocate scheduler. Mirrors
+        // Flux::FluxRunner::measure_compute_buffer_at. Qwen has no pooled y / guidance /
+        // c_concat; context is required (build_graph asserts non-empty). context feature
+        // dim = joint_attention_dim (3584); token count has no fixed max, 512 is a safe
+        // conservative bound. Returns 0 on failure.
+        size_t measure_compute_buffer_at(int latent_w, int latent_h) {
+            if (latent_w <= 0 || latent_h <= 0) {
+                return 0;
+            }
+            sd::Tensor<float> x         = sd::zeros<float>({latent_w, latent_h, 16, 1});
+            sd::Tensor<float> timesteps = sd::zeros<float>({1});
+            sd::Tensor<float> context   = sd::zeros<float>(
+                {static_cast<int>(qwen_image_params.joint_attention_dim), 512, 1});
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, {}, false);
+            };
+            return measure_compute_buffer(get_graph);
+        }
+
         sd::Tensor<float> compute(int n_threads,
                                   const sd::Tensor<float>& x,
                                   const sd::Tensor<float>& timesteps,

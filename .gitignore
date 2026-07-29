@@ -54,5 +54,8 @@ outputs/
 *.mp4
 !docs/assets/*.png
 
+# local development scratch dirs (experiment outputs, reports, ad-hoc scripts)
+conv3d_fix_results/
+
 # imatrix calibration outputs (large, not for git)
 imatrix-out/

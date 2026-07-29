@@ -336,6 +336,43 @@ encoder on the CPU backend.
 These options are workload dependent. Validate output quality and latency for
 the exact model and resolution you plan to run.
 
+### Budget-driven placement (`--auto-allocate`) and full auto (`--auto-fit`)
+
+Two levels of automation size a run to a hard VRAM budget instead of tuning
+`--type` and offload flags by hand:
+
+- `--auto-allocate` — you pick the quantization (`--type`); the runtime decides,
+  per component (DiT / text encoder / VAE), what stays resident on the GPU and
+  what streams from host, so the peak stays under `--max-vram`.
+- `--auto-fit` — fully automatic. It **implies `--auto-allocate`** and, in
+  addition, chooses the quantization itself: the DiT is driven down the ladder
+  `q8_0 → q4_k` to the highest level that stays resident within the budget, the
+  text encoder is set to `q8_0` (near-lossless, halves its footprint), and
+  placement is decided as above. `--auto-fit` **ignores `--type`** (it owns the
+  quantization) and logs that it is doing so.
+
+`--auto-fit` measures each component's real compute-buffer footprint at the
+requested resolution (`-W`/`-H`, and `--frames` for video) to size the resident
+headroom, so pass the generation size you intend to use. Without a size it falls
+back to a conservative fixed headroom.
+
+```bash
+# Fully automatic under an 8 GiB budget — system picks DiT quant + placement.
+./build-cuda/bin/ed-cli \
+  --backend cuda \
+  --model /path/to/FLUX.1-dev \
+  --prompt "a glass teapot on a wooden table" \
+  --auto-fit --max-vram 8 --vae-tiling auto \
+  -W 1024 -H 1024 --steps 20 --guidance 3.5 \
+  --output flux-autofit.png
+```
+
+The largest win is a big DiT under a mid-size budget: at 16/24 GiB, Qwen-Image's
+~20 GiB transformer is kept resident at `q4_k` instead of being offloaded,
+making DiT sampling roughly 3x faster. Validated across FLUX / Kontext / SD3 /
+Qwen-Image / Qwen-Image-Edit / Wan at 24/16/8 GiB on an RTX 4090. See
+[consumer-GPU benchmarks](consumer-gpu-benchmarks.md).
+
 ### Pre-quantized GGUF with `ed-convert`
 
 `--type` quantizes weights on every load. `ed-convert` runs the quantization

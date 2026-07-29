@@ -129,6 +129,7 @@ public:
     // either the global offload flag or the TE-specific flag is set.
     bool clip_offload_params_to_cpu() const { return offload_params_to_cpu_ || text_encoder_offload_; }
     bool auto_allocate() const { return auto_allocate_; }
+    bool auto_fit() const { return auto_fit_; }
     bool free_params_immediately() const { return free_params_immediately_; }
     float max_vram() const { return max_vram_; }
     size_t max_graph_vram_bytes() const { return max_graph_vram_bytes_; }
@@ -142,14 +143,35 @@ public:
     bool plan_component_offload(const ::ModelLoader& loader,
                                 const std::string& weight_prefix,
                                 size_t& remaining_free_bytes);
+    // Auto-fit scheduler (only active under --auto-fit). Before offload planning, force
+    // the DiT ("model.diffusion_model") to the highest quant level in the ladder
+    // q8_0 -> q4_k that keeps it resident within the VRAM budget, ignoring the user's
+    // --type. On a 4090 a resident lower-quant DiT beats a higher-quant offloaded one
+    // (q4 ~= q8 in speed/quality; offload thrashes weights every step). If even q4_k does
+    // not fit, leaves the DiT at q8_0 and lets plan_component_offload offload it. No-op
+    // outside auto-fit. Takes a NON-const loader.
+    void replan_dit_quant_for_budget(::ModelLoader& loader);
     // Call once after all components are decided: sets the graph VRAM budget for offloaded
     // components to (effective_budget - resident_total - compute headroom). No-op outside
     // auto-allocate. Resets the internal resident accumulator for the next model load.
     void finalize_auto_segment_budget(size_t effective_budget_bytes);
-    void reset_auto_allocate_state() { resident_bytes_total_ = 0; }
+    void reset_auto_allocate_state() { resident_bytes_total_ = 0; any_component_offloaded_ = false; }
     // Hard-cap budget = min(user --max-vram, live free VRAM). If no --max-vram, = live free.
     // Used to seed the auto-allocate tally and finalize_auto_segment_budget. 0 if CPU backend.
     size_t effective_budget_bytes() const;
+    // Target generation resolution for compute-buffer measurement (0 = unset).
+    int fit_width() const { return fit_width_; }
+    int fit_height() const { return fit_height_; }
+    int fit_frames() const { return fit_frames_; }
+    // Auto-fit/auto-allocate: cache the measured DiT compute-buffer size (bytes) so the
+    // placement judgments use the real activation footprint instead of the fixed 4 GiB
+    // constant. Set once in the pipeline's prepare(), before plan_component_offload. 0
+    // clears it (fall back to fixed constant). See resident_headroom_bytes().
+    void set_measured_dit_headroom(size_t bytes) { measured_dit_headroom_ = bytes; }
+    // Headroom reserved for a resident component's own compute buffer + activations. Uses
+    // the measured DiT value (× fragmentation margin) when available, else the fixed
+    // kResidentComputeHeadroom constant. Defined in the .cpp (needs the constant).
+    size_t resident_headroom_bytes() const;
     bool flash_attention() const { return flash_attention_; }
     bool circular_x() const { return circular_x_; }
     bool circular_y() const { return circular_y_; }
@@ -194,7 +216,13 @@ private:
     bool offload_params_to_cpu_ = false;
     bool text_encoder_offload_ = false;
     bool auto_allocate_ = false;
+    bool auto_fit_ = false;  // auto-fit: system chooses DiT quant + placement to fit budget
+    int fit_width_ = 0;   // target gen resolution for compute-buffer measure (0 = unset)
+    int fit_height_ = 0;
+    int fit_frames_ = 0;  // target video frame count for compute-buffer measure (0 = image/unset)
+    size_t measured_dit_headroom_ = 0;  // measured DiT compute buffer (bytes); 0 = use fixed constant
     size_t resident_bytes_total_ = 0;  // auto-allocate: bytes decided resident this load
+    bool any_component_offloaded_ = false;  // auto-allocate: some component this load was offloaded (needs segment room)
     bool free_params_immediately_ = false;
 
     float max_vram_ = 0.0f;

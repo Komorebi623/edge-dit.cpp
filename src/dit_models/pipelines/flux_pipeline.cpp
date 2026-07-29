@@ -267,6 +267,32 @@ bool FluxPipeline::prepare(const ed_context_params_t& params,
     // On a 24G card a 12G flux DiT fits -> resident (no regression); only offload if it
     // genuinely does not fit the budget.
     runtime_->reset_auto_allocate_state();
+
+    // Build the transformer spec FIRST (shapes only, no weights loaded yet) so we can
+    // measure the DiT's real compute-buffer footprint at the target resolution and use it
+    // as the resident headroom, instead of a fixed 4 GiB constant. offload_params_to_cpu
+    // here only affects later param placement, not the graph shape, so passing the
+    // pre-offload-decision value is safe.
+    if (!initialize_flux_transformer_spec(loader,
+                                          runtime_->backend(),
+                                          runtime_->offload_params_to_cpu(),
+                                          error)) {
+        return false;
+    }
+    runtime_->set_measured_dit_headroom(0);
+    if (runtime_->auto_fit() && flux_runner_ != nullptr &&
+        runtime_->fit_width() > 0 && runtime_->fit_height() > 0) {
+        const int vae_scale_factor = 8;
+        const int latent_w = runtime_->fit_width() / vae_scale_factor;
+        const int latent_h = runtime_->fit_height() / vae_scale_factor;
+        const size_t measured = flux_runner_->measure_compute_buffer_at(latent_w, latent_h);
+        if (measured > 0) {
+            runtime_->set_measured_dit_headroom(measured);
+        }
+        LOG_INFO("auto-allocate: measured DiT compute buffer = %.2f GB at latent %dx%d (fixed fallback = 4.00 GB)",
+                 measured / (1024.0 * 1024.0 * 1024.0), latent_w, latent_h);
+    }
+
     const size_t eff_budget = runtime_->effective_budget_bytes();
     size_t remaining_free = eff_budget;
     const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
@@ -275,12 +301,12 @@ bool FluxPipeline::prepare(const ed_context_params_t& params,
     const bool vae_offload = runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
     runtime_->finalize_auto_segment_budget(eff_budget);
 
-    if (!initialize_flux_transformer_spec(loader,
-                                          runtime_->backend(),
-                                          diffusion_offload,
-                                          error)) {
-        return false;
-    }
+    // The spec built above for measurement used the pre-decision offload flag, which sets
+    // params_backend (GPU vs CPU). Now that diffusion_offload is decided, drop that spec
+    // so prepare_flux_runtime_weights rebuilds it with the correct placement. Rebuild is
+    // cheap (metadata ctx only, no weights loaded yet) and measurement already freed its
+    // compute ctx.
+    reset_flux_runner();
 
     return prepare_flux_runtime_weights(loader,
                                         runtime_->backend(),

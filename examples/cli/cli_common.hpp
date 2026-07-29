@@ -515,6 +515,7 @@ struct FluxCliArgs {
     bool keep_text_encoder_on_cpu = false;
     bool text_encoder_offload = false;
     bool auto_allocate = false;
+    bool auto_fit = false;
     bool keep_vae_on_cpu = false;
     float max_vram = 0.0f;
 
@@ -767,6 +768,8 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->text_encoder_offload = true;
         } else if (std::strcmp(key, "--auto-allocate") == 0) {
             args->auto_allocate = true;
+        } else if (std::strcmp(key, "--auto-fit") == 0) {
+            args->auto_fit = true;
         } else if (std::strcmp(key, "--keep-vae-on-cpu") == 0) {
             args->keep_vae_on_cpu = true;
         } else if (std::strcmp(key, "--max-vram") == 0) {

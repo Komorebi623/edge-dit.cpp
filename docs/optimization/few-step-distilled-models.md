@@ -99,7 +99,9 @@ ed-cli --backend cuda --type q8_0 --model models/qwen-image \
 ```
 
 Distilled variants distributed as LoRA adapters must be merged into the base
-weights offline before use; the CLI loads full weights, not LoRA deltas.
+weights offline before use; the CLI loads full weights, not LoRA deltas. See
+[Merging LoRA weights](merging-lora-weights.md) for which variants need this and
+a step-by-step guide.
 
 See [Command line usage](../cli.md) for the full option reference and
 [Supported models](../models.md) for per-family notes.

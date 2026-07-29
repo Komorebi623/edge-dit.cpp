@@ -102,6 +102,9 @@ static void print_usage(const char* prog) {
         "  --auto-allocate           Auto per-component placement under a hard VRAM cap\n"
         "                            = min(--max-vram, free); keeps components resident\n"
         "                            when they fit, offloads (segments) the rest\n"
+        "  --auto-fit                Fully automatic: choose DiT quantization (q8_0 down\n"
+        "                            to q4_k) AND placement to fit the VRAM budget.\n"
+        "                            Implies --auto-allocate; ignores --type. Off by default.\n"
         "  --flash-attention         Enable flash attention, default: on\n"
         "  --no-flash-attention      Disable flash attention\n"
         "  --cfg-parallel-size <n>   Split CFG cond/uncond branches across n GPUs, currently supports 1 or 2\n"
@@ -440,7 +443,10 @@ static bool save_mjpg_avi(const char* path, const ed_video_t& video, int fps, in
         AviIndexEntry entry{};
         std::memcpy(entry.fourcc, "00dc", 4);
         entry.flags = 0x10;
-        entry.offset = static_cast<uint32_t>(avi.size());
+        // idx1 offsets are relative to the start of the 'movi' chunk data (i.e. the
+        // byte after the "movi" FourCC), not absolute file offsets. movi_size_pos
+        // points at the LIST size field; +8 skips that size field and the "movi" tag.
+        entry.offset = static_cast<uint32_t>(avi.size() - (movi_size_pos + 8));
         entry.size = static_cast<uint32_t>(jpg.size());
 
         write_fourcc(avi, "00dc");
@@ -613,6 +619,13 @@ int main(int argc, char** argv) {
     ctx_params.keep_text_encoder_on_cpu = args.keep_text_encoder_on_cpu;
     ctx_params.text_encoder_offload = args.text_encoder_offload;
     ctx_params.auto_allocate = args.auto_allocate;
+    ctx_params.auto_fit = args.auto_fit;
+    // For auto-allocate/auto-fit compute-buffer measurement: use the requested
+    // generation size as the target resolution so the resident-headroom estimate
+    // reflects the real activation footprint. Harmless when neither mode is on.
+    ctx_params.fit_width = args.width;
+    ctx_params.fit_height = args.height;
+    ctx_params.fit_frames = args.frames;
     ctx_params.keep_vae_on_cpu = args.keep_vae_on_cpu;
     if (args.max_vram > 0.0f) {
         ctx_params.max_vram_gb = args.max_vram;

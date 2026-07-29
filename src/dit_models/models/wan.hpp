@@ -5008,6 +5008,35 @@ namespace WAN {
             return gf;
         }
 
+        // Measure DiT compute-buffer footprint at a target video latent size without
+        // device alloc or weight load, for the auto-fit/auto-allocate scheduler. Mirrors
+        // Flux::FluxRunner::measure_compute_buffer_at, but video adds the time/frame
+        // dimension: x is 5D {W,H,T,C,1} and T=latent_frames drives the sequence length
+        // (activation grows with t*h*w), so the frame count MUST be passed. latent_t
+        // mirrors the pipeline's latent_frames(): ((frames-1)/4)+1. TI2V-5B uses per-frame
+        // timesteps. i2v adds clip_fea cross-attn tokens. Returns 0 on failure.
+        size_t measure_compute_buffer_at(int latent_w, int latent_h, int frames) {
+            if (latent_w <= 0 || latent_h <= 0 || frames <= 0) {
+                return 0;
+            }
+            const int latent_t = ((frames - 1) / 4) + 1;
+            sd::Tensor<float> x = sd::zeros<float>(
+                {latent_w, latent_h, latent_t, static_cast<int>(wan_params.in_dim), 1});
+            sd::Tensor<float> timesteps = (version == VERSION_WAN2_2_TI2V)
+                                              ? sd::zeros<float>({latent_t})
+                                              : sd::zeros<float>({1});
+            sd::Tensor<float> context = sd::zeros<float>(
+                {static_cast<int>(wan_params.text_dim), static_cast<int>(wan_params.text_len), 1});
+            sd::Tensor<float> clip_fea;
+            if (wan_params.model_type == "i2v") {
+                clip_fea = sd::zeros<float>({1280, 257, 1});
+            }
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, clip_fea, {}, {}, {}, 1.f);
+            };
+            return measure_compute_buffer(get_graph);
+        }
+
         sd::Tensor<float> compute(int n_threads,
                                   const sd::Tensor<float>& x,
                                   const sd::Tensor<float>& timesteps,
