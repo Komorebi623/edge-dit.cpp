@@ -263,7 +263,7 @@ Full-weight distilled directory (auto step count):
   --backend cuda --type q8_0 \
   --model /path/to/sd3.5-medium-turbo \
   --steps -1 \
-  --auto-allocate --vae-tiling \
+  --auto-allocate --vae-tiling auto \
   --prompt "a glass teapot on a wooden table" \
   --output turbo.png
 ```
@@ -277,7 +277,7 @@ Distilled DiT weights combined with a base model's VAE and text encoders via
   --model /path/to/qwen-image \
   --diffusion-model /path/to/qwen-image-lightning/transformer/diffusion_pytorch_model.safetensors.index.json \
   --steps -1 --cfg-scale 1.0 \
-  --auto-allocate --vae-tiling \
+  --auto-allocate --vae-tiling auto \
   --prompt "a red apple on a wooden table" \
   --output lightning.png
 ```
@@ -314,13 +314,24 @@ Per-tensor type rules:
 Memory-oriented flags:
 
 ```text
---vae-tiling
+--vae-tiling on|off|auto
 --vae-tile-size <float>
 --offload-to-cpu
 --keep-text-encoder-on-cpu
+--text-encoder-offload
 --keep-vae-on-cpu
 --max-vram <GB>
+--auto-allocate
 ```
+
+`--vae-tiling` is tri-state `on|off|auto` and defaults to `auto`, which enables
+tiled VAE decode automatically on low-VRAM GPUs (<=16 GB); pass `off` to force
+it off. `--auto-allocate` places each component (DiT, text encoder, VAE) under a
+hard VRAM cap of `min(--max-vram, free)`, keeping a component resident when it
+fits and streaming it from host memory otherwise. `--text-encoder-offload` keeps
+text-encoder weights on the host and stages them to the GPU per encode (compute
+still runs on the GPU), unlike `--keep-text-encoder-on-cpu`, which runs the
+encoder on the CPU backend.
 
 These options are workload dependent. Validate output quality and latency for
 the exact model and resolution you plan to run.

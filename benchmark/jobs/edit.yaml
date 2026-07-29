@@ -1,27 +1,27 @@
 # image-editing benchmark manifest: cross-system compare (base + quant + offload + distilled)
-# single 24G budget: kontext / qwen-image-edit OOM bare at bf16; only baseline FP16/bf16 tiers get offload
-# quality auto-uses edit metrics: directional-CLIP / preservation-SSIM / preservation-LPIPS / aesthetic / IR
-# offload: full on all three systems; te-cpu edge-dit only
+# New schema: model lives inside each system section.
 name: edit
 task: image-editing
-models: [flux-kontext, kontext-lightning, qwen-image-edit]   # kontext-lightning is distilled
 prompts: 3
-device: 1                          # lock this job to GPU 1 (avoid multiple jobs contending for one card -> OOM)
+device: 1                          # lock this job to GPU 1
 
 edge-dit:
+  model: [flux-kontext, kontext-lightning, qwen-image-edit, qwen-image-edit-lightning]
   quant:
     - fp16
-    - {type: fp16, offload: full}     # baseline A: full offload
-    - {type: fp16, offload: te-cpu}   # baseline B: text encoder on CPU only (edge-only)
+    - {type: fp16, offload: full}
+    - {type: fp16, offload: te-cpu}
     - q8
     - q4_k
 diffusers:
+  model: [flux-kontext, kontext-lightning, qwen-image-edit, qwen-image-edit-lightning]
   quant:
     - bf16
-    - {type: bf16, offload: full}     # baseline: full offload (no te-cpu)
+    - {type: bf16, offload: full}
     - fp8
 stable-diffusion.cpp:
+  model: [flux-kontext, kontext-lightning, qwen-image-edit, qwen-image-edit-lightning]
   quant:
     - fp16
-    - {type: fp16, offload: full}     # baseline: full offload (no te-cpu)
+    - {type: fp16, offload: full}
     - q8

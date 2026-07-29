@@ -228,7 +228,7 @@ public:
                       int n_threads = 0,
                       bool use_mmap = false);
 
-    // dtype / version / stats。
+    // dtype / version / stats
     SDVersion get_ld_version();
 
     std::map<ggml_type, uint32_t> get_wtype_stat() const;

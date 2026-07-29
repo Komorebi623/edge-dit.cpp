@@ -1,0 +1,15 @@
+# Flagship of the section-scoped schema: mix a section-level model list with
+# per-entry {model, steps} overrides, so different models run different quant /
+# step counts in ONE section. Shows model/steps as section dimensions.
+name: example-per-model-mix
+task: text-to-image
+prompts: 1
+
+edge-dit:
+  model: [sd3-medium]                              # section default model
+  quant:
+    - fp16                                         # sd3-medium fp16 (section model)
+    - q8                                           # sd3-medium q8
+    - {type: q4_k, model: qwen-image, offload: full}   # only qwen-image, q4_k, offloaded
+    - {model: flux-schnell, type: fp16, steps: 4}      # only flux-schnell, 4 steps (distilled)
+    - {model: sd35-medium-turbo, type: fp16, steps: 8} # only sd3.5-turbo, 8 steps (distilled)

@@ -9,7 +9,7 @@
   on resource-constrained devices and local deployment environments.</strong>
 </p>
 
-[![Status](https://img.shields.io/badge/status-public_preview-orange)](#development-status)
+[![Status](https://img.shields.io/badge/status-public_preview-orange)](#supported-models)
 [![Backend](https://img.shields.io/badge/backend-CUDA--first-blue)](#backend-support)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](#license)
 
@@ -17,12 +17,13 @@ edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for loc
 
 ## Latest News
 
-- **2026-07-27:** 🚀 Added **`--auto-allocate`** adaptive VRAM placement — under a hard budget (`--max-vram`), the runtime decides per-component (DiT/text-encoder/VAE) what stays resident vs. streams from host, so large models run within a fixed budget on consumer GPUs. Validated across 6 families x 3 budgets (24/16/8 GiB) on an RTX 4090. See [consumer-GPU benchmarks](docs/consumer-gpu-benchmarks.md).
-- **2026-07-27:** 🚀 Added **few-step distilled model** auto-detection — Turbo/Lightning/schnell-class checkpoints are recognized and default to a 4–8 step schedule (2.5–5x fewer forwards) when `--steps` is unset, with the explicit value always taking precedence. See [few-step distilled models](docs/optimization/few-step-distilled-models.md).
-- **2026-07-27:** 🚀 **Unified-memory offload short-circuit** on Apple Silicon — `--offload-to-cpu` is a no-op on UMA (it only adds redundant copies), so it is now detected and ignored with a warning, cutting SD3 peak memory by ~3–4 GB on an M4 Pro. See [memory-efficient execution](docs/optimization/memory-efficient-execution.md#unified-memory-apple-silicon).
-- **2026-07-27:** 🚀 Added optional **SageAttention** (INT8-QK + F16-PV) for SD3 and Wan self-attention (`ED_SAGE_ATTN=1`): a loss-free, opt-in attention speedup (~5–6% on SD3). See [attention optimization](docs/optimization/graph-and-operator-optimization.md#quantized-attention-sageattention-optional).
-- **2026-07-24:** 🚀 Added **activation-calibrated imatrix quantization** to `ed-convert` (`--imatrix`): an offline calibration pass weights low-bit (q4_k) quantization toward the most important input channels. See [CLI usage](docs/cli.md#activation-calibrated-imatrix-quantization).
-- **2026-07-23:** 🚀 Added **`ed-convert`** for **offline weight quantization** — convert any supported model once into a portable, self-identifying pre-quantized GGUF, then load it directly and skip on-load quantization. Works across image, editing, and video models. See [CLI usage](docs/cli.md#pre-quantized-gguf-with-ed-convert).
+- **2026-07-29:** 🚀 Restructured the **cross-system benchmark**.
+- **2026-07-27:** 🚀 Added **`--auto-allocate`** adaptive per-component VRAM placement under a hard budget.
+- **2026-07-27:** 🚀 Added **few-step distilled model** auto-detection (Turbo/Lightning/schnell default to 4–8 steps).
+- **2026-07-27:** 🚀 Added **unified-memory offload short-circuit** on Apple Silicon (`--offload-to-cpu` is a no-op on UMA).
+- **2026-07-27:** 🚀 Added optional **SageAttention** (INT8-QK + F16-PV) for SD3/Wan attention (`ED_SAGE_ATTN=1`).
+- **2026-07-24:** 🚀 Added **activation-calibrated imatrix quantization** to `ed-convert` (`--imatrix`).
+- **2026-07-23:** 🚀 Added **`ed-convert`** for offline weight quantization to portable pre-quantized GGUF.
 - **2026-07-11:** 🚀 **edge-dit.cpp v0.1.0-alpha** enters **public preview**.
 - **2026-07-08:** 🚀 Added the **managed development console** for the
   **Python job server**.
@@ -139,41 +140,16 @@ The v0.x API, ABI, CLI flags, and HTTP schemas are public but not yet stable.
 
 Clone the repository with submodules:
 
-After the first clone, fetch the submodules (ggml + oneDNN):
-
-```bash
-git submodule update --init --recursive
-```
-
-The CPU backend uses oneDNN to provide bf16 AMX matmul acceleration (source in `third_party/onednn`, pinned to v3.7).
-Build oneDNN first (only once, installed to `third_party/onednn/install`), then build edge-dit:
-
-```bash
-bash ./scripts/build_onednn.sh   # build oneDNN (Release/THREADPOOL/UKERNEL), a few minutes
-bash ./scripts/build_cpu.sh      # auto-detects the install above and enables GGML_ONEDNN
-```
-
-`build_cpu.sh` automatically finds dnnl in `third_party/onednn/install`; use `ED_ONEDNN=0 bash ./scripts/build_cpu.sh`
-to disable oneDNN (falling back to stock ggml, slower but with no external dependency). If at runtime it reports that `libdnnl.so` cannot be found, add:
-`LD_LIBRARY_PATH=third_party/onednn/install/lib64`。
-
 ```bash
 git clone --recursive https://github.com/THU-MIG/edge-dit.cpp
 cd edge-dit.cpp
 ```
 
-If the repository was cloned without submodules:
+If the repository was cloned without submodules (for example from a source ZIP
+archive), fetch them with:
 
 ```bash
 bash scripts/bootstrap.sh
-```
-
-When updating an existing checkout, pull the superproject and submodule state
-together:
-
-```bash
-git pull --recurse-submodules
-git submodule update --init --recursive
 ```
 
 Build the default CUDA performance profile:
@@ -206,7 +182,12 @@ optimized CUDA path and automatically handles user-space dependencies when
 possible. For CI or dependency-limited environments, see the optional `minimal`
 profile in [Build and installation](docs/build.md).
 
-For full build options and command-line usage, see:
+For a CPU build, run `bash scripts/build_cpu.sh`; it auto-enables oneDNN bf16
+AMX matmul acceleration when `third_party/onednn` has been built into
+`third_party/onednn/install`, and can be forced off with `ED_ONEDNN=0`.
+
+For full build options (CPU, Metal, Vulkan, and updating an existing checkout)
+and command-line usage, see:
 
 - [Build and installation](docs/build.md)
 - [Command line usage](docs/cli.md)

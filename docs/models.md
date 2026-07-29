@@ -139,13 +139,19 @@ Per-tensor overrides are available with:
 Memory-oriented options:
 
 ```bash
---vae-tiling
+--vae-tiling on|off|auto
 --vae-tile-size <float>
 --offload-to-cpu
 --keep-text-encoder-on-cpu
 --keep-vae-on-cpu
+--auto-allocate
 --max-vram <GB>
 ```
+
+`--vae-tiling` takes an explicit `on|off|auto` value. Under `--auto-allocate`
+with a `--max-vram` budget, the runtime decides per component (diffusion
+transformer, text encoder, VAE) what stays resident on the GPU and what streams
+from host memory, so large models can run within a fixed VRAM budget.
 
 See [Command line usage](cli.md#quantization-and-memory) for runnable examples
 and [Performance and optimization](performance.md) for cache, parallelism, and

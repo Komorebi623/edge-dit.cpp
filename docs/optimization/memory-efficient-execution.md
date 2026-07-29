@@ -103,6 +103,27 @@ repeated CPU-to-GPU transfers. It is therefore a memory-for-bandwidth trade:
 most valuable when weights would not otherwise fit, and counterproductive when
 device memory is already sufficient.
 
+### Staged text-encoder offload
+
+`--text-encoder-offload` applies the same stage-per-use pattern to the text
+encoders specifically: their weights are kept in CPU memory and staged onto the
+GPU only for the encode pass, then released, while the encode itself still runs
+on the GPU. This differs from `--keep-text-encoder-on-cpu` (Section 2), which
+runs the encoder on the CPU backend. Staging keeps the faster GPU compute while
+freeing the encoder's device residency between conditioning phases.
+
+### Automatic placement (`--auto-allocate`)
+
+Rather than deciding offload per component by hand, `--auto-allocate` fits
+components against a hard VRAM budget of `min(--max-vram, live free VRAM)`.
+Components are considered in priority order — diffusion transformer, then text
+encoders, then VAE — and each is placed resident on the GPU if its
+(post-quantization) weights plus a compute-headroom reserve still fit the
+remaining budget; otherwise it is offloaded. After placement, the leftover
+budget becomes the graph VRAM budget (Section 4) for whatever was offloaded, so
+the largest, most-reused weights get first claim on resident VRAM and the rest
+is graph-segmented to stay within the cap.
+
 ### Unified memory (Apple Silicon)
 
 On Apple Silicon the CPU and GPU share the same physical memory, so staging
@@ -157,9 +178,10 @@ together, so that only one tile's workspace is allocated at a time.
 
 Tiling is controlled by a relative tile size and a target overlap:
 
-- The relative tile size expresses how many tiles span each dimension. A value
-  of `2.0` corresponds to roughly a 2×2 tile grid, while a larger value such as
-  `4.0` produces a finer grid of smaller tiles and a correspondingly lower peak.
+- The relative tile size expresses how many tiles span each dimension. The
+  default is `5.0` (roughly a 5×5 grid, about a 32×32 latent tile, which
+  minimizes the VAE peak empirically); a smaller value such as `2.0` gives a
+  coarser 2×2 grid with a higher peak.
 - The target overlap is the fractional overlap between neighboring tiles,
   clamped to a sensible range. Overlap exists so that tile boundaries can be
   blended smoothly.
@@ -191,12 +213,12 @@ compose. A typical constrained-device configuration layers several of them:
 ```bash
 # Constrained GPU: quantize weights, drop T5, tile the VAE, keep encoders on CPU
 ./build-cuda/bin/ed-cli --backend cuda --model /path/to/sd3 \
-  --type q4_k --no-t5 --vae-tiling --keep-text-encoder-on-cpu \
+  --type q4_k --no-t5 --vae-tiling on --keep-text-encoder-on-cpu \
   -p "a glass teapot on a wooden table" -W 1024 -H 1024 --steps 20 -o output.png
 
 # Very constrained GPU: full offload with a graph VRAM budget
 ./build-cuda/bin/ed-cli --backend cuda --model /path/to/sd3 \
-  --type q4_k --no-t5 --vae-tiling --offload-to-cpu --max-vram 4 \
+  --type q4_k --no-t5 --vae-tiling on --offload-to-cpu --max-vram 4 \
   -p "a glass teapot on a wooden table" -W 512 -H 512 --steps 20 -o output.png
 ```
 
@@ -216,8 +238,10 @@ exact model and resolution being targeted.
 | `--offload-to-cpu` | Keep weights in CPU memory and stage them onto the GPU for compute |
 | `--keep-text-encoder-on-cpu` | Place the text encoders on the CPU backend |
 | `--keep-vae-on-cpu` | Place the VAE on the CPU backend |
-| `--max-vram <GB>` | Compute-graph VRAM budget; drives graph-cut segmentation (used with offload) |
-| `--vae-tiling` | Enable VAE tiling with the default relative tile size |
+| `--text-encoder-offload` | Keep text-encoder weights in CPU memory and stage them onto the GPU per encode (compute still runs on the GPU), unlike `--keep-text-encoder-on-cpu` which runs the encoder on the CPU |
+| `--auto-allocate` | Budget-capped automatic placement: fit components (DiT, then text encoders, then VAE) resident on the GPU under a hard `min(--max-vram, free VRAM)` cap, offloading and graph-segmenting whatever does not fit |
+| `--max-vram <GB>` | Compute-graph VRAM budget; drives graph-cut segmentation (used with offload or `--auto-allocate`) |
+| `--vae-tiling <on\|off\|auto>` | VAE tiling: `on` forces it, `off` forces it off (suppressing the low-VRAM auto-enable), `auto` (the default) enables it only on lower-VRAM GPUs (<=25 GiB total) |
 | `--vae-tile-size <float>` | Enable VAE tiling and set the relative tile size (larger value = finer grid) |
 | `--no-t5` | Skip loading the T5 text encoder (SD3-family only) |
 
@@ -228,10 +252,14 @@ These map to fields on `ed_context_params_t`:
 - `bool offload_params_to_cpu` — parameter offload.
 - `bool keep_text_encoder_on_cpu`, `bool keep_vae_on_cpu` — per-component CPU
   placement.
+- `bool text_encoder_offload` — stage text-encoder weights to the GPU per
+  encode instead of running the encoder on the CPU.
+- `bool auto_allocate` — budget-capped automatic per-component placement.
 - `float max_vram_gb` — graph VRAM budget in gigabytes; `0` disables it.
 - `bool skip_t5` — skip the T5 text encoder.
 - `ed_tiling_params_t vae_tiling` — VAE tiling configuration, with
-  `enabled`, `rel_size_x` / `rel_size_y` (relative tile size, default `2.0`),
+  `enabled`, `force_disable` (explicit off; suppresses the low-VRAM auto-enable),
+  `rel_size_x` / `rel_size_y` (relative tile size, default `5.0`),
   `target_overlap` (default `0.25`), and `tile_size_x` / `tile_size_y`
   (absolute, used only when a relative size is not set).
 

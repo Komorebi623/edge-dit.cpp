@@ -51,6 +51,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--diffusion-model", default=None, help="standalone DiT transformer weights (distilled models); --model then points to the base")
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--task", required=True, choices=["text-to-image", "image-editing", "text-to-video"])
@@ -185,6 +186,10 @@ def build_command(args: argparse.Namespace, output: Path) -> list[str]:
         args.backend,
         "--model",
         args.model,
+    ]
+    if args.diffusion_model:
+        command += ["--diffusion-model", args.diffusion_model]
+    command += [
         "--prompt",
         args.prompt,
         "--width",

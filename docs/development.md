@@ -15,7 +15,7 @@ src/core/backend/                     ggml and CUDA/cuDNN integration
 src/core/parallel/                    CFG/SP process-group infrastructure
 src/core/optimization/cache/          Cache runtime, policies, and contracts
 src/dit_models/                       Model and pipeline implementations
-examples/cli/                         ed-cli and ed-sample
+examples/cli/                         ed-cli, ed-sample, and ed-convert
 examples/server/                      Native HTTP server
 bindings/python/                      Python package, tests, server_v2, console
 scripts/                              Build, bootstrap, validation, release tools

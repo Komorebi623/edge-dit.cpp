@@ -66,11 +66,11 @@ Placed in a system section's `cache:` list (scalar single tier / list to sweep).
 | capability | edge-dit.cpp | diffusers | stable-diffusion.cpp |
 |---|---|---|---|
 | role | primary (main subject) | python_reference (reference) | native_baseline (native baseline) |
-| tasks | t2i / editing / t2v | t2i / editing / t2v | t2i / editing / t2v |
+| tasks | t2i / editing / t2v | t2i / editing / t2v | t2i / editing / t2v (**Wan: see note**) |
 | backends | cuda / cpu / metal / vulkan | **cuda only** | cuda / cpu / metal / vulkan |
 | parallel | cfg / sequence | — | — |
 | memory_modes | quantization / cpu_offload / component_placement (TE-offload) / vae_tiling / graph_cut | torch_dtype / cpu_offload (whole) / attention_backend | quantization / offload (whole) / vae_tiling / graph_cut |
 
-All three systems cover all three tasks (text-to-image / image-editing / text-to-video). edge-dit.cpp is the most capable tier (four backends + multi-GPU parallelism + the most memory modes); diffusers, as the Python reference, is CUDA-only with quantization via torch_dtype/Quanto; sd.cpp is the native baseline, four backends + quantization/offload/VAE tiling, but no multi-GPU parallelism and no exclusive cache.
+All three systems cover all three tasks (text-to-image / image-editing / text-to-video). edge-dit.cpp is the most capable tier (four backends + multi-GPU parallelism + the most memory modes); diffusers, as the Python reference, is CUDA-only with quantization via torch_dtype/Quanto; sd.cpp is the native baseline, four backends + quantization/offload/VAE tiling, but no multi-GPU parallelism and no exclusive cache. **Note on Wan: stable-diffusion.cpp DOES support Wan, but it needs component-separated loading (--diffusion-model + --vae + --t5xxl, with -M vid_gen). This benchmark runner currently passes a single --model directory, which Wan does not accept ("get sd version from file failed"). So Wan is not benchmarkable on the stable-diffusion.cpp side until the runner implements component-separated loading; do not put Wan in a stable-diffusion.cpp section for now.**
 
 > A method's `kind`/`needs calibration`/description is authoritative in `methods/<category>/<id>.yaml`; cross-system attribution is authoritative in its `cross_system` field (this table is aggregated from it). After adding a method/system, please sync this table.

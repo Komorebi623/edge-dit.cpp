@@ -110,7 +110,7 @@ def die(msg: str) -> None:
 def load_job(path: Path) -> dict:
     """Parse a per-system job manifest.
 
-    Top-level shared fields: name, task, models, prompts, steps, metrics.
+    Top-level shared fields: name, task, prompts, steps, metrics, device.
     Each benchmarked system is its own section keyed by a system alias
     (edge-dit / diffusers / stable-diffusion.cpp / sdcpp); a section carries that
     system's own quant (required) + offload / vae_tiling / cache. A system with no
@@ -118,7 +118,7 @@ def load_job(path: Path) -> dict:
     matrix with per-system quant tiers (edge q8_0 vs diffusers fp8) in one run.
     """
     job = load_yaml(path)
-    for req in ("name", "task", "models"):
+    for req in ("name", "task"):
         if req not in job:
             die(f"job missing required field: {req}")
     job.setdefault("prompts", 3)
@@ -133,6 +133,8 @@ def load_job(path: Path) -> dict:
             seg = dict(val or {})
             if "quant" not in seg:
                 die(f"system section '{key}' missing required field: quant")
+            if "model" not in seg:
+                die(f"system section '{key}' missing required field: model")
             seg.setdefault("offload", "none")
             seg.setdefault("vae_tiling", "auto")
             seg.setdefault("cache", "none")
@@ -209,15 +211,9 @@ def build_workload(model: dict, task: str, steps, pset_map: dict, pset_file: Pat
     """In-memory workload dict for runner.execute(). Mirrors what config.py used to
     load + inject, but built directly (no suite, no yaml round-trip)."""
     gen = dict(model.get("generation", {}))
-    # steps: "default" = each model's own generation.steps; a number = global override;
-    # a dict {model_id: N, default: N} = per-model override (falls back to the model's own).
-    if isinstance(steps, dict):
-        mid = model["model_id"]
-        if mid in steps:
-            gen["steps"] = int(steps[mid])
-        elif "default" in steps:
-            gen["steps"] = int(steps["default"])
-    elif steps != "default":
+    # steps: "default" = the model's own generation.steps; a number = explicit override.
+    # (per-model / per-run selection happens at expansion time; here steps is a single value.)
+    if steps is not None and steps != "default":
         gen["steps"] = int(steps)
     gen.setdefault("frames", 1)
     gen.setdefault("seed", 0)
@@ -339,31 +335,44 @@ def main() -> None:
     plan: list[dict] = []  # each: {system_id, runner_key, workload, run_options, run_dir, run_id}
     seen_calib: set = set()  # (model, quant, cache) -> one calibration run regardless of offload
     skips: list = []  # (system, method) combos skipped because cross_system doesn't support them
-    for mid in job["models"]:
+    model_cache: dict = {}
+    def get_model_bundle(mid, steps):
+        # (mid, steps) -> (model, workload, pset_map, pids). model/prompts are steps-independent
+        # but workload bakes in steps, so key by both.
+        key = (mid, steps)
+        if key in model_cache:
+            return model_cache[key]
         model = load_model(mid)
         if model.get("task") != task:
             die(f"model {mid} is task={model.get('task')}, job task={task}")
         pset_file = prompt_set_path(model)
         pset_map = load_prompt_set(pset_file)
         pids = first_prompt_ids(pset_map, int(job["prompts"]))
-        workload = build_workload(model, task, job["steps"], pset_map, pset_file)
+        workload = build_workload(model, task, steps, pset_map, pset_file)
+        model_cache[key] = (model, workload, pset_map, pids)
+        return model_cache[key]
 
-        for system_id, seg in segments.items():
-            sys_cfg = load_system(system_id)
-            runner_key = sys_cfg.get("runner")
-            if runner_key not in RUNNERS:
-                die(f"system '{system_id}' has unknown runner '{runner_key}'")
-            for raw_q in seg["quant"]:
-                q = normalize_quant(raw_q)          # id string or {type, offload, vae_tiling, cache}
-                quant_id = q["type"]
-                method = resolve_method("quant", quant_id)
-                if not method_supports(method, system_id):
-                    skips.append(f"{system_id}: quant '{quant_id}' not supported (cross_system), skipped")
-                    continue
-                # per-quant override wins over the segment default; else sweep the segment list
-                offloads = [q["offload"]] if "offload" in q else as_list(seg["offload"])
-                caches = [q["cache"]] if "cache" in q else as_list(seg["cache"])
-                vtile = q.get("vae_tiling", seg["vae_tiling"])
+    for system_id, seg in segments.items():
+        sys_cfg = load_system(system_id)
+        runner_key = sys_cfg.get("runner")
+        if runner_key not in RUNNERS:
+            die(f"system '{system_id}' has unknown runner '{runner_key}'")
+        for raw_q in seg["quant"]:
+            q = normalize_quant(raw_q)  # id string or {type, model, offload, vae_tiling, cache, steps}
+            quant_id = q["type"]
+            method = resolve_method("quant", quant_id)
+            if not method_supports(method, system_id):
+                skips.append(f"{system_id}: quant '{quant_id}' not supported (cross_system), skipped")
+                continue
+            # per-quant object overrides win over the segment default; else sweep the segment list.
+            # model / offload / cache / steps are all section dimensions with the same rule.
+            models = [q["model"]] if "model" in q else as_list(seg["model"])
+            offloads = [q["offload"]] if "offload" in q else as_list(seg["offload"])
+            caches = [q["cache"]] if "cache" in q else as_list(seg["cache"])
+            vtile = q.get("vae_tiling", seg["vae_tiling"])
+            steps = q.get("steps", seg.get("steps", job["steps"]))
+            for mid in models:
+                model, workload, pset_map, pids = get_model_bundle(mid, steps)
                 for offload in offloads:
                     for cache_id in caches:
                         if cache_id and cache_id != "none" and not method_supports(
@@ -409,9 +418,16 @@ def main() -> None:
                             })
 
     n_bench = sum(1 for p in plan if not p.get("is_calib"))
+    all_models = set()
+    for seg in segments.values():
+        all_models.update(as_list(seg["model"]))
+        for raw_q in seg["quant"]:
+            qq = normalize_quant(raw_q)
+            if "model" in qq:
+                all_models.add(qq["model"])
     print(f"[run.py] expanded {n_bench} runs "
-          f"({len(job['models'])} models x {len(segments)} systems x "
-          f"{int(job['prompts'])} prompts + per-system quant/offload/cache)")
+          f"({len(all_models)} models x {len(segments)} systems x "
+          f"{int(job['prompts'])} prompts; per-section model/quant/offload/cache/steps)")
     for s in dict.fromkeys(skips):  # de-dup (same skip repeats across models)
         print(f"[run.py] skip → {s}")
 

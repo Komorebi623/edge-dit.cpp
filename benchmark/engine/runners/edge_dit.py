@@ -87,8 +87,17 @@ class EdgeDitRunner(BenchmarkRunner):
                 measured_runs,
             )
         sample_binary = self.edge_sample_binary(run_options)
-        model_ref = workload["model"]["local_path_ref"]
+        # Distilled transformer-only models: --model points to the base (text_encoder/vae/
+        # scheduler), --diffusion-model points to the standalone transformer weights.
+        base_ref = workload["model"].get("base_model_ref")
+        if base_ref:
+            model_ref = base_ref
+            diffusion_ref = workload["model"]["local_path_ref"]
+        else:
+            model_ref = workload["model"]["local_path_ref"]
+            diffusion_ref = None
         model_path = self.resolve_path(model_ref)
+        diffusion_path = self.resolve_path(diffusion_ref) if diffusion_ref else None
         if sample_binary is None:
             raise NotImplementedError("edge-dit path references are not resolved")
         if model_path is None or not model_path.exists():
@@ -104,6 +113,7 @@ class EdgeDitRunner(BenchmarkRunner):
             str(sample_binary),
             "--model",
             str(model_path),
+            *( ["--diffusion-model", str(diffusion_path)] if diffusion_path else [] ),
             "--prompt",
             prompt,
             "--output-dir",
@@ -151,8 +161,17 @@ class EdgeDitRunner(BenchmarkRunner):
         measured_runs: int,
     ) -> list[str]:
         binary = self.edge_cli_binary(run_options)
-        model_ref = workload["model"]["local_path_ref"]
+        # Distilled transformer-only models: --model points to the base (text_encoder/vae/
+        # scheduler), --diffusion-model points to the standalone transformer weights.
+        base_ref = workload["model"].get("base_model_ref")
+        if base_ref:
+            model_ref = base_ref
+            diffusion_ref = workload["model"]["local_path_ref"]
+        else:
+            model_ref = workload["model"]["local_path_ref"]
+            diffusion_ref = None
         model_path = self.resolve_path(model_ref)
+        diffusion_path = self.resolve_path(diffusion_ref) if diffusion_ref else None
         if binary is None:
             raise NotImplementedError("edge-dit path references are not resolved")
         if model_path is None or not model_path.exists():
@@ -168,6 +187,7 @@ class EdgeDitRunner(BenchmarkRunner):
             str(binary),
             "--model",
             str(model_path),
+            *( ["--diffusion-model", str(diffusion_path)] if diffusion_path else [] ),
             "--prompt",
             prompt,
             "--output-dir",
@@ -225,8 +245,17 @@ class EdgeDitRunner(BenchmarkRunner):
     ) -> list[str]:
         run_options = run_options or {}
         binary = self.edge_cli_binary(run_options)
-        model_ref = workload["model"]["local_path_ref"]
+        # Distilled transformer-only models: --model points to the base (text_encoder/vae/
+        # scheduler), --diffusion-model points to the standalone transformer weights.
+        base_ref = workload["model"].get("base_model_ref")
+        if base_ref:
+            model_ref = base_ref
+            diffusion_ref = workload["model"]["local_path_ref"]
+        else:
+            model_ref = workload["model"]["local_path_ref"]
+            diffusion_ref = None
         model_path = self.resolve_path(model_ref)
+        diffusion_path = self.resolve_path(diffusion_ref) if diffusion_ref else None
         if binary is None:
             raise NotImplementedError("edge-dit path references are not resolved")
         if model_path is None or not model_path.exists():
@@ -241,6 +270,7 @@ class EdgeDitRunner(BenchmarkRunner):
             "cuda",
             "--model",
             str(model_path),
+            *( ["--diffusion-model", str(diffusion_path)] if diffusion_path else [] ),
             "--prompt",
             prompt,
             "--width",

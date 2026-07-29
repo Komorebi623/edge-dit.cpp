@@ -1,0 +1,20 @@
+schema_version: 1
+model_id: qwen-image-edit-lightning
+model_family: Qwen-Image-Edit
+model_name: Qwen-Image-Edit Lightning (8-step)
+task: image-editing
+distilled: true                        # distilled, few steps
+model:
+  public_id: lightx2v/Qwen-Image-Edit-Lightning
+  local_path_ref: qwen_image_edit_lightning_weights  # site -> distilled/qwen-image-edit-lightning-merged/dit/...index.json
+  format: transformer-weights-file      # merged transformer index (needs rest of qwen-image-edit base components)
+  base_model_ref: qwen_image_edit_dir   # base provides text_encoder/vae/scheduler
+prompt_set: ../prompts/image-editing-v1.jsonl
+input_image_ref: edit_input_image      # edit-task input image, path resolved in site
+generation:
+  width: 1024
+  height: 1024
+  steps: 8                             # Lightning 8-step default
+  guidance: 1.0
+  cfg_scale: 1.0                        # Lightning single forward pass
+  scheduler: model-default

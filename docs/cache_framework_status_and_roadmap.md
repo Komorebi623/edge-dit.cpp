@@ -23,10 +23,15 @@ vs. gaps". All "not load-bearing / dead code" assertions in the text have been v
 > **Latest progress (2026-07-15): the decoupling of the cache layer from the model layer is complete.** A batch of commits after 07-14
 > finished the "dehook" work that was originally listed as "weeks-scale, terminal state": the model forward no longer
 > knows any cache concept, and instead calls the conditional `tap()` of `TapRegistry` at structural landmarks; the old
-> `CacheGraphScope` seam has been **deleted wholesale** (commit `cd0c9b7`, `-1667` lines), and the `ED_CACHE_SUBSTEP`
+> `CacheGraphScope` seam has been **deleted wholesale**, and the `ED_CACHE_SUBSTEP`
 > gate disappeared along with it -- **the substep loop became the only execution path**. §2.6, §4, §5 below have been rewritten accordingly;
 > in §5's three-layer roadmap, the first two layers (StateManager / Operator) plus the original "Slice 4 dehook" have all landed,
 > leaving only layer 3 (GraphRepository) and the SP+cache composition undone.
+>
+> **Follow-up (late 07): every method now has an on-device path.** SenCache reuse was routed onto the device
+> single-residual slot and TaylorSeer's feature-history reuse onto the device ring, so no method is disabled on device-only runners (Flux/Qwen) any more — only SP still limits them
+> to Output granularity (§4.1). The DiCache probe was pinned to no-return, and `CacheGraphLowering` was folded into `CacheEngine` as `run_substep_loop`
+>; the removed `ED_*_GPU` toggles leave the device path as the only path.
 
 > **Terminology: load-bearing vs. scaffolding.** "Load-bearing" means the component is called on the real inference path and removing it would change behavior;
 > "scaffolding" means code that is implemented but currently has no caller, and removing it does not affect any existing functionality. One of the core conclusions of this document
@@ -60,7 +65,8 @@ fallback. The error message lists the sites the model actually exposes (`exposed
 
 ### 2.4 Three granularities (load-bearing)
 
-In `execute_substeps` of `cache_graph_lowering.cpp`, dispatch is done by `SubstepOpKind` (the policy's
+In `run_substep_loop` of `cache_engine.cpp` (the former `CacheGraphLowering::execute_substeps`, folded
+into `CacheEngine` with no behavior change), dispatch is done by `SubstepOpKind` (the policy's
 `next_substep()` produces a `SubstepPlan` substep by substep, which the middle layer translates into a tap-driven runner pass):
 
 - **Output**: black box, uses only `hooks.full()` + host-side output diff/reuse, also usable under SP;
@@ -94,13 +100,13 @@ The original design doc listed "fully dehook" as the terminal state, a weeks-sca
   buffers, gallocr unaware. Which tensors the cache needs to read is decided by the per-substep `SubstepPlan.taps`,
   not by model enumeration fields. inject (reuse injection) also goes through the registry: the forward replaces the stream
   at `inject_at(i)` and jumps to `inject_resume()`.
-- **The `CacheGraphScope` seam has been deleted wholesale** (commit `cd0c9b7`, `-1667` lines): the old fixed `*_node`
+- **The `CacheGraphScope` seam has been deleted wholesale**: the old fixed `*_node`
   fields, `kCache*Name` constants, `expand_cache_scope_nodes`, the runner's `cache_scope_` member +
   `set_cache_scope`, and the `DiCacheGpuState` standalone GPU state path have all been removed. Only a pure result struct
   `sd::DiffusionCacheResult` remains (host-readback output/feature/before/probe + DiCache scalar).
 - **substep is the only path**: the `ED_CACHE_SUBSTEP` gate disappeared, `run_branch` unconditionally goes through
-  `CacheGraphLowering::execute_substeps` (`cache_engine.cpp:196`); the old `execute` and its
-  large hook if/else have been deleted (commit `a2831c6`, `-444` lines). All 8 methods implement `next_substep()`.
+  `run_substep_loop` (`cache_engine.cpp:786`); the old `execute` and its
+  large hook if/else have been deleted. All 8 methods implement `next_substep()`.
 - **DiCache probe has also been tap-ified**: the checklist item once marked "probe not migrated" is complete -- the probe's
   cross-step persistent tensors (prev_probe/probe_prev1/2) are threaded into indicator lowering via
   `TapRegistry::ProbeMetricOperands`, and delta_y/delta_x/gamma are reduced in-graph then read back as scalars.
@@ -133,7 +139,7 @@ The original design doc listed "fully dehook" as the terminal state, a weeks-sca
   site. The `CachePhase::{FULL_ANCHOR,CORRECTION,REINTEGRATION}` in `cache_program.hpp`
   are only placeholders; in practice only `FORWARD/PROBE` are used (stages three/four of the `redesign` doc are not done).
 - **Feature/Probe are entirely disabled under SP-parallel**: `feature_cache_available()` is defined as
-  `!can_attempt_graph_cut_segmented_compute()` (`ggml_extend.hpp:6472-6473`), and the latter is true whenever
+  `!can_attempt_graph_cut_segmented_compute()` (`ggml_extend.hpp:6991-6992`), and the latter is true whenever
   "any process group is enabled" -- so pure SP also disables the tap capture path (the pipeline passes
   `cache_seam_available = !cfg_parallel && feature_cache_available()` into `CacheEngine::init`),
   leaving only Output granularity under SP. This is the direct manifestation that the engine's two big selling points (multi-GPU parallel + step caching) currently cannot be stacked,
@@ -150,10 +156,10 @@ The original design doc listed "fully dehook" as the terminal state, a weeks-sca
 The design doc's three most ambitious declarative machines have advanced from "only the decision layer landed" -- **the first two are now load-bearing**:
 
 - **`CacheStateManager` is load-bearing (history ring + device slot backend)**: `CacheEngine::init` passes
-  `state_` into `CacheGraphLowering::execute_substeps` (`cache_engine.cpp:196`), and the lowering's
+  `state_` into `run_substep_loop` (`cache_engine.cpp:786`), and the runner's
   `ActionInterpreter` really calls `state_.read_history` / `state_.write` / `state_.rotate_history`
-  (`cache_graph_lowering.cpp`), with the device-slot path calling `state.read` + `state.alloc_device_entry`.
-  TaylorSeer's derivative-history ring and MagCache/Qwen's **device-side single residual slot** all run on top of it.
+  (`cache_engine.cpp`), with the device-slot path calling `state.read` + `state.alloc_device_entry`.
+  TaylorSeer's feature-history ring (host, or on-device on a GPU runner with a store) and MagCache/SenCache's **device-side single residual slot** all run on top of it.
   What is still scaffolding: `commit_step` (`cache_state_manager.cpp`) / `rollback_step`
   are still **explicit no-ops** -- but this is **honest**: the whole codebase has no `rollback_step` caller, `commit_step` is only
   called once unconditionally by `end_step`, and no cache method aborts midway (failure takes the synchronous full-compute
@@ -161,14 +167,14 @@ The design doc's three most ambitious declarative machines have advanced from "o
   work, not a load-bearing capability. Each policy still holds its own scalar decision state (`states_` map), which is **decision
   logic** (belongs in the policy), separated from the **tensor storage** that StateManager manages.
 - **`CacheOperatorRegistry` + operators are load-bearing**: `CacheEngine` instantiates the registry and calls
-  `register_builtin_cache_operators` (`cache_engine.cpp:111`, previously dead code); the lowering's
+  `register_builtin_cache_operators` (`cache_engine.cpp:701`, previously dead code); the runner's
   DIFFERENCE/PREDICT/BLEND actions are routed via `operators_.find(...)` to `DifferenceOperator/
   LinearPredictOperator/WeightedBlendOperator::apply_host`.
   EasyCache/UCache's output diff and TaylorSeer's history-extrapolation blend are all executed by operators.
 - **Still no `GraphRepository` / multiple static-graph variants**: `GraphRepository`, `GraphVariantKey`,
   `get_or_compile` have **zero hits** in `src/`, `examples/`, and all docs except redesign.
   The design doc's core idea "at runtime, choose among multiple pre-compiled static graph variants" **is not implemented**. The actual execution is
-  tap-driven runner-pass dispatch: `execute_substeps` branches by `SubstepPlan.op.kind` to call
+  tap-driven runner-pass dispatch: `run_substep_loop` branches by `SubstepPlan.op.kind` to call
   `hooks.full` and the tap-driven `hooks.substep_capture/substep_probe/substep_inject_*` (device
   or host). So `CacheProgram`/`GraphVariantPlan` are "decision descriptors + action sequences" (telling the lowering
   which substep to produce and which slot/operator actions to execute), not compilation artifacts.
@@ -243,25 +249,30 @@ GPU reuse path), so layers 1-2 have been advanced to completion. **The next deci
 
 - **Capability wiring**: `CacheEngine` instantiates `CacheOperatorRegistry` and calls
   `register_builtin_cache_operators` (previously dead code), passing `state_` + `operators_` + optional
-  `ICacheDeviceStore` into `CacheGraphLowering::execute_substeps`.
+  `ICacheDeviceStore` into `run_substep_loop`.
 - **Unified substep path**: all 8 methods implement `next_substep()`, producing `SubstepPlan` substep by substep;
   the middle layer dispatches by `SubstepOpKind` to a tap-driven runner pass. The `ED_CACHE_SUBSTEP` gate and the old
-  `execute`'s large hook if/else have been deleted (commit `a2831c6`).
+  `execute`'s large hook if/else have been deleted.
 - **Output (EasyCache/UCache/DBCache/CacheDiT)**: `OutputCompute` (FULL then DIFFERENCE→slot) /
   `OutputReuse` (LOAD+BLEND→output). Skip counts unchanged.
-- **Feature host path (MagCache/TaylorSeer/SenCache)**: `FeatureCompute`/`FeatureReuse`
-  (TaylorSeer makes the history ring load-bearing: raw-feature ring + ROTATE_HISTORY + per-step reuse_coeffs
-  blend).
+- **Feature path (MagCache/TaylorSeer/SenCache)**: `FeatureCompute`/`FeatureReuse`, served on the device
+  ring/slot when a GPU store is wired (MagCache/SenCache single residual; TaylorSeer feature-history ring:
+  device ring + ROTATE_HISTORY + per-step reuse_coeffs blend) and on the host ring on
+  CPU/SP runners. SenCache was routed onto the device slot too, fixing its earlier
+  fake skips on device-only runners.
 - **Probe (DiCache)**: `stop_after` shallow prefix + residual ring; probe has been tap-ified (delta_y/
-  delta_x/gamma are reduced in-graph via `TapRegistry::ProbeMetricOperands` then read back as scalars).
-- **Default device-side GPU reuse (MagCache/Qwen, `ED_FEATURE_CACHE_GPU` default ON) is load-bearing and verified**:
+  delta_x/gamma are reduced in-graph via `TapRegistry::ProbeMetricOperands` then read back as scalars). The
+  probe pass is pinned to no-return: it reads only the indicator scalars, so the
+  discardable model-output D2H copy is skipped (the dead `SubstepPlan.input`/`InputSource` was dropped too).
+- **Default device-side GPU reuse (MagCache/SenCache/TaylorSeer on a GPU runner) is load-bearing and verified**:
   `CacheStateManager` owns a per-slot persistent device buffer (`RunnerCacheDeviceStore`,
-  `ggml_extend.hpp:1866`), storing residuals d2d via `substep_capture` and reusing them in-graph via `substep_inject_slot`'s
-  `ggml_add(x_before, slot)`. Both Flux **and Qwen** have migrated from the legacy `DiCacheGpuState` path
+  `ggml_extend.hpp:1975`), storing residuals d2d via `substep_capture` and reusing them in-graph via `substep_inject_slot`'s
+  `ggml_add(x_before, slot)`. The device path is now the only path — the `ED_*_GPU` toggles were removed
+  and both Flux **and Qwen** long since migrated off the legacy `DiCacheGpuState` path
   to the device slot. **Acceptance (2026-07-14)**: device slot vs. host-declarative is **byte-identical (PSNR 100 dB)** --
   Flux MagCache 30/50, Qwen MagCache 36/50, skip counts bitwise-identical, and the two paths vs. no-cache are
   28.4 dB / 25.2 dB respectively (consistent with the benchmark report).
-- **Model dehook done (§2.6)**: the `CacheGraphScope` seam was deleted wholesale (commit `cd0c9b7`),
+- **Model dehook done (§2.6)**: the `CacheGraphScope` seam was deleted wholesale,
   the 4 model forwards were changed to `TapRegistry` conditional taps, and the cache layer has zero dependency on concrete model headers.
 
 **Remaining work:**
@@ -270,7 +281,7 @@ GPU reuse path), so layers 1-2 have been advanced to completion. **The next deci
   and fine-grained cut points.
 - **SP + cache composition**: under SP, Feature/Probe are still rejected by capability negotiation (§4.1), leaving only Output granularity.
   After decoupling, this is the **biggest user-perceptible gap**.
-- **Transactional semantics (commit/rollback)**: honest no-op, no trigger point (see §4.2). Reserved for the future, not current debt.
+- **Transactional semantics**: honest no-op, no trigger point (see §4.2). Reserved for the future, not current debt.
 
 **Conclusion**: the declarative engine has moved from "scaffolding" to "load-bearing" -- the 8 methods + Flux/Qwen default device-side GPU reuse
 genuinely run on StateManager+Operator, and `CacheProgram` is no longer just a decision descriptor; moreover **the model side is fully dehooked**
@@ -283,7 +294,7 @@ genuinely run on StateManager+Operator, and `CacheProgram` is no longer just a d
 ## 6. Alternative Directions (brief, not recommended)
 
 - **SP + cache composition**: highest value, best fits the engine's dual selling points (multi-GPU + step caching currently cannot be stacked). The difficulty = making the
-  graph-cut planner preserve the tap's named intermediate outputs across segments -- `ggml_extend.hpp:6471`
+  graph-cut planner preserve the tap's named intermediate outputs across segments -- `ggml_extend.hpp:6990`
   explicitly documents this conflict: "mid-graph capture is not preserved across segments". This is the natural downstream of "landing the
   declarative engine" layer 3 (GraphRepository/variant compilation), best done afterward. Output-granularity caching
   can in theory catch the SP ride earlier (no tap capture needed).
