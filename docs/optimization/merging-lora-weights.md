@@ -47,7 +47,7 @@ applied.
 2. **The LoRA adapter** from `lightx2v/Qwen-Image-Lightning`:
    - `Qwen-Image-Lightning-4steps-V1.0-bf16.safetensors` (for Qwen-Image)
    - `Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors` (for Qwen-Image-Edit)
-3. **The merge script**: `conv3d_fix_results/merge_qwen_lora.py`.
+3. **The merge script**: `scripts/merge_qwen_lora.py`.
 
 ## Steps
 
@@ -64,7 +64,7 @@ PY
 
 # 2. Merge LoRA into the base transformer
 #    args: <base transformer dir> <lora .safetensors> <output dir>
-python conv3d_fix_results/merge_qwen_lora.py \
+python scripts/merge_qwen_lora.py \
   /models/Qwen-Image/transformer \
   /models/distilled/qwen-image-lightning/Qwen-Image-Lightning-4steps-V1.0-bf16.safetensors \
   /models/distilled/qwen-image-lightning-merged/transformer
@@ -99,7 +99,7 @@ with `--model .../qwen-image-edit --qwen-image-zero-cond-t -i <input image>`.
 
 ## Note on other LoRA layouts
 
-`conv3d_fix_results/merge_flux_lora.py` is a sibling for PEFT-style LoRAs
+`scripts/merge_flux_lora.py` is a sibling for PEFT-style LoRAs
 (`.lora_A.weight` / `.lora_B.weight`, `transformer.` prefix stripped, scale 1.0
 when no `.alpha`). It is not needed for any of the six variants above (they are
 either full-weight or use the Qwen `lora_down/up` layout) — keep it only if you
