@@ -21,6 +21,10 @@ struct TensorStorage {
     bool is_f8_e5m2         = false;
     bool is_f64             = false;
     bool is_i64             = false;
+    // diffusers FLUX stores final_layer adaLN modulation as [shift, scale] but the
+    // engine (and BFL checkpoints) expect [scale, shift]; when set, the two halves
+    // of dim0 are swapped at load time. See ModelLoader::convert_tensors_name.
+    bool swap_scale_shift   = false;
     int64_t ne[ED_MAX_DIMS] = {1, 1, 1, 1, 1};
     int n_dims              = 0;
 

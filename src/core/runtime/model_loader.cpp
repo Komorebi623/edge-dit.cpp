@@ -1035,7 +1035,15 @@ void ModelLoader::convert_tensors_name() {
     String2TensorStorage new_map;
     for (auto& item : tensor_storage_map_) {
         TensorStorage tensor_storage = item.second;
+        const std::string original_name = tensor_storage.name;
         tensor_storage.name = convert_tensor_name(tensor_storage.name, version);
+        // diffusers FLUX final adaLN modulation ("norm_out.linear") is laid out as
+        // [shift, scale] on dim0; the engine and BFL checkpoints use [scale, shift].
+        // Flag it so the two halves are swapped when the weight data is loaded.
+        if ((ed_version_is_flux(version) || ed_version_is_flux2(version)) &&
+            contains(original_name, "norm_out.linear.")) {
+            tensor_storage.swap_scale_shift = true;
+        }
         new_map[tensor_storage.name] = std::move(tensor_storage);
     }
     tensor_storage_map_.swap(new_map);
@@ -1470,6 +1478,26 @@ void ModelLoader::set_wtype_override(ggml_type wtype, std::string tensor_type_ru
              tensor_storage_map_.size());
 }
 
+size_t ModelLoader::override_component_wtype(const std::string& prefix, ggml_type dst_type) {
+    if (dst_type == GGML_TYPE_COUNT) {
+        return 0;
+    }
+    size_t changed = 0;
+    for (auto& item : tensor_storage_map_) {
+        if (item.first.rfind(prefix, 0) != 0) {
+            continue;  // not in this component
+        }
+        if (!tensor_should_be_converted(item.second, dst_type)) {
+            continue;  // biases/norms/embeds etc. stay as-is (mirrors set_wtype_override)
+        }
+        if (item.second.expected_type != dst_type) {
+            item.second.expected_type = dst_type;
+            ++changed;
+        }
+    }
+    return changed;
+}
+
 bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_threads_p, bool enable_mmap) {
     if (!on_new_tensor_cb) {
         set_error("load_tensors called without callback");
@@ -1617,6 +1645,24 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_thread
                         }
                     } else {
                         convert_buf = target_buf;
+                    }
+
+                    // diffusers FLUX final adaLN modulation is stored as [shift, scale]
+                    // along the outermost (2*hidden) axis; the engine expects [scale,
+                    // shift]. Swap the two contiguous byte halves. The split lands on a
+                    // row boundary for both the weight ([in, 2*hidden]) and bias
+                    // ([2*hidden]), so it is quantization-block-aligned for any dtype.
+                    if (tensor_storage.swap_scale_shift) {
+                        const size_t total = ggml_nbytes(dst_tensor);
+                        if (total % 2 == 0 && convert_buf != nullptr) {
+                            const size_t half = total / 2;
+                            std::vector<uint8_t> tmp(convert_buf, convert_buf + half);
+                            std::memmove(convert_buf, convert_buf + half, half);
+                            std::memcpy(convert_buf + half, tmp.data(), half);
+                        } else {
+                            LOG_WARN("swap_scale_shift skipped for '%s': odd byte size %zu",
+                                     tensor_storage.name.c_str(), total);
+                        }
                     }
 
                     if (dst_tensor->buffer != nullptr && !ggml_backend_buffer_is_host(dst_tensor->buffer)) {

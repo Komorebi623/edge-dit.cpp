@@ -356,6 +356,29 @@ bool FluxKontextPipeline::prepare(const ed_context_params_t& params,
 
     // Auto-allocate: seed tally with hard-cap budget min(--max-vram, free); finalize after.
     runtime_->reset_auto_allocate_state();
+
+    // Build the transformer spec first (shapes only, no weights) to measure the DiT's real
+    // compute buffer at the target resolution for resident-headroom sizing (vs fixed 4G).
+    // Same pattern as FluxPipeline. offload flag here only affects later param placement.
+    if (!initialize_flux_transformer_spec(loader,
+                                          runtime_->backend(),
+                                          runtime_->offload_params_to_cpu(),
+                                          error)) {
+        return false;
+    }
+    runtime_->set_measured_dit_headroom(0);
+    if (runtime_->auto_fit() && flux_runner_ != nullptr &&
+        runtime_->fit_width() > 0 && runtime_->fit_height() > 0) {
+        const int latent_w = runtime_->fit_width() / 8;
+        const int latent_h = runtime_->fit_height() / 8;
+        const size_t measured = flux_runner_->measure_compute_buffer_at(latent_w, latent_h);
+        if (measured > 0) {
+            runtime_->set_measured_dit_headroom(measured);
+        }
+        LOG_INFO("auto-allocate: measured DiT compute buffer = %.2f GB at latent %dx%d (fixed fallback = 4.00 GB)",
+                 measured / (1024.0 * 1024.0 * 1024.0), latent_w, latent_h);
+    }
+
     const size_t eff_budget = runtime_->effective_budget_bytes();
     size_t remaining_free = eff_budget;
     const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
@@ -364,12 +387,9 @@ bool FluxKontextPipeline::prepare(const ed_context_params_t& params,
     const bool vae_offload = runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
     runtime_->finalize_auto_segment_budget(eff_budget);
 
-    if (!initialize_flux_transformer_spec(loader,
-                                          runtime_->backend(),
-                                          diffusion_offload,
-                                          error)) {
-        return false;
-    }
+    // Spec above used the pre-decision offload flag; drop it so prepare rebuilds with the
+    // decided placement (cheap, no weights loaded; measure already freed its compute ctx).
+    reset_flux_runner();
 
     return prepare_flux_runtime_weights(loader,
                                         runtime_->backend(),

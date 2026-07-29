@@ -4678,6 +4678,37 @@ namespace Flux {
             return gf;
         }
 
+        // Measure the DiT compute-buffer (activation) footprint at a target latent
+        // resolution, WITHOUT allocating device memory or loading weights. Used by the
+        // auto-fit/auto-allocate scheduler to size resident headroom from the real model
+        // + resolution. latent_w/latent_h are pixel W/H / vae_scale_factor (=8). Returns
+        // 0 on failure (caller falls back to the fixed headroom constant).
+        size_t measure_compute_buffer_at(int latent_w, int latent_h) {
+            if (latent_w <= 0 || latent_h <= 0) {
+                return 0;
+            }
+            // Dummy shape-only inputs matching the real compute() call at flux_pipeline
+            // (x, timesteps, context, {}, y, guidance). Data is never read during measure.
+            sd::Tensor<float> x         = sd::zeros<float>({latent_w, latent_h, 16, 1});
+            sd::Tensor<float> timesteps = sd::zeros<float>({1});
+            // T5 context: [context_in_dim, tokens, 1]. Use 512 tokens (flux T5 max) so the
+            // attention activation is measured at/above the real sequence length.
+            sd::Tensor<float> context   = sd::zeros<float>(
+                {static_cast<int>(flux_params.context_in_dim), 512, 1});
+            sd::Tensor<float> y;
+            if (flux_params.vec_in_dim > 0) {
+                y = sd::zeros<float>({static_cast<int>(flux_params.vec_in_dim), 1});
+            }
+            sd::Tensor<float> guidance;
+            if (flux_params.guidance_embed || flux_params.is_chroma) {
+                guidance = sd::zeros<float>({1});
+            }
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, {}, y, guidance, {}, false, {});
+            };
+            return measure_compute_buffer(get_graph);
+        }
+
         sd::Tensor<float> compute(int n_threads,
                                   const sd::Tensor<float>& x,
                                   const sd::Tensor<float>& timesteps,

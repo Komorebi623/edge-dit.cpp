@@ -60,6 +60,10 @@ struct DiffusionModel {
     virtual void set_flash_attention_enabled(bool enabled)           = 0;
     virtual void set_max_graph_vram_bytes(size_t max_vram_bytes)     = 0;
     virtual void set_circular_axes(bool circular_x, bool circular_y) = 0;
+    // Measure the DiT compute-buffer (activation) footprint at a target latent size for
+    // the auto-fit/auto-allocate scheduler. frames is the video frame count (ignored by
+    // image models). Default 0 = not implemented -> caller falls back to fixed headroom.
+    virtual size_t measure_compute_buffer_at(int /*latent_w*/, int /*latent_h*/, int /*frames*/) { return 0; }
 
     // ---- Feature/Probe cache support (Layer C runner device helpers) ----
     // A model that can capture/inject the block-stack residual overrides these.
@@ -219,6 +223,10 @@ struct MMDiTModel : public DiffusionModel {
 
     std::string get_desc() override {
         return mmdit.get_desc();
+    }
+
+    size_t measure_compute_buffer_at(int latent_w, int latent_h, int /*frames*/) override {
+        return mmdit.measure_compute_buffer_at(latent_w, latent_h);
     }
 
     void alloc_params_buffer() override {
@@ -504,6 +512,10 @@ struct WanModel : public DiffusionModel {
         return wan.get_desc();
     }
 
+    size_t measure_compute_buffer_at(int latent_w, int latent_h, int frames) override {
+        return wan.measure_compute_buffer_at(latent_w, latent_h, frames);
+    }
+
     int64_t num_heads() const {
         return wan.num_heads();
     }
@@ -643,6 +655,10 @@ struct QwenImageModel : public DiffusionModel {
 
     std::string get_desc() override {
         return qwen_image.get_desc();
+    }
+
+    size_t measure_compute_buffer_at(int latent_w, int latent_h, int /*frames*/) override {
+        return qwen_image.measure_compute_buffer_at(latent_w, latent_h);
     }
 
     void alloc_params_buffer() override {
