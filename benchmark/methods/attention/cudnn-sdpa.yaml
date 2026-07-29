@@ -1,0 +1,8 @@
+method_id: cudnn-sdpa
+kind: build-variant
+category: attention
+description: >
+  cuDNN SDPA for long sequences (triggers only when sequence length L >= 4096).
+  Enabled by default in the performance build variant.
+options: {}   # provided by the performance build; auto-triggers at L >= 4096
+cross_system: [edge-dit, diffusers]

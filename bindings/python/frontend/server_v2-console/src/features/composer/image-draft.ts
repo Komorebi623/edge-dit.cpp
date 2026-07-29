@@ -85,14 +85,14 @@ export function validateImageDraft(draft: ImageDraft): ImageDraftErrors {
   const errors: ImageDraftErrors = {}
 
   if (!draft.prompt.trim()) {
-    errors.prompt = '请输入 `prompt`。'
+    errors.prompt = 'Please enter `prompt`.'
   }
 
   const positiveIntegerFields: Array<[keyof ImageDraft, string]> = [
-    ['width', '`width` 必须大于 0。'],
-    ['height', '`height` 必须大于 0。'],
-    ['steps', '`steps` 必须大于 0。'],
-    ['batchCount', '`batch_count` 必须大于 0。'],
+    ['width', '`width` must be greater than 0.'],
+    ['height', '`height` must be greater than 0.'],
+    ['steps', '`steps` must be greater than 0.'],
+    ['batchCount', '`batch_count` must be greater than 0.'],
   ]
 
   for (const [field, message] of positiveIntegerFields) {
@@ -109,16 +109,16 @@ export function validateImageDraft(draft: ImageDraft): ImageDraftErrors {
   if (draft.seed.trim()) {
     const parsed = Number.parseInt(draft.seed, 10)
     if (!Number.isInteger(parsed)) {
-      errors.seed = '`seed` 必须是整数。'
+      errors.seed = '`seed` must be an integer.'
     }
   }
 
   const numericFields: Array<[keyof ImageDraft, string]> = [
-    ['guidance', '`guidance` 必须是数值。'],
-    ['cfgScale', '`cfg_scale` 必须是数值。'],
-    ['imageCfgScale', '`image_cfg_scale` 必须是数值。'],
-    ['eta', '`eta` 必须是数值。'],
-    ['flowShift', '`flow_shift` 必须是数值。'],
+    ['guidance', '`guidance` must be a number.'],
+    ['cfgScale', '`cfg_scale` must be a number.'],
+    ['imageCfgScale', '`image_cfg_scale` must be a number.'],
+    ['eta', '`eta` must be a number.'],
+    ['flowShift', '`flow_shift` must be a number.'],
   ]
 
   for (const [field, message] of numericFields) {

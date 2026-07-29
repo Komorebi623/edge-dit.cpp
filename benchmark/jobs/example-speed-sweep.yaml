@@ -1,0 +1,13 @@
+# Example 2 - multi-model x multi-quant, speed/VRAM only (skip quality, faster)
+# metrics.quality:false -> the eval stage skips the paired quant-vs-fp16 quality diff,
+# keeping only speed (DiT pure sampling / end-to-end ms) and VRAM (peak / per-component).
+# Only edge-dit is tested; the section sweeps the q8 and q4_k tiers.
+# Expanded runs: edge-dit section [ models(3) x quant(2) x offload(1) x cache(1) x prompts(3) ] = 18
+name: example-speed-sweep
+task: text-to-image
+models: [sd3-medium, flux-dev, qwen-image]
+metrics:
+  quality: false
+
+edge-dit:
+  quant: [q8, q4_k]

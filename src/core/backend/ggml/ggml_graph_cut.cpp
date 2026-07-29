@@ -1193,7 +1193,7 @@ namespace sd::ggml_graph_cut {
         }
 
         if (!group.enabled()) {
-            // world_size == 1 或 parallel disabled 时，通信可以视为 no-op。
+            // When world_size == 1 or parallel is disabled, communication can be treated as a no-op.
             return true;
         }
 

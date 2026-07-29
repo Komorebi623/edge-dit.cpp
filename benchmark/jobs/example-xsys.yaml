@@ -1,0 +1,28 @@
+# Example 4 - true cross-system comparison (one job, one command, the whole cross-system quant matrix)
+#
+# [flagship of the new format] per-system sections let each system write its own quant tiers, no longer bound to "one quant list":
+#   - edge-dit          : fp16 / q8(q8_0) / q4_k   (weight-only, via precision)
+#   - diffusers         : bf16(baseline) / fp8 / w8a8   (Optimum-Quanto, via quant_weights)
+#   - stable-diffusion.cpp: fp16 / q8(q8_0) / q4_k  (weight-only, via precision)
+# All three sections expand, generate, evaluate, and tabulate in one command. The old "cross-system must be split per job" limit is gone.
+#
+# Capability filtering is built in: if a section lists a method the system does not support (e.g. q8/q4_k under diffusers),
+# run.py auto-skips it during expansion and prints [run.py] skip -> ..., never running to failure, so misconfig is safe.
+#
+# Reading the table: for cross-system speed always use [DiT pure sampling ms] (end-to-end includes online quant conversion/loading, sd.cpp quant tiers especially polluted);
+# quant loss PSNR/SSIM/LPIPS only within the same system vs its own fp16 (diffusers is vs bf16), not comparable across systems;
+# CLIP/aesthetic/ImageReward absolute quality is comparable across systems.
+#
+# Expanded runs: edge(3) + diffusers(3) + sdcpp(3) tiers, each x prompts(3) = 27
+name: example-xsys
+task: text-to-image
+models: [sd3-medium]
+
+edge-dit:
+  quant: [fp16, q8, q4_k]
+
+diffusers:
+  quant: [bf16, fp8, w8a8]
+
+stable-diffusion.cpp:
+  quant: [fp16, q8, q4_k]

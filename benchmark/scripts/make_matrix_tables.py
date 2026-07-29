@@ -13,13 +13,13 @@ Latency semantics (IMPORTANT, per user guidance): the end-to-end latency column
 is contaminated by one-time on-the-fly weight quantization (q4_K/q8 convert can
 be 70-170s) and, for sd.cpp, by layer-by-layer load folded into "sampling
 completed". So the report SEPARATES:
-  - "DiT纯采样ms"  = component denoise time  -> the reliable speed metric
-  - "端到端ms(口径)" = full latency + a boundary tag, NOT for cross-system speed claims
+  - "DiT sampling ms"  = component denoise time  -> the reliable speed metric
+  - "end-to-end ms(boundary)" = full latency + a boundary tag, NOT for cross-system speed claims
 
 Tasks emit different quality columns:
-  text-to-image : CLIP / 美学 / IR         + (PSNR/SSIM/LPIPS vs same-system FP16)
-  image-editing : dCLIP / keepSSIM / keepLPIPS / 美学 / IR + (量化差异)
-  text-to-video : 逐帧CLIP / 逐帧美学 / 时序LPIPS / 时序SSIM / 闪烁std + (量化差异)
+  text-to-image : CLIP / aesthetic / IR         + (PSNR/SSIM/LPIPS vs same-system FP16)
+  image-editing : dCLIP / keepSSIM / keepLPIPS / aesthetic / IR + (quant delta)
+  text-to-video : frameCLIP / frameAesth / tempLPIPS / tempSSIM / flicker std + (quant delta)
 
 Usage:
     python benchmark/scripts/make_matrix_tables.py \
@@ -58,11 +58,12 @@ def load_yaml(p: Path) -> Optional[dict]:
 
 
 def budget_of(ro: Dict[str, Any]) -> str:
+    """'full' = no VRAM-saving knobs (hardware-independent name for the baseline tier)."""
     if ro.get("max_vram_gib") is not None:
         return f"{int(ro['max_vram_gib'])}g"
     if ro.get("offload") or ro.get("offload_to_cpu"):
         return "offload"
-    return "24g"
+    return "full"
 
 
 # diffusers expresses quantization via Quanto qtypes, not a `precision` field.
@@ -88,9 +89,9 @@ def boundary_tag(measurement_boundary: Optional[str]) -> str:
     if not measurement_boundary:
         return "?"
     if "no_output_encoding" in measurement_boundary or "load_once" in measurement_boundary:
-        return "净推理"  # load-once, excludes model load + output encoding
+        return "net-inference"  # load-once, excludes model load + output encoding
     if "includes_load" in measurement_boundary:
-        return "含加载+编码"
+        return "incl-load+encode"
     return measurement_boundary[:16]
 
 
@@ -163,43 +164,46 @@ class Row:
 # --------------------------------------------------------------------------- #
 # Per-task column specs: (header, attr, precision)
 # --------------------------------------------------------------------------- #
-COMMON_COLS = [
-    ("DiT纯采样ms", "dit_ms", 1),
-    ("端到端ms", "e2e_ms", 1),
-    ("口径", "boundary", None),
+SPEED_COLS = [
+    ("DiT sampling ms", "dit_ms", 1),
+    ("end-to-end ms", "e2e_ms", 1),
+    ("boundary", "boundary", None),
     ("TE_ms", "te_ms", 1),
     ("VAE_ms", "vae_ms", 1),
-    ("峰值显存", "peak_vram", 0),
-    ("TE显存", "te_vram", 0),
-    ("DiT显存", "dit_vram", 0),
-    ("VAE显存", "vae_vram", 0),
 ]
+VRAM_COLS = [
+    ("peak VRAM", "peak_vram", 0),
+    ("TE VRAM", "te_vram", 0),
+    ("DiT VRAM", "dit_vram", 0),
+    ("VAE VRAM", "vae_vram", 0),
+]
+COMMON_COLS = SPEED_COLS + VRAM_COLS
 
 TASK_COLS = {
     "text-to-image": [
         ("CLIP", "clip", 3),
-        ("美学", "aesthetic", 2),
+        ("aesthetic", "aesthetic", 2),
         ("IR", "ir", 3),
         ("PSNRvsFP16", "psnr", 2),
         ("SSIMvsFP16", "ssim", 3),
         ("LPIPSvsFP16", "lpips", 3),
     ],
     "image-editing": [
-        ("方向CLIP", "dclip", 3),
-        ("保持SSIM", "keep_ssim", 3),
-        ("保持LPIPS", "keep_lpips", 3),
-        ("美学", "aesthetic", 2),
+        ("dir CLIP", "dclip", 3),
+        ("keep SSIM", "keep_ssim", 3),
+        ("keep LPIPS", "keep_lpips", 3),
+        ("aesthetic", "aesthetic", 2),
         ("IR", "ir", 3),
         ("PSNRvsFP16", "psnr", 2),
         ("SSIMvsFP16", "ssim", 3),
         ("LPIPSvsFP16", "lpips", 3),
     ],
     "text-to-video": [
-        ("逐帧CLIP", "clip", 3),
-        ("逐帧美学", "aesthetic", 2),
-        ("时序LPIPS", "tmp_lpips", 3),
-        ("时序SSIM", "tmp_ssim", 3),
-        ("闪烁std", "tmp_lpips_flk", 3),
+        ("frame CLIP", "clip", 3),
+        ("frame aesthetic", "aesthetic", 2),
+        ("temporal LPIPS", "tmp_lpips", 3),
+        ("temporal SSIM", "tmp_ssim", 3),
+        ("flicker std", "tmp_lpips_flk", 3),
         ("PSNRvsFP16", "psnr", 2),
         ("SSIMvsFP16", "ssim", 3),
         ("LPIPSvsFP16", "lpips", 3),
@@ -224,6 +228,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--results-root", type=Path, required=True)
     ap.add_argument("--output", type=Path, default=None)
+    ap.add_argument("--no-speed", action="store_true", help="hide speed columns (DiT/e2e/TE/VAE ms)")
+    ap.add_argument("--no-vram", action="store_true", help="hide VRAM columns (peak + per-component)")
+    ap.add_argument("--no-quality", action="store_true", help="hide quality columns")
     args = ap.parse_args()
 
     root = args.results_root.expanduser().resolve()
@@ -234,20 +241,23 @@ def main() -> None:
         rows.append(Row(rj.parent))
 
     n_succ = sum(1 for r in rows if r.status == "success")
-    out: List[str] = ["# 跨系统对比矩阵结果（全指标一次性汇总）\n"]
-    out.append(f"共 {len(rows)} runs | success {n_succ} | failed {len(rows) - n_succ}\n")
+    out: List[str] = ["# Cross-system comparison matrix (all metrics, one-shot aggregate)\n"]
+    out.append(f"{len(rows)} runs total | success {n_succ} | failed {len(rows) - n_succ}\n")
     out.append(
-        "> **速度口径提醒**：比推理速度请用「DiT纯采样ms」（组件级denoise耗时，可靠）。"
-        "「端到端ms」含一次性在线量化转换/模型加载（见「口径」列：净推理=不含加载/编码，含加载+编码=cli单次），"
-        "不可用于跨系统速度结论。量化质量损失（PSNR/SSIM/LPIPS vs FP16）仅在同系统内 vs 自己的FP16基准，跨系统不可比。\n"
+        "> **Speed boundary reminder**: to compare inference speed use \"DiT sampling ms\" (component-level denoise time, reliable). "
+        "\"end-to-end ms\" includes one-time on-the-fly quantization conversion / model loading (see the \"boundary\" column: "
+        "net-inference = excludes load/encoding, incl-load+encode = single CLI run), and must not be used for cross-system speed claims. "
+        "Quantization quality loss (PSNR/SSIM/LPIPS vs FP16) is only meaningful within the same system vs its own FP16 baseline; not comparable across systems.\n"
     )
     out.append(
-        "> **sd.cpp 特别注意**：stable-diffusion.cpp 分层边加载边采样，在线量化转换（q4_K/q8，可达数十~上百秒）"
-        "会混入 denoise 阶段计时，因此其「DiT纯采样ms」在量化档下同样偏高、不代表纯推理。sd.cpp 的速度需用预量化权重"
-        "重测或仅横向参考同档趋势，不可与 edge/diffusers 的 DiT 纯采样直接比。\n"
+        "> **Special note for sd.cpp**: stable-diffusion.cpp loads layer-by-layer while sampling, and on-the-fly quantization conversion "
+        "(q4_K/q8, tens to hundreds of seconds) folds into the denoise-stage timing, so its \"DiT sampling ms\" is likewise inflated under "
+        "quantized tiers and does not represent pure inference. sd.cpp speed should be re-measured with pre-quantized weights, or only used as "
+        "a same-tier trend reference; it cannot be compared directly with edge/diffusers DiT sampling.\n"
     )
     out.append(
-        "> **主打衡量档为 q8**（画质可用）；q4 仅作极限省显存参考点，画质损失明显，不宜用于速度/质量优势结论。\n"
+        "> **The headline tier is q8** (usable image quality); q4 is only an extreme VRAM-saving reference point with obvious quality loss, "
+        "and is not suitable for speed/quality advantage claims.\n"
     )
 
     # group: (workload, system, precision, budget) -> rows (one per prompt)
@@ -257,9 +267,15 @@ def main() -> None:
 
     for wl in sorted(set(r.workload for r in rows if r.workload)):
         task = next((r.task for r in rows if r.workload == wl), "text-to-image")
-        cols = COMMON_COLS + TASK_COLS.get(task, TASK_COLS["text-to-image"])
+        cols = []
+        if not args.no_speed:
+            cols += SPEED_COLS
+        if not args.no_vram:
+            cols += VRAM_COLS
+        if not args.no_quality:
+            cols += TASK_COLS.get(task, TASK_COLS["text-to-image"])
         out.append(f"\n## {wl}  ({task})\n")
-        header = "| 系统 | 精度 | 预算 | prompt | 状态 | " + " | ".join(h for h, _, _ in cols) + " |"
+        header = "| system | precision | budget | prompt | status | " + " | ".join(h for h, _, _ in cols) + " |"
         sep = "|" + "---|" * (5 + len(cols))
         out.append(header)
         out.append(sep)
@@ -276,7 +292,7 @@ def main() -> None:
             if succ:
                 mcells = " | ".join(mean_cell(succ, a, p) for _, a, p in cols)
                 out.append(
-                    f"| **{k[1]}** | **{k[2]}** | **{k[3]}** | **均值** | **({len(succ)})** | {mcells} |"
+                    f"| **{k[1]}** | **{k[2]}** | **{k[3]}** | **mean** | **({len(succ)})** | {mcells} |"
                 )
 
     out_path.write_text("\n".join(out), encoding="utf-8")

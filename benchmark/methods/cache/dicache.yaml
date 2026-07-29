@@ -1,0 +1,9 @@
+method_id: dicache
+kind: runtime
+category: cache
+description: >
+  Shallow-probe trajectory alignment. Uses a shallow probe of early blocks to
+  align the denoising trajectory and decide reuse. Works out of the box, no
+  calibration needed.
+options: {cache: dicache}
+cross_system: [edge-dit]   # edge-dit only

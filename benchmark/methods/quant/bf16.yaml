@@ -1,0 +1,7 @@
+method_id: bf16
+kind: runtime
+category: quant
+description: BF16 weights. The diffusers baseline (no quantization) for same-system quant loss.
+options: {}
+cross_system: [diffusers]   # diffusers baseline; edge/sdcpp use fp16 as baseline
+convert_default: false

@@ -1,0 +1,18 @@
+# Example 6 - per-model steps (set sampling steps for a specific model)
+# steps has three forms: default (each model's built-in steps) / integer (global force) / dict (per-model).
+# dict form {model_id: N, default: N}: give a model its own steps, missing ones fall back to default, then to the model's built-in.
+# Use: different models want different steps in the same job (e.g. a few more steps for SD3, uniform for the rest).
+# Expanded runs: edge-dit section [ models(3) x quant(1) x prompts(3) ] = 9
+#   - sd3-medium uses 28 steps, flux-dev uses 25, qwen-image falls back to default=20
+# (note: steps lands in workload.generation.steps, not in run_options, so --dry-run's
+#  run_options= does not show it, but the steps are injected correctly.)
+name: example-per-model-steps
+task: text-to-image
+models: [sd3-medium, flux-dev, qwen-image]
+steps:
+  sd3-medium: 28     # a few extra steps just for SD3
+  flux-dev: 25
+  default: 20        # the rest (qwen-image) use 20
+
+edge-dit:
+  quant: [q8]

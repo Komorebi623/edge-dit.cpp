@@ -1,477 +1,199 @@
 # edge-dit.cpp Benchmark
 
-This directory defines the benchmark contract for edge-dit.cpp v0.1.0-alpha.
-It is intentionally split into two layers:
+Benchmark framework for edge-dit.cpp (a ggml-based Diffusion Transformer inference engine).
 
-- **Benchmark contract:** specifications, schemas, workload definitions, system
-  definitions, hardware metadata, and prompts.
-- **Benchmark execution:** runners, measurement utilities, orchestration,
-  result checking, aggregation, and report generation.
+Measures and compares DiT inference: **which models × which quantization / acceleration methods** to test, reporting speed, VRAM, and (optionally) image quality. You can test edge-dit.cpp alone, or compare it side-by-side with **Diffusers** and **stable-diffusion.cpp**.
 
-The existing `benchmark/evaluation/` scripts remain quality-evaluation helpers.
-They are reused by the harness for quality evaluation instead of replacing the
-inference benchmark runner.
+You only write a single **test manifest** `jobs/*.yaml` (declaring `models × quantization/methods × task`), run one command, and the framework automatically chains **image generation → evaluation → tables**; report tables land in `reports/<job>/` (raw artifacts like images live in `results/<job>/`). You don't need to understand the internal mechanics.
 
-## v1 Goal
+> **Multi-GPU parallelism**: each job can set `device: N` in the manifest (or `--device N` on the command line) to lock one GPU; multiple jobs each take one card and run simultaneously without competing for VRAM.
 
-The v1 harness freezes and implements:
+---
 
-- what the v0.1.0-alpha benchmark is meant to prove;
-- which workloads and systems are in scope;
-- how latency, memory, quality, and parallel metrics are represented;
-- which local paths are allowed only in local site overrides;
-- which result directories must not be committed;
-- how each run is expanded, executed, checked, aggregated, and reported.
+## Install: what you test → what you install
 
-Official numbers must be generated from result directories by the analysis
-scripts. Do not hand-copy benchmark values into reports.
+Installation is **layered and on-demand**. Testing edge-dit.cpp alone does **not** require installing Diffusers or stable-diffusion.cpp.
 
-## Layout
-
-```text
-benchmark/
-├── specs/       Benchmark policy and release-specific contract
-├── configs/     Suite, workload, system, hardware, and local site configs
-├── prompts/     Prompt sets used by workload configs
-├── schemas/     Machine-readable result and environment schemas
-├── runners/     System adapters for edge-dit.cpp, Diffusers, stable-diffusion.cpp, and xDiT
-├── measurement/ Timing, environment, and resource measurement helpers
-├── orchestration/ Suite validation, dry-run expansion, execution, resume, and result checks
-├── analysis/    Result aggregation, table generation, and report generation
-├── evaluation/  Quality metrics (CLIP, aesthetic, ImageReward, PSNR/SSIM/LPIPS,
-│                directional-CLIP for edits, temporal consistency for video)
-└── results/     Local benchmark outputs, ignored by Git
-```
-
-## Local Outputs
-
-The following directories are local-only and ignored by Git:
-
-```text
-benchmark/results/
-benchmark/cache/
-benchmark/downloads/
-benchmark/tmp/
-```
-
-Do not commit generated images, videos, raw logs, model weights, downloaded
-models, or benchmark result directories.
-
-## Validation
-
-Validate the benchmark contract and configs:
+| You want to… | Install what |
+|---|---|
+| Test **edge-dit.cpp** + compute image quality | `pip install -r requirements/core.txt` + `python scripts/setup_assets.py` (for edge-dit itself see repo-root `scripts/build_cuda.sh`) |
+| Also compare **Diffusers** | Add `pip install -r requirements/diffusers.txt` |
+| Also compare **stable-diffusion.cpp** | build `sd-cli` + e2e wrapper (repo-root `scripts/build_sd_cpp_e2e.py`); fill in `stable_diffusion_cpp_*` paths in the site |
 
 ```bash
-python3 benchmark/orchestration/validate_config.py
+# 1. First install the matching torch for your CUDA/driver (core.txt intentionally does not pin the torch version)
+pip install torch --index-url https://download.pytorch.org/whl/cu121   # choose per your actual CUDA
+pip install -r benchmark/requirements/core.txt
+
+# 2. Download image-quality evaluation weights (LAION aesthetic / ImageReward / CLIP)
+python benchmark/scripts/setup_assets.py
 ```
 
-Preview the FLUX pilot run matrix without executing models:
+`core.txt` = everything needed to run edge-dit + compute all image-quality metrics, **excluding** the diffusers stack. `setup_assets.py` is **idempotent** (skips what already exists, `--force` re-downloads) and supports the `HF_ENDPOINT` mirror; weights **are not committed to git** (size/license).
+
+---
+
+## Quick start (3 steps)
+
+> All commands below run from the **repo root** `edge-dit.cpp/` — `run.py` needs to import the runner as the `benchmark` package.
+
+### 1. Pick / write a manifest
+
+The manifest has a **per-system sectioned** structure: shared fields at the top level, and each system to test opens its own section (with its own quantization tiers). A minimal manifest = 3 required top-level fields + one system section:
+
+```yaml
+name: my-first-job          # report tables land in reports/my-first-job/, raw artifacts in results/my-first-job/
+task: text-to-image         # task type, must match the model
+models: [sd3-medium]        # model id, see models/
+
+edge-dit:                   # one system section = test that system; quant is required inside the section
+  quant: [fp16, q8, q4_k]   # quantization tier id, see methods/quant/
+# everything else uses defaults: offload=none, vae_tiling=auto, cache=none, prompts=3, all three metrics on
+```
+
+**How to write each manifest field, advanced usage (per-quant object override / per-model steps / metrics three toggles), cross_system filtering, and a batch of ready-to-copy manifests (starting with `example-`) are all explained in [`jobs/README.md`](jobs/README.md).**
+
+### 2. Run
+
+**First time, configure the local site**: `sites/*.yaml` is the only place for machine-specific paths (edge-dit binary, each model directory, python, etc.). Following [`sites/README.md`](sites/README.md), copy `sites/site-example.yaml` into your own `sites/<machine>.yaml` and fill in the actual paths.
 
 ```bash
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/pilot-flux.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --dry-run
+python benchmark/run.py \
+  --job  benchmark/jobs/my-first-job.yaml \
+  --site benchmark/sites/my-site.yaml
 ```
 
-Build edge-dit.cpp before official runs. The CUDA build script defaults to the
-performance profile:
+Add `--dry-run` to only print the expanded run plan (no image generation), for checking the manifest; add `--output-root <dir>` to change the **raw artifacts** directory (default `results/<name>/`; report tables always go to `reports/<name>/`).
+
+### 3. View results
+
+After running, the **report tables** are in `reports/<name>/` (committed to git), and the **raw artifacts** (images, result.json) are in `results/<name>/` (git-ignored). To view results, look at reports:
+
+```
+benchmark/reports/my-first-job/
+├── summary-all.md       one at-a-glance overview table (core columns: speed/VRAM/quality, means)  ← look here first
+├── summary-speed.md     narrow speed table (DiT sampling / end-to-end / TE / VAE ms)
+├── summary-memory.md    narrow VRAM table (peak + per stage)
+├── summary-quality.md   narrow quality table (CLIP/aesthetic/IR + quantization loss)
+└── tables.md            full per-metric detail (per config, per prompt + mean, 20 columns, for reference)
+```
+
+Generated images/videos are under `results/<name>/<system>/.../samples/`.
+
+---
+
+## What run.py does
+
+```
+job.yaml
+   └─ expand  models × each system section (quant × offload × cache) × prompts  into a set of runs
+       └─ directly call engine/runners/<system>.execute() one by one   generate + collect latency/VRAM, write result.json
+           └─ scripts/eval_all.py                        backfill image-quality metrics (when quality=true)
+               └─ scripts/make_matrix_tables.py          aggregate into a single tables.md
+```
+
+Everything runs in-process end-to-end, bypassing the old suite / scenario_matrix mechanism (archived in `archive/`).
+
+---
+
+## "I want to test X, where do I configure it"
+
+| I want to… | Where to configure |
+|---|---|
+| How to write manifest fields (quant/cache/offload/VAE tiling/per-quant object/per-model steps/metrics) | all in [`jobs/README.md`](jobs/README.md) |
+| Cross-system comparison | open several system sections, each with its own quantization tiers (see "Three-system integration") |
+| Add a model / method / comparison system / switch machine | see "Extending" at the end |
+| Re-run evaluation only (no re-generation) | `scripts/eval_all.py` + `make_matrix_tables.py` (see end) |
+
+Usually you only edit two places: **`jobs/`** (what to test) and **`sites/`** (machine paths). `models/` (14) and `methods/` (22) are the libraries you choose from.
+
+---
+
+## Acceleration methods overview
+
+Under `methods/` each method has one yaml, registering its category, `kind` (runtime = just change params and test / build-variant = needs a separately compiled binary), whether it needs calibration, and its cross-system comparable scope. **The authoritative lookup table for "which method is supported by which systems, which can be orchestrated directly by a job, which need calibration" is in [`CAPABILITIES.md`](CAPABILITIES.md).**
+
+In one sentence:
+
+- **Dimensions the current job section can orchestrate directly**: quantization (`quant`), cache (`cache`), offload (`offload`), VAE tiling (`vae_tiling`) — single-card runtime.
+- **Attention** (flash on by default; sage/cudnn need build variants) and **parallelism** (cfg/sequence need multi-GPU) already have their capabilities and cross-system comparability registered in `methods/`, but `run.py` currently executes single-card only and has no dedicated job field yet; testing these for now goes through engine-side switches or the corresponding binary.
+- **cache baseline**: `none` already includes flash-attention + CUDA fused operators + cuDNN (performance build), on by default and not listed as a method. **Calibration-free and directly sweepable**: `easycache / ucache / dbcache / taylorseer / cache-dit` (shared by edge and sd.cpp); `magcache` and `sencache` both fail to calibrate on edge on-device (profile can't be generated, the accelerated run degrades quality), **do not put them in the manifest**; edge's own calibration-free option is `dicache`.
+
+---
+
+## Three-system integration
+
+System capabilities are defined in `systems/*.yaml`. After configuring each system's paths in the site, **open a section for that system** in the manifest to use it.
+
+- **edge-dit.cpp** (required, the main subject): first compile `build-cuda/bin/ed-cli` and `ed-sample` (repo-root `scripts/build_cuda.sh`). Quantization tiers `fp16` / `q8` (q8_0) / `q4_k` (weight-only).
+- **diffusers** (optional, Python reference): needs a Python with `torch`/`diffusers`/`transformers` installed; the site's `diffusers_python` points to it. Quantization uses **Optimum-Quanto**: `bf16` (baseline) / `fp8` (qfloat8) / `w8a8` (qint8, crashes on SD3); **no q4**; CUDA only.
+- **stable-diffusion.cpp** (optional, native baseline): needs `sd-cli` and the e2e wrapper built. dtype `fp16` / `q8` (q8_0) / `q4_k`. Its on-the-fly quantization conversion mixes into the sampling timing, so under quantized tiers "DiT sampling ms" is inflated and speed must be interpreted with care.
+
+**One job runs the entire cross-system matrix**: per-system sectioning lets each system have a section with its own quantization tiers, and one command runs it all — edge/sdcpp accept `fp16/q8/q4_k`, diffusers accepts `bf16/fp8/w8a8`; the three sections expand, generate, evaluate, and aggregate into the same `tables.md`. `jobs/example-xsys.yaml` is the flagship example. If a section writes a method that system doesn't support, run.py **automatically skips it and prints** `[run.py] skip → ...` during expansion, without running to failure (capability ownership is in `CAPABILITIES.md`).
+
+---
+
+## Reading the tables
+
+`reports/<name>/tables.md` — several prompt detail rows per config + 1 mean row. Columns include system / precision / budget / component-level times / VRAM / quality. **Metric conventions (important)**:
+
+- **Compare inference speed with DiT sampling ms** (component-level denoise time), **never with end-to-end ms** — the latter includes one-time on-the-fly quantization conversion and model loading, which contaminates conclusions (especially for sd.cpp quantized tiers).
+- **Quantization loss** (PSNR/SSIM/LPIPS) is only meaningful **within the same system** vs its own baseline (fp16 for edge/sdcpp, bf16 for diffusers), and is **not comparable across systems**.
+- Cross-system **absolute image quality** (CLIP/aesthetic/ImageReward) can be compared side by side; but when a gap is suspiciously large, first check convention alignment (same model/prompt/seed/resolution/steps/dtype) before drawing conclusions.
+- **q8 is the headline usable-quality tier**; q4 is only an extreme VRAM-saving reference point, with obvious quality loss.
+- **budget column**: `full` = no VRAM-saving switch enabled (baseline tier) / `offload` = whole-model CPU offload (i.e. `offload: full`). Note: `offload: te-cpu` (text encoder only) still falls in the `full` bucket under the current classification.
+- Task-specific quality columns are routed automatically: t2i = CLIP/aesthetic/IR; editing = directional CLIP + preservation SSIM/LPIPS; video = per-frame + temporal consistency.
+- The `metrics` three toggles control table output: `speed:false` hides time columns, `vram:false` hides VRAM columns, `quality:false` hides quality columns and actually skips the quality computation (see `jobs/README.md`).
+
+---
+
+## Directory guide
+
+**Active (you touch these directly)**
+- `jobs/` — test manifests, your entry point (`README.md` has the full field docs + example walkthroughs + `example-*` ready-made manifests)
+- `models/` — model library, one file per model (14, covering 6 families): SD3 / SD3.5 (incl. distilled turbo) / FLUX.1 (dev/schnell) / FLUX.1-Kontext (incl. distilled lightning) / Qwen-Image (incl. distilled lightning + Edit) / Wan 2.x (incl. distilled distill)
+- `methods/` — method library, categorized as `quant/ cache/ attention/ memory/ parallel/` (22)
+- `sites/` — machine config (`site4090.yaml` / `siteh200.yaml` + template), the **only** place allowed to hold machine-specific paths
+- `run.py` — front-end entry point
+
+**Framework internals (usually untouched)**
+- `systems/` — system capability definitions (runner, tasks, backends, memory modes)
+- `engine/runners/` — per-system adapters; `engine/measurement/` — latency/VRAM/environment collection
+- `scripts/` — `setup_assets.py` (download quality weights), `eval_all.py` (quality backfill), `make_matrix_tables.py` (tables), `run_*_e2e.py` (per-system execution wrappers), sd.cpp build/convert scripts
+- `evaluation/single_metric/` — CLIP / aesthetic / ImageReward / PSNR / SSIM / LPIPS / directional CLIP / temporal consistency metric implementations
+- `prompts/` — per-task prompt sets; `requirements/` — `core.txt` / `diffusers.txt`; `results/` / `cache/` — local artifacts (git-ignored)
+
+**Results and reports**
+- `results/` — **raw artifacts** auto-produced by run.py (images/result.json/config per run), **git-ignored** (large), regenerable by re-running any time.
+- `reports/<job>/` — **report tables** auto-produced by run.py (`tables.md` detail + `summary-*.md` aggregates), **committed to git**, where you look at results (`reports/v0.1.0-alpha/` is a historical release snapshot).
+
+**Legacy system (deprecated, all archived in `archive/`)**: old orchestration / analysis / configs / shell scripts, old specs / schemas contracts; `archive/` is git-ignored and the new flow does not depend on it.
+
+---
+
+## Re-evaluate only (no re-generation)
+
+With existing artifacts and want to swap metrics / regenerate tables, directly call the two standalone scripts:
 
 ```bash
-bash scripts/build_cuda.sh
+python benchmark/scripts/eval_all.py \
+  --results-root benchmark/results/<job> \
+  --site benchmark/sites/site4090.yaml
+python benchmark/scripts/make_matrix_tables.py \
+  --results-root benchmark/results/<job> \
+  --output benchmark/reports/<job>/tables.md
+python benchmark/scripts/summarize.py \
+  --results-root benchmark/results/<job> \
+  --output-dir benchmark/reports/<job>
 ```
 
-Run the README main-table suite. This is the source for the root README
-Performance table and uses FLUX.1-dev, Stable Diffusion 3 Medium, and
-Qwen-Image with the same 1024x1024, 50-step, batch-1 setting:
+`eval_all.py` uses each run's `config.resolved.yaml` as the authoritative source (task/system/precision/real prompt), routes metrics by task, loads each metric model only once, and backfills `result.json.quality` and `eval/quality.json`.
 
-```bash
-bash benchmark/scripts/run_readme_main_table.sh
-```
+---
 
-The current README snapshot evaluates three representative text-to-image
-workloads.
+## Extending (none require changing `engine/`)
 
-Run the reproducible FLUX.1-dev single-GPU e2e suite:
-
-```bash
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/flux-e2e.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --output-root benchmark/results/nightly-YYYYMMDD
-```
-
-The README main-table workloads are the `*-1024-s50` text-to-image configs:
-1024x1024, 50 denoising steps, seed 0, batch 1. FLUX.1-dev and Qwen-Image use
-BF16; Stable Diffusion 3 Medium uses the matched precision available to each
-runtime. Shorter 20-step workloads are smoke or diagnostic only and must not be
-aggregated into README or main-table performance numbers. This snapshot
-evaluates Stable Diffusion 3 Medium; Stable Diffusion 3.5 Large is not
-included.
-
-## Full Performance Page Suites
-
-`docs/performance.md` is backed by a wider feature-results matrix than the root
-README. Run these suites into separate frozen result roots, then aggregate those
-roots into a `performance-page` summary.
-
-```bash
-# Build the five CUDA variants used by cuda-optimization-ablation.
-bash benchmark/scripts/build_cuda_ablation_matrix.sh
-
-# Task coverage: T2I, image editing, and video.
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/task-coverage.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --output-root benchmark/results/perf-task-coverage-YYYYMMDD
-
-# Parallel scaling: SD3 Medium CFG-2 plus FLUX SP-1/SP-2/SP-4.
-bash benchmark/scripts/run_parallel_tables.sh \
-  --edge-build-dir build-cuda \
-  --output-root benchmark/results/perf-parallel-YYYYMMDD
-
-# Low-VRAM deployment profiles. The runner waits for a clean single GPU by
-# default because the public table reports peak VRAM.
-bash benchmark/scripts/run_resource_profiles_table.sh \
-  --edge-build-dir build-cuda \
-  --output-root benchmark/results/perf-resource-profiles-YYYYMMDD
-
-# Quantization latency and memory trade-offs under the same FLUX 50-step
-# workload used by the resource profiles table.
-bash benchmark/scripts/run_quantization_table.sh \
-  --edge-build-dir build-cuda \
-  --output-root benchmark/results/perf-quantization-YYYYMMDD
-
-# High-resolution VAE tiling memory trade-offs under a 2048x2048, 50-step FLUX
-# workload.
-bash benchmark/scripts/run_vae_tiling_table.sh \
-  --edge-build-dir build-cuda \
-  --output-root benchmark/results/perf-vae-tiling-YYYYMMDD
-
-# Cache speed-quality. This is the only suite that gates public quality metrics.
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/cache-quality.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --systems edge-dit.cpp \
-  --output-root benchmark/results/perf-cache-quality-YYYYMMDD
-
-# CUDA optimization trade-offs.
-for suite in cuda-optimization-ablation cuda-optimization-ablation-qwen; do
-  python3 benchmark/orchestration/run_suite.py \
-    --suite "benchmark/configs/suites/${suite}.yaml" \
-    --site benchmark/configs/local/site-h200.yaml \
-    --execute \
-    --systems edge-dit.cpp \
-    --output-root "benchmark/results/perf-${suite}-YYYYMMDD"
-done
-```
-
-After cache quality evaluation, apply metric summaries back to the matching
-target result directories:
-
-```bash
-python3 benchmark/analysis/apply_quality_metrics.py \
-  --result-dir benchmark/results/perf-cache-quality-YYYYMMDD/.../target-run \
-  --eval-summary benchmark/results/perf-cache-quality-YYYYMMDD/.../eval_summary/summary.json
-```
-
-Finally aggregate the frozen roots:
-
-```bash
-python3 benchmark/analysis/aggregate.py \
-  --results-dir benchmark/results/perf-main-table-YYYYMMDD \
-  --results-dir benchmark/results/perf-task-coverage-YYYYMMDD \
-  --results-dir benchmark/results/perf-parallel-YYYYMMDD \
-  --results-dir benchmark/results/perf-cache-quality-YYYYMMDD \
-  --results-dir benchmark/results/perf-resource-profiles-YYYYMMDD \
-  --results-dir benchmark/results/perf-quantization-YYYYMMDD \
-  --results-dir benchmark/results/perf-vae-tiling-YYYYMMDD \
-  --results-dir benchmark/results/perf-cuda-optimization-ablation-YYYYMMDD \
-  --results-dir benchmark/results/perf-cuda-optimization-ablation-qwen-YYYYMMDD \
-  --suite-id performance-page \
-  --output benchmark/results/performance-page-YYYYMMDD/summary.json
-```
-
-Run the public model smoke suite across all locally configured public-preview
-model families:
-
-```bash
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/model-smoke.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --systems edge-dit.cpp \
-  --output-root benchmark/results/model-smoke-YYYYMMDD
-```
-
-Run memory-constrained and optimization probe suites:
-
-```bash
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/memory.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --systems edge-dit.cpp \
-  --output-root benchmark/results/memory-YYYYMMDD
-
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/ablation.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --systems edge-dit.cpp \
-  --output-root benchmark/results/ablation-YYYYMMDD
-```
-
-Generate the local SenCache profile and run the repeated cache-mode matrix:
-
-```bash
-mkdir -p benchmark/cache
-
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/cache-calibration-smoke.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --systems edge-dit.cpp \
-  --output-root benchmark/results/cache-calibration-smoke-YYYYMMDD
-
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/cache-matrix.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --systems edge-dit.cpp \
-  --output-root benchmark/results/cache-matrix-YYYYMMDD
-```
-
-Run quick edge-dit.cpp parallel smoke suites:
-
-```bash
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/parallel-smoke.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --systems edge-dit.cpp \
-  --output-root benchmark/results/parallel-smoke-YYYYMMDD
-
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/cfg-smoke.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --systems edge-dit.cpp \
-  --output-root benchmark/results/cfg-smoke-YYYYMMDD
-```
-
-For unattended official FLUX runs, use the release script. It waits for enough
-free GPU memory, runs the 50-step suite, and regenerates the benchmark report:
-
-```bash
-bash benchmark/scripts/run_flux_s50_release.sh single
-```
-
-For 1/2/4 GPU sequence-parallel and xDiT runs:
-
-```bash
-bash benchmark/scripts/run_flux_s50_release.sh parallel
-```
-
-Run the reproducible FLUX.1-dev parallel e2e suite for edge-dit.cpp:
-
-```bash
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/flux-parallel-e2e.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --systems edge-dit.cpp \
-  --output-root benchmark/results/nightly-YYYYMMDD
-```
-
-Record xDiT baseline preflight or skipped status without mixing it into
-edge-dit.cpp numbers:
-
-```bash
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/flux-parallel-e2e.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --systems xdit \
-  --force-external-update \
-  --output-root benchmark/results/nightly-YYYYMMDD
-```
-
-For a tiny smoke run, override the run counts:
-
-```bash
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/flux-e2e.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --systems edge-dit.cpp \
-  --warmup-runs 0 \
-  --measured-runs 1
-```
-
-External baselines that are configured with `force_latest_origin_main` require
-an explicit opt-in before execution:
-
-```bash
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/flux-parallel-e2e.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --systems xdit \
-  --force-external-update \
-  --warmup-runs 0 \
-  --measured-runs 1 \
-  --max-runs 1
-```
-
-The execution harness records process-level wall time, external GPU memory
-samples, host RSS samples, environment metadata, command lines, logs, and
-machine-readable `result.json` files. Component-level timing fields remain
-`null` until a system-specific runner can emit them reliably.
-
-The official latency boundary is **load-once e2e generation**:
-
-- model loading is timed and recorded as `latency_ms.load`;
-- warmup generations run in the same process and are excluded from steady-state
-  statistics;
-- measured samples time one complete generation after the model is already
-  loaded;
-- output encoding and file writing are outside the core latency where the
-  backend makes that split available.
-
-System adapters that participate in official comparisons must write
-`runner_metrics.json` with `load_ms`, `warmup_ms`, and `measured_ms`. The
-orchestrator refuses official adapters that do not produce this file, so
-process startup and model loading cannot be accidentally counted as steady-state
-generation latency. edge-dit.cpp, Diffusers, and stable-diffusion.cpp have
-load-once wrappers for the README text-to-image main table; xDiT still needs a
-matching official wrapper before its numbers can be reported.
-
-The executable adapters live in `benchmark/scripts/`:
-
-```text
-benchmark/scripts/run_edge_e2e.py       # wraps build-cuda/bin/ed-sample
-benchmark/scripts/run_edge_cli_once.py  # wraps build-cuda/bin/ed-cli for non-T2I smoke
-benchmark/scripts/run_diffusers_e2e.py  # runs Diffusers load-once loops
-benchmark/scripts/sd_cpp_e2e.cpp        # stable-diffusion.cpp C API load-once wrapper
-benchmark/scripts/build_sd_cpp_e2e.py   # builds the stable-diffusion.cpp wrapper
-benchmark/scripts/prepare_sdcpp_sd3_transformer.py
-```
-
-Inspect completed and pending suite entries:
-
-```bash
-python3 benchmark/orchestration/resume_suite.py \
-  --suite benchmark/configs/suites/pilot-flux.yaml \
-  --site benchmark/configs/local/site-h200.yaml
-```
-
-Resume a suite while skipping matching successful runs:
-
-```bash
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/pilot-flux.yaml \
-  --site benchmark/configs/local/site-h200.yaml \
-  --execute \
-  --resume
-```
-
-Aggregate results:
-
-```bash
-python3 benchmark/analysis/aggregate.py \
-  --results-dir benchmark/results/nightly-YYYYMMDD \
-  --include-workload flux1-dev-t2i-1024-s50 \
-  --suite-id nightly-YYYYMMDD \
-  --output benchmark/reports/v0.1.0-alpha/summary.json
-```
-
-Generate Markdown tables and a report:
-
-```bash
-python3 benchmark/analysis/generate_tables.py \
-  benchmark/reports/v0.1.0-alpha/summary.json \
-  --output benchmark/reports/v0.1.0-alpha/tables.md
-
-python3 benchmark/analysis/generate_report.py \
-  benchmark/reports/v0.1.0-alpha/summary.json \
-  --tables benchmark/reports/v0.1.0-alpha/tables.md \
-  --output benchmark/reports/v0.1.0-alpha/report.md
-```
-
-## Cross-System Matrix Evaluation
-
-The cross-system matrix compares edge-dit.cpp against Diffusers and
-stable-diffusion.cpp across models x precisions x VRAM budgets, and reports
-component-level timing/VRAM plus per-task quality. It generates images/videos,
-scores them with the correct metric per task, and aggregates one Markdown table.
-
-### Dependencies
-
-The quality metrics need a Python env with the packages in
-`benchmark/requirements.txt` (install a CUDA-matched `torch` first):
-
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu121   # match your CUDA
-pip install -r benchmark/requirements.txt
-```
-
-ImageReward runs on `transformers>=5` via the self-contained shim at the top of
-`benchmark/evaluation/single_metric/cal_ir.py`; a clean `pip install image-reward`
-needs no source edits. The LAION aesthetic-v2 head weights
-(`sac+logos+ava1-l14-linearMSE.pth`) are not on PyPI — fetch them from the
-improved-aesthetic-predictor project and place them under
-`benchmark/cache/aesthetic/` (or pass `--aesthetic-weights`).
-
-### One command (generate → evaluate → table)
-
-```bash
-nohup bash benchmark/scripts/run_cross_system_matrix.sh \
-  > benchmark/results/matrix.log 2>&1 &
-```
-
-Stage 1 generates all suites (8 GPUs, one suite per card, `--resume`), stage 2
-scores every successful run with `eval_all.py` (sharded by system across 3 GPUs;
-quant-vs-FP16 pairing is same-system, so this sharding is safe), stage 3 writes
-`tables_matrix.md`.
-
-### Evaluate existing runs only (re-score without regenerating)
-
-```bash
-python3 benchmark/scripts/eval_all.py \
-  --results-root benchmark/results/cross-system-matrix \
-  --site benchmark/configs/local/site-4090.yaml
-python3 benchmark/scripts/make_matrix_tables.py \
-  --results-root benchmark/results/cross-system-matrix
-```
-
-`eval_all.py` reads `config.resolved.yaml` as the authoritative source of
-task/system/precision/budget and the true prompt (via
-`run_options.prompt_id → resolved_prompt_set`), loads each metric model once,
-routes by task, and back-fills both `result.json.quality` and a per-run
-`eval/quality.json`. Per-task metrics:
-
-- **text-to-image**: CLIP, aesthetic, ImageReward.
-- **image-editing**: directional-CLIP (edit direction vs instruction),
-  keep-SSIM/keep-LPIPS (output vs input, edit magnitude), aesthetic, ImageReward.
-- **text-to-video**: per-frame CLIP & aesthetic, plus adjacent-frame temporal
-  consistency (LPIPS/SSIM mean + flicker std).
-- Quantization loss (PSNR/SSIM/LPIPS) is paired against the same-system FP16 run
-  only, so it is meaningful only within a system (not across systems).
-
-### Reading the numbers
-
-- Compare inference speed with **DiT pure-sampling ms** (component denoise time),
-  not end-to-end latency: end-to-end is contaminated by one-time on-the-fly
-  weight quantization (tens to hundreds of seconds) and model load. The table's
-  "口径/boundary" column tags each latency as load-once vs. includes-load.
-- For stable-diffusion.cpp the convert step folds into the denoise timing too,
-  so its DiT sampling ms is also inflated under quantized dtypes.
-- Treat **q8** as the primary usable-quality quantization tier; q4 is an
-  extreme-VRAM reference point with visible quality loss.
-- Cross-system absolute quality scores (CLIP/aesthetic/IR) are comparable; if a
-  gap looks implausibly large, check alignment before drawing conclusions.
-
+- **Add a model**: drop a file into `models/` (copy an existing one, set `model_family` / `task` / default resolution+steps / `prompt_set` / `local_path_ref`), then configure that ref's actual path in the site.
+- **Add a quantization/cache/acceleration method**: drop a file into `methods/<category>/` (named `options` + a one-line `description` + tag `kind`/`needs_calibration`/`cross_system`).
+- **Add a comparison system**: add `systems/<name>.yaml` + the corresponding adapter in `engine/runners/`.
+- **Switch machine**: create `sites/<host>.yaml`, filling only machine-specific paths.

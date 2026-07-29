@@ -1,0 +1,16 @@
+# Example 7 - the three metrics toggles (control evaluation and tables)
+# metrics has three boolean toggles, all on by default: quality / speed / vram.
+#   - quality:false -> actually skip quality eval (does not run eval_all.py, saves time) + hides quality columns in the table
+#   - speed:false / vram:false -> data is still produced for free, the toggle only controls whether the table shows those columns
+# This example cares only about quality, turns off the speed/VRAM columns, table keeps quality only (CLIP/aesthetic/IR + quant loss).
+# Expanded runs: edge-dit section [ models(1) x quant(2) x prompts(3) ] = 6
+name: example-metrics
+task: text-to-image
+models: [sd3-medium]
+metrics:
+  speed: false       # hide DiT-sampling/end-to-end/TE/VAE ms columns in the table
+  vram:  false       # hide peak/per-component VRAM columns in the table
+  # quality defaults to true: still computes and shows CLIP/aesthetic/IR + PSNR/SSIM/LPIPS
+
+edge-dit:
+  quant: [fp16, q8]

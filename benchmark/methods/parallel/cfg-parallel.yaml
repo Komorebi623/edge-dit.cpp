@@ -1,0 +1,8 @@
+method_id: cfg-parallel
+kind: runtime
+category: parallel
+description: >
+  CFG parallelism. Splits the conditional and unconditional passes across 2
+  GPUs. Requires multi-GPU; measured ~1.77x speedup at 2 GPUs.
+options: {cfg_parallel_size: 2}
+cross_system: [edge-dit, diffusers]

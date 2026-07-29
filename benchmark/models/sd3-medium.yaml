@@ -1,0 +1,19 @@
+schema_version: 1
+model_id: sd3-medium
+model_family: SD3
+model_name: Stable Diffusion 3 Medium
+task: text-to-image
+distilled: false                       # not distilled; steps use default_steps below
+model:
+  public_id: stabilityai/stable-diffusion-3-medium
+  local_path_ref: sd3_medium_dir       # actual path resolved in site config
+  format: diffusers-directory
+  stable_diffusion_cpp_transformer_ref: sd3_medium_sdcpp_transformer
+prompt_set: ../prompts/text-to-image-v1.jsonl
+generation:                            # defaults; job steps/quant can override
+  width: 1024
+  height: 1024
+  steps: 20
+  guidance: 4.5
+  cfg_scale: 4.5                        # SD3 uses CFG (two forward passes)
+  scheduler: model-default

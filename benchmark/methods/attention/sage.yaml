@@ -1,0 +1,9 @@
+method_id: sage
+kind: build-variant
+category: attention
+description: >
+  SageAttention2 INT8-QK attention. Requires a dedicated sage binary variant:
+  build with -DED_ENABLE_CUDA_SAGE_ATTN=ON, then run with the ED_SAGE_ATTN=1
+  environment variable to activate it at runtime.
+options: {}   # build-time: -DED_ENABLE_CUDA_SAGE_ATTN=ON; runtime env: ED_SAGE_ATTN=1
+cross_system: [edge-dit]   # edge-dit only

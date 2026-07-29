@@ -1,0 +1,9 @@
+# Single model, three quant tiers, with all metrics (stage-1 verification) -- per-system single-section form
+name: example-sd3-quant
+task: text-to-image
+models: [sd3-medium]
+
+edge-dit:
+  quant: [fp16, q8, q4_k]
+# Only edge-dit is tested; section defaults offload=none, vae_tiling=auto, cache=none.
+# Top-level prompts=3, metrics all on by default.

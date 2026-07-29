@@ -1,0 +1,9 @@
+method_id: sequence-parallel
+kind: runtime
+category: parallel
+description: >
+  Ulysses sequence parallelism. Shards the token sequence across GPUs; best for
+  long sequences / high resolution. Requires multi-GPU; measured up to 2.59x on
+  FLUX. sp_parallel_size is tunable.
+options: {sp_parallel_size: 4}
+cross_system: [edge-dit]   # edge-dit only

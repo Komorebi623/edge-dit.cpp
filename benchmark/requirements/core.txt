@@ -1,0 +1,31 @@
+# edge-dit.cpp benchmark -- CORE dependencies.
+#
+# This layer is everything you need to (a) run the edge-dit.cpp system-under-test
+# and (b) compute the quality metrics (CLIP / aesthetic / ImageReward / LPIPS /
+# SSIM / PSNR / temporal-consistency). It does NOT pull the diffusers stack --
+# install requirements/diffusers.txt on top only when you want to (re)generate
+# the diffusers cross-system baseline.
+#
+# torch is intentionally unpinned: install the build matching your CUDA/driver
+# first (see https://pytorch.org), e.g.
+#     pip install torch --index-url https://download.pytorch.org/whl/cu121
+# then `pip install -r benchmark/requirements/core.txt` for the rest.
+#
+# The quality metrics run on transformers>=5 thanks to the self-contained shim
+# at the top of evaluation/single_metric/cal_ir.py -- a clean
+# `pip install image-reward` needs no edits to its installed source.
+
+transformers>=5.0          # CLIP + aesthetic backbone; cal_ir.py shim targets v5 API removals (validated on 5.14.1)
+image-reward>=1.5          # ImageReward-v1.0 (BLIP-based human-preference score)
+lpips>=0.1.4               # perceptual distance (edit keep-LPIPS, video temporal, quant-vs-fp16)
+scikit-image>=0.20         # SSIM (structural_similarity)
+opencv-python>=4.7         # video frame decode (temporal consistency, per-frame metrics)
+Pillow>=9.0
+numpy>=1.24
+tqdm>=4.60
+PyYAML>=6.0                # reads config.resolved.yaml / site config
+requests>=2.28             # asset downloader (benchmark/scripts/setup_assets.py)
+
+# The LAION aesthetic-v2 MLP head weights are NOT on PyPI, and the ImageReward
+# weights are fetched at first use. Run `python benchmark/scripts/setup_assets.py`
+# once to pull both (idempotent, honours HF_ENDPOINT).

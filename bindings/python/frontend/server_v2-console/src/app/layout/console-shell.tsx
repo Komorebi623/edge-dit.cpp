@@ -841,7 +841,7 @@ export function ConsoleShell() {
       return
     }
     if (!file.type.startsWith('image/')) {
-      setEditImageDraftErrors((current) => ({ ...current, inputImage: '请选择有效的图片文件。' }))
+      setEditImageDraftErrors((current) => ({ ...current, inputImage: 'Please select a valid image file.' }))
       toast.error('Only image files can be used as edit inputs.')
       return
     }
@@ -858,7 +858,7 @@ export function ConsoleShell() {
       setSubmitErrorText(null)
       toast.success(`${editImageBinding.inputLabel} ready: ${file.name}`)
     } catch {
-      setEditImageDraftErrors((current) => ({ ...current, inputImage: '读取图片失败，请重试。' }))
+      setEditImageDraftErrors((current) => ({ ...current, inputImage: 'Failed to read the image, please try again.' }))
       toast.error('The selected image could not be read.')
     }
   }
@@ -1006,7 +1006,7 @@ export function ConsoleShell() {
         const validationErrors = validateImageDraft(imageDraft)
         setImageDraftErrors(validationErrors)
         if (Object.keys(validationErrors).length > 0) {
-          setSubmitErrorText('请先修正表单中的字段错误。')
+          setSubmitErrorText('Please fix the field errors in the form first.')
           return
         }
       }
@@ -1018,7 +1018,7 @@ export function ConsoleShell() {
         const validationErrors = validateEditImageDraft(editImageDraft)
         setEditImageDraftErrors(validationErrors)
         if (Object.keys(validationErrors).length > 0) {
-          setSubmitErrorText('请先修正表单中的字段错误。')
+          setSubmitErrorText('Please fix the field errors in the form first.')
           return
         }
       }
@@ -1030,7 +1030,7 @@ export function ConsoleShell() {
         const validationErrors = validateVideoDraft(videoDraft)
         setVideoDraftErrors(validationErrors)
         if (Object.keys(validationErrors).length > 0) {
-          setSubmitErrorText('请先修正表单中的字段错误。')
+          setSubmitErrorText('Please fix the field errors in the form first.')
           return
         }
       }
@@ -1040,12 +1040,12 @@ export function ConsoleShell() {
     try {
       const parsed = JSON.parse(currentRawJsonBuffer) as unknown
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        setSubmitErrorText('请求体必须是 JSON object。')
+        setSubmitErrorText('The request body must be a JSON object.')
         return
       }
       payload = parsed as Record<string, unknown>
     } catch {
-      setSubmitErrorText('JSON 格式无效，请先修正语法。')
+      setSubmitErrorText('Invalid JSON format, please fix the syntax first.')
       return
     }
 

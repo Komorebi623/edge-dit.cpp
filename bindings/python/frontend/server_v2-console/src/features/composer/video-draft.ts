@@ -69,14 +69,14 @@ export function validateVideoDraft(draft: VideoDraft): VideoDraftErrors {
   const errors: VideoDraftErrors = {}
 
   if (!draft.prompt.trim()) {
-    errors.prompt = '请输入 `prompt`。'
+    errors.prompt = 'Please enter `prompt`.'
   }
 
   const positiveIntegerFields: Array<[keyof VideoDraft, string]> = [
-    ['width', '`width` 必须大于 0。'],
-    ['height', '`height` 必须大于 0。'],
-    ['frames', '`frames` 必须大于 0。'],
-    ['steps', '`steps` 必须大于 0。'],
+    ['width', '`width` must be greater than 0.'],
+    ['height', '`height` must be greater than 0.'],
+    ['frames', '`frames` must be greater than 0.'],
+    ['steps', '`steps` must be greater than 0.'],
   ]
 
   for (const [field, message] of positiveIntegerFields) {
@@ -93,15 +93,15 @@ export function validateVideoDraft(draft: VideoDraft): VideoDraftErrors {
   if (draft.seed.trim()) {
     const parsed = Number.parseInt(draft.seed, 10)
     if (!Number.isInteger(parsed)) {
-      errors.seed = '`seed` 必须是整数。'
+      errors.seed = '`seed` must be an integer.'
     }
   }
 
   const numericFields: Array<[keyof VideoDraft, string]> = [
-    ['guidance', '`guidance` 必须是数值。'],
-    ['cfgScale', '`cfg_scale` 必须是数值。'],
-    ['eta', '`eta` 必须是数值。'],
-    ['flowShift', '`flow_shift` 必须是数值。'],
+    ['guidance', '`guidance` must be a number.'],
+    ['cfgScale', '`cfg_scale` must be a number.'],
+    ['eta', '`eta` must be a number.'],
+    ['flowShift', '`flow_shift` must be a number.'],
   ]
 
   for (const [field, message] of numericFields) {

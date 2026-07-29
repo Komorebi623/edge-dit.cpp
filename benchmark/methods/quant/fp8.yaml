@@ -1,0 +1,9 @@
+method_id: fp8
+kind: runtime
+category: quant
+description: >
+  diffusers FP8 via Optimum-Quanto (qfloat8 weights + activations). diffusers-only
+  quantization tier; edge/sd.cpp use q8_0 instead.
+options: {quant_weights: qfloat8, quant_activations: qfloat8}
+cross_system: [diffusers]
+convert_default: false

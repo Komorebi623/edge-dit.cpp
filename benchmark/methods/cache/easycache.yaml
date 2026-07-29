@@ -1,0 +1,9 @@
+method_id: easycache
+kind: runtime
+category: cache
+description: >
+  Output-change gated caching. Monitors the transformer output change rate and
+  reuses the cached result while the block output stays below threshold.
+  Works out of the box, no calibration needed.
+options: {cache: easycache}
+cross_system: [edge-dit, stable-diffusion.cpp]

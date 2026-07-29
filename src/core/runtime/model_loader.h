@@ -218,7 +218,7 @@ public:
     bool init_from_diffusers_directory(const std::string& dir_path,
                                        const std::string& prefix = "");
 
-    // 权重绑定：原来的 load_tensors 也不再暴露给 Engine。
+    // Weight binding: the original load_tensors is likewise no longer exposed to the Engine.
     bool load_tensors(on_new_tensor_cb_t on_new_tensor_cb,
                       int n_threads = 0,
                       bool use_mmap = false);

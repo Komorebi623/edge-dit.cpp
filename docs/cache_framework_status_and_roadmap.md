@@ -1,306 +1,306 @@
-# Cache Framework 现状总结与前进目标分析
+# Cache Framework Status Summary and Forward-Goal Analysis
 
-> 面向 `edge-dit.cpp` 的 step-caching 子系统
+> For the step-caching subsystem of `edge-dit.cpp`
 >
-> - 文档状态：现状盘点 + 路线建议
-> - 分支：`refactor/cache_framework`
-> - 触发来源：一次针对 cache framework 的代码审阅
-> - 目标读者：cache 算法开发者、Runtime/Backend 开发者
+> - Document status: status review + roadmap recommendations
+> - Branch: `refactor/cache_framework`
+> - Trigger: a code review targeting the cache framework
+> - Intended audience: cache-algorithm developers, Runtime/Backend developers
 
 ---
 
-## 1. 背景与范围
+## 1. Background and Scope
 
-`refactor/cache_framework` 把 step-caching 从旧的 `CacheController` 重构为声明式的
-`CacheEngine`。本文做两件事：
+`refactor/cache_framework` refactors step-caching from the old `CacheController` into a declarative
+`CacheEngine`. This document does two things:
 
-1. **盘点现状**：哪些能力真正落地、优点与差距分别是什么；
-2. **给出前进目标**：把「落地声明式引擎」作为推荐方向深入分析其优势与问题，并列出备选方向。
+1. **Take stock of the status**: which capabilities have actually landed, and what the strengths and gaps are respectively;
+2. **Lay out the forward goal**: treat "landing the declarative engine" as the recommended direction, analyze its advantages and problems in depth, and list alternative directions.
 
-本文以 `docs/cache_framework_redesign.md` 描述的声明式架构为**目标态**，衡量「已落地
-vs 差距」。文中所有「未承重 / 死代码」类断言均已由代码检索核实，并附 `file:line`。
+This document uses the declarative architecture described in `docs/cache_framework_redesign.md` as the **target state**, measuring "already landed
+vs. gaps". All "not load-bearing / dead code" assertions in the text have been verified by code search, with `file:line` attached.
 
-> **最新进展（2026-07-15）：cache 层与模型层的解耦已完成。** 07-14 之后的一批提交
-> 把「去 hook（dehook）」这一原本列为「数周量级、终态」的工作做完了：模型 forward 不再
-> 认识任何 cache 概念，改为在结构地标处调用 `TapRegistry` 的条件 `tap()`；旧的
-> `CacheGraphScope` seam 已被**整块删除**（commit `cd0c9b7`，`-1667` 行），`ED_CACHE_SUBSTEP`
-> 门控随之消失——**substep 循环成为唯一执行路径**。下方 §2.6、§4、§5 已据此改写；
-> §5 的三层路线图中，前两层（StateManager / Operator）＋原「Slice 4 去 hook」均已落地，
-> 只剩第 3 层（GraphRepository）与 SP+缓存复合未做。
+> **Latest progress (2026-07-15): the decoupling of the cache layer from the model layer is complete.** A batch of commits after 07-14
+> finished the "dehook" work that was originally listed as "weeks-scale, terminal state": the model forward no longer
+> knows any cache concept, and instead calls the conditional `tap()` of `TapRegistry` at structural landmarks; the old
+> `CacheGraphScope` seam has been **deleted wholesale** (commit `cd0c9b7`, `-1667` lines), and the `ED_CACHE_SUBSTEP`
+> gate disappeared along with it -- **the substep loop became the only execution path**. §2.6, §4, §5 below have been rewritten accordingly;
+> in §5's three-layer roadmap, the first two layers (StateManager / Operator) plus the original "Slice 4 dehook" have all landed,
+> leaving only layer 3 (GraphRepository) and the SP+cache composition undone.
 
-> **术语：承重 vs 脚手架。**「承重」指该组件在真实推理路径上被调用、去掉会改变行为；
-> 「脚手架」指已实现但当前无任何调用方、去掉不影响任何现有功能的代码。本文的核心结论
-> 之一，就是区分声明式设计里哪些是承重、哪些是脚手架。
-
----
-
-## 2. 现状总结（已落地）
-
-### 2.1 架构
-
-- `CacheEngine`（`src/core/optimization/cache/runtime/cache_engine.{hpp,cpp}`）替代
-  `CacheController`，保留 `init / enabled / begin_step / end_step / run_branch /
-  log_summary` 接口；头文件末尾以 `using CacheController = CacheEngine;` 别名过渡，
-  因此 pipeline 只改类型名即接入。
-- 6 个 pipeline 已接入 `run_branch`：flux、flux_kontext、qwen_image、qwen_image_edit、
-  sd3、wan（`src/dit_models/pipelines/*_pipeline.cpp`）。
-
-### 2.2 能力协商是真的（承重）
-
-`CacheEngine::init` 在 `policy_->compile(...)` **之前**调用
-`validate_requirements`（`runtime/capability_negotiation.cpp`）。不支持的组合会显式
-`LOG_WARN("cache disabled: ...")` 并返回 false，取代旧的「静默 full-compute」降级。
-错误信息会列出模型实际暴露的 site（`exposed_sites`），可诊断。
-
-### 2.3 8 个 policy 迁至 `ICachePolicy`
-
-`policy/policy_factory.cpp` 分发：null / EasyCache / UCache / DBCache+CacheDiT
-（共用 `condition_policy`）/ TaylorSeer / MagCache / DiCache / SenCache，各一个文件于
-`policy/policies/`。
-
-### 2.4 三种 granularity（承重）
-
-在 `cache_graph_lowering.cpp` 的 `execute_substeps` 中按 `SubstepOpKind` 分流（policy 的
-`next_substep()` 逐子步产出 `SubstepPlan`，中间层翻译为 tap 驱动的 runner pass）：
-
-- **Output**：黑盒，只用 `hooks.full()` + 主机侧输出 diff/复用，SP 下也可用；
-- **Feature**：经 `TapRegistry` 在 ModelIn/ModelOut 锚点捕获/注入残差（MagCache、TaylorSeer、
-  SenCache）；
-- **Probe**：跑浅层前缀（`stop_after`）再决策（DiCache）。
-
-### 2.5 性能优化真实有效
-
-详见 `docs/cache_quality_benchmark_report.md`（H200 / 50 步 / Flux+Qwen）：
-
-- on-GPU MagCache 特征复用、DiCache GPU 探针重写、`ED_CACHE_COMPILED_GRAPHS`
-  build-once 图复用；
-- skip 成本从 ~40ms/skip 降到 ~1ms，且验证 byte-identical，质量不变；
-- Flux：MagCache 2.05x、DiCache 默认 1.24x（近无损，PSNR ~40）。
-- **2026-07-14 更新**：Flux 和 Qwen 的默认 on-GPU 特征复用现统一走**声明式设备槽**
-  （`CacheStateManager` 设备后端），已替换 legacy `DiCacheGpuState` 路径；设备槽 vs
-  host-declarative 验证**字节一致（PSNR 100 dB）**，skip 计数逐位一致（见 §5.5）。
-  注：本轮 Qwen 验证需 `ED_QWEN_SINGLE_FUSED_ATTENTION=0`（默认融合注意力在当前 CUDA-13
-  环境下产出纯白图，属既有环境问题，与 cache 无关）。
-
-### 2.6 cache/模型解耦已完成：TapRegistry 取代 seam（承重，2026-07-15）
-
-原设计文档把「彻底去 hook」列为终态、数周量级的 Slice 4。**它已经做完了**：
-
-- **依赖方向已倒置干净**：cache 层（`src/core/optimization/cache/`）**零 include 任何具体
-  模型 header**（flux/qwen/wan/mmdit），只依赖模型侧暴露的抽象——`anchor` / `cache_site` /
-  `model_topology` / `model_schema` / `tap_registry` / `model_cache_contract`。已由 grep 核实。
-- **模型 forward 不再认识 cache**：4 个模型（flux/qwen_image/mmdit/wan）的 forward 在结构
-  地标处调用 `TapRegistry` 的条件 `tap()`（`ctx->tap_registry`）——非请求即 no-op，不 pin
-  buffer、gallocr 无感。cache 需要读哪些张量由 per-substep 的 `SubstepPlan.taps` 决定，
-  而非模型枚举字段。inject（复用注入）也走 registry：forward 在 `inject_at(i)` 处替换流
-  并跳到 `inject_resume()`。
-- **`CacheGraphScope` seam 已整块删除**（commit `cd0c9b7`，`-1667` 行）：旧的固定 `*_node`
-  字段、`kCache*Name` 常量、`expand_cache_scope_nodes`、runner 的 `cache_scope_` 成员 +
-  `set_cache_scope`、`DiCacheGpuState` 独立 GPU 状态路径均已移除。只保留一个纯结果结构体
-  `sd::DiffusionCacheResult`（host 读回的 output/feature/before/probe + DiCache 标量）。
-- **substep 是唯一路径**：`ED_CACHE_SUBSTEP` 门控消失，`run_branch` 无条件走
-  `CacheGraphLowering::execute_substeps`（`cache_engine.cpp:196`）；旧 `execute` 及其
-  hook 大 if/else 已删（commit `a2831c6`，`-444` 行）。8 个方法全部实现 `next_substep()`。
-- **DiCache probe 也已 tap 化**：checklist 曾标注「probe 未迁」的那项已完成——probe 的
-  跨步持久张量（prev_probe/probe_prev1/2）经 `TapRegistry::ProbeMetricOperands` 线程进
-  indicator lowering，delta_y/delta_x/gamma 在图内归约后读回标量。
+> **Terminology: load-bearing vs. scaffolding.** "Load-bearing" means the component is called on the real inference path and removing it would change behavior;
+> "scaffolding" means code that is implemented but currently has no caller, and removing it does not affect any existing functionality. One of the core conclusions of this document
+> is precisely to distinguish which parts of the declarative design are load-bearing and which are scaffolding.
 
 ---
 
-## 3. 优点
+## 2. Status Summary (already landed)
 
-1. **解耦目标已达成**：新增 cache 方法 = 写一个 `ICachePolicy`；新增模型 = 暴露一个
-   `DiTModelCacheContract` + 在 forward 的结构地标处调用 `TapRegistry::tap()`（ModelIn/
-   BlockOut[i]/ModelOut）。摆脱了「模型数 × 方法数」的组合爆炸，且模型侧不再 include 或
-   认识任何 cache 概念（见 §2.6）。
-2. **失败是显式的**：SP-parallel 或无法切图时，Feature/Probe 方法经能力协商被正确拒绝，
-   而不是静默跑成 no-cache。
-3. **CacheProgram 可 dump**（`ED_DUMP_CACHE_PROGRAM`），策略决策可观测。
-4. **GPU 路径提速且质量不变**：skip ~1ms、byte-identical。
-5. **CFG-parallel + 缓存可用**：cond/uncond 各自用 `condition_key`（condition 结构地址）+
-   `CacheBranch` tag 隔离状态（`cache_slot.hpp:26`、`cache_state_manager.cpp:8`
-   `key_of`、`magcache_policy.cpp` `branch_for`）。cache 命中只跳过本地 forward，
-   `cfg_all_gather` 仍无条件执行以保持同步（对齐 `CLAUDE.md`）。
+### 2.1 Architecture
 
----
+- `CacheEngine` (`src/core/optimization/cache/runtime/cache_engine.{hpp,cpp}`) replaces
+  `CacheController`, keeping the `init / enabled / begin_step / end_step / run_branch /
+  log_summary` interface; the end of the header transitions with the alias `using CacheController = CacheEngine;`,
+  so pipelines connect just by changing the type name.
+- 6 pipelines have connected to `run_branch`: flux, flux_kontext, qwen_image, qwen_image_edit,
+  sd3, wan (`src/dit_models/pipelines/*_pipeline.cpp`).
 
-## 4. 缺点 / 差距
+### 2.2 Capability negotiation is real (load-bearing)
 
-### 4.1 承重层的问题
+`CacheEngine::init` calls `validate_requirements` (`runtime/capability_negotiation.cpp`)
+**before** `policy_->compile(...)`. An unsupported combination will explicitly
+`LOG_WARN("cache disabled: ...")` and return false, replacing the old "silent full-compute"
+fallback. The error message lists the sites the model actually exposes (`exposed_sites`), which is diagnosable.
 
-- **粗粒度 Option-A 拓扑**：`dit_model_cache_contract.cpp` 只暴露单个 `BLOCK_STACK`
-  segment（输入投影 / 整块 stack / 输出投影）。无 per-block、attention/FFN、token 级
-  site。`cache_program.hpp` 的 `CachePhase::{FULL_ANCHOR,CORRECTION,REINTEGRATION}`
-  仅占位，实际只用到 `FORWARD/PROBE`（`redesign` 文档阶段三/四未做）。
-- **SP-parallel 下 Feature/Probe 全失效**：`feature_cache_available()` 定义为
-  `!can_attempt_graph_cut_segmented_compute()`（`ggml_extend.hpp:6472-6473`），而后者在
-  「任何 process group 使能」时即为 true —— 故纯 SP 也会关掉 tap 捕获路径（pipeline 以
-  `cache_seam_available = !cfg_parallel && feature_cache_available()` 传入 `CacheEngine::init`），
-  SP 下只剩 Output 粒度。这是引擎两大卖点（多卡并行 + 步缓存）当前无法叠加的直接体现，
-  也是解耦完成后**最大的剩余能力缺口**。
-- **~~hook 耦合脆弱~~（已随 dehook 消解）**：`gpu_metric`/`branch_key` 曾静默把所有 Feature
-  cache（MagCache/TaylorSeer/SenCache）归零跑成 0/N。该脆弱面源于旧 `CacheGraphScope` 的
-  固定 `*_node` 字段 + 双写路径；§2.6 的 dehook 已删除该 seam，tap 由模型按请求集主动登记，
-  这一类回归的结构性成因已消除。保留此条作为历史教训：触及 tap/lowering 时仍按「skip 计数 +
-  PSNR≥地板」验收。
-- **cache 路径曾有 GPU 内存泄漏**（已修），长跑仍需 chunked 生成绕过。
+### 2.3 8 policies migrated to `ICachePolicy`
 
-### 4.2 声明式机器：已承重 vs 仍是脚手架（2026-07-15 更新，均已 grep 核实）
+`policy/policy_factory.cpp` dispatches: null / EasyCache / UCache / DBCache+CacheDiT
+(sharing `condition_policy`) / TaylorSeer / MagCache / DiCache / SenCache, each one file in
+`policy/policies/`.
 
-设计文档最有雄心的三块声明式机器，现状已从「只落地决策层」推进——**前两块已承重**：
+### 2.4 Three granularities (load-bearing)
 
-- **`CacheStateManager` 已承重（history ring + 设备槽后端）**：`CacheEngine::init` 把
-  `state_` 传入 `CacheGraphLowering::execute_substeps`（`cache_engine.cpp:196`），lowering 的
-  `ActionInterpreter` 真实调用 `state_.read_history` / `state_.write` / `state_.rotate_history`
-  （`cache_graph_lowering.cpp`），设备槽路径调 `state.read` + `state.alloc_device_entry`。
-  TaylorSeer 的导数历史 ring、MagCache/Qwen 的**设备端单残差槽**都跑在其上。
-  仍是脚手架的部分：`commit_step`（`cache_state_manager.cpp`）/ `rollback_step`
-  仍是**显式 no-op**——但这是**诚实的**：全库无 `rollback_step` 调用方，`commit_step` 只被
-  `end_step` 无条件调用一次，且没有任何 cache 方法会中途 abort（失败走同步 full-compute
-  回退，不涉及状态回滚）。所谓「事务式回滚安全」当前无触发点，是为未来细粒度/token-cache
-  预留的接口占位，而非承重能力。各 policy 仍自持标量决策状态（`states_` map），这是**决策
-  逻辑**（该留在 policy），与 StateManager 管的**张量存储**已分离。
-- **`CacheOperatorRegistry` + operator 已承重**：`CacheEngine` 实例化 registry 并调
-  `register_builtin_cache_operators`（`cache_engine.cpp:111`，此前死代码）；lowering 的
-  DIFFERENCE/PREDICT/BLEND 动作经 `operators_.find(...)` 路由到 `DifferenceOperator/
-  LinearPredictOperator/WeightedBlendOperator::apply_host`。
-  EasyCache/UCache 的输出 diff、TaylorSeer 的历史外推 blend 都由 operator 执行。
-- **仍无 `GraphRepository` / 多静态图变体**：`GraphRepository`、`GraphVariantKey`、
-  `get_or_compile` 在 `src/`、`examples/` 及除 redesign 外的所有 docs 中**零命中**。
-  设计文档核心思想「运行时在多张预编译静态图变体间选择」**没有实现**。实际执行是
-  tap 驱动的 runner pass 分派：`execute_substeps` 按 `SubstepPlan.op.kind` 分支去调
-  `hooks.full` 与 tap 驱动的 `hooks.substep_capture/substep_probe/substep_inject_*`（device
-  或 host）。因此 `CacheProgram`/`GraphVariantPlan` 是「决策描述符 + 动作序列」（告诉 lowering
-  产出哪种 substep、执行哪些 slot/operator 动作），而非编译产物。
+In `execute_substeps` of `cache_graph_lowering.cpp`, dispatch is done by `SubstepOpKind` (the policy's
+`next_substep()` produces a `SubstepPlan` substep by substep, which the middle layer translates into a tap-driven runner pass):
 
-> **小结**：声明式组件里，`CacheProgram`/`GraphVariantPlan`（描述符 + 动作）、
-> `CacheRunnerHooks` lowering、`CacheStateManager` 的 history/设备槽后端、`CacheOperatorRegistry`
-> 均已承重——8 个方法（含 Flux/Qwen 的默认设备端 GPU 复用）真实跑在 StateManager+Operator 上；
-> 且模型侧已彻底 dehook（§2.6）。仍是脚手架的只剩：`GraphRepository`/多变体编译（未建），
-> 以及 `commit_step`/`rollback_step` 的事务语义（诚实 no-op，无触发点，为未来预留）。
+- **Output**: black box, uses only `hooks.full()` + host-side output diff/reuse, also usable under SP;
+- **Feature**: captures/injects residuals at the ModelIn/ModelOut anchors via `TapRegistry` (MagCache, TaylorSeer,
+  SenCache);
+- **Probe**: runs a shallow prefix (`stop_after`) and then decides (DiCache).
 
----
+### 2.5 Performance optimizations are genuinely effective
 
-## 5. 推荐前进目标：落地声明式引擎
+See `docs/cache_quality_benchmark_report.md` for details (H200 / 50 steps / Flux+Qwen):
 
-**方向**：把 §4.2 的三块脚手架真正接上，兑现 `cache_framework_redesign.md` 的核心承诺。
-**现状（2026-07-14）**：前两层已落地承重，只剩第 3 层。
+- on-GPU MagCache feature reuse, DiCache GPU probe rewrite, `ED_CACHE_COMPILED_GRAPHS`
+  build-once graph reuse;
+- skip cost dropped from ~40ms/skip to ~1ms, verified byte-identical, quality unchanged;
+- Flux: MagCache 2.05x, DiCache default 1.24x (near-lossless, PSNR ~40).
+- **2026-07-14 update**: the default on-GPU feature reuse for Flux and Qwen now uniformly goes through the **declarative device slot**
+  (`CacheStateManager` device backend), having replaced the legacy `DiCacheGpuState` path; device slot vs.
+  host-declarative verification is **byte-identical (PSNR 100 dB)**, with skip counts bitwise-identical (see §5.5).
+  Note: this round of Qwen verification requires `ED_QWEN_SINGLE_FUSED_ATTENTION=0` (the default fused attention produces
+  a pure-white image in the current CUDA-13 environment, which is a pre-existing environment issue unrelated to cache).
 
-### 5.1 具体含义（分层，每层独立按「skip 计数 + PSNR≥地板」验收）
+### 2.6 cache/model decoupling complete: TapRegistry replaces the seam (load-bearing, 2026-07-15)
 
-1. **StateManager 承重化 ✅ 已完成**：`CacheStateManager` 已是 TaylorSeer / DiCache /
-   MagCache / Qwen 的真实状态后端（host history ring + 设备端单残差槽），替换了这些方法
-   张量存储层面的私有 `states_`。事务 commit/rollback 仍是诚实 no-op（无触发点，见 §4.2）。
-2. **Operator 化数学 ✅ 已完成**：残差 diff / 预测外推 / blend 已路由到 `CacheOperator`，
-   policy 引用 operator id，`register_builtin_cache_operators` 真正被调用。
-3. **GraphRepository + 变体编译 ⬜ 未做**：引入真正的 FULL/REUSE/PREDICT 静态图变体编译与
-   缓存，并与 `ED_CACHE_COMPILED_GRAPHS` 的 build-once 图复用融合（两者都想「少建图」）。
-   这是唯一剩下的声明式层，也是 SP 复合 / 细粒度的天然下游。
+The original design doc listed "fully dehook" as the terminal state, a weeks-scale Slice 4. **It is already done**:
 
-### 5.2 已兑现的收益（层 1-2）与剩余价值（层 3）
-
-已兑现：
-- 8 个方法 + Flux/Qwen 默认设备端 GPU 复用跑在 StateManager+Operator 上，`CacheProgram`
-  不再只是决策描述符；
-- operator 化让新方法接入更快（组合已有 operator，而非每次内联新数学）；
-- 设备槽把 skip 成本压到 ~1ms 且验证字节一致（见 §2.5、§5.5）。
-
-剩余价值（层 3）：
-- 为细粒度 / 轨迹修正 / token cache 打地基（需要真正的多变体静态图）；
-- 与 compiled-graph 复用合流，可能进一步降低建图开销；
-- 事务 rollback 安全当前**无触发点**，不是收益——除非未来出现会中途 abort 的方法。
-
-### 5.3 问题 / 风险（不回避）
-
-- **层 1-2 已证「脚手架可承重」**：设备槽验收字节一致（PSNR 100 dB）、skip 计数逐位一致，
-  证明「接脚手架」确有具体收益（skip ~1ms、单一 GPU 复用路径）。这消解了原本「纯整洁化、
-  无用户可见收益」的担忧——本文仍主张**把落地当手段而非目的**，每层绑定具体收益。
-- **过度设计风险（层 3）**：`GraphRepository` / 多变体在 GGML 静态图上与既有 `PlanCache` /
-  `compute_reuse`（`ED_CACHE_COMPILED_GRAPHS`）职责重叠。落地前须先厘清边界，
-  否则是两套「图缓存」互相打架（参见 `perf_gap_vs_diffusers.md` 的建图开销分析）。
-- **回归风险高**：层 3 触及最脆弱的 graph-cut / PlanCache 子系统。曾出事的 hook 耦合面
-  已随 §2.6 的 dehook 消解（seam 删除、tap 按请求集主动登记），但 tap/lowering 仍需谨慎，
-  触及处按「skip 计数 + PSNR≥地板」验收。
-- **收益递延**：只有第 3 层（GraphRepository）直接关联 SP 复合与细粒度这些用户可感知能力。
-
-### 5.4 首个最小切片（已完成，作为「脚手架可承重」的证明点）
-
-原计划：只把 `CacheStateManager` 接为 **TaylorSeer** 的 history 后端（`n_derivatives+1`
-深度），改动面小、边界清晰，作为证明点。**实际结果**：该切片 + 后续 7 个方法 + Flux/Qwen
-默认设备端 GPU 复用全部落地并验证等价（skip 计数逐位一致 + PSNR≥地板；设备槽 vs host
-更达字节一致 100 dB）。证明点成立——脚手架确可承重，且带来了具体收益（skip ~1ms、单一
-GPU 复用路径），故层 1-2 已推进完成。**下一步的判断点转移到层 3**：GraphRepository 与
-`ED_CACHE_COMPILED_GRAPHS` 职责重叠，落地前须先厘清边界（§5.3），否则宁可止步。
-
-### 5.5 实施进展（2026-07-15，层 1-2 + 模型 dehook 已完成并验证）
-
-> **验收基准更正**：§5.1/§5.4 原写「byte-identical」，实测证伪——本引擎 CUDA 后端**逐帧
-> 不确定**（同一 no-cache 配置连跑两次 PSNR ≈ 35 dB，非 100%）。因此等价性验收改为
-> **①skip 计数逐位一致（精确复现，直接抓决策回归）+ ②输出 PSNR ≥ no-cache 自比的
-> ~35 dB 噪声地板**。md5 比对是错误方法。
-
-**已落地并验证等价（8/8 方法 + 默认设备端 GPU 复用 + 模型 dehook）：**
-
-- **能力接线**：`CacheEngine` 实例化 `CacheOperatorRegistry` 并调用
-  `register_builtin_cache_operators`（此前死代码），把 `state_` + `operators_` + 可选
-  `ICacheDeviceStore` 传入 `CacheGraphLowering::execute_substeps`。
-- **统一 substep 路径**：8 个方法均实现 `next_substep()`，逐子步产出 `SubstepPlan`；
-  中间层按 `SubstepOpKind` 分派到 tap 驱动的 runner pass。`ED_CACHE_SUBSTEP` 门控与旧
-  `execute` 的 hook 大 if/else 已删（commit `a2831c6`）。
-- **Output（EasyCache/UCache/DBCache/CacheDiT）**：`OutputCompute`（FULL 后 DIFFERENCE→slot）/
-  `OutputReuse`（LOAD+BLEND→输出）。skip 计数不变。
-- **Feature host 路径（MagCache/TaylorSeer/SenCache）**：`FeatureCompute`/`FeatureReuse`
-  （TaylorSeer 让 history ring 承重：raw-feature ring + ROTATE_HISTORY + 每步 reuse_coeffs
-  blend）。
-- **Probe（DiCache）**：`stop_after` 浅层前缀 + residual ring；probe 已 tap 化（delta_y/
-  delta_x/gamma 经 `TapRegistry::ProbeMetricOperands` 在图内归约后读回标量）。
-- **默认设备端 GPU 复用（MagCache/Qwen，`ED_FEATURE_CACHE_GPU` 默认 ON）已承重并验证**：
-  `CacheStateManager` 拥有 per-slot 持久设备 buffer（`RunnerCacheDeviceStore`，
-  `ggml_extend.hpp:1866`），经 `substep_capture` d2d 存残差、`substep_inject_slot` 在图内
-  `ggml_add(x_before, slot)` 复用。Flux **和 Qwen** 均已从 legacy `DiCacheGpuState` 路径
-  迁到设备槽。**验收（2026-07-14）**：设备槽 vs host-declarative **字节一致（PSNR 100 dB）**——
-  Flux MagCache 30/50、Qwen MagCache 36/50，skip 计数逐位一致，两条路径 vs no-cache 分别
-  为 28.4 dB / 25.2 dB（与 benchmark 报告一致）。
-- **模型 dehook 已完成（§2.6）**：`CacheGraphScope` seam 整块删除（commit `cd0c9b7`），
-  4 个模型 forward 改为 `TapRegistry` 条件 tap，cache 层零依赖具体模型 header。
-
-**剩余工作：**
-
-- **`GraphRepository` / 多静态图变体**：redesign 的第 3 层，未建。这是 SP + 缓存复合、
-  细粒度切点的天然下游。
-- **SP + 缓存复合**：SP 下 Feature/Probe 仍被能力协商拒绝（§4.1），当前只剩 Output 粒度。
-  解耦完成后这是**最大的用户可感知缺口**。
-- **事务语义（commit/rollback）**：诚实 no-op，无触发点（见 §4.2）。为未来预留，非当前债。
-
-**结论**：声明式引擎已从「脚手架」转为「承重」——8 个方法 + Flux/Qwen 默认设备端 GPU 复用
-真实跑在 StateManager+Operator 上，`CacheProgram` 不再只是决策描述符；且**模型侧已彻底 dehook**
-（原列为「数周量级终态」的 Slice 4 已完成，seam 删除，substep 是唯一路径）。仍是脚手架的只剩
-`GraphRepository`（未建）与事务语义（诚实 no-op）。每步继续按「skip 计数 + PSNR≥地板」验收
-（CUDA 逐帧不确定，md5 比对错误），触及 tap/lowering 处优先保留 fallback。
+- **The dependency direction has been cleanly inverted**: the cache layer (`src/core/optimization/cache/`) includes **zero concrete
+  model headers** (flux/qwen/wan/mmdit), depending only on the abstractions exposed by the model side -- `anchor` / `cache_site` /
+  `model_topology` / `model_schema` / `tap_registry` / `model_cache_contract`. Verified by grep.
+- **The model forward no longer knows about cache**: the forward of the 4 models (flux/qwen_image/mmdit/wan) calls the conditional
+  `tap()` of `TapRegistry` (`ctx->tap_registry`) at structural landmarks -- a no-op unless requested, not pinning
+  buffers, gallocr unaware. Which tensors the cache needs to read is decided by the per-substep `SubstepPlan.taps`,
+  not by model enumeration fields. inject (reuse injection) also goes through the registry: the forward replaces the stream
+  at `inject_at(i)` and jumps to `inject_resume()`.
+- **The `CacheGraphScope` seam has been deleted wholesale** (commit `cd0c9b7`, `-1667` lines): the old fixed `*_node`
+  fields, `kCache*Name` constants, `expand_cache_scope_nodes`, the runner's `cache_scope_` member +
+  `set_cache_scope`, and the `DiCacheGpuState` standalone GPU state path have all been removed. Only a pure result struct
+  `sd::DiffusionCacheResult` remains (host-readback output/feature/before/probe + DiCache scalar).
+- **substep is the only path**: the `ED_CACHE_SUBSTEP` gate disappeared, `run_branch` unconditionally goes through
+  `CacheGraphLowering::execute_substeps` (`cache_engine.cpp:196`); the old `execute` and its
+  large hook if/else have been deleted (commit `a2831c6`, `-444` lines). All 8 methods implement `next_substep()`.
+- **DiCache probe has also been tap-ified**: the checklist item once marked "probe not migrated" is complete -- the probe's
+  cross-step persistent tensors (prev_probe/probe_prev1/2) are threaded into indicator lowering via
+  `TapRegistry::ProbeMetricOperands`, and delta_y/delta_x/gamma are reduced in-graph then read back as scalars.
 
 ---
 
-## 6. 备选方向（简述，非推荐）
+## 3. Strengths
 
-- **SP + 缓存复合**：价值最高、最贴合引擎双卖点（多卡 + 步缓存当前无法叠加）。难点 = 让
-  graph-cut planner 跨 segment 保留 tap 的命名中间输出——`ggml_extend.hpp:6471`
-  明确记录了此冲突：「mid-graph capture is not preserved across segments」。这是「落地
-  声明式引擎」第 3 层（GraphRepository/变体编译）的天然下游，宜在其后做。Output 粒度缓存
-  理论上可较早搭 SP 便车（无需 tap 捕获）。
-- **巩固与加固**：删除或显式标注剩余脚手架、刷新全量 benchmark（当前 Qwen 行仍是旧数据）。
-  低风险、不增能力，可作为任何方向的前置。（注：曾脆弱的 hook 耦合已随 §2.6 的 dehook 消解。）
-- **细粒度切点**：把拓扑从单一 `BLOCK_STACK` 扩到 per-block / attention·FFN / token 级，
-  解锁 partial-compute 与 token cache。研究前沿、上限高，但每个模型都要改 contract + seam，
-  测试矩阵组合爆炸。
+1. **The decoupling goal is achieved**: adding a cache method = writing one `ICachePolicy`; adding a model = exposing one
+   `DiTModelCacheContract` + calling `TapRegistry::tap()` at the forward's structural landmarks (ModelIn/
+   BlockOut[i]/ModelOut). It escapes the "number of models × number of methods" combinatorial explosion, and the model side no longer includes or
+   knows any cache concept (see §2.6).
+2. **Failure is explicit**: under SP-parallel or when the graph cannot be cut, Feature/Probe methods are correctly rejected by capability negotiation,
+   rather than silently running as no-cache.
+3. **CacheProgram is dumpable** (`ED_DUMP_CACHE_PROGRAM`), policy decisions are observable.
+4. **The GPU path is faster with quality unchanged**: skip ~1ms, byte-identical.
+5. **CFG-parallel + cache is usable**: cond/uncond each use `condition_key` (condition struct address) +
+   `CacheBranch` tag to isolate state (`cache_slot.hpp:26`, `cache_state_manager.cpp:8`
+   `key_of`, `magcache_policy.cpp` `branch_for`). A cache hit only skips the local forward, and
+   `cfg_all_gather` still executes unconditionally to keep synchronization (aligned with `CLAUDE.md`).
 
 ---
 
-## 7. 参考文档（引用不重复）
+## 4. Weaknesses / Gaps
 
-| 文档 | 内容 |
+### 4.1 Problems in the load-bearing layer
+
+- **Coarse-grained Option-A topology**: `dit_model_cache_contract.cpp` exposes only a single `BLOCK_STACK`
+  segment (input projection / whole-block stack / output projection). No per-block, attention/FFN, or token-level
+  site. The `CachePhase::{FULL_ANCHOR,CORRECTION,REINTEGRATION}` in `cache_program.hpp`
+  are only placeholders; in practice only `FORWARD/PROBE` are used (stages three/four of the `redesign` doc are not done).
+- **Feature/Probe are entirely disabled under SP-parallel**: `feature_cache_available()` is defined as
+  `!can_attempt_graph_cut_segmented_compute()` (`ggml_extend.hpp:6472-6473`), and the latter is true whenever
+  "any process group is enabled" -- so pure SP also disables the tap capture path (the pipeline passes
+  `cache_seam_available = !cfg_parallel && feature_cache_available()` into `CacheEngine::init`),
+  leaving only Output granularity under SP. This is the direct manifestation that the engine's two big selling points (multi-GPU parallel + step caching) currently cannot be stacked,
+  and is the **biggest remaining capability gap** after decoupling.
+- **~~hook coupling is fragile~~ (resolved along with dehook)**: `gpu_metric`/`branch_key` once silently zeroed out all Feature
+  cache (MagCache/TaylorSeer/SenCache), running them as 0/N. That fragility stemmed from the old `CacheGraphScope`'s
+  fixed `*_node` fields + dual-write path; the dehook in §2.6 has deleted that seam, and taps are actively registered by the model per request set,
+  so the structural cause of this class of regression is eliminated. This item is retained as a historical lesson: when touching tap/lowering, still accept by "skip count +
+  PSNR ≥ floor".
+- **The cache path once had a GPU memory leak** (fixed); long runs still need chunked generation to work around it.
+
+### 4.2 The declarative machinery: load-bearing vs. still-scaffolding (2026-07-15 update, all grep-verified)
+
+The design doc's three most ambitious declarative machines have advanced from "only the decision layer landed" -- **the first two are now load-bearing**:
+
+- **`CacheStateManager` is load-bearing (history ring + device slot backend)**: `CacheEngine::init` passes
+  `state_` into `CacheGraphLowering::execute_substeps` (`cache_engine.cpp:196`), and the lowering's
+  `ActionInterpreter` really calls `state_.read_history` / `state_.write` / `state_.rotate_history`
+  (`cache_graph_lowering.cpp`), with the device-slot path calling `state.read` + `state.alloc_device_entry`.
+  TaylorSeer's derivative-history ring and MagCache/Qwen's **device-side single residual slot** all run on top of it.
+  What is still scaffolding: `commit_step` (`cache_state_manager.cpp`) / `rollback_step`
+  are still **explicit no-ops** -- but this is **honest**: the whole codebase has no `rollback_step` caller, `commit_step` is only
+  called once unconditionally by `end_step`, and no cache method aborts midway (failure takes the synchronous full-compute
+  fallback, not involving state rollback). The so-called "transactional rollback safety" currently has no trigger point; it is an interface placeholder reserved for future fine-grained/token-cache
+  work, not a load-bearing capability. Each policy still holds its own scalar decision state (`states_` map), which is **decision
+  logic** (belongs in the policy), separated from the **tensor storage** that StateManager manages.
+- **`CacheOperatorRegistry` + operators are load-bearing**: `CacheEngine` instantiates the registry and calls
+  `register_builtin_cache_operators` (`cache_engine.cpp:111`, previously dead code); the lowering's
+  DIFFERENCE/PREDICT/BLEND actions are routed via `operators_.find(...)` to `DifferenceOperator/
+  LinearPredictOperator/WeightedBlendOperator::apply_host`.
+  EasyCache/UCache's output diff and TaylorSeer's history-extrapolation blend are all executed by operators.
+- **Still no `GraphRepository` / multiple static-graph variants**: `GraphRepository`, `GraphVariantKey`,
+  `get_or_compile` have **zero hits** in `src/`, `examples/`, and all docs except redesign.
+  The design doc's core idea "at runtime, choose among multiple pre-compiled static graph variants" **is not implemented**. The actual execution is
+  tap-driven runner-pass dispatch: `execute_substeps` branches by `SubstepPlan.op.kind` to call
+  `hooks.full` and the tap-driven `hooks.substep_capture/substep_probe/substep_inject_*` (device
+  or host). So `CacheProgram`/`GraphVariantPlan` are "decision descriptors + action sequences" (telling the lowering
+  which substep to produce and which slot/operator actions to execute), not compilation artifacts.
+
+> **Summary**: among the declarative components, `CacheProgram`/`GraphVariantPlan` (descriptors + actions),
+> the `CacheRunnerHooks` lowering, the `CacheStateManager` history/device-slot backend, and `CacheOperatorRegistry`
+> are all load-bearing -- the 8 methods (including Flux/Qwen's default device-side GPU reuse) genuinely run on StateManager+Operator;
+> and the model side is fully dehooked (§2.6). What is still scaffolding: only `GraphRepository`/multi-variant compilation (not built),
+> and the transactional semantics of `commit_step`/`rollback_step` (honest no-ops, no trigger point, reserved for the future).
+
+---
+
+## 5. Recommended Forward Goal: Land the Declarative Engine
+
+**Direction**: actually connect the three scaffolding pieces in §4.2, delivering the core promises of `cache_framework_redesign.md`.
+**Status (2026-07-14)**: the first two layers have landed as load-bearing, leaving only layer 3.
+
+### 5.1 Concrete meaning (layered, each layer independently accepted by "skip count + PSNR ≥ floor")
+
+1. **StateManager becomes load-bearing ✅ done**: `CacheStateManager` is already the real state backend for TaylorSeer / DiCache /
+   MagCache / Qwen (host history ring + device-side single residual slot), replacing the private `states_` of these methods
+   at the tensor-storage level. Transactional commit/rollback are still honest no-ops (no trigger point, see §4.2).
+2. **Operator-izing the math ✅ done**: residual diff / prediction extrapolation / blend are routed to `CacheOperator`,
+   policies reference operator ids, and `register_builtin_cache_operators` is genuinely called.
+3. **GraphRepository + variant compilation ⬜ not done**: introduce real FULL/REUSE/PREDICT static-graph variant compilation and
+   caching, and fuse it with the build-once graph reuse of `ED_CACHE_COMPILED_GRAPHS` (both want to "build fewer graphs").
+   This is the only remaining declarative layer, and the natural downstream of SP composition / fine-grained.
+
+### 5.2 Benefits already delivered (layers 1-2) and remaining value (layer 3)
+
+Already delivered:
+- the 8 methods + Flux/Qwen default device-side GPU reuse run on StateManager+Operator, and `CacheProgram`
+  is no longer just a decision descriptor;
+- operator-ization makes onboarding new methods faster (compose existing operators, rather than inlining new math each time);
+- the device slot compresses skip cost to ~1ms with byte-identical verification (see §2.5, §5.5).
+
+Remaining value (layer 3):
+- lays the foundation for fine-grained / trajectory correction / token cache (needs real multi-variant static graphs);
+- merging with compiled-graph reuse may further reduce graph-build overhead;
+- transactional rollback safety currently has **no trigger point**, and is not a benefit -- unless a method that aborts midway appears in the future.
+
+### 5.3 Problems / Risks (not avoided)
+
+- **Layers 1-2 have proven "scaffolding can become load-bearing"**: device-slot acceptance is byte-identical (PSNR 100 dB), skip counts are bitwise-identical,
+  proving that "connecting the scaffolding" does bring concrete benefits (skip ~1ms, a single GPU reuse path). This dissolves the original concern of "pure tidying,
+  no user-visible benefit" -- this document still argues to **treat landing as a means, not an end**, binding each layer to a concrete benefit.
+- **Over-engineering risk (layer 3)**: `GraphRepository` / multi-variant overlaps in responsibility with the existing `PlanCache` /
+  `compute_reuse` (`ED_CACHE_COMPILED_GRAPHS`) on GGML static graphs. The boundary must be clarified before landing,
+  otherwise it is two sets of "graph cache" fighting each other (see the graph-build overhead analysis in `perf_gap_vs_diffusers.md`).
+- **High regression risk**: layer 3 touches the most fragile graph-cut / PlanCache subsystem. The hook-coupling surface that once caused incidents
+  has been resolved along with the dehook in §2.6 (seam deleted, taps actively registered per request set), but tap/lowering still needs care,
+  and where touched should be accepted by "skip count + PSNR ≥ floor".
+- **Deferred benefit**: only layer 3 (GraphRepository) is directly tied to user-perceptible capabilities like SP composition and fine-graining.
+
+### 5.4 The first minimal slice (done, as a proof point that "scaffolding can be load-bearing")
+
+Original plan: connect `CacheStateManager` only as the history backend for **TaylorSeer** (depth `n_derivatives+1`),
+a small change surface with clear boundaries, as a proof point. **Actual result**: that slice + the subsequent 7 methods + Flux/Qwen
+default device-side GPU reuse all landed and were verified equivalent (skip counts bitwise-identical + PSNR ≥ floor; device slot vs. host
+even reaches byte-identical 100 dB). The proof point holds -- scaffolding can indeed be load-bearing, and it brought concrete benefits (skip ~1ms, a single
+GPU reuse path), so layers 1-2 have been advanced to completion. **The next decision point moves to layer 3**: GraphRepository and
+`ED_CACHE_COMPILED_GRAPHS` overlap in responsibility, and the boundary must be clarified before landing (§5.3), otherwise it is better to stop.
+
+### 5.5 Implementation progress (2026-07-15, layers 1-2 + model dehook done and verified)
+
+> **Acceptance-baseline correction**: §5.1/§5.4 originally wrote "byte-identical", which measurement disproves -- this engine's CUDA backend is **frame-to-frame
+> nondeterministic** (the same no-cache config run twice yields PSNR ≈ 35 dB, not 100%). So equivalence acceptance is changed to
+> **① skip counts bitwise-identical (exact reproduction, directly catching decision regressions) + ② output PSNR ≥ the
+> ~35 dB noise floor of the no-cache self-comparison**. md5 comparison is the wrong method.
+
+**Landed and verified equivalent (8/8 methods + default device-side GPU reuse + model dehook):**
+
+- **Capability wiring**: `CacheEngine` instantiates `CacheOperatorRegistry` and calls
+  `register_builtin_cache_operators` (previously dead code), passing `state_` + `operators_` + optional
+  `ICacheDeviceStore` into `CacheGraphLowering::execute_substeps`.
+- **Unified substep path**: all 8 methods implement `next_substep()`, producing `SubstepPlan` substep by substep;
+  the middle layer dispatches by `SubstepOpKind` to a tap-driven runner pass. The `ED_CACHE_SUBSTEP` gate and the old
+  `execute`'s large hook if/else have been deleted (commit `a2831c6`).
+- **Output (EasyCache/UCache/DBCache/CacheDiT)**: `OutputCompute` (FULL then DIFFERENCE→slot) /
+  `OutputReuse` (LOAD+BLEND→output). Skip counts unchanged.
+- **Feature host path (MagCache/TaylorSeer/SenCache)**: `FeatureCompute`/`FeatureReuse`
+  (TaylorSeer makes the history ring load-bearing: raw-feature ring + ROTATE_HISTORY + per-step reuse_coeffs
+  blend).
+- **Probe (DiCache)**: `stop_after` shallow prefix + residual ring; probe has been tap-ified (delta_y/
+  delta_x/gamma are reduced in-graph via `TapRegistry::ProbeMetricOperands` then read back as scalars).
+- **Default device-side GPU reuse (MagCache/Qwen, `ED_FEATURE_CACHE_GPU` default ON) is load-bearing and verified**:
+  `CacheStateManager` owns a per-slot persistent device buffer (`RunnerCacheDeviceStore`,
+  `ggml_extend.hpp:1866`), storing residuals d2d via `substep_capture` and reusing them in-graph via `substep_inject_slot`'s
+  `ggml_add(x_before, slot)`. Both Flux **and Qwen** have migrated from the legacy `DiCacheGpuState` path
+  to the device slot. **Acceptance (2026-07-14)**: device slot vs. host-declarative is **byte-identical (PSNR 100 dB)** --
+  Flux MagCache 30/50, Qwen MagCache 36/50, skip counts bitwise-identical, and the two paths vs. no-cache are
+  28.4 dB / 25.2 dB respectively (consistent with the benchmark report).
+- **Model dehook done (§2.6)**: the `CacheGraphScope` seam was deleted wholesale (commit `cd0c9b7`),
+  the 4 model forwards were changed to `TapRegistry` conditional taps, and the cache layer has zero dependency on concrete model headers.
+
+**Remaining work:**
+
+- **`GraphRepository` / multiple static-graph variants**: layer 3 of the redesign, not built. This is the natural downstream of SP + cache composition
+  and fine-grained cut points.
+- **SP + cache composition**: under SP, Feature/Probe are still rejected by capability negotiation (§4.1), leaving only Output granularity.
+  After decoupling, this is the **biggest user-perceptible gap**.
+- **Transactional semantics (commit/rollback)**: honest no-op, no trigger point (see §4.2). Reserved for the future, not current debt.
+
+**Conclusion**: the declarative engine has moved from "scaffolding" to "load-bearing" -- the 8 methods + Flux/Qwen default device-side GPU reuse
+genuinely run on StateManager+Operator, and `CacheProgram` is no longer just a decision descriptor; moreover **the model side is fully dehooked**
+(the Slice 4 originally listed as "weeks-scale terminal state" is done, the seam deleted, substep the only path). What is still scaffolding is only
+`GraphRepository` (not built) and the transactional semantics (honest no-op). Each step continues to be accepted by "skip count + PSNR ≥ floor"
+(CUDA is frame-to-frame nondeterministic, md5 comparison is wrong), and where tap/lowering is touched, keep the fallback preferentially.
+
+---
+
+## 6. Alternative Directions (brief, not recommended)
+
+- **SP + cache composition**: highest value, best fits the engine's dual selling points (multi-GPU + step caching currently cannot be stacked). The difficulty = making the
+  graph-cut planner preserve the tap's named intermediate outputs across segments -- `ggml_extend.hpp:6471`
+  explicitly documents this conflict: "mid-graph capture is not preserved across segments". This is the natural downstream of "landing the
+  declarative engine" layer 3 (GraphRepository/variant compilation), best done afterward. Output-granularity caching
+  can in theory catch the SP ride earlier (no tap capture needed).
+- **Consolidate and harden**: delete or explicitly annotate the remaining scaffolding, refresh the full benchmark (the Qwen row is still old data).
+  Low risk, adds no capability, can serve as a prerequisite for any direction. (Note: the once-fragile hook coupling has been resolved along with the dehook in §2.6.)
+- **Fine-grained cut points**: expand the topology from a single `BLOCK_STACK` to per-block / attention·FFN / token level,
+  unlocking partial-compute and token cache. Research frontier, high ceiling, but every model needs contract + seam changes,
+  and the test-matrix combination explodes.
+
+---
+
+## 7. Reference Documents (references not repeated)
+
+| Document | Content |
 |---|---|
-| `cache_framework_design.md` | 上游 xllm `dit_cache` 框架及其 DiT 集成分析，§13 提出下一代接口 |
-| `cache_framework_redesign.md` | 声明式重构**设计草案**（本分支部分实现的目标态） |
-| `cache_quality_benchmark_report.md` | MagCache/DiCache vs no-cache 的 PSNR/SSIM/LPIPS + 速度 |
-| `perf_gap_vs_diffusers.md` | 本引擎相对 diffusers 变慢的根因（逐步建图、无 CUDA Graph、GPU↔CPU 往返） |
-| `perf_improvement_plan.md` | 针对上述根因的执行计划 |
+| `cache_framework_design.md` | Analysis of the upstream xllm `dit_cache` framework and its DiT integration; §13 proposes the next-gen interface |
+| `cache_framework_redesign.md` | Declarative-refactor **design draft** (the target state partially implemented on this branch) |
+| `cache_quality_benchmark_report.md` | PSNR/SSIM/LPIPS + speed of MagCache/DiCache vs. no-cache |
+| `perf_gap_vs_diffusers.md` | Root causes of this engine being slower than diffusers (step-by-step graph build, no CUDA Graph, GPU↔CPU round trips) |
+| `perf_improvement_plan.md` | Execution plan targeting the above root causes |
