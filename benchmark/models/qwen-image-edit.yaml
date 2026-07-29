@@ -1,0 +1,19 @@
+schema_version: 1
+model_id: qwen-image-edit
+model_family: Qwen-Image-Edit
+model_name: Qwen-Image-Edit
+task: image-editing
+distilled: false
+model:
+  public_id: Qwen/Qwen-Image-Edit
+  local_path_ref: qwen_image_edit_dir
+  format: diffusers-directory
+prompt_set: ../prompts/image-editing-v1.jsonl
+input_image_ref: edit_input_image      # edit-task input image, path resolved in site
+generation:                            # defaults; job can override
+  width: 1024
+  height: 1024
+  steps: 20
+  guidance: 4.0
+  cfg_scale: 4.0                        # Qwen-Image-Edit uses CFG (two forward passes)
+  scheduler: model-default

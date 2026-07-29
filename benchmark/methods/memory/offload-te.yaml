@@ -1,0 +1,9 @@
+method_id: offload-te
+kind: runtime            # runtime toggle, no rebuild needed
+category: memory
+description: >
+  Text encoder only stays resident on CPU (component placement): DiT/VAE remain on
+  GPU. Saves VRAM, not a speedup -- gentler than full offload, common under a medium
+  VRAM budget (e.g. 16G).
+options: {keep_text_encoder_on_cpu: true}
+cross_system: [edge-dit, diffusers, stable-diffusion.cpp]

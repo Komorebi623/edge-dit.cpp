@@ -1,0 +1,27 @@
+# text-to-video benchmark manifest: cross-system compare (base + quant + offload + distilled)
+# single 24G budget: 1.3b runs bare at bf16 (peak ~20.4G); 14b requires offload at bf16
+# quality auto-uses video metrics: per-frame CLIP / per-frame aesthetic / temporal consistency (LPIPS/SSIM/flicker)
+# offload: full on all three systems; te-cpu edge-dit only
+name: video
+task: text-to-video
+models: [wan2-t2v-1.3b, wan21-t2v-1.3b-distill, wan2-t2v-14b]   # distill is distilled
+prompts: 3
+device: 2                          # lock this job to GPU 2 (avoid multiple jobs contending for one card -> OOM)
+
+edge-dit:
+  quant:
+    - fp16
+    - {type: fp16, offload: full}     # baseline A: full offload (required for 14b, safe for 1.3b too)
+    - {type: fp16, offload: te-cpu}   # baseline B: text encoder on CPU only (edge-only)
+    - q8
+    - q4_k
+diffusers:
+  quant:
+    - bf16
+    - {type: bf16, offload: full}     # baseline: full offload (no te-cpu)
+    - fp8
+stable-diffusion.cpp:
+  quant:
+    - fp16
+    - {type: fp16, offload: full}     # baseline: full offload (no te-cpu)
+    - q8

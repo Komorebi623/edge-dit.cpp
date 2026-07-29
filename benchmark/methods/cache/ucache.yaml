@@ -1,0 +1,8 @@
+method_id: ucache
+kind: runtime
+category: cache
+description: >
+  EasyCache enhanced with an adaptive threshold (auto-tuned reuse gate).
+  Works out of the box, no calibration needed.
+options: {cache: ucache}
+cross_system: [edge-dit, stable-diffusion.cpp]

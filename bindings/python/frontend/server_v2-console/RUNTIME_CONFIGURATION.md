@@ -1,57 +1,57 @@
-# Runtime 配置指南
+# Runtime Configuration Guide
 
-这份文档只讲一件事：
+This document covers just one thing:
 
-- 把 `server_v2` Web Console 迁到另一台设备时，
-- 怎样用最少改动完成配置，
-- 并且区分简单版和复杂版两种做法。
+- when migrating the `server_v2` Web Console to another machine,
+- how to complete the configuration with the fewest changes,
+- and distinguishing between the simple approach and the complex approach.
 
-推荐顺序很简单：
+The recommended order is simple:
 
-1. 先用现成 profile
-2. 先改环境变量
-3. 跑不稳再加本地 profile
+1. Use an existing profile first
+2. Change environment variables first
+3. Add a local profile only if it still doesn't run reliably
 
-## 1. 当前哪些地方可以配置
+## 1. What can currently be configured
 
-当前实现里，运行配置主要来自两处：
+In the current implementation, the runtime configuration mainly comes from two places:
 
 - `runtime/profiles/*.json`
-- 本地环境变量
+- local environment variables
 
-它们的分工是：
+Their division of labor is:
 
-- profile 负责模型类型和默认引擎参数
-- 环境变量负责本机路径覆盖
+- the profile handles the model type and default engine parameters
+- environment variables handle machine-local path overrides
 
-最常用的脚本是：
+The most commonly used scripts are:
 
 - [scripts/runtime-env.sh](scripts/runtime-env.sh)
 - [scripts/run-managed-profile.sh](scripts/run-managed-profile.sh)
 
-## 2. 简单版：只改环境变量
+## 2. Simple approach: change only environment variables
 
-这是最推荐的第一步。
+This is the most recommended first step.
 
-适用情况：
+Applicable when:
 
-- 模型没变
-- 只是路径变了
-- 新设备和当前验证机器差异不大
+- the model hasn't changed
+- only the paths have changed
+- the new machine differs little from the current validation machine
 
-### 2.1 需要准备
+### 2.1 What you need to prepare
 
-先确认本机已经具备：
+First confirm the machine already has:
 
-- 仓库代码
+- the repository code
 - `libedgedit.so`
-- 可用的 Python
-- CUDA / cuDNN 依赖
-- 模型目录
+- a usable Python
+- CUDA / cuDNN dependencies
+- the model directory
 
-### 2.2 需要设置的变量
+### 2.2 Variables you need to set
 
-先设置基础变量：
+First set the base variables:
 
 ```bash
 export EDGE_DIT_REPO_ROOT=/path/to/edge-dit.cpp
@@ -60,7 +60,7 @@ export EDGE_DIT_LIBRARY=/path/to/edge-dit.cpp/build-cuda-shared/bin/libedgedit.s
 export EDGE_DIT_DEPENDENCY_DIRS=/path/to/cudnn/lib:/path/to/cuda_nvrtc/lib:/path/to/cublas/lib:/path/to/cuda_runtime/lib:/path/to/edge-dit.cpp/build-cuda-shared/bin
 ```
 
-再设置模型路径变量。常见对应关系如下：
+Then set the model path variables. The common correspondences are:
 
 - `flux-dev` -> `EDGE_DIT_FLUX_MODEL_PATH`
 - `flux-kontext` -> `EDGE_DIT_FLUX_KONTEXT_MODEL_PATH`
@@ -69,7 +69,7 @@ export EDGE_DIT_DEPENDENCY_DIRS=/path/to/cudnn/lib:/path/to/cuda_nvrtc/lib:/path
 - `sd3-medium` -> `EDGE_DIT_SD3_MEDIUM_MODEL_PATH`
 - `wan-t2v` -> `EDGE_DIT_WAN_VIDEO_MODEL_PATH`
 
-例如：
+For example:
 
 ```bash
 export EDGE_DIT_FLUX_KONTEXT_MODEL_PATH=/models/FLUX.1-Kontext-dev
@@ -77,55 +77,55 @@ export EDGE_DIT_QWEN_IMAGE_EDIT_MODEL_PATH=/models/Qwen-Image-Edit
 export EDGE_DIT_WAN_VIDEO_MODEL_PATH=/models/Wan2.1-T2V-1.3B-Diffusers
 ```
 
-### 2.3 启动方式
+### 2.3 How to start
 
-在 `bindings/python/frontend/server_v2-console` 目录下运行：
+Run in the `bindings/python/frontend/server_v2-console` directory:
 
 ```bash
 npm run dev:managed
 ```
 
-如果想直接指定启动某个 profile：
+If you want to directly start a specific profile:
 
 ```bash
 npm run dev:managed -- --auto-start-profile flux-kontext
 ```
 
-### 2.4 前端里怎么操作
+### 2.4 How to operate in the frontend
 
-前端里不需要手写这些参数。
+You don't need to hand-write these parameters in the frontend.
 
-你只需要：
+You only need to:
 
-1. 打开控制台
-2. 在 `Local Runtime` 里选择模型
-3. 点击启动或切换
+1. Open the console
+2. Select a model under `Local Runtime`
+3. Click start or switch
 
-如果简单版能跑通，就不需要继续折腾。
+If the simple approach works, there's no need to keep tinkering.
 
-## 3. 复杂版：增加本地 profile
+## 3. Complex approach: add a local profile
 
-只有下面这些情况，才建议进入复杂版：
+Only in the following cases is the complex approach recommended:
 
-- 新设备显存明显更小或更大
-- 现成 profile 会 OOM
-- 需要改卸载策略
-- 需要改 `weight_type` 或 `max_vram_gb`
+- the new machine has noticeably less or more VRAM
+- an existing profile OOMs
+- you need to change the offload strategy
+- you need to change `weight_type` or `max_vram_gb`
 
-### 3.1 做法
+### 3.1 How to do it
 
-在下面目录新增一个本地 profile 文件：
+Add a new local profile file under the following directory:
 
 ```text
 bindings/python/frontend/server_v2-console/runtime/profiles/
 ```
 
-推荐命名：
+Recommended naming:
 
 - `flux-kontext-12gb-local.json`
 - `qwen-image-edit-24gb-local.json`
 
-### 3.2 一个最小例子
+### 3.2 A minimal example
 
 ```json
 {
@@ -145,7 +145,7 @@ bindings/python/frontend/server_v2-console/runtime/profiles/
 }
 ```
 
-建议只改这些真正和机器资源相关的字段：
+It's recommended to change only the fields that are truly related to machine resources:
 
 - `max_vram_gb`
 - `offload_params_to_cpu`
@@ -154,42 +154,42 @@ bindings/python/frontend/server_v2-console/runtime/profiles/
 - `weight_type`
 - `backend`
 
-### 3.3 推荐规则
+### 3.3 Recommended rules
 
-- 优先复制最接近的现成 profile
-- `model_env` 尽量保持不变
-- 不要把机器私有路径改进共享 profile
-- 本地 profile 最好保持未跟踪，或加到 `.git/info/exclude`
+- Prefer copying the closest existing profile
+- Keep `model_env` unchanged as much as possible
+- Do not edit machine-private paths into a shared profile
+- Keep local profiles untracked, or add them to `.git/info/exclude`
 
-## 4. 给新设备用户的完整流程
+## 4. Complete flow for users on a new machine
 
-推荐按这个顺序做：
+The recommended order is:
 
-1. 先设置环境变量
-2. 先复用现成 profile
-3. 运行 `npm run dev:managed`
-4. 在前端做一次最小 smoke test
-5. 如果只是路径问题，到这里就结束
-6. 如果遇到显存或加载策略问题，再创建本地 profile
+1. Set the environment variables first
+2. Reuse an existing profile first
+3. Run `npm run dev:managed`
+4. Do a minimal smoke test in the frontend
+5. If it's only a path issue, you're done here
+6. If you hit VRAM or loading-strategy issues, then create a local profile
 
-一句话总结：
+In one sentence:
 
-> 先用环境变量解决路径问题，再用本地 profile 解决机器差异问题。
+> Solve path issues with environment variables first, then solve machine differences with a local profile.
 
-## 5. 当前方案的边界
+## 5. Boundaries of the current approach
 
-现在已经有：
+What already exists:
 
-- 现成 profile
-- 环境变量覆盖模型路径
-- runtime manager 按 profile 启动
+- existing profiles
+- environment-variable overrides for model paths
+- the runtime manager starting up by profile
 
-现在还没有：
+What doesn't exist yet:
 
-- 浏览器里直接编辑启动参数
-- 自动保存本地 override
-- 一键导入导出机器配置
+- editing startup parameters directly in the browser
+- automatically saving local overrides
+- one-click import/export of machine configurations
 
-所以当前最稳妥的做法仍然是：
+So the most reliable approach for now is still:
 
-> 简单版先跑通，复杂版再定制。
+> Get the simple approach working first, then customize with the complex approach.

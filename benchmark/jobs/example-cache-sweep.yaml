@@ -1,0 +1,12 @@
+# Example 3 - sweep cache methods at a fixed quant tier (compare each cache's speedup vs quality cost)
+# Write cache as a list inside the edge-dit section to sweep that dimension. Here only [calibration-free] runtime caches:
+# none / easycache / taylorseer work out of the box, no calibration.
+# (magcache and sencache both fail calibration on the edge on-device runner, do not list them; use dicache for an edge-only calibration-free option)
+# Expanded runs: edge-dit section [ models(1) x quant(1) x offload(1) x cache(3) x prompts(3) ] = 9
+name: example-cache-sweep
+task: text-to-image
+models: [sd3-medium]
+
+edge-dit:
+  quant: [q8]
+  cache: [none, easycache, taylorseer]

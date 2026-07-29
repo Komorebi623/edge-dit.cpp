@@ -1,0 +1,6 @@
+method_id: fp16
+kind: runtime            # runtime toggle (via --type), no rebuild needed
+category: quant
+description: FP16 weights (f16). The FP16 baseline for same-system quant loss.
+options: {precision: f16}
+cross_system: [edge-dit, diffusers, stable-diffusion.cpp]   # available on all three systems

@@ -113,7 +113,6 @@ def main() -> int:
     measured_ms: list[float] = []
     runs: list[dict[str, object]] = []
     cache_events: list[dict[str, object]] = []
-    last_measured_cache_events: list[dict[str, object]] = []
     last_measured_stdout = ""
     total_runs = args.warmup_runs + args.measured_runs
     for index in range(total_runs):
@@ -134,8 +133,7 @@ def main() -> int:
         sys.stderr.write(completed.stderr)
         sys.stdout.flush()
         sys.stderr.flush()
-        run_cache_events = parse_cache_events(completed.stdout + "\n" + completed.stderr)
-        cache_events.extend(run_cache_events)
+        cache_events.extend(parse_cache_events(completed.stdout + "\n" + completed.stderr))
         runs.append(
             {
                 "phase": phase,
@@ -154,7 +152,6 @@ def main() -> int:
         else:
             measured_ms.append(elapsed_ms)
             last_measured_stdout = completed.stdout
-            last_measured_cache_events = run_cache_events
 
     write_metadata(output_dir, sample_dir, runs)
     component_ms, stage_boundaries = parse_phase_markers(last_measured_stdout)
@@ -170,7 +167,6 @@ def main() -> int:
         "warmup_ms": warmup_ms,
         "measured_ms": measured_ms,
         "cache_events": cache_events,
-        "cache": summarize_cache_events(last_measured_cache_events),
         "component_ms": component_ms,
         "stage_boundaries": stage_boundaries,
         "sample_output_dir": str(sample_dir),
@@ -262,27 +258,6 @@ def parse_cache_events(text: str) -> list[dict[str, object]]:
             }
         )
     return events
-
-
-def summarize_cache_events(events: list[dict[str, object]]) -> dict[str, object] | None:
-    """Reduce one measured pass's cache summaries to a normalized record.
-
-    A cache mode logs its "reused N/M steps" line once per run; on the final
-    measured run we surface the last one as a single machine-readable record so
-    a regression gate can assert on steps_reused without re-parsing stdout.
-    Returns None when no cache summary was emitted (cache off / disabled).
-    """
-    if not events:
-        return None
-    last = events[-1]
-    total = int(last["total"])
-    count = int(last["count"])
-    return {
-        "mode": last["mode"],
-        "steps_reused": count,
-        "total_steps": total,
-        "reuse_ratio": (count / total) if total else 0.0,
-    }
 
 
 def append_cache_options(command: list[str], args: argparse.Namespace) -> None:

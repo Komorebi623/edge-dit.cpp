@@ -1,0 +1,19 @@
+schema_version: 1
+model_id: qwen-image-lightning
+model_family: Qwen-Image
+model_name: Qwen-Image Lightning (4-step)
+task: text-to-image
+distilled: true                        # distilled, few steps
+model:
+  public_id: lightx2v/Qwen-Image-Lightning
+  local_path_ref: qwen_image_lightning_weights  # site -> distilled/qwen-image-lightning/Qwen-Image-Lightning-4steps-V1.0-bf16.safetensors
+  format: transformer-weights-file      # single-safetensors distilled weights (needs rest of qwen-image base components)
+  base_model_ref: qwen_image_dir        # base provides text_encoder/vae/scheduler
+prompt_set: ../prompts/text-to-image-v1.jsonl
+generation:
+  width: 1024
+  height: 1024
+  steps: 4                             # Lightning 4-step default
+  guidance: 1.0
+  cfg_scale: 1.0                        # Lightning single forward pass
+  scheduler: model-default

@@ -1,0 +1,9 @@
+method_id: taylorseer
+kind: runtime
+category: cache
+description: >
+  Residual Taylor extrapolation. Predicts skipped-step residuals via a Taylor
+  series over cached history instead of recomputing. Works out of the box, no
+  calibration needed.
+options: {cache: taylorseer}
+cross_system: [edge-dit, stable-diffusion.cpp]

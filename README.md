@@ -139,22 +139,22 @@ The v0.x API, ABI, CLI flags, and HTTP schemas are public but not yet stable.
 
 Clone the repository with submodules:
 
-首次克隆后先拉取子模块（ggml + oneDNN）：
+After the first clone, fetch the submodules (ggml + oneDNN):
 
 ```bash
 git submodule update --init --recursive
 ```
 
-CPU 后端用 oneDNN 提供 bf16 AMX 矩阵乘加速（源码在 `third_party/onednn`，固定 v3.7）。
-先编 oneDNN（一次即可，产物装到 `third_party/onednn/install`），再编 edge-dit：
+The CPU backend uses oneDNN to provide bf16 AMX matmul acceleration (source in `third_party/onednn`, pinned to v3.7).
+Build oneDNN first (only once, installed to `third_party/onednn/install`), then build edge-dit:
 
 ```bash
-bash ./scripts/build_onednn.sh   # 编 oneDNN（Release/THREADPOOL/UKERNEL），几分钟
-bash ./scripts/build_cpu.sh      # 自动探测上面的 install 并启用 GGML_ONEDNN
+bash ./scripts/build_onednn.sh   # build oneDNN (Release/THREADPOOL/UKERNEL), a few minutes
+bash ./scripts/build_cpu.sh      # auto-detects the install above and enables GGML_ONEDNN
 ```
 
-`build_cpu.sh` 会自动从 `third_party/onednn/install` 找到 dnnl；用 `ED_ONEDNN=0 bash ./scripts/build_cpu.sh`
-可关闭 oneDNN（退回 stock ggml，慢但无外部依赖）。运行时若报找不到 `libdnnl.so`，加：
+`build_cpu.sh` automatically finds dnnl in `third_party/onednn/install`; use `ED_ONEDNN=0 bash ./scripts/build_cpu.sh`
+to disable oneDNN (falling back to stock ggml, slower but with no external dependency). If at runtime it reports that `libdnnl.so` cannot be found, add:
 `LD_LIBRARY_PATH=third_party/onednn/install/lib64`。
 
 ```bash

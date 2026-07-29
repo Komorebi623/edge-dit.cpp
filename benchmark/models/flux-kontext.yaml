@@ -1,0 +1,19 @@
+schema_version: 1
+model_id: flux-kontext
+model_family: FLUX.1-Kontext
+model_name: FLUX.1-Kontext-dev
+task: image-editing
+distilled: false
+model:
+  public_id: black-forest-labs/FLUX.1-Kontext-dev
+  local_path_ref: flux_kontext_dir
+  format: diffusers-directory
+prompt_set: ../prompts/image-editing-v1.jsonl
+input_image_ref: edit_input_image      # edit-task input image, path resolved in site
+generation:                            # defaults; job can override
+  width: 1024
+  height: 1024
+  steps: 20
+  guidance: 3.5
+  cfg_scale: 1.0                        # Kontext uses distilled guidance, single forward pass
+  scheduler: model-default

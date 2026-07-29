@@ -86,17 +86,17 @@ export function validateEditImageDraft(draft: EditImageDraft): EditImageDraftErr
   const errors: EditImageDraftErrors = {}
 
   if (!draft.prompt.trim()) {
-    errors.prompt = '请输入 `prompt`。'
+    errors.prompt = 'Please enter `prompt`.'
   }
 
   if (!draft.inputImage.trim()) {
-    errors.inputImage = '请先提供一张输入图片。'
+    errors.inputImage = 'Please provide an input image first.'
   }
 
   const positiveIntegerFields: Array<[keyof EditImageDraft, string]> = [
-    ['width', '`width` 必须大于 0。'],
-    ['height', '`height` 必须大于 0。'],
-    ['steps', '`steps` 必须大于 0。'],
+    ['width', '`width` must be greater than 0.'],
+    ['height', '`height` must be greater than 0.'],
+    ['steps', '`steps` must be greater than 0.'],
   ]
 
   for (const [field, message] of positiveIntegerFields) {
@@ -113,14 +113,14 @@ export function validateEditImageDraft(draft: EditImageDraft): EditImageDraftErr
   if (draft.seed.trim()) {
     const parsed = Number.parseInt(draft.seed, 10)
     if (!Number.isInteger(parsed)) {
-      errors.seed = '`seed` 必须是整数。'
+      errors.seed = '`seed` must be an integer.'
     }
   }
 
   const numericFields: Array<[keyof EditImageDraft, string]> = [
-    ['guidance', '`guidance` 必须是数值。'],
-    ['cfgScale', '`cfg_scale` 必须是数值。'],
-    ['flowShift', '`flow_shift` 必须是数值。'],
+    ['guidance', '`guidance` must be a number.'],
+    ['cfgScale', '`cfg_scale` must be a number.'],
+    ['flowShift', '`flow_shift` must be a number.'],
   ]
 
   for (const [field, message] of numericFields) {

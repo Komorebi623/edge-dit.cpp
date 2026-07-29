@@ -1,0 +1,9 @@
+method_id: dbcache
+kind: runtime
+category: cache
+description: >
+  Residual-difference gated caching (dual-block). Reuses cached residuals when
+  the block residual diff stays below threshold. Works out of the box, no
+  calibration needed.
+options: {cache: dbcache}
+cross_system: [edge-dit, stable-diffusion.cpp]
