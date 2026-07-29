@@ -335,6 +335,8 @@ int main(int argc, char** argv) {
     ctx_params.skip_t5 = args.no_t5;
     if (args.vae_tiling == 1) {
         ctx_params.vae_tiling.enabled = true;
+    } else if (args.vae_tiling == 0) {
+        ctx_params.vae_tiling.force_disable = true;  // explicit off: suppress low-VRAM auto-enable
     }
     if (args.vae_tile_size > 0.0f) {
         ctx_params.vae_tiling.enabled = true;

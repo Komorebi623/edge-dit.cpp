@@ -48,8 +48,8 @@ struct ParallelConfig {
     int sp_parallel_size  = 1;
 };
 
-// 异步通信句柄：
-// NCCL 后端里 wait() 才真正同步；CPU 后端默认 async 会退化成同步完成。
+// Asynchronous communication handle:
+// In the NCCL backend, wait() is what truly synchronizes; the CPU backend's default async degrades to synchronous completion.
 class Work {
 public:
     virtual ~Work() = default;

@@ -167,7 +167,7 @@ namespace {
 // bounds offloaded/segmented components), so a component may only stay resident if its
 // weights PLUS this headroom fit the budget. Measured DiT compute activations at
 // 1024²/20steps/double-forward: sd3 ~3.4G, flux ~1.9G; 4 GiB covers the upper end with
-// margin. Undersized headroom is what let sd3 8g全常驻 peak at 10.3G > 8G budget.
+// margin. Undersized headroom is what let sd3 8g fully-resident peak at 10.3G > 8G budget.
 constexpr size_t kResidentComputeHeadroom = static_cast<size_t>(4) * 1024 * 1024 * 1024;
 // Smallest plausible standalone component (VAE ~0.15-0.5G); used by the all-offload
 // fallback: if the budget can't even fit one small component + compute headroom,
@@ -410,7 +410,7 @@ bool ModelRuntime::plan_component_offload(const ::ModelLoader& loader,
 
     // All-offload fallback: if the budget can't even fit one small component plus the
     // compute headroom, nothing can stay resident safely -> offload everything (legacy
-    // --offload-to-cpu behavior, safest). Prevents a tiny-budget全常驻 from overshooting.
+    // --offload-to-cpu behavior, safest). Prevents a tiny-budget fully-resident from overshooting.
     const size_t headroom = resident_headroom_bytes();
     if (remaining_free_bytes < kMinResidentComponentBytes + headroom) {
         LOG_INFO("auto-allocate: '%s' budget %.2f GB too small for resident+compute headroom "
@@ -602,8 +602,8 @@ size_t ModelRuntime::effective_budget_bytes() const {
 
 // so consumer cards stay under their VRAM wall without a manual flag.
 void ModelRuntime::maybe_enable_vae_tiling_for_low_vram() {
-    if (vae_tiling_.enabled) {
-        return;  // user asked for tiling explicitly; respect their settings
+    if (vae_tiling_.enabled || vae_tiling_.force_disable) {
+        return;  // user explicitly set tiling on or off; respect it, skip low-VRAM auto-enable
     }
     if (backends_.vae_backend == nullptr || ggml_backend_is_cpu(backends_.vae_backend)) {
         return;  // VAE runs on CPU, GPU tiling does not apply
@@ -615,7 +615,7 @@ void ModelRuntime::maybe_enable_vae_tiling_for_low_vram() {
     size_t free_bytes = 0, total_bytes = 0;
     ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
     const double total_gib = static_cast<double>(total_bytes) / (1024.0 * 1024.0 * 1024.0);
-    constexpr double kLowVramThresholdGiB = 16.0;
+    constexpr double kLowVramThresholdGiB = 25.0;
     if (total_bytes == 0 || total_gib > kLowVramThresholdGiB) {
         return;  // large GPU: leave VAE untiled for max throughput
     }

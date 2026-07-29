@@ -34,6 +34,7 @@ CLAUDE.md
 /benchmark/cache/
 /benchmark/downloads/
 /benchmark/tmp/
+/benchmark/archive/
 /cache_test_*/
 *.log
 *.mp4

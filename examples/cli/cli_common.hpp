@@ -509,7 +509,7 @@ struct FluxCliArgs {
     const char* cache_calibrate_path = nullptr;
     const char* cache_profile_path = nullptr;
     bool no_t5 = false;
-    int vae_tiling = -1;  // -1=default(off), 1=on
+    int vae_tiling = -1;  // -1=auto(low-VRAM auto-enable), 0=force off, 1=force on
     float vae_tile_size = 0.0f;
     bool offload_to_cpu = false;
     bool keep_text_encoder_on_cpu = false;
@@ -744,7 +744,18 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         } else if (std::strcmp(key, "--no-t5") == 0) {
             args->no_t5 = true;
         } else if (std::strcmp(key, "--vae-tiling") == 0) {
-            args->vae_tiling = 1;
+            const char* v = require_value(key);
+            if (!v) return false;
+            if (std::strcmp(v, "on") == 0 || std::strcmp(v, "yes") == 0 || std::strcmp(v, "1") == 0) {
+                args->vae_tiling = 1;
+            } else if (std::strcmp(v, "off") == 0 || std::strcmp(v, "no") == 0 || std::strcmp(v, "0") == 0) {
+                args->vae_tiling = 0;
+            } else if (std::strcmp(v, "auto") == 0) {
+                args->vae_tiling = -1;
+            } else {
+                fprintf(stderr, "--vae-tiling expects on|off|auto (got '%s')\n", v);
+                return false;
+            }
         } else if (std::strcmp(key, "--vae-tile-size") == 0) {
             const char* v = require_value(key);
             if (!v) return false;

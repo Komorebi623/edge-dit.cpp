@@ -67,8 +67,8 @@ void ed_context_params_init(ed_context_params_t * params) {
     params->tp_parallel_size = 1;
     params->sp_parallel_size = 1;
     params->vae_tiling.enabled = false;
-    params->vae_tiling.rel_size_x = 2.0f;
-    params->vae_tiling.rel_size_y = 2.0f;
+    params->vae_tiling.rel_size_x = 5.0f;
+    params->vae_tiling.rel_size_y = 5.0f;
     params->vae_tiling.target_overlap = 0.25f;
 }
 

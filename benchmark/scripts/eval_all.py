@@ -25,7 +25,7 @@ Image dir / filename prefix is resolved from ONE authoritative table
 Usage:
     python benchmark/scripts/eval_all.py \
         --results-root benchmark/results/cross-system-matrix \
-        --site benchmark/configs/local/site-4090.yaml \
+        --site benchmark/sites/site4090.yaml \
         --aesthetic-weights benchmark/cache/aesthetic/sac+logos+ava1-l14-linearMSE.pth
 """
 
@@ -69,12 +69,13 @@ def image_dir_and_prefix(system: str, task: str) -> Tuple[Optional[str], str, Li
 
 
 def budget_of(run_options: Dict[str, Any]) -> str:
-    """Derive the memory-budget bucket from the resolved run_options knobs."""
+    """Derive the memory-budget bucket from the resolved run_options knobs.
+    'full' = no VRAM-saving knobs (hardware-independent name for the baseline tier)."""
     if run_options.get("max_vram_gib") is not None:
         return f"{int(run_options['max_vram_gib'])}g"
     if run_options.get("offload") or run_options.get("offload_to_cpu"):
         return "offload"
-    return "24g"
+    return "full"
 
 
 # diffusers expresses quantization via Optimum-Quanto qtypes in run_options,
@@ -168,7 +169,7 @@ class RunView:
         return d if d.is_dir() else None
 
     def is_fp16_baseline(self) -> bool:
-        return self.precision in ("bf16", "f16", "fp16") and self.budget == "24g"
+        return self.precision in ("bf16", "f16", "fp16") and self.budget == "full"
 
 
 def discover_runs(root: Path) -> List[RunView]:
@@ -525,23 +526,39 @@ def write_back(run: RunView, scores: Dict[str, Any], diff: Optional[Dict[str, An
             json.dump(result, f, ensure_ascii=False, indent=2, sort_keys=True)
 
 
+# FP16/bf16 baseline tier preference: least VRAM-saving first. offload does not
+# change the generated image (only where weights live), so an offloaded FP16 run
+# is a valid quant baseline when the un-offloaded one OOMs (large models at 24G).
+_BUDGET_PREFERENCE = {"full": 0, "offload": 1}
+
+
+def _baseline_rank(budget: str) -> int:
+    # lower = more preferred; "full" (no offload) wins, then offload, then any Ng bucket.
+    return _BUDGET_PREFERENCE.get(budget, 2)
+
+
 def find_baseline(quant: RunView, runs: List[RunView]) -> Optional[RunView]:
-    """Same system + workload + prompt_id, FP16 24g baseline."""
-    for r in runs:
-        if (
-            r.system == quant.system
-            and r.workload == quant.workload
-            and r.prompt_id == quant.prompt_id
-            and r.is_fp16_baseline()
-        ):
-            return r
-    return None
+    """Same system + workload + prompt_id FP16/bf16 baseline. Picks the least
+    VRAM-saving FP16 run available: prefer un-offloaded (budget 'full'); fall back
+    to an offloaded FP16 when the model OOMs un-offloaded (offload doesn't alter
+    the image, so it's a valid baseline). Requires the run to have produced an image."""
+    candidates = [
+        r for r in runs
+        if r.system == quant.system
+        and r.workload == quant.workload
+        and r.prompt_id == quant.prompt_id
+        and r.precision in ("bf16", "f16", "fp16")
+        and r.sample_dir is not None
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda r: _baseline_rank(r.budget))
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Unified cross-system evaluation orchestrator.")
     p.add_argument("--results-root", type=Path, required=True)
-    p.add_argument("--site", type=Path, default=REPO / "benchmark/configs/local/site-4090.yaml")
+    p.add_argument("--site", type=Path, default=REPO / "benchmark/sites/site4090.yaml")
     p.add_argument(
         "--aesthetic-weights",
         type=Path,
@@ -595,7 +612,10 @@ def main() -> None:
                 continue
 
             diff = None
-            if not args.skip_diff and not run.is_fp16_baseline():
+            # quant-loss diff only for genuine quantized tiers vs the same-system FP16 baseline.
+            # (bf16/f16/fp16 at any budget are NOT quantized -- comparing a non-full bf16 run to the
+            #  full bf16 baseline would report offload/tiling diffs as fake "quant loss".)
+            if not args.skip_diff and run.precision not in ("bf16", "f16", "fp16"):
                 base = find_baseline(run, runs)
                 if base is not None and base.dir != run.dir:
                     try:

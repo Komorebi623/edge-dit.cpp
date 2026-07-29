@@ -1,0 +1,13 @@
+method_id: sencache
+kind: runtime
+category: cache
+description: >
+  Sensitivity Jacobian bound. Bounds the reuse error via a sensitivity
+  (Jacobian) estimate. Needs a calibrated sensitivity profile for every model.
+  Not usable on the edge on-device runner yet (the engine disables it), so do
+  not list it in jobs — use dicache instead.
+options: {cache: sencache}
+needs_calibration: >
+  Every model needs calibration. Not currently supported on the edge on-device
+  runner (engine-disabled), so it cannot be benchmarked — do not put it in a job.
+cross_system: [edge-dit]   # edge-dit only

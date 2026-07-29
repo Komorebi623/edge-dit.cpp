@@ -1,0 +1,9 @@
+method_id: offload-full
+kind: runtime            # runtime toggle, no rebuild needed
+category: memory
+description: >
+  Full CPU offload: both weights and text encoder stay resident on CPU, moved to
+  GPU on demand. Saves VRAM, not a speedup -- trades time for VRAM, latency usually
+  rises. Only enable under a low VRAM budget (e.g. 8G).
+options: {offload_to_cpu: true, keep_text_encoder_on_cpu: true}
+cross_system: [edge-dit, diffusers, stable-diffusion.cpp]   # all three systems support full offload

@@ -1,0 +1,9 @@
+method_id: cache-dit
+kind: runtime
+category: cache
+description: >
+  Combined DBCache residual gating + TaylorSeer extrapolation. Gates reuse on
+  residual diff, then extrapolates skipped steps via Taylor. Works out of the
+  box, no calibration needed.
+options: {cache: cache-dit}
+cross_system: [edge-dit, stable-diffusion.cpp]

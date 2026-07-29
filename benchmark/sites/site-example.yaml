@@ -1,0 +1,45 @@
+schema_version: 1
+site_id: my-machine            # any name identifying this machine
+description: local path config (copy this and edit to your real paths)
+
+# paths: only fill in "where the external things not in git live on this machine".
+#   - only fill what you test: edge-dit only needs core+models; add diffusers/sdcpp for cross-system compare.
+#   - key names must match local_path_ref / base_model_ref in models/<model>.yaml.
+paths:
+  # -- core (required for anything) --
+  edge_dit_repo:   /path/to/edge-dit.cpp                          # repo root
+  edge_dit_cli:    /path/to/edge-dit.cpp/build-cuda/bin/ed-cli    # compiled CLI binary (for image-editing/video)
+  edge_dit_sample: /path/to/edge-dit.cpp/build-cuda/bin/ed-sample # compiled sample binary (for text-to-image)
+
+  # -- base models (fill the ones you test; all full diffusers dirs) --
+  flux_dev_dir:     /path/to/models/flux.1-dev
+  sd3_medium_dir:   /path/to/models/sd3-medium
+  sd35_large_dir:   /path/to/models/stable-diffusion-3.5-large    # SD3.5 Large (bring your own weights)
+  sd35_medium_dir:  /path/to/models/stable-diffusion-3.5-medium   # SD3.5 Medium (bring your own weights)
+  qwen_image_dir:   /path/to/models/qwen-image
+  qwen_image_edit_dir: /path/to/models/qwen-image-edit          # image editing (Qwen)
+  flux_kontext_dir: /path/to/models/flux.1-kontext-dev           # image-editing model
+  wan2_t2v_1.3b_dir:     /path/to/models/wan2.1-t2v-1.3b              # text-to-video (1.3B)
+  wan2_t2v_14b_dir: /path/to/models/wan2.1-t2v-14b              # text-to-video (14B, larger and slower)
+
+  # -- distilled type A: full standalone dir, needs only this dir (no base) --
+  flux_schnell_dir:      /path/to/models/flux.1-schnell          # FLUX schnell (~4 steps)
+  sd35_medium_turbo_dir: /path/to/models/distilled/sd35-medium-turbo
+
+  # -- distilled type B: transformer only, also needs the matching base model dir above for text_encoder/vae/scheduler --
+  #   (base is specified by base_model_ref in models/<distilled>.yaml, i.e. the base-model entries above)
+  kontext_lightning_dir:        /path/to/models/distilled/kontext-lightning         # transformer dir only; base flux_kontext_dir
+  qwen_image_lightning_weights: /path/to/models/distilled/qwen-image-lightning/Qwen-Image-Lightning-4steps-V1.0-bf16.safetensors  # single weights file; base qwen_image_dir
+  wan21_t2v_distill_weights:    /path/to/models/distilled/wan21-t2v-1.3b-distill/Wan2.1-T2V-1.3B-Distill-iter6000.safetensors      # single weights file; base wan2_t2v_1.3b_dir
+
+  # -- image-editing input image (only needed when testing image-editing) --
+  edit_input_image: /path/to/edge-dit.cpp/assets/logo.png
+
+  # -- optional: only for cross-system compare (omit entirely if edge-dit only) --
+  diffusers_python:          /path/to/conda/envs/edge/bin/python  # python used to compare diffusers
+  stable_diffusion_cpp_repo: /path/to/stable-diffusion.cpp        # for comparing sd.cpp
+  stable_diffusion_cpp_cli:  /path/to/stable-diffusion.cpp/build-cuda/bin/sd-cli
+
+notes:
+  - This is the only config allowed to hold absolute machine paths; other configs reference here indirectly via ref names.
+  - Framework artifact paths under benchmark/cache/ need not be written; run.py fills them in automatically.

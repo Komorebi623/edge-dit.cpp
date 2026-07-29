@@ -1,0 +1,35 @@
+# text-to-image benchmark manifest: cross-system compare (base + quant + offload + distilled)
+# single 24G budget: large models (flux/qwen) OOM bare at bf16; only baseline FP16/bf16 tiers get offload so the baseline can run
+# (quant loss PSNR/SSIM/LPIPS is vs same-system FP16); quant tiers use little VRAM, run bare to avoid offload slowdown
+# offload: full (whole model to CPU) on all three systems; te-cpu (text encoder only) edge-dit only
+# smoke test: temporarily set prompts to 1 and steps to 4 for a table in minutes
+name: t2i
+task: text-to-image
+models:
+  - sd3-medium
+  - flux-dev
+  - qwen-image
+  - flux-schnell            # distilled (FLUX Schnell)
+  - sd35-medium-turbo       # distilled (SD3.5 Turbo)
+  - qwen-image-lightning    # distilled (Qwen Lightning)
+prompts: 3
+device: 0                          # lock this job to GPU 0 (avoid multiple jobs contending for one card -> OOM)
+
+edge-dit:                             # weight-only, via precision
+  quant:
+    - fp16
+    - {type: fp16, offload: full}     # baseline A: full offload
+    - {type: fp16, offload: te-cpu}   # baseline B: text encoder on CPU only (edge-only, faster than full)
+    - q8                              # small VRAM after quantization, run bare
+    - q4_k                            # extreme VRAM-saving, no offload (would only slow it down)
+diffusers:                            # Optimum-Quanto, via quant_weights
+  quant:
+    - bf16
+    - {type: bf16, offload: full}     # baseline: full offload (diffusers has no te-cpu)
+    - fp8
+stable-diffusion.cpp:                 # native baseline
+  quant:
+    - fp16
+    - {type: fp16, offload: full}     # baseline: full offload (sd.cpp has no te-cpu)
+    - q8
+    - q4_k

@@ -1,0 +1,10 @@
+method_id: vae-tiling
+kind: runtime            # runtime toggle (--vae-tiling), no rebuild needed
+category: memory
+description: >
+  VAE tiled decode: at high resolution, split the latent into tiles and run each
+  through the VAE separately, cutting peak VRAM. Saves VRAM, not a speedup. The
+  three states are controlled at the job level by the vae_tiling field (on|off|auto);
+  this method is the force-on (on) form.
+options: {vae_tiling: true}
+cross_system: [edge-dit, stable-diffusion.cpp]   # diffusers memory_modes does not list vae_tiling

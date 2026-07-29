@@ -1920,11 +1920,10 @@ inline ggml_tensor* build_tap_inject(GGMLRunnerContext* ctx, ggml_tensor* x_befo
     TapRegistry* reg = ctx->tap_registry;
     switch (reg->inject_kind()) {
         case TapRegistry::InjectKind::HostFeature:
+            // SD3/Wan host reuse: x_before + host-reconstructed feature. The device
+            // residual/blend reuse (MagCache/DiCache) is woven through the cache.*
+            // operators via build_stream_override, not this switch.
             return ggml_add(c, x_before, reg->inject_input());
-        case TapRegistry::InjectKind::DeviceResidual:
-            return ggml_add(c, x_before, reg->inject_resid1());
-        // DeviceBlend (DiCache gamma-blend) migrated to the cache.gamma_blend
-        // operator via build_stream_override; no longer served here.
         default:
             return x_before;
     }
@@ -6802,10 +6801,11 @@ public:
                                        const std::vector<std::string>& indicator_names,
                                        const std::function<void()>& post_readback = nullptr,
                                        bool read_feature = false,
-                                       bool read_taps = false) {
+                                       bool read_taps = false,
+                                       bool no_return = false) {
         SubstepPassResult result;
         set_tap_registry(registry);
-        auto out = GGMLRunner::compute<float>(get_graph, n_threads, /*free=*/false);
+        auto out = GGMLRunner::compute<float>(get_graph, n_threads, /*free=*/false, no_return);
         result.output = restore_trailing_singleton_dims(std::move(out), expected_dim);
 
         for (const auto& name : indicator_names) {

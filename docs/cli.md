@@ -351,7 +351,7 @@ back to a conservative fixed headroom.
   --backend cuda \
   --model /path/to/FLUX.1-dev \
   --prompt "a glass teapot on a wooden table" \
-  --auto-fit --max-vram 8 --vae-tiling \
+  --auto-fit --max-vram 8 --vae-tiling auto \
   -W 1024 -H 1024 --steps 20 --guidance 3.5 \
   --output flux-autofit.png
 ```

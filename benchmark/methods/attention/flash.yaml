@@ -1,0 +1,9 @@
+method_id: flash
+kind: runtime
+category: attention
+description: >
+  Flash Attention. Enabled by default as part of the baseline; benchmark it by
+  turning it OFF for comparison (runner emits --no-flash-attention when
+  flash_attention is false). Leave options empty to keep the default-on state.
+options: {}   # default-on; set {flash_attention: false} to disable (--no-flash-attention)
+cross_system: [edge-dit, diffusers, stable-diffusion.cpp]

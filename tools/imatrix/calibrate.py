@@ -1,23 +1,25 @@
-"""imatrix 离线校准工具(纯 Python,不改 C++)。
+"""imatrix offline calibration tool (pure Python, does not modify C++).
 
-收集每层每输入通道的激活均方 E[x^2] 作为量化重要性(imatrix),喂给 q4_K 等
-k-quant 的加权取整。重要性度量借用了 AWQ 的思想(激活大=权重列重要),但这里
-只产出 imatrix 加权,并未实现 AWQ 的 per-channel scaling。
+Collects the per-layer, per-input-channel mean-square activation E[x^2] as the quantization
+importance (imatrix), feeding it into the weighted rounding of k-quants such as q4_K. The importance
+metric borrows AWQ's idea (large activation = important weight column), but here we
+only produce imatrix weighting and do not implement AWQ's per-channel scaling.
 
-用 diffusers 加载 SD3-medium,对 transformer(DiT)的每个 nn.Linear 注册 forward hook,
-跑若干多样 prompt 的去噪前向,收集每层输入激活的 per-input-channel 统计:
-    - sum_x2[c] = sum over all tokens of x[:,c]^2   (→ E[x^2] 均方激活)
-这个 E[x^2] 度量借用了 AWQ 的显著性思想(激活大 = 权重列重要),也是 GPTQ Hessian(X X^T)的对角近似。
-由此得到的 per-input-channel 重要性向量,长度 = in_features = edge 里的 n_per_row,
-正好喂进 edge 的 ggml_quantize_chunk(imatrix 接口),运行时零改动。
+Load SD3-medium with diffusers, register a forward hook on every nn.Linear of the transformer (DiT),
+run the denoising forward on a number of diverse prompts, and collect per-input-channel statistics of
+each layer's input activations:
+    - sum_x2[c] = sum over all tokens of x[:,c]^2   (-> E[x^2] mean-square activation)
+This E[x^2] metric borrows AWQ's saliency idea (large activation = important weight column), and is also the diagonal approximation of the GPTQ Hessian (X X^T).
+The resulting per-input-channel importance vector has length = in_features = n_per_row in edge,
+which feeds exactly into edge's ggml_quantize_chunk (imatrix interface), with zero runtime changes.
 
-同时对每层保留一小批真实激活样本(reservoir),用于离线验证时计算"输出域误差"
-(||W X - Wq X|| / ||W X||)——这是画质最直接的代理。
+At the same time, keep a small batch of real activation samples per layer (reservoir), used during offline verification to compute the "output-domain error"
+(||W X - Wq X|| / ||W X||) -- the most direct proxy for image quality.
 
-产物写到 --outdir(默认当前目录下的 imatrix-out/):
-    imatrix.npz   每层 imatrix 向量(float32) + count
-    imatrix.gguf  规范 gguf 格式(面向未来 C++ 集成)
-    acts.npz      每层激活样本(float16, 每层 <=SAMPLE_ROWS 行)
+Outputs are written to --outdir (default ./imatrix-out/ under the current directory):
+    imatrix.npz   per-layer imatrix vectors (float32) + count
+    imatrix.gguf  canonical gguf format (for future C++ integration)
+    acts.npz      per-layer activation samples (float16, <=SAMPLE_ROWS rows per layer)
 """
 import os
 import sys
@@ -38,7 +40,7 @@ def main():
                     help="calibration outputs (imatrix.gguf etc), default ./imatrix-out")
     ap.add_argument("--steps", type=int, default=6)
     ap.add_argument("--nprompts", type=int, default=16)
-    ap.add_argument("--sample-rows", type=int, default=256, help="每层保留的激活样本行数")
+    ap.add_argument("--sample-rows", type=int, default=256, help="number of activation sample rows kept per layer")
     ap.add_argument("--smoke", action="store_true")
     args = ap.parse_args()
     if args.smoke:
@@ -54,7 +56,7 @@ def main():
     tf = pipe.transformer
     tf.eval()
 
-    # ---- 注册 hook: 收集每个 nn.Linear 的输入激活统计 ----
+    # ---- Register hook: collect input activation statistics for each nn.Linear ----
     stats = {}   # name -> dict(sum_x2 float64[in], count int, sample float16[R,in])
     handles = []
 
@@ -68,7 +70,7 @@ def main():
             sx2 = (xf * xf).sum(dim=0).double().cpu().numpy()  # [in]
             n = xf.shape[0]
             if s is None:
-                # 初始化 + 首批做激活样本(取前 SAMPLE_ROWS 行)
+                # Initialize + take the activation sample from the first batch (first SAMPLE_ROWS rows)
                 r = min(args.sample_rows, xf.shape[0])
                 stats[name] = {
                     "sum_x2": sx2,
@@ -86,9 +88,9 @@ def main():
         if isinstance(mod, torch.nn.Linear):
             handles.append(mod.register_forward_hook(make_hook(name)))
             n_lin += 1
-    log(f"[hook] 注册 {n_lin} 个 nn.Linear")
+    log(f"[hook] registered {n_lin} nn.Linear")
 
-    # ---- 多样校准 prompt ----
+    # ---- Diverse calibration prompts ----
     base_prompts = [
         "a photograph of an astronaut riding a horse on the moon",
         "a bustling medieval marketplace at golden hour, highly detailed",
@@ -125,7 +127,7 @@ def main():
     for h in handles:
         h.remove()
 
-    # ---- 产出 imatrix: E[x^2] = sum_x2 / count ----
+    # ---- Produce imatrix: E[x^2] = sum_x2 / count ----
     imatrix = {}
     acts = {}
     meta = {}
@@ -138,16 +140,16 @@ def main():
     np.savez(os.path.join(args.outdir, "imatrix.npz"), **imatrix,
              **{f"__meta__{k}": v for k, v in meta.items()})
     np.savez(os.path.join(args.outdir, "acts.npz"), **acts)
-    log(f"[save] imatrix.npz / acts.npz : {len(imatrix)} 层")
+    log(f"[save] imatrix.npz / acts.npz : {len(imatrix)} layers")
 
-    # ---- 规范 gguf(面向未来 C++ 集成),每层一个 float32 tensor ----
+    # ---- Canonical gguf (for future C++ integration), one float32 tensor per layer ----
     try:
         import gguf
         w = gguf.GGUFWriter(os.path.join(args.outdir, "imatrix.gguf"), "sd3-dit-imatrix")
         w.add_uint32("imatrix.n_tensors", len(imatrix))
         w.add_string("imatrix.source", "sd3-medium Ex2 activation calibration")
         for name, v in imatrix.items():
-            # gguf tensor 名: 用 diffusers 权重名 + .weight(C++ 集成时映射到 edge tensor 名)
+            # gguf tensor name: use the diffusers weight name + .weight (mapped to the edge tensor name during C++ integration)
             w.add_tensor(name + ".weight", v.reshape(1, -1))
         w.write_header_to_file()
         w.write_kv_data_to_file()
@@ -155,9 +157,9 @@ def main():
         w.close()
         log("[save] imatrix.gguf")
     except Exception as e:
-        log(f"[warn] gguf 导出失败(不影响验证): {e}")
+        log(f"[warn] gguf export failed (does not affect verification): {e}")
 
-    # 打印几个代表层的 imatrix 分布,直观看离群通道
+    # Print the imatrix distribution of a few representative layers, to visually inspect outlier channels
     for name in list(imatrix.keys())[:3] + [k for k in imatrix if "attn.to_q" in k][:1]:
         v = imatrix[name]
         log(f"[imatrix] {name}: in={v.size} max/mean={v.max()/v.mean():.1f} "

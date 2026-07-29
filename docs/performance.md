@@ -365,8 +365,7 @@ full-compute outputs after generation.
   and has not yet been validated on a physical 8 GiB GPU.
 
 * The Stable Diffusion benchmark uses Stable Diffusion 3 Medium. Sequence
-  parallelism is currently reported for FLUX only, and this snapshot does not
-  include a matching xDiT baseline.
+  parallelism is currently reported for FLUX only.
 
 
 ## Related Documentation

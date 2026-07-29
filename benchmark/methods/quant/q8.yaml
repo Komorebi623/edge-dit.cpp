@@ -1,0 +1,9 @@
+method_id: q8
+kind: runtime
+category: quant
+description: >
+  8-bit weight quantization. edge/sd.cpp = q8_0 (weight-only int8, ggml mmq);
+  diffusers = W8A8 (Quanto qint8, activations also quantized -- known to crash SD3).
+options: {precision: q8_0}
+cross_system: [edge-dit, stable-diffusion.cpp]   # diffusers q8=W8A8 has different semantics, see README
+convert_default: false   # q8 quantizes online by default (no pre-conversion)

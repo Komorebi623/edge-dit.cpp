@@ -1,0 +1,20 @@
+schema_version: 1
+model_id: kontext-lightning
+model_family: FLUX.1-Kontext
+model_name: FLUX.1-Kontext Lightning
+task: image-editing
+distilled: true                        # distilled, few steps
+model:
+  public_id: black-forest-labs/FLUX.1-Kontext-dev   # Kontext-Lightning distilled, based on Kontext-dev
+  local_path_ref: kontext_lightning_dir  # site -> distilled/kontext-lightning
+  format: diffusers-transformer-only    # transformer subdir only (needs rest of flux-kontext base components)
+  base_model_ref: flux_kontext_dir      # base provides text_encoder/vae/scheduler
+prompt_set: ../prompts/image-editing-v1.jsonl
+input_image_ref: edit_input_image
+generation:
+  width: 1024
+  height: 1024
+  steps: 8                             # Kontext Lightning low-step default
+  guidance: 3.5
+  cfg_scale: 1.0                        # Lightning single forward pass
+  scheduler: model-default

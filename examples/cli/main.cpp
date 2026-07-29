@@ -92,8 +92,8 @@ static void print_usage(const char* prog) {
         "  --tensor-type-rules <csv> Per-tensor quant overrides (mixed quant), e.g. \"attn=q4_0,norm=f16\"\n"
         "                            Each rule is <name-regex>=<ggml-type-name>, comma-separated\n"
         "  --no-t5                   Skip loading T5XXL text encoder (SD3 only; reduces memory, degrades prompt adherence)\n"
-        "  --vae-tiling              Enable VAE tiled decode (reduces VRAM, default: off)\n"
-        "  --vae-tile-size <float>   VAE tile relative size, default: 2.0 (2x2 grid). Larger = finer tiles = less VRAM\n"
+        "  --vae-tiling <on|off|auto>  VAE tiled decode (reduces VRAM). auto=enable on low-VRAM GPUs (<=16G); default: auto\n"
+        "  --vae-tile-size <float>   VAE tile relative size, default: 5.0 (~32x32 tile). Larger = finer tiles = less VRAM\n"
         "  --offload-to-cpu          Keep model weights on CPU, copy to GPU per-compute (saves VRAM)\n"
         "  --keep-text-encoder-on-cpu  Run text encoder on CPU backend\n"
         "  --text-encoder-offload    Keep text-encoder weights on CPU, stage to GPU per encode (compute on GPU)\n"
@@ -637,11 +637,11 @@ int main(int argc, char** argv) {
     }
 
     /*
-     * Flux 测试阶段先让内部自动识别 dtype / sampler / scheduler。
-     * 如果你的模型是量化 GGUF，也可以在这里手动指定：
+     * During Flux bring-up, let the internals auto-detect dtype / sampler / scheduler first.
+     * If your model is a quantized GGUF, you can also specify it manually here:
      *   ctx_params.weight_type = ED_DTYPE_Q8_0;
-     * 命令行 --type / --tensor-type-rules 会覆盖这里的默认值，
-     * 并在加载 safetensors 时触发在线量化。
+     * The command-line --type / --tensor-type-rules will override the defaults here,
+     * and trigger online quantization when loading safetensors.
      */
     ctx_params.weight_type = args.weight_type != nullptr
                                  ? parse_weight_type(args.weight_type, nullptr)
@@ -650,6 +650,8 @@ int main(int argc, char** argv) {
     ctx_params.skip_t5 = args.no_t5;
     if (args.vae_tiling == 1) {
         ctx_params.vae_tiling.enabled = true;
+    } else if (args.vae_tiling == 0) {
+        ctx_params.vae_tiling.force_disable = true;  // explicit off: suppress low-VRAM auto-enable
     }
     if (args.vae_tile_size > 0.0f) {
         ctx_params.vae_tiling.enabled = true;
@@ -755,10 +757,10 @@ int main(int argc, char** argv) {
         gen_params.batch_count = 1;
 
         /*
-         * Flux / DiT 测试建议：
-         * - sampler/scheduler 用 AUTO，让内部根据模型选择
-         * - cfg_scale 设为 1.0，避免传统 CFG 负条件分支
-         * - distilled_guidance 用 Flux 常见值 3.5
+         * Flux / DiT testing tips:
+         * - use AUTO for sampler/scheduler, letting the internals pick based on the model
+         * - set cfg_scale to 1.0 to avoid the traditional CFG negative-conditioning branch
+         * - use the common Flux value of 3.5 for distilled_guidance
          */
         gen_params.sample.sampler = ED_SAMPLER_AUTO;
         gen_params.sample.scheduler = ED_SCHEDULER_AUTO;

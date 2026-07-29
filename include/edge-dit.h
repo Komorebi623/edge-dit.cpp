@@ -132,6 +132,7 @@ typedef struct ed_lora_t {
 
 typedef struct ed_tiling_params_t {
     bool enabled;
+    bool force_disable;  // true = user explicitly disabled tiling; suppresses low-VRAM auto-enable
     int tile_size_x;
     int tile_size_y;
     float target_overlap;

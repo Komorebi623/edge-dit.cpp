@@ -1,0 +1,15 @@
+method_id: magcache
+kind: runtime
+category: cache
+description: >
+  Precalibrated magnitude-ratio table. Skips steps by consulting a per-step
+  magnitude ratio profile. Not usable on the edge on-device runner yet: the
+  calibration pass does not receive the feature-seam observations it needs, so
+  no profile is written and an accelerated run falls back to a neutral table
+  and degrades image quality. Do not list it in jobs — use dicache instead.
+options: {cache: magcache}
+needs_calibration: >
+  Every model needs a calibrated profile. Calibration does not currently work on
+  the edge on-device runner (the feature seam returns no data, so the profile is
+  never written), so it cannot be benchmarked — do not put it in a job.
+cross_system: [edge-dit]   # edge-dit only
