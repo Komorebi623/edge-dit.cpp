@@ -96,11 +96,3 @@ with `--model .../qwen-image-edit --qwen-image-zero-cond-t -i <input image>`.
    output is a drop-in diffusers transformer directory.
 5. Asserts every LoRA module was merged (`merged_count == len(mods)`), so a
    naming mismatch fails loudly instead of silently producing a bad model.
-
-## Note on other LoRA layouts
-
-`scripts/merge_flux_lora.py` is a sibling for PEFT-style LoRAs
-(`.lora_A.weight` / `.lora_B.weight`, `transformer.` prefix stripped, scale 1.0
-when no `.alpha`). It is not needed for any of the six variants above (they are
-either full-weight or use the Qwen `lora_down/up` layout) — keep it only if you
-later merge a PEFT-format LoRA.
