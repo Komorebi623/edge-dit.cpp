@@ -1060,10 +1060,22 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_scale(ggml_context* ctx,
     return x;
 }
 
+// ggml-vulkan's unary shaders (gelu/silu/...) read their input with a flat linear
+// index and ignore nb[] strides, so a non-contiguous VIEW source is miscomputed
+// (its supports_op even requires ggml_is_contiguous). ggml_is_contiguous_rows() is
+// too weak a guard: a row-packed view with a wide row stride passes it but is not
+// fully contiguous. On Vulkan, force a full ggml_cont in that case. CPU/CUDA handle
+// strided rows natively, so they keep the cheaper contiguous-rows guard (backend
+// defaults to nullptr => unchanged behavior for every existing caller).
+__STATIC_INLINE__ bool ggml_ext_unary_needs_full_cont(ggml_backend_t backend, ggml_tensor* x) {
+    return sd_backend_is(backend, "Vulkan") && !ggml_is_contiguous(x);
+}
+
 __STATIC_INLINE__ ggml_tensor* ggml_ext_gelu(ggml_context* ctx,
                                              ggml_tensor* x,
-                                             bool inplace = false) {
-    if (!ggml_is_contiguous_rows(x)) {
+                                             bool inplace           = false,
+                                             ggml_backend_t backend = nullptr) {
+    if (!ggml_is_contiguous_rows(x) || ggml_ext_unary_needs_full_cont(backend, x)) {
         x = ggml_cont(ctx, x);
     } else if (inplace && !ggml_is_contiguous(x)) {
         inplace = false;
@@ -1078,8 +1090,9 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_gelu(ggml_context* ctx,
 
 __STATIC_INLINE__ ggml_tensor* ggml_ext_gelu_quick(ggml_context* ctx,
                                                    ggml_tensor* x,
-                                                   bool inplace = false) {
-    if (!ggml_is_contiguous_rows(x)) {
+                                                   bool inplace           = false,
+                                                   ggml_backend_t backend = nullptr) {
+    if (!ggml_is_contiguous_rows(x) || ggml_ext_unary_needs_full_cont(backend, x)) {
         x = ggml_cont(ctx, x);
     } else if (inplace && !ggml_is_contiguous(x)) {
         inplace = false;

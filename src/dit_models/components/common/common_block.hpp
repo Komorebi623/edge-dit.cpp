@@ -202,7 +202,7 @@ public:
 
         gate = ggml_cont(ctx->ggml_ctx, gate);
 
-        gate = ggml_ext_gelu(ctx->ggml_ctx, gate, true);
+        gate = ggml_ext_gelu(ctx->ggml_ctx, gate, true, ctx->backend);
 
         x = ggml_mul(ctx->ggml_ctx, x, gate);  // [ne3, ne2, ne1, dim_out]
 
@@ -222,7 +222,7 @@ public:
         auto proj = std::dynamic_pointer_cast<Linear>(blocks["proj"]);
 
         x = proj->forward(ctx, x);
-        x = ggml_ext_gelu(ctx->ggml_ctx, x, true);
+        x = ggml_ext_gelu(ctx->ggml_ctx, x, true, ctx->backend);
         return x;
     }
 };
