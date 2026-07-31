@@ -14,4 +14,4 @@ if [[ ! -f "${PROFILE_PATH}" ]]; then
   exit 1
 fi
 
-exec "${EDGE_DIT_PYTHON_BIN}" "${APP_ROOT}/runtime/managed_server_v2.py" --profile "${PROFILE_PATH}" "$@"
+exec "${EDGE_DIT_PYTHON_BIN}" "${APP_ROOT}/runtime/managed_server.py" --profile "${PROFILE_PATH}" "$@"

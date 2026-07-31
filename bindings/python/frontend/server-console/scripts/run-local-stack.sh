@@ -36,7 +36,7 @@ run_manager_loop() {
       return 0
     fi
 
-    echo "[server_v2-console] runtime manager exited with ${exit_code}; restarting in 2s" >&2
+    echo "[python-server-console] runtime manager exited with ${exit_code}; restarting in 2s" >&2
     sleep 2
   done
 }

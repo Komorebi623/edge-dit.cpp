@@ -32,7 +32,7 @@ const runtimeStatusPayload = {
       kind: 'image',
       model_env: 'EDGE_DIT_FLUX_MODEL_PATH',
       name: 'FLUX.1-dev',
-      notes: ['Validated through the server_v2 HTTP job API in this workspace.'],
+      notes: ['Validated through the Python Server HTTP job API in this workspace.'],
       request_example: {
         height: 256,
         prompt: 'smoke test teapot',
@@ -56,7 +56,7 @@ const runtimeStatusPayload = {
     },
   ],
   manager: {
-    app_root: '/tmp/server_v2-console',
+    app_root: '/tmp/server-console',
     host: '127.0.0.1',
     port: 8090,
     started_at_ms: 1,
@@ -69,7 +69,7 @@ const runtimeStatusPayload = {
       kind: 'image',
       model_env: 'EDGE_DIT_FLUX_MODEL_PATH',
       name: 'FLUX.1-dev',
-      notes: ['Validated through the server_v2 HTTP job API in this workspace.'],
+      notes: ['Validated through the Python Server HTTP job API in this workspace.'],
       request_example: {
         height: 256,
         prompt: 'smoke test teapot',
@@ -122,7 +122,7 @@ const apiHandlers = prefixes.flatMap((prefix) => [
     HttpResponse.json({
       model: 'edge-dit-model',
       request_id: 'req-health',
-      service: 'edge-dit-python-server-v2',
+      service: 'edge-dit-python-server',
       status: 'ok',
     }),
   ),
@@ -154,7 +154,7 @@ const apiHandlers = prefixes.flatMap((prefix) => [
         progress: 'sampling_step_only',
         results: 'stored_in_memory',
       },
-      service: 'edge-dit-python-server-v2',
+      service: 'edge-dit-python-server',
       supports: {
         image: true,
         video: true,

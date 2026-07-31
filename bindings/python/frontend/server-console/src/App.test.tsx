@@ -10,10 +10,10 @@ describe('App shell', () => {
     window.localStorage.clear()
   })
 
-  it('renders the connected server_v2 console scaffold', async () => {
+  it('renders the connected Python Server Console scaffold', async () => {
     render(<App />)
 
-    expect(screen.getByRole('heading', { name: /server_v2 web console/i })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /python server console/i })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: /connection/i })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: /local runtime/i })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: /generation composer/i })).toBeInTheDocument()
@@ -32,7 +32,7 @@ describe('App shell', () => {
       kind: 'image' as const,
       model_env: 'EDGE_DIT_FLUX_MODEL_PATH',
       name: 'FLUX.1-dev',
-      notes: ['Validated through the server_v2 HTTP job API in this workspace.'],
+      notes: ['Validated through the Python Server HTTP job API in this workspace.'],
       request_example: {
         height: 256,
         prompt: 'smoke test teapot',
@@ -87,7 +87,7 @@ describe('App shell', () => {
             },
           ],
           manager: {
-            app_root: '/tmp/server_v2-console',
+            app_root: '/tmp/server-console',
             host: '127.0.0.1',
             port: 8090,
             started_at_ms: 1,
@@ -126,13 +126,13 @@ describe('App shell', () => {
     expect(screen.getByText('49.0 s')).toBeInTheDocument()
   })
 
-  it('derives edit-model sampling steps from managed runtime logs when server_v2 still reports 0/0', async () => {
+  it('derives edit-model sampling steps from managed runtime logs when server still reports 0/0', async () => {
     const qwenEditProfile = {
       description: 'Verified local edit preset for Qwen-Image-Edit.',
       kind: 'image' as const,
       model_env: 'EDGE_DIT_QWEN_IMAGE_EDIT_MODEL_PATH',
       name: 'Qwen-Image-Edit',
-      notes: ['Validated through the server_v2 HTTP job API in this workspace.'],
+      notes: ['Validated through the Python Server HTTP job API in this workspace.'],
       request_example: {
         height: 256,
         init_image_b64: 'data:image/png;base64,AAAA',
@@ -195,7 +195,7 @@ describe('App shell', () => {
             },
           ],
           manager: {
-            app_root: '/tmp/server_v2-console',
+            app_root: '/tmp/server-console',
             host: '127.0.0.1',
             port: 8090,
             started_at_ms: 1,
@@ -362,7 +362,7 @@ describe('App shell', () => {
     expect(await screen.findByText('Preparing')).toBeInTheDocument()
     expect(screen.getByText('0 / 0')).toBeInTheDocument()
     expect(
-      screen.getByText(/has started the job, but server_v2 has not published sampling-step counters yet/i),
+      screen.getByText(/has started the job, but Python Server has not published sampling-step counters yet/i),
     ).toBeInTheDocument()
     expect(screen.queryByText(/^Sampling$/i)).not.toBeInTheDocument()
   })
@@ -919,7 +919,7 @@ describe('App shell', () => {
       kind: 'image' as const,
       model_env: 'EDGE_DIT_FLUX_MODEL_PATH',
       name: 'FLUX.1-dev',
-      notes: ['Validated through the server_v2 HTTP job API in this workspace.'],
+      notes: ['Validated through the Python Server HTTP job API in this workspace.'],
       request_example: {
         height: 256,
         prompt: 'smoke test teapot',
@@ -991,7 +991,7 @@ describe('App shell', () => {
             },
           ],
           manager: {
-            app_root: '/tmp/server_v2-console',
+            app_root: '/tmp/server-console',
             host: '127.0.0.1',
             port: 8090,
             started_at_ms: 1,
@@ -1057,7 +1057,7 @@ describe('App shell', () => {
             },
           ],
           manager: {
-            app_root: '/tmp/server_v2-console',
+            app_root: '/tmp/server-console',
             host: '127.0.0.1',
             port: 8090,
             started_at_ms: 1,
@@ -1135,7 +1135,7 @@ describe('App shell', () => {
           },
         ],
         manager: {
-          app_root: '/tmp/server_v2-console',
+          app_root: '/tmp/server-console',
           host: '127.0.0.1',
           port: 8090,
           started_at_ms: 1,
@@ -1186,7 +1186,7 @@ describe('App shell', () => {
         return HttpResponse.json({
           model: runtimePhase === 'ready' ? 'wan-model' : 'flux-model',
           request_id: runtimePhase === 'ready' ? 'req-health-wan' : 'req-health-flux',
-          service: 'edge-dit-python-server-v2',
+          service: 'edge-dit-python-server',
           status: 'ok',
         })
       }),
@@ -1220,7 +1220,7 @@ describe('App shell', () => {
             progress: 'sampling_step_only',
             results: 'stored_in_memory',
           },
-          service: 'edge-dit-python-server-v2',
+          service: 'edge-dit-python-server',
           supports: {
             image: runtimePhase !== 'ready',
             video: runtimePhase === 'ready',

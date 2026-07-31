@@ -1257,7 +1257,7 @@ function ConsoleHeader({
               edge-dit local console
             </p>
             <h1 className="mt-1 text-2xl font-semibold tracking-[-0.035em] text-[var(--text-primary)] sm:text-3xl">
-              server_v2 Web Console
+              Python Server Console
             </h1>
           </div>
         </div>
@@ -3650,7 +3650,7 @@ function deriveProgressVm(
     }
     if (!samplingBudgetPublished) {
       return {
-        description: 'The backend has started the job, but server_v2 has not published sampling-step counters yet.',
+        description: 'The backend has started the job, but Python Server has not published sampling-step counters yet.',
         percent,
         phaseLabel: 'Preparing',
         stepsLabel: `${observedCurrent} / ${observedTotal}`,

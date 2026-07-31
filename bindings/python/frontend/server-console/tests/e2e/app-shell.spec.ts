@@ -27,7 +27,7 @@ test('shows the console shell', async ({ page }) => {
             kind: 'image',
             model_env: 'EDGE_DIT_FLUX_MODEL_PATH',
             name: 'FLUX.1-dev',
-            notes: ['Validated through the server_v2 HTTP job API in this workspace.'],
+            notes: ['Validated through the Python Server HTTP job API in this workspace.'],
             request_example: {
               height: 256,
               prompt: 'smoke test teapot',
@@ -45,7 +45,7 @@ test('shows the console shell', async ({ page }) => {
         },
         log_tail: [],
         manager: {
-          app_root: '/tmp/server_v2-console',
+          app_root: '/tmp/server-console',
           host: '127.0.0.1',
           port: 8090,
           started_at_ms: 1,
@@ -58,7 +58,7 @@ test('shows the console shell', async ({ page }) => {
             kind: 'image',
             model_env: 'EDGE_DIT_FLUX_MODEL_PATH',
             name: 'FLUX.1-dev',
-            notes: ['Validated through the server_v2 HTTP job API in this workspace.'],
+            notes: ['Validated through the Python Server HTTP job API in this workspace.'],
             request_example: {
               height: 256,
               prompt: 'smoke test teapot',
@@ -86,7 +86,7 @@ test('shows the console shell', async ({ page }) => {
       body: JSON.stringify({
         model: 'edge-dit-model',
         request_id: 'e2e-health',
-        service: 'edge-dit-python-server-v2',
+        service: 'edge-dit-python-server',
         status: 'ok',
       }),
       contentType: 'application/json',
@@ -123,7 +123,7 @@ test('shows the console shell', async ({ page }) => {
           progress: 'sampling_step_only',
           results: 'stored_in_memory',
         },
-        service: 'edge-dit-python-server-v2',
+        service: 'edge-dit-python-server',
         supports: {
           image: true,
           video: true,
@@ -150,7 +150,7 @@ test('shows the console shell', async ({ page }) => {
 
   await page.goto('/')
 
-  await expect(page.getByRole('heading', { name: 'server_v2 Web Console' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Python Server Console' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Connection' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Local Runtime' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Generation Composer' })).toBeVisible()

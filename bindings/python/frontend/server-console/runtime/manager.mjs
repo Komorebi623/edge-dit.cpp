@@ -67,8 +67,8 @@ Options:
   --auto-start-profile <slug>   Start a verified profile after the manager boots
   --host <host>                 Runtime manager bind host (default: ${DEFAULT_MANAGER_HOST})
   --port <port>                 Runtime manager bind port (default: ${DEFAULT_MANAGER_PORT})
-  --backend-host <host>         Managed server_v2 bind host (default: ${DEFAULT_BACKEND_HOST})
-  --backend-port <port>         Managed server_v2 bind port (default: ${DEFAULT_BACKEND_PORT})
+  --backend-host <host>         Managed Python Server bind host (default: ${DEFAULT_BACKEND_HOST})
+  --backend-port <port>         Managed Python Server bind port (default: ${DEFAULT_BACKEND_PORT})
   --job-ttl-seconds <seconds>   Override managed job TTL (default: ${DEFAULT_JOB_TTL_SECONDS})
 `)
   process.exit(0)

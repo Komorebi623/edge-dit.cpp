@@ -1,6 +1,6 @@
 import { API_PREFIXES, type ApiPrefix, type ConnectionTarget } from './server'
 
-const STORAGE_KEY = 'edge-dit.server-v2-console.connection-target'
+const STORAGE_KEY = 'edge-dit.server-console.connection-target'
 
 export const DEFAULT_CONNECTION_TARGET: ConnectionTarget = {
   baseUrl: 'http://127.0.0.1:8080',

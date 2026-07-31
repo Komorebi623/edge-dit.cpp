@@ -19,7 +19,7 @@ export class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorB
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error('server_v2 console crashed', error, info)
+    console.error('Python Server Console crashed', error, info)
   }
 
   render() {

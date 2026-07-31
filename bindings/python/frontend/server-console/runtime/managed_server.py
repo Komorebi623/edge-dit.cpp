@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from edge_dit.config import EngineConfig
-from edge_dit.server_v2 import serve
+from edge_dit.server import serve
 
 
 def _expand(value: Any) -> Any:
@@ -43,7 +43,7 @@ def _resolve_engine_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Launch a managed local server_v2 profile")
+    parser = argparse.ArgumentParser(description="Launch a managed local Python Server profile")
     parser.add_argument("--profile", required=True, help="Path to a runtime profile JSON file")
     parser.add_argument("--host", default=os.environ.get("EDGE_DIT_MANAGED_BACKEND_HOST", "127.0.0.1"))
     parser.add_argument(
