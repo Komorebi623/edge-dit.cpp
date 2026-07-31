@@ -1374,7 +1374,7 @@ namespace Flux {
             if (use_mlp_silu_act) {
                 x = ggml_ext_silu_act(ctx->ggml_ctx, x);
             } else {
-                x = ggml_ext_gelu(ctx->ggml_ctx, x, true);
+                x = ggml_ext_gelu(ctx->ggml_ctx, x, true, ctx->backend);
             }
             x = mlp_2->forward(ctx, x);
             return x;
@@ -2701,7 +2701,7 @@ namespace Flux {
             } else if (use_mlp_silu_act) {
                 mlp = ggml_ext_silu_act(ctx->ggml_ctx, mlp);
             } else {
-                mlp = ggml_ext_gelu(ctx->ggml_ctx, mlp, true);
+                mlp = ggml_ext_gelu(ctx->ggml_ctx, mlp, true, ctx->backend);
             }
             auto attn_mlp = ggml_concat(ctx->ggml_ctx, attn, mlp, 0);  // [N, n_token, hidden_size + mlp_hidden_dim]
             auto output   = linear2->forward(ctx, attn_mlp);           // [N, n_token, hidden_size]
@@ -3020,10 +3020,10 @@ namespace Flux {
                         mlp = mlp_bf16;
                         ggml_set_name(mlp, (prefix + "_mlp_gelu_bf16").c_str());
                     } else {
-                        mlp = ggml_ext_gelu(ctx->ggml_ctx, mlp, true);
+                        mlp = ggml_ext_gelu(ctx->ggml_ctx, mlp, true, ctx->backend);
                     }
                 } else {
-                    mlp = ggml_ext_gelu(ctx->ggml_ctx, mlp, true);
+                    mlp = ggml_ext_gelu(ctx->ggml_ctx, mlp, true, ctx->backend);
                 }
             }
             ggml_tensor* output = nullptr;
@@ -3158,7 +3158,7 @@ namespace Flux {
             } else if (use_mlp_silu_act) {
                 mlp = ggml_ext_silu_act(ctx->ggml_ctx, mlp);
             } else {
-                mlp = ggml_ext_gelu(ctx->ggml_ctx, mlp, true);
+                mlp = ggml_ext_gelu(ctx->ggml_ctx, mlp, true, ctx->backend);
             }
             auto attn_mlp = ggml_concat(ctx->ggml_ctx, attn_flat, mlp, 0);
             ggml_set_name(attn_mlp, (prefix + "_attn_mlp").c_str());

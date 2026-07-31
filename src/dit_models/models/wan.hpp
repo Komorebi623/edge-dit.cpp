@@ -2205,7 +2205,13 @@ namespace WAN {
             ggml_tensor* w = params["gamma"];
             w              = ggml_reshape_1d(ctx->ggml_ctx, w, ggml_nelements(w));
             if (auto h = edgedit::ggml_ext::channel_rms_norm_custom(ctx->ggml_ctx, x, w)) {
-                return h;
+                // GGML_OP_CUSTOM is only executed by backends that intercept it (CPU,
+                // CUDA). Vulkan reports supports_op=false and, with no scheduler/CPU
+                // fallback in single-backend compute, would silently skip it -> garbage.
+                // Fall through to the standard-ggml path when the backend can't run it.
+                if (ctx->backend == nullptr || ggml_backend_supports_op(ctx->backend, h)) {
+                    return h;
+                }
             }
             auto h         = ggml_ext_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, x, 3, 0, 1, 2));  // [ID, IH, IW, N*IC]
             h              = ggml_rms_norm(ctx->ggml_ctx, h, 1e-12f);
@@ -3315,8 +3321,15 @@ namespace WAN {
             // to both encode (img2img/edit input encoding, ~13s otherwise) and decode. The conv3d
             // use_direct gate (ggml_extend.hpp) guards on kernel 3x3x3 / in_channels>=64 /
             // spatial>=128 / w f16, so early small convs fall back automatically.
-            runner_ctx.conv2d_direct_enabled      = true;
-            runner_ctx.conv3d_auto_direct_enabled = true;
+            //
+            // Vulkan is exempt: ggml-vulkan has NO GGML_OP_CONV_3D support, so the direct path
+            // emits an op the backend silently skips (single-backend compute, no fallback) ->
+            // uninitialized output -> corrupted VAE decode. The non-direct ggml_conv_3d
+            // (im2col_3d + mul_mat, both Vulkan-supported) is correct there.
+            if (!sd_backend_is(runner_ctx.backend, "Vulkan")) {
+                runner_ctx.conv2d_direct_enabled      = true;
+                runner_ctx.conv3d_auto_direct_enabled = true;
+            }
 #endif
 
             ggml_tensor* out = decode_graph ? ae.decode(&runner_ctx, z) : ae.encode(&runner_ctx, z);
@@ -4166,7 +4179,7 @@ namespace WAN {
             y = modulate_shift_scale(ctx->ggml_ctx, y, es[3], es[4]);
 
             y = ffn_0->forward(ctx, y);
-            y = ggml_ext_gelu(ctx->ggml_ctx, y, true);
+            y = ggml_ext_gelu(ctx->ggml_ctx, y, true, ctx->backend);
             y = ffn_2->forward(ctx, y);
 
             x = residual_gate(ctx->ggml_ctx, x, y, es[5]);
@@ -4213,7 +4226,7 @@ namespace WAN {
             y = modulate_shift_scale(ctx->ggml_ctx, y, es[3], es[4]);
 
             y = ffn_0->forward(ctx, y);
-            y = ggml_ext_gelu(ctx->ggml_ctx, y, true);
+            y = ggml_ext_gelu(ctx->ggml_ctx, y, true, ctx->backend);
             y = ffn_2->forward(ctx, y);
 
             x = residual_gate(ctx->ggml_ctx, x, y, es[5]);
@@ -4359,7 +4372,7 @@ namespace WAN {
 
             auto x = proj_0->forward(ctx, image_embeds);
             x      = proj_1->forward(ctx, x);
-            x      = ggml_ext_gelu(ctx->ggml_ctx, x, true);
+            x      = ggml_ext_gelu(ctx->ggml_ctx, x, true, ctx->backend);
             x      = proj_3->forward(ctx, x);
             x      = proj_4->forward(ctx, x);
 
@@ -4546,7 +4559,7 @@ namespace WAN {
             e0      = ggml_reshape_4d(ctx->ggml_ctx, e0, e0->ne[0] / 6, 6, e0->ne[1], e0->ne[2]);  //  [N, 6, dim] or [N, T, 6, dim]
 
             context = text_embedding_0->forward(ctx, context);
-            context = ggml_ext_gelu(ctx->ggml_ctx, context);
+            context = ggml_ext_gelu(ctx->ggml_ctx, context, false, ctx->backend);
             context = text_embedding_2->forward(ctx, context);  // [N, context_txt_len, dim]
 
             int64_t context_img_len = 0;

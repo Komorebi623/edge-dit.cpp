@@ -10,18 +10,20 @@ support commitment.
 
 ## Supported Models
 
-| Model family | Task | Common format | Backend coverage | Status |
-|---|---|---|---|---|
-| SD3 / SD3.5 | Text-to-image | Diffusers-style directory or component weights | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| FLUX.1 | Text-to-image | Diffusers-style directory, top-level FLUX safetensors, or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| FLUX.1-Kontext | Image editing / reference-guided generation | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Qwen-Image | Text-to-image | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Qwen-Image-Edit | Image editing | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Wan 2.x | Video generation | Diffusers-style directory or components | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized |
+| Model family | Task | HuggingFace base repo | Common format | Backend coverage | Status |
+|---|---|---|---|---|---|
+| SD3 / SD3.5 | Text-to-image | [`stabilityai/stable-diffusion-3-medium`](https://huggingface.co/stabilityai/stable-diffusion-3-medium) (and SD3.5 siblings) | Diffusers-style directory or component weights | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| FLUX.1 | Text-to-image | [`black-forest-labs/FLUX.1-dev`](https://huggingface.co/black-forest-labs/FLUX.1-dev) | Diffusers-style directory, top-level FLUX safetensors, or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| FLUX.1-Kontext | Image editing / reference-guided generation | [`black-forest-labs/FLUX.1-Kontext-dev`](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| Qwen-Image | Text-to-image | [`Qwen/Qwen-Image`](https://huggingface.co/Qwen/Qwen-Image) | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| Qwen-Image-Edit | Image editing | [`Qwen/Qwen-Image-Edit`](https://huggingface.co/Qwen/Qwen-Image-Edit) | Diffusers-style directory or components | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| Wan 2.x | Video generation | [`Wan-AI/Wan2.1-T2V-1.3B`](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) (and 14B) | Diffusers-style directory or components | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized |
 
 Backend availability means the runtime can be built for that backend. Model
 quality, memory use, and speed are workload dependent and should be validated
-for the exact model, resolution, and prompt set you plan to use.
+for the exact model, resolution, and prompt set you plan to use. The repo column
+lists the base checkpoint each family is validated against; pick the exact
+revision/variant (e.g. an SD3.5 sibling) that matches your use case.
 
 ## Model Formats
 
@@ -40,18 +42,34 @@ for both forms.
 
 ### Step-distilled variants
 
-Each supported family has step-distilled variants (FLUX.1-schnell, SD3.5-Turbo,
-Qwen-Image-Lightning, Wan distill, …) that generate in 4–8 steps instead of 20+.
-They load through the same pipeline as the base model; the runtime auto-detects
-them and applies a few-step default when `--steps` is unset. Most distilled
-checkpoints (FLUX.1-schnell, FLUX.1-Kontext Lightning, SD3.5-Turbo, Wan distill)
-ship as full weights and load directly via `--model` or `--diffusion-model`.
-**The two Qwen-Image ones (Qwen-Image-Lightning and Qwen-Image-Edit-Lightning)
-are published as LoRA adapters and must be merged into the base weights offline
-first** with `scripts/merge_qwen_lora.py` — see
-[Merging LoRA weights](optimization/merging-lora-weights.md). For step defaults
-and the auto-detection rule, see
-[Few-step distilled models](optimization/few-step-distilled-models.md).
+Each supported family has step-distilled variants that generate in 4–8 steps
+instead of 20+. They load through the same pipeline as the base model; the
+runtime auto-detects them and applies a few-step default when `--steps` is
+unset. Full-weight distilled checkpoints load directly (`--model` or
+`--diffusion-model`); LoRA-form distills must be merged into the base weights
+offline first.
+
+The distilled variants validated in the [consumer-GPU
+benchmarks](consumer-gpu-benchmarks.md), using the same columns as the base
+support matrix above:
+
+| Distilled variant | Task | HuggingFace repo | Common format | Backend coverage | Status |
+|---|---|---|---|---|---|
+| FLUX.1-schnell | Text-to-image | [`black-forest-labs/FLUX.1-schnell`](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | Full Diffusers directory (its top-level `.safetensors` is transformer-only → `--diffusion-model`) | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| SD3.5-medium-turbo | Text-to-image | `tensorart/stable-diffusion-3.5-medium-turbo` — confirm exact repo on HF | Full Diffusers directory | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| FLUX.1-Kontext Lightning | Image editing | confirm exact repo on HF | Full transformer shards (load via `--diffusion-model`) | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| Qwen-Image Lightning | Text-to-image | [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) | **LoRA adapter — merge into base first** | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| Qwen-Image-Edit Lightning | Image editing | [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) (Edit file) | **LoRA adapter — merge into base first** | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| Wan2.1-T2V-1.3B Distill | Video generation | confirm exact repo on HF | Standalone single full-weight `.safetensors` (load via `--diffusion-model`) | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized |
+
+All distilled variants default to a **4–8 step** schedule when `--steps` is unset
+(schnell 4, the rest 8). Only the two Qwen-Image variants ship as LoRA adapters
+and must be merged into the base weights offline before use with
+`scripts/merge_qwen_lora.py` — see [Merging LoRA
+weights](optimization/merging-lora-weights.md). The rest are drop-in full
+weights. For the exact per-variant run command (step count, `--cfg-scale` /
+`--guidance` / `--flow-shift`, standalone-file vs directory form), see
+[Few-step distilled models](optimization/few-step-distilled-models.md#4-per-variant-commands).
 
 ## Text-to-Image
 
