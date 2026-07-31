@@ -2,7 +2,7 @@
 
 `jobs/*.yaml` is the **single entry point** for writing a benchmark: declare "which models × which quantization/acceleration methods × what task", run one command to get tables. This file is the **authoritative reference + ready-made examples** for the manifest format — reading this one file is enough to write a job.
 
-- To copy a ready-made manifest directly: see [**Examples**](#examples-walkthrough-example-yaml) at the end.
+- To copy a ready-made manifest directly: see [**Examples**](#examples-ready-made-manifests-copy-and-edit-directly) at the end.
 - To look up "which systems support a method": see [`../CAPABILITIES.md`](../CAPABILITIES.md).
 
 ---
@@ -11,20 +11,20 @@
 
 The manifest has a **per-system sectioned** structure:
 
-- **Top level** holds fields shared across the three systems (`name` / `task` / `models` / `prompts` / `steps` / `metrics` / `device`);
-- **Each system to test** opens its own section (section name = system alias), with that system's own quantization/acceleration tiers;
+- **Top level** holds fields shared across the three systems (`name` / `task` / `prompts` / `steps` / `metrics` / `device`);
+- **Each system to test** opens its own section (section name = system alias), carrying **that system's own model list + quantization/acceleration tiers**;
 - **A system without a section = not tested**.
 
-This way one job lets each system take what it needs (edge uses q8_0, diffusers uses fp8, sdcpp uses q4_k), running the entire cross-system matrix in one command.
+The key idea: `model` and `steps` are **per-section dimensions**, not shared top-level fields. Each system takes what it needs — edge uses q8_0, diffusers uses fp8, sdcpp uses q4_k, and each can even test a different set of models — running the entire cross-system matrix in one command.
 
-A minimal manifest = 3 required top-level fields + one system section:
+A minimal manifest = 2 required top-level fields + one system section (which must carry `model` + `quant`):
 
 ```yaml
 name: my-first-job          # results land in results/my-first-job/
 task: text-to-image         # task type, must match the model
-models: [sd3-medium]        # model id (see ../models/)
 
 edge-dit:                   # one system section = test that system
+  model: [sd3-medium]       # model id (see ../models/); required inside the section
   quant: [fp16, q8, q4_k]   # quant is required inside the section
 # everything else in the section uses defaults: offload=none, vae_tiling=auto, cache=none
 # everything else at top level uses defaults: prompts=3, steps=default, all three metrics on
@@ -38,11 +38,12 @@ edge-dit:                   # one system section = test that system
 |---|---|---|---|
 | `name` | ✓ | — | results directory name `results/<name>/` (can be overridden by command-line `--output-root`) |
 | `task` | ✓ | — | `text-to-image` / `image-editing` / `text-to-video`, must match each model yaml's `task` |
-| `models` | ✓ | — | list of model ids, taken from `../models/` (14) |
 | `prompts` | | `3` | take the first N prompts from that model's prompt set per config, generate each and average |
-| `steps` | | `default` | sampling steps, **three forms** (see "Advanced 2") |
+| `steps` | | `default` | global default step count; can be overridden per section or per quant tier (see "Advanced 2") |
 | `metrics` | | all three on | `quality` / `speed` / `vram` three toggles (see "Advanced 3") |
 | `device` | | not locked | lock this job to a specific physical GPU (e.g. `device: 5`); if unset, use the default card. Command-line `--device N` overrides it. When running multiple jobs in parallel on multiple GPUs, assign each job a different card to avoid VRAM contention OOM |
+
+> Note: there is **no** top-level `models` field anymore — `model` lives inside each system section (see below), so different systems can test different models.
 
 ## System section fields
 
@@ -50,51 +51,61 @@ The section name can be `edge-dit` (= `edge-dit.cpp`), `diffusers`, or `stable-d
 
 | section field | required | default | notes |
 |---|---|---|---|
+| `model` | ✓ | — | that system's model id list, taken from `../models/` (14). A **list sweeps this dimension** (each model × each quant); a single id is one model. An `quant` object can also pin `model` to just one tier (see "Advanced 1") |
 | `quant` | ✓ | — | that system's quantization tier list; an item can be an **id string** or an **object** (see "Advanced 1"). edge/sdcpp accept `fp16`/`q8`/`q4_k`, diffusers accepts `bf16`/`fp8`/`w8a8` (see "Quantization tiers per-system" at the end) |
-| `offload` | | `none` | `none` / `te-cpu` (text encoder only kept on CPU) / `full` (whole-model offload); **scalar single tier, a list sweeps this dimension** |
+| `offload` | | `none` | which components to offload (**weights on CPU, staged to GPU for compute** — no "compute on CPU" mode). Values: `none` / `full` (whole model, all three systems) · `te-cpu` / `vae-offload` / `dit-offload` (per-component, **edge-only**) · `auto-allocate` / `auto-fit` (engine-driven, **edge-only**) · `sequential` (**diffusers-only**, accelerate per-submodule). A tier not supported by a section's system is skipped during expansion. **scalar single tier, a list sweeps this dimension**. ⚠ `te-cpu`/`vae-offload` on a **large TE (e.g. FLUX T5-XXL ~9G) can OOM** when staged to GPU — prefer `full` or set `max_vram` |
+| `max_vram` | | not set | cap compute-graph VRAM in GB (`max_vram: 20` → `--max-vram`), via graph-cut segmentation; **edge and sd.cpp** both honor it. When offloading without it, the edge engine defaults to `0.85 × free VRAM`. Also settable per-quant object (see "Advanced 1") |
 | `vae_tiling` | | `auto` | `auto` (engine decides by VRAM) / `yes` / `no` |
 | `cache` | | `none` | cache method id; **scalar single tier, a list sweeps this dimension** |
+| `steps` | | top-level `steps` | section-level step count override (see "Advanced 2") |
 
 ## How the matrix expands
 
-For each system section, expand the Cartesian product `models × quant × offload × cache × prompts`; summing across sections gives the total run count. Adding `--dry-run` prints each expanded run with its `run_options`, and prints the total run count at the start — **after writing the manifest, dry-run to verify before running for real**.
+For each system section, expand the Cartesian product `model × quant × offload × cache × prompts`; summing across sections gives the total run count. Adding `--dry-run` prints each expanded run with its `run_options`, and prints the total run count at the start — **after writing the manifest, dry-run to verify before running for real**.
 
-> Example: `edge-dit` section `models(1) × quant(3) × offload(1) × cache(1) × prompts(3) = 9`.
+> Example: `edge-dit` section `model(1) × quant(3) × offload(1) × cache(1) × prompts(3) = 9`.
 
 ---
 
 ## Advanced 1 · per-quant object override (configure one tier individually)
 
-Besides an id string, a `quant` list item can be an **object** `{type: <id>, offload:, vae_tiling:, cache:}` — the `offload` / `vae_tiling` / `cache` inside the object **override the section default**, applying only to that one tier. Used for "most tiers use the section default, individual tiers enable a specific switch".
+Besides an id string, a `quant` list item can be an **object** `{type: <id>, model:, steps:, offload:, max_vram:, vae_tiling:, cache:}` — the keys inside the object **override the section default**, applying only to that one tier. This is the core of the section-scoped schema: it lets one section mix "most tiers use the section defaults" with "this one tier pins a specific model / step count / switch". (For the edge-only `offload: auto-fit`, `type` is ignored — auto-fit owns the DiT quant and downgrades it under the budget.)
 
 ```yaml
 edge-dit:
+  model: [sd3-medium]                              # section default model
   quant:
-    - fp16                             # bare id: use section default (none / auto / none)
-    - {type: q8, offload: full}        # only the q8 tier does whole-model offload
-    - {type: q4_k, cache: taylorseer}  # only the q4_k tier adds taylorseer cache
-  offload: none                        # section default (used by bare fp16; tiers overridden by an object are unaffected)
+    - fp16                                         # bare id: section default model (sd3-medium), no offload
+    - q8                                           # bare id: sd3-medium q8
+    - {type: q4_k, model: qwen-image, offload: full}   # only qwen-image, q4_k, whole-model offload
+    - {model: flux-schnell, type: fp16, steps: 4}      # only flux-schnell, forced 4 steps (distilled)
+  offload: none                                    # section default (bare tiers use it; object-overridden tiers do not)
 ```
 
-Expansion: `fp16` (none), `q8` (offload_to_cpu), `q4_k` (cache=taylorseer), each × prompts. Keys not written in the object fall back to the section default. Corresponding example `example-perquant.yaml`.
+Expansion: `sd3-medium` fp16 (none) · `sd3-medium` q8 (none) · `qwen-image` q4_k (offload) · `flux-schnell` fp16 4-step, each × prompts. Keys not written in an object fall back to the section default. Corresponding example `example-per-model-mix.yaml`.
 
-## Advanced 2 · per-model steps (individual step count for a model)
+> The same override rule applies to `model` / `offload` / `max_vram` / `cache` / `vae_tiling` / `steps` — all are section dimensions: write a section-level list to sweep, or pin one value inside a `quant` object to fix it for just that tier.
 
-`steps` has three forms:
+## Advanced 2 · steps (global / per-section / per-tier)
 
-- `default` (default): each model uses `generation.steps` from its own model yaml — **distilled models are naturally few-step** (schnell / turbo / lightning / distill come with ~4 steps); leaving the default is recommended;
-- **an integer**: globally force all models to use that step count (e.g. `steps: 20`);
-- **a dict** `{model_id: N, default: N}`: per-model specification, giving a specific model its own step count; missing models fall back to `default`, and if that is also missing, fall back to that model's own step count.
+`steps` resolves in three levels, most-specific wins: **quant object `steps` > section `steps` > top-level `steps`**. The top-level default is `default`.
+
+- `default` (default): each model uses `generation.steps` from its own model yaml — **distilled models are naturally few-step** (schnell / turbo / lightning / distill come with ~4–8 steps); leaving the default is recommended;
+- **an integer** at top level: force that step count for every run (e.g. `steps: 20`);
+- **section-level `steps: N`**: force that step count for the whole section;
+- **per-tier `{type: ..., steps: N}`**: give one quant tier its own step count (usually to pin a distilled model's few-step budget, as in "Advanced 1").
 
 ```yaml
-models: [sd3-medium, flux-dev, qwen-image]
-steps:
-  sd3-medium: 28     # SD3 runs a few more steps
-  flux-dev: 25
-  default: 20        # the rest (qwen-image) use 20
+# top-level default = 20 for everything, but the distilled tier runs 4 steps
+steps: 20
+edge-dit:
+  model: [sd3-medium]
+  quant:
+    - fp16                                    # 20 steps (top-level)
+    - {model: flux-schnell, type: fp16, steps: 4}   # 4 steps (per-tier override)
 ```
 
-Corresponding example `example-per-model-steps.yaml`. (Note: `steps` lands in each run's workload `generation.steps`, not in `run_options`, so it does not appear in `--dry-run`'s `run_options=`, but the expanded run count and step count are correctly injected.)
+(Note: `steps` lands in each run's workload `generation.steps`, not in `run_options`, so it does not appear in `--dry-run`'s `run_options=`, but the expanded run count and step count are correctly injected.)
 
 ## Advanced 3 · metrics three toggles (control evaluation and table output)
 
@@ -120,16 +131,17 @@ Only care about quality, don't want to see speed/VRAM columns:
 metrics: {speed: false, vram: false}
 ```
 
-Corresponding example `example-metrics.yaml`.
+Corresponding example `example-sweeps.yaml`.
 
 ---
 
 ## cross_system capability filtering (no worry about misconfiguration)
 
-If a section configures a method that system doesn't support (e.g. `quant:[q8]` in a `diffusers:` section, `quant:[fp8]` in an `edge-dit:` section, or a `cache:` item the system lacks), run.py **automatically skips that combination during expansion and prints** a line:
+If a section configures a method that system doesn't support (e.g. `quant:[q8]` in a `diffusers:` section, `quant:[fp8]` in an `edge-dit:` section, an `offload` tier the system lacks — `te-cpu`/`vae-offload`/`dit-offload`/`auto-fit`/`auto-allocate` are edge-only, `sequential` is diffusers-only — or a `cache:` item the system lacks), run.py **automatically skips that combination during expansion and prints** a line:
 
 ```
 [run.py] skip → diffusers: quant 'q8' not supported (cross_system), skipped
+[run.py] skip → diffusers: offload 'te-cpu' not supported (cross_system), skipped
 ```
 
 Neither errors out nor wastes time running to failure. Which method is supported by which systems is in [`../CAPABILITIES.md`](../CAPABILITIES.md).
@@ -142,7 +154,7 @@ Neither errors out nor wastes time running to failure. Which method is supported
 | `stable-diffusion.cpp` | `fp16` / `q8` (q8_0) / `q4_k` | weight-only, via `precision` |
 | `diffusers` | `bf16` (baseline) / `fp8` / `w8a8` | Optimum-Quanto, via `quant_weights` |
 
-To compare quantization across systems: write each section's own tiers, and one job runs it all in one command (see Example 4 below). Quantization loss is only meaningful within the same system vs its own baseline (fp16 for edge/sdcpp, bf16 for diffusers), not comparable across systems; CLIP/aesthetic/IR absolute quality can be compared side by side.
+To compare quantization across systems: write each section's own tiers (and its own `model` list), and one job runs it all in one command (see `example-cross-system` below). Quantization loss is only meaningful within the same system vs its own baseline (fp16 for edge/sdcpp, bf16 for diffusers), not comparable across systems; CLIP/aesthetic/IR absolute quality can be compared side by side.
 
 ## cache calibration note
 
@@ -174,40 +186,44 @@ python benchmark/run.py --job benchmark/jobs/video.yaml --site .../site4090.yaml
 
 ---
 
----
-
 ## Examples (ready-made manifests, copy and edit directly)
 
 Each corresponds to a same-named `example-*.yaml` under `jobs/`, with detailed comments in the file; the table below shows at a glance what capability each demonstrates:
 
 | manifest | demonstrates | run count |
 |---|---|:--:|
-| `example-quant-sweep` | minimal start: single model, three quantization tiers + full quality | 9 |
-| `example-speed-sweep` | multi-model × multi-quant, `metrics.quality:false` skips quality for speed | 18 |
-| `example-cache-sweep` | sweep several cache methods (calibration-free) in a section's `cache` list | 9 |
-| `example-xsys` | true cross-system: three sections each with their own quantization tiers, one command | 27 |
-| `example-perquant` | per-quant object override (configure offload/cache for one tier individually) | 9 |
-| `example-per-model-steps` | per-model steps (individual step count for a model) | 9 |
-| `example-metrics` | metrics three toggles (turn off speed/VRAM columns) | 6 |
+| `example-cross-system` | true cross-system: three sections, each with its own model list + quantization tiers, one command | 42 |
+| `example-per-model-mix` | flagship of the schema: section model list + per-tier `{model, steps}` overrides (different models/steps in one section) | 5 |
+| `example-sweeps` | single-system sweeps: section-level lists sweep `offload` / `cache`, plus metrics toggles (quality only) | 6 |
+| `example-edit` | `image-editing` task: base + distilled (kontext-lightning) across systems | 18 |
+| `example-video` | `text-to-video` task: Wan 1.3b + distilled, video metrics auto-selected by task | 15 |
 
 Three signature patterns (see the corresponding files for the rest):
 
 ```yaml
-# cross-system in one command (example-xsys): each of three sections with its own accepted quantization tiers
-models: [sd3-medium]
-edge-dit:            { quant: [fp16, q8, q4_k] }
-diffusers:           { quant: [bf16, fp8, w8a8] }
-stable-diffusion.cpp: { quant: [fp16, q8, q4_k] }
+# cross-system in one command (example-cross-system): each of three sections with its
+# own model list and its own accepted quantization tiers
+task: text-to-image
+edge-dit:             { model: [sd3-medium, flux-dev], quant: [fp16, q8, q4_k] }
+diffusers:            { model: [sd3-medium, flux-dev], quant: [bf16, fp8] }
+stable-diffusion.cpp: { model: [sd3-medium, flux-dev], quant: [fp16, q8] }
 ```
 ```yaml
-# per-quant object override (example-perquant): enable a switch for just one tier
+# per-model mix (example-per-model-mix): one section, different models/steps per tier
 edge-dit:
-  quant: [fp16, {type: q8, offload: full}, {type: q4_k, cache: taylorseer}]
+  model: [sd3-medium]
+  quant:
+    - fp16                                            # sd3-medium (section model)
+    - {type: q4_k, model: qwen-image, offload: full}  # only qwen-image, offloaded
+    - {model: flux-schnell, type: fp16, steps: 4}     # only flux-schnell, 4 steps
 ```
 ```yaml
-# per-model steps (example-per-model-steps): different step counts per model
-models: [sd3-medium, flux-dev, qwen-image]
-steps:  {sd3-medium: 28, flux-dev: 25, default: 20}
+# single-system sweep (example-sweeps): section-level lists sweep a dimension
+edge-dit:
+  model: [sd3-medium]
+  quant: [q8]
+  offload: [none, full]                 # sweep: each quant runs both
+  cache:   [none, easycache, taylorseer] # sweep: calibration-free caches
 ```
 
 Field semantics are above; method capability attribution is in [`../CAPABILITIES.md`](../CAPABILITIES.md).

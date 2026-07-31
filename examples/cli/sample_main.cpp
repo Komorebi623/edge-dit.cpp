@@ -75,6 +75,15 @@ void print_usage(const char* prog) {
         "  --threads <int>           CPU thread count. Default auto\n"
         "  --backend <name>          auto|cpu|cuda|vulkan|metal|gpu. Default auto\n"
         "  --no-flash-attention      Disable flash attention\n\n"
+        "Memory / offload:\n"
+        "  --offload-to-cpu          Full offload: all weights on CPU, staged to GPU per compute\n"
+        "  --dit-offload             DiT weights on CPU, staged to GPU per step (compute on GPU)\n"
+        "  --text-encoder-offload    Text-encoder weights on CPU, staged to GPU per encode\n"
+        "  --vae-offload             VAE weights on CPU, staged to GPU per decode\n"
+        "  --max-vram <GB>           Limit compute-graph VRAM (segments the graph). Implies --auto-allocate path\n"
+        "  --auto-allocate           Auto per-component placement under a hard VRAM cap\n"
+        "  --auto-fit                Fully automatic: choose DiT quant + placement to fit; ignores --type\n"
+        "  --vae-tiling <on|off|auto>  VAE tiled decode (reduces VRAM)\n\n"
         "Timing:\n"
         "  --warmup <int>            Untimed warm-up generations (images still written). Default 1\n"
         "  --repeat <int>            Timed passes over the whole prompt slice. Default 1\n\n"
@@ -317,10 +326,11 @@ int main(int argc, char** argv) {
     ctx_params.sp_parallel_size = args.sp_parallel_size;
     ctx_params.flash_attention = args.flash_attention;
     ctx_params.offload_params_to_cpu = args.offload_to_cpu;
-    ctx_params.keep_text_encoder_on_cpu = args.keep_text_encoder_on_cpu;
+    ctx_params.dit_offload = args.dit_offload;
     ctx_params.text_encoder_offload = args.text_encoder_offload;
     ctx_params.auto_allocate = args.auto_allocate;
-    ctx_params.keep_vae_on_cpu = args.keep_vae_on_cpu;
+    ctx_params.auto_fit = args.auto_fit;
+    ctx_params.vae_offload = args.vae_offload;
     if (args.max_vram > 0.0f) {
         ctx_params.max_vram_gb = args.max_vram;
     }

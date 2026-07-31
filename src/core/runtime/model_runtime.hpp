@@ -128,6 +128,12 @@ public:
     // Text encoder should offload (weights on CPU, staged to GPU per encode) when
     // either the global offload flag or the TE-specific flag is set.
     bool clip_offload_params_to_cpu() const { return offload_params_to_cpu_ || text_encoder_offload_; }
+    // DiT should offload (weights on CPU, staged to GPU per step) when either the
+    // global offload flag or the DiT-specific flag is set.
+    bool dit_offload_params_to_cpu() const { return offload_params_to_cpu_ || dit_offload_; }
+    // VAE should offload (weights on CPU, staged to GPU per decode) when either the
+    // global offload flag or the VAE-specific flag is set.
+    bool vae_offload_params_to_cpu() const { return offload_params_to_cpu_ || vae_offload_; }
     bool auto_allocate() const { return auto_allocate_; }
     bool auto_fit() const { return auto_fit_; }
     bool free_params_immediately() const { return free_params_immediately_; }
@@ -215,6 +221,8 @@ private:
     bool use_mmap_ = false;
     bool offload_params_to_cpu_ = false;
     bool text_encoder_offload_ = false;
+    bool dit_offload_ = false;
+    bool vae_offload_ = false;
     bool auto_allocate_ = false;
     bool auto_fit_ = false;  // auto-fit: system chooses DiT quant + placement to fit budget
     int fit_width_ = 0;   // target gen resolution for compute-buffer measure (0 = unset)

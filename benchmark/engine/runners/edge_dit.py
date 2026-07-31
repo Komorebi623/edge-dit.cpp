@@ -87,8 +87,17 @@ class EdgeDitRunner(BenchmarkRunner):
                 measured_runs,
             )
         sample_binary = self.edge_sample_binary(run_options)
-        model_ref = workload["model"]["local_path_ref"]
+        # Distilled transformer-only models: --model points to the base (text_encoder/vae/
+        # scheduler), --diffusion-model points to the standalone transformer weights.
+        base_ref = workload["model"].get("base_model_ref")
+        if base_ref:
+            model_ref = base_ref
+            diffusion_ref = workload["model"]["local_path_ref"]
+        else:
+            model_ref = workload["model"]["local_path_ref"]
+            diffusion_ref = None
         model_path = self.resolve_path(model_ref)
+        diffusion_path = self.resolve_path(diffusion_ref) if diffusion_ref else None
         if sample_binary is None:
             raise NotImplementedError("edge-dit path references are not resolved")
         if model_path is None or not model_path.exists():
@@ -104,6 +113,7 @@ class EdgeDitRunner(BenchmarkRunner):
             str(sample_binary),
             "--model",
             str(model_path),
+            *( ["--diffusion-model", str(diffusion_path)] if diffusion_path else [] ),
             "--prompt",
             prompt,
             "--output-dir",
@@ -131,6 +141,8 @@ class EdgeDitRunner(BenchmarkRunner):
         ]
         self.apply_edge_wrapper_options(command, workload.get("model_options", {}))
         self.apply_edge_wrapper_options(command, run_options)
+        if generation.get("flow_shift") is not None:
+            command.extend(["--flow-shift", str(generation["flow_shift"])])
         if gpu_count > 1:
             devices = edge_device_csv(gpu_count)
             command.extend(["--devices", devices])
@@ -151,8 +163,17 @@ class EdgeDitRunner(BenchmarkRunner):
         measured_runs: int,
     ) -> list[str]:
         binary = self.edge_cli_binary(run_options)
-        model_ref = workload["model"]["local_path_ref"]
+        # Distilled transformer-only models: --model points to the base (text_encoder/vae/
+        # scheduler), --diffusion-model points to the standalone transformer weights.
+        base_ref = workload["model"].get("base_model_ref")
+        if base_ref:
+            model_ref = base_ref
+            diffusion_ref = workload["model"]["local_path_ref"]
+        else:
+            model_ref = workload["model"]["local_path_ref"]
+            diffusion_ref = None
         model_path = self.resolve_path(model_ref)
+        diffusion_path = self.resolve_path(diffusion_ref) if diffusion_ref else None
         if binary is None:
             raise NotImplementedError("edge-dit path references are not resolved")
         if model_path is None or not model_path.exists():
@@ -168,6 +189,7 @@ class EdgeDitRunner(BenchmarkRunner):
             str(binary),
             "--model",
             str(model_path),
+            *( ["--diffusion-model", str(diffusion_path)] if diffusion_path else [] ),
             "--prompt",
             prompt,
             "--output-dir",
@@ -207,6 +229,8 @@ class EdgeDitRunner(BenchmarkRunner):
                 command.extend(["--fps", str(generation["fps"])])
         self.apply_edge_wrapper_options(command, workload.get("model_options", {}))
         self.apply_edge_wrapper_options(command, run_options)
+        if generation.get("flow_shift") is not None:
+            command.extend(["--flow-shift", str(generation["flow_shift"])])
         if gpu_count > 1:
             devices = edge_device_csv(gpu_count)
             command.extend(["--devices", devices])
@@ -225,8 +249,17 @@ class EdgeDitRunner(BenchmarkRunner):
     ) -> list[str]:
         run_options = run_options or {}
         binary = self.edge_cli_binary(run_options)
-        model_ref = workload["model"]["local_path_ref"]
+        # Distilled transformer-only models: --model points to the base (text_encoder/vae/
+        # scheduler), --diffusion-model points to the standalone transformer weights.
+        base_ref = workload["model"].get("base_model_ref")
+        if base_ref:
+            model_ref = base_ref
+            diffusion_ref = workload["model"]["local_path_ref"]
+        else:
+            model_ref = workload["model"]["local_path_ref"]
+            diffusion_ref = None
         model_path = self.resolve_path(model_ref)
+        diffusion_path = self.resolve_path(diffusion_ref) if diffusion_ref else None
         if binary is None:
             raise NotImplementedError("edge-dit path references are not resolved")
         if model_path is None or not model_path.exists():
@@ -241,6 +274,7 @@ class EdgeDitRunner(BenchmarkRunner):
             "cuda",
             "--model",
             str(model_path),
+            *( ["--diffusion-model", str(diffusion_path)] if diffusion_path else [] ),
             "--prompt",
             prompt,
             "--width",
@@ -296,12 +330,18 @@ class EdgeDitRunner(BenchmarkRunner):
             command.append("--offload-to-cpu")
         if options.get("no_t5"):
             command.append("--no-t5")
-        if options.get("keep_text_encoder_on_cpu"):
-            command.append("--keep-text-encoder-on-cpu")
-        if options.get("keep_vae_on_cpu"):
-            command.append("--keep-vae-on-cpu")
+        if options.get("text_encoder_offload"):
+            command.append("--text-encoder-offload")
+        if options.get("vae_offload"):
+            command.append("--vae-offload")
+        if options.get("dit_offload"):
+            command.append("--dit-offload")
         if options.get("max_vram_gib") is not None:
             command.extend(["--max-vram", str(options["max_vram_gib"])])
+        if options.get("auto_fit"):
+            command.append("--auto-fit")
+        elif options.get("auto_allocate"):
+            command.append("--auto-allocate")
         if options.get("flash_attention") is False:
             command.append("--no-flash-attention")
         if options.get("profile_graph_cuts"):
@@ -324,12 +364,18 @@ class EdgeDitRunner(BenchmarkRunner):
             command.append("--offload-to-cpu")
         if options.get("no_t5"):
             command.append("--no-t5")
-        if options.get("keep_text_encoder_on_cpu"):
-            command.append("--keep-text-encoder-on-cpu")
-        if options.get("keep_vae_on_cpu"):
-            command.append("--keep-vae-on-cpu")
+        if options.get("text_encoder_offload"):
+            command.append("--text-encoder-offload")
+        if options.get("vae_offload"):
+            command.append("--vae-offload")
+        if options.get("dit_offload"):
+            command.append("--dit-offload")
         if options.get("max_vram_gib") is not None:
             command.extend(["--max-vram", str(options["max_vram_gib"])])
+        if options.get("auto_fit"):
+            command.append("--auto-fit")
+        elif options.get("auto_allocate"):
+            command.append("--auto-allocate")
         if options.get("profile_graph_cuts"):
             command.append("--profile-graph-cuts")
         if options.get("flash_attention") is False:

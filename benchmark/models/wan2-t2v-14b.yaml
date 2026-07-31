@@ -15,6 +15,7 @@ generation:                            # video defaults 832x480 / 9 frames / 20 
   frames: 9
   fps: 16
   steps: 20
-  guidance: 5.0
-  cfg_scale: 1.0
+  guidance: 1.0                        # Wan uses CFG (cfg_scale), not distilled guidance
+  cfg_scale: 5.0                        # Wan official CFG=5.0 (two forward passes)
+  flow_shift: 3.0                       # 3.0 for 480P (832x480), 5.0 for 720P
   scheduler: model-default

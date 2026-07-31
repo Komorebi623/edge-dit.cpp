@@ -51,9 +51,10 @@ signals, in order of reliability:
   to 4 steps, dev to 20.
 - **Path-keyword signal (all families).** For same-architecture distills, the
   model or `--diffusion-model` path is scanned (case-insensitive) for
-  `schnell`, `turbo`, `lightning`, `lightx2v`, `distill`, `hyper`, and
-  `Nstep`/`Nsteps` markers. A `schnell`/`4step` hit defaults to 4 steps; other
-  hits default to 8. No hit means the base default is used.
+  `schnell`, `turbo`, `lightning`, `lightx2v`, `distill`, `hyper`, and the
+  explicit step markers `4step`/`4steps`/`8step`/`8steps`. A `schnell`,
+  `4step`, or `4steps` hit defaults to 4 steps; any other hit defaults to 8.
+  No hit means the base default is used.
 
 The keyword list is deliberately conservative. A miss is harmless — it just
 falls back to the base step count (slower, not broken). A false positive would

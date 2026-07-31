@@ -53,6 +53,7 @@ outputs/
 *.jpeg
 *.mp4
 !docs/assets/*.png
+!benchmark/assets/*.png
 
 # local development scratch dirs (experiment outputs, reports, ad-hoc scripts)
 conv3d_fix_results/

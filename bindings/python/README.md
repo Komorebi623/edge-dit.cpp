@@ -84,7 +84,7 @@ with Engine(
     model_path="/path/to/FLUX.1-dev",
     backend="cuda",
     offload_params_to_cpu=True,
-    keep_text_encoder_on_cpu=True,
+    text_encoder_offload=True,
     max_vram_gb=8.0,
 ) as engine:
     images = engine.generate_image(
@@ -106,7 +106,7 @@ config = EngineConfig(
     model_path="/path/to/FLUX.1-dev",
     backend="cuda",
     offload_params_to_cpu=True,
-    keep_text_encoder_on_cpu=True,
+    text_encoder_offload=True,
     max_vram_gb=8.0,
 )
 
@@ -385,8 +385,8 @@ with Engine(
     model_path="/path/to/Wan2.1-T2V-1.3B-Diffusers",
     backend="cuda",
     offload_params_to_cpu=True,
-    keep_text_encoder_on_cpu=True,
-    keep_vae_on_cpu=True,
+    text_encoder_offload=True,
+    vae_offload=True,
     max_vram_gb=8.0,
 ) as engine:
     frames = engine.generate_video(
@@ -549,7 +549,7 @@ For `FLUX.1-dev`, a conservative smoke test that worked in this environment used
 
 - `backend="cuda"`
 - `offload_params_to_cpu=True`
-- `keep_text_encoder_on_cpu=True`
+- `text_encoder_offload=True`
 - `max_vram_gb=8.0`
 - `width=256`
 - `height=256`
@@ -581,21 +581,21 @@ Additional validation completed in this workspace on `2026-07-06`:
 
 - `stable-diffusion-3-medium-diffusers`
   - worked with `backend="cuda"`, `offload_params_to_cpu=True`,
-    `keep_text_encoder_on_cpu=True`, `skip_t5=True`, `max_vram_gb=8.0`,
+    `text_encoder_offload=True`, `skip_t5=True`, `max_vram_gb=8.0`,
     `width=256`, `height=256`, `steps=1`
   - sample config: `bindings/python/examples/sd3_smoke_config.json`
 - `Qwen-Image`
   - default bf16 single-GPU loading on a 24 GiB RTX 3090 failed because the runtime diffusion
     weights allocation requested about `38.98 GiB`
   - worked after setting `weight_type="q4_k"` plus `offload_params_to_cpu=True`,
-    `keep_text_encoder_on_cpu=True`, `keep_vae_on_cpu=True`, `max_vram_gb=8.0`,
+    `text_encoder_offload=True`, `vae_offload=True`, `max_vram_gb=8.0`,
     `width=512`, `height=512`, `steps=1`
   - `weight_type` also accepts `f32`, `f16`, `bf16`, `q4_0`, `q4_1`, `q5_0`, `q5_1`, `q8_0`,
     `q2_k`, `q3_k`, `q4_k`, `q5_k`, `q6_k`, and `auto`
   - sample config: `bindings/python/examples/qwen_image_smoke_config.json`
 - `Wan2.1-T2V-1.3B`
   - worked with `backend="cuda"`, `offload_params_to_cpu=True`,
-    `keep_text_encoder_on_cpu=True`, `keep_vae_on_cpu=True`, `max_vram_gb=8.0`,
+    `text_encoder_offload=True`, `vae_offload=True`, `max_vram_gb=8.0`,
     `width=416`, `height=240`, `frames=9`, `steps=1`, `cfg_scale=5.0`, `flow_shift=5.0`
   - validated against `/path/to/Wan2.1-T2V-1.3B-Diffusers`
   - note that the raw non-diffusers release directory with top-level `.pth` files still did not

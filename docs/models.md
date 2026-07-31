@@ -64,7 +64,8 @@ support matrix above:
 
 All distilled variants default to a **4–8 step** schedule when `--steps` is unset
 (schnell 4, the rest 8). Only the two Qwen-Image variants ship as LoRA adapters
-and must be merged into the base weights offline before use — see [Merging LoRA
+and must be merged into the base weights offline before use with
+`scripts/merge_qwen_lora.py` — see [Merging LoRA
 weights](optimization/merging-lora-weights.md). The rest are drop-in full
 weights. For the exact per-variant run command (step count, `--cfg-scale` /
 `--guidance` / `--flow-shift`, standalone-file vs directory form), see
@@ -100,6 +101,10 @@ Command example: [SD3 / SD3.5 CLI](cli.md#sd3-sd35).
 Qwen-Image text-to-image support uses Diffusers-style directories or component
 weights.
 
+Its few-step **Qwen-Image-Lightning** variant ships as a LoRA adapter, so merge
+it into the base weights first (`scripts/merge_qwen_lora.py`); see
+[Merging LoRA weights](optimization/merging-lora-weights.md).
+
 Command example: [Qwen-Image CLI](cli.md#qwen-image).
 
 ## Image Editing
@@ -115,6 +120,10 @@ Command example: [FLUX.1-Kontext CLI](cli.md#flux1-kontext).
 ### Qwen-Image-Edit
 
 Qwen-Image-Edit uses an input/reference image via `--image`.
+
+Its few-step **Qwen-Image-Edit-Lightning** variant ships as a LoRA adapter, so
+merge it into the base weights first (`scripts/merge_qwen_lora.py`); see
+[Merging LoRA weights](optimization/merging-lora-weights.md).
 
 For Qwen-Image-Edit-2511, use:
 
@@ -161,13 +170,25 @@ Per-tensor overrides are available with:
 Memory-oriented options:
 
 ```bash
---vae-tiling
+--vae-tiling on|off|auto
 --vae-tile-size <float>
 --offload-to-cpu
---keep-text-encoder-on-cpu
---keep-vae-on-cpu
+--dit-offload
+--text-encoder-offload
+--vae-offload
+--auto-allocate
+--auto-fit
 --max-vram <GB>
 ```
+
+`--vae-tiling` takes an explicit `on|off|auto` value. Under `--auto-allocate`
+with a `--max-vram` budget, the runtime decides per component (diffusion
+transformer, text encoder, VAE) what stays resident on the GPU and what streams
+from host memory, so large models can run within a fixed VRAM budget.
+`--auto-fit` goes one step further — a superset of `--auto-allocate` that also
+picks the quantization to fit the budget (text encoders forced to `q8_0`, the
+diffusion transformer walking a `q8_0 → q4_K` ladder), ignoring `--type`; use it
+to fit a hard VRAM cap without hand-tuning quantization and placement.
 
 See [Command line usage](cli.md#quantization-and-memory) for runnable examples
 and [Performance and optimization](performance.md) for cache, parallelism, and

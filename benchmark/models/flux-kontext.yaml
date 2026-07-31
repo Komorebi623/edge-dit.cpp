@@ -15,5 +15,5 @@ generation:                            # defaults; job can override
   height: 1024
   steps: 20
   guidance: 3.5
-  cfg_scale: 1.0                        # Kontext uses distilled guidance, single forward pass
+  cfg_scale: 1.0
   scheduler: model-default

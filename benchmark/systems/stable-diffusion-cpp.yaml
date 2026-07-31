@@ -8,6 +8,7 @@ repo:
   remote: origin
   branch: main
   commit_policy: local_fixed
+  expected_commit: ea4e566   # benchmark validated on this sd.cpp commit (2026-07-18); preflight warns on mismatch
 binary:
   path_ref: stable_diffusion_cpp_cli
   help_command: ["{binary}", "--help"]

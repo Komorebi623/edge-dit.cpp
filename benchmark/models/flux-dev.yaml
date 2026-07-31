@@ -14,5 +14,5 @@ generation:
   height: 1024
   steps: 20
   guidance: 3.5
-  cfg_scale: 1.0                        # FLUX-dev distilled guidance, single forward pass
+  cfg_scale: 1.0
   scheduler: model-default

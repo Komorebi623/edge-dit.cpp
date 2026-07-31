@@ -31,11 +31,18 @@ faster than its baseline.
 
 ## Overall Performance
 
-Reproduce the README main table with:
+Reproduce the README main table as a run.py job — a `text-to-image` manifest
+with `edge-dit` / `diffusers` / `stable-diffusion.cpp` sections over the three
+workloads below, run against an H200 site with the CUDA `performance` build:
 
 ```bash
-bash benchmark/scripts/run_readme_main_table.sh
+python3 benchmark/run.py \
+  --job  benchmark/jobs/<readme-main-table>.yaml \
+  --site benchmark/sites/<h200>.yaml
 ```
+
+See [the benchmark harness README](../benchmark/README.md) for the manifest
+schema and the cross-system example manifest to start from.
 
 The current snapshot evaluates three representative text-to-image workloads.
 
@@ -69,19 +76,18 @@ is not included.
 Parallel tables report latency and scaling only. Quality metrics are reserved
 for the cache speed-quality suite.
 
-Reproduce these tables with the parallel-table runner:
-
-```bash
-bash benchmark/scripts/run_parallel_tables.sh
-```
-
-The script validates the CFG expansion, restricts the SP table run to the FLUX
-1024 and 2048 workloads, discovers the Python NVIDIA CUDA runtime library paths,
-and writes aggregate outputs alongside the benchmark results.
+These parallel tables are not produced by a run.py job — the harness front end
+runs single-card only and has no multi-GPU job field. They are reproduced by
+driving `ed-cli` directly with its parallel flags (`--devices`,
+`--cfg-parallel-size`, `--sp-size`) on the CUDA `performance` build, with the
+NVIDIA CUDA runtime libraries on `LD_LIBRARY_PATH` so cuDNN SDPA executes
+instead of falling back to ggml CUDA flash attention. See
+[Parallel execution](optimization/parallel-execution.md) and
+[Command line usage](cli.md#parallel-execution) for the launch commands. The
+older `run_parallel_tables.sh` suite that automated this has been archived under
+`benchmark/archive/`.
 
 ### CFG Parallelism
-
-Suite config: `benchmark/configs/suites/cfg-parallel.yaml`.
 
 Contract: Stable Diffusion 3 Medium, 1024x1024, 50 steps, CFG scale 4.5, BF16,
 batch 1, seed 0, load-once generation.
@@ -92,8 +98,6 @@ batch 1, seed 0, load-once generation.
 | CFG parallel | 2 | 2.480 s | 2.504 s | 1.77x | 88.4% | 22113 MiB |
 
 ### Sequence Parallelism
-
-Suite config: `benchmark/configs/suites/sp-parallel.yaml`.
 
 Contract: local H200 node, CUDA `performance` profile, BF16, batch 1, seed 0,
 1 warm-up run, 5 measured runs, load-once generation. FLUX 1024 rows are
@@ -118,15 +122,23 @@ are not mixed into this table.
 
 ## Computation Reuse
 
-Reproduce this table with the cache-reuse table runner:
+Reproduce this table as a run.py job: a `text-to-image` manifest with an
+`edge-dit` FLUX.1-dev section sweeping the `cache` dimension over the methods
+below (plus `none` for the full-compute reference), run on the CUDA
+`performance` build:
 
 ```bash
-bash benchmark/scripts/run_cache_reuse_table.sh
+python3 benchmark/run.py \
+  --job  benchmark/jobs/<cache-reuse>.yaml \
+  --site benchmark/sites/<h200>.yaml
 ```
 
-The script runs the full-compute/cache matrix, the retuned MagCache and DiCache
-rows, the 50-step SenCache calibration, the tuned SenCache row, and PSNR/LPIPS
-evaluation against matched full-compute prompt/seed outputs.
+The manifest covers the full-compute/cache matrix, the MagCache and DiCache
+method-default rows, and the tuned SenCache row; SenCache also needs a
+calibration profile generated under this workload first (see
+[Computation reuse](optimization/computation-reuse.md#4-calibration)). The
+PSNR/LPIPS columns are computed by the evaluation stage against matched
+full-compute prompt/seed outputs.
 
 Contract: FLUX.1-dev, 1024x1024, 50 steps, BF16, batch 1, 8 prompts x 3 seeds,
 1 warm-up run, 5 measured runs, load-once generation with the build used by the
@@ -154,19 +166,20 @@ applied to MagCache or DiCache when explicitly passed. The SenCache row uses a
 
 ### Deployment Profiles
 
-Reproduce this table with the resource-profile table runner:
+Reproduce this table as a run.py job: a FLUX.1-dev `edge-dit` manifest with one
+`quant` object per profile row, combining the precision (`fp16`/`q8`/`q4_k`),
+the `offload` tier (e.g. `te-cpu`, or `full` for the parameter-offload rows),
+`max_vram`, and `vae_tiling` documented for that profile:
 
 ```bash
-bash benchmark/scripts/run_resource_profiles_table.sh
+python3 benchmark/run.py \
+  --job  benchmark/jobs/<low-vram-profiles>.yaml \
+  --site benchmark/sites/<h200>.yaml
 ```
 
-Result root: `benchmark/results/perf-resource-profiles-20260715-gpu7`.
-
-The script validates the six single-GPU profile expansions, waits for a clean
-GPU by default so peak VRAM is not polluted by unrelated jobs, discovers the
-Python NVIDIA CUDA runtime library paths, fails if stderr shows cuDNN SDPA
-fallback or missing runtime libraries, and writes aggregate outputs alongside
-the benchmark results.
+The six rows map to six `quant`-object tiers in one `edge-dit` section (per-tier
+overrides of `offload` / `max_vram` / `vae_tiling`). Run on a clean GPU so peak
+VRAM is not polluted by unrelated jobs.
 
 Contract: FLUX.1-dev, 1024x1024, 50 steps, BF16/Q8_0/Q4_K depending on profile,
 batch 1, seed 0, 1 warm-up run, 5 measured runs, load-once generation.
@@ -191,21 +204,21 @@ peak VRAM.
 
 ### Quantization Trade-Off
 
-Reproduce this table with the quantization table runner:
+Reproduce this table as a run.py job: a FLUX.1-dev `edge-dit` manifest whose
+`quant` list carries one tier per row (`bf16`, `q8`, and `quant` objects
+`{type: q6_k}` / `{type: q4_k}`, plus a `q4_k` tier with
+`tensor_type_rules` for the precision-rules row):
 
 ```bash
-bash benchmark/scripts/run_quantization_table.sh
+python3 benchmark/run.py \
+  --job  benchmark/jobs/<quantization>.yaml \
+  --site benchmark/sites/<h200>.yaml
 ```
 
-Result root: `benchmark/results/perf-quantization-20260715-gpu7-rerun`.
-
-The script validates the five single-GPU precision expansions, waits for a
-clean GPU by default so peak VRAM is not polluted by unrelated jobs, discovers
-the Python NVIDIA CUDA runtime library paths, fails if stderr shows cuDNN SDPA
-fallback or missing runtime libraries, and writes aggregate outputs alongside
-the benchmark results. Each row is executed as an independent harness run
-process. The quantized rows use the same FLUX model path with per-row `--type`
-selection; no separate prequantized checkpoint path is configured in this suite.
+Each tier expands to an independent run process. The quantized rows use the
+same FLUX model path with per-tier weight-type selection; no separate
+prequantized checkpoint is configured. Run on a clean GPU so peak VRAM is not
+polluted by unrelated jobs.
 
 Contract: FLUX.1-dev, 1024x1024, 50 steps, BF16/Q8_0/Q6_K/Q4_K depending on
 row, batch 1, seed 0, 1 warm-up run, 5 measured runs, load-once generation.
@@ -220,19 +233,21 @@ row, batch 1, seed 0, 1 warm-up run, 5 measured runs, load-once generation.
 
 ### VAE Tiling
 
-Reproduce this table with the VAE tiling table runner:
+Reproduce this table as a run.py job: a FLUX.1-dev `edge-dit` manifest at
+2048x2048 with a `vae_tiling` tier for the untiled (`no`) and tiled (`yes`)
+rows:
 
 ```bash
-bash benchmark/scripts/run_vae_tiling_table.sh
+python3 benchmark/run.py \
+  --job  benchmark/jobs/<vae-tiling>.yaml \
+  --site benchmark/sites/<h200>.yaml
 ```
 
-Result root: `benchmark/results/perf-vae-tiling-20260715-gpu5`.
-
-The script validates the three single-GPU VAE layout expansions, waits for a
-clean GPU by default so peak VRAM is not polluted by unrelated jobs, discovers
-the Python NVIDIA CUDA runtime library paths, fails if stderr shows cuDNN SDPA
-fallback or missing runtime libraries, and writes aggregate outputs alongside
-the benchmark results.
+The `vae_tiling` field toggles tiling on/off; the tile granularity behind the
+2x2 vs 4x4 rows is the relative tile size (see
+[Memory-efficient execution](optimization/memory-efficient-execution.md#5-vae-tiling)),
+so the finer-grid rows need the tile-size control driven through `ed-cli`
+directly. Run on a clean GPU so peak VRAM is not polluted by unrelated jobs.
 
 Contract: FLUX.1-dev, 2048x2048, 50 steps, BF16, batch 1, seed 0,
 1 warm-up run, 5 measured runs, load-once generation.
@@ -279,80 +294,69 @@ configuration: it uses more device memory and has substantially higher latency.
 
 ## Reproducibility
 
-The table-specific runner scripts and suite commands are the source of truth
-for reproducing the published benchmark tables:
+The benchmark harness drives reproduction through a single front end,
+`benchmark/run.py`, which reads a job manifest (`benchmark/jobs/*.yaml`,
+declaring models × quantization/acceleration tiers × task) and a machine site
+file (`benchmark/sites/*.yaml`, holding the local binary and model paths), then
+chains generation → evaluation → table aggregation in one process:
 
 ```bash
-python3 benchmark/orchestration/validate_config.py
-
-bash benchmark/scripts/run_readme_main_table.sh
-bash benchmark/scripts/run_parallel_tables.sh
-bash benchmark/scripts/run_cache_reuse_table.sh
-bash benchmark/scripts/run_resource_profiles_table.sh
-bash benchmark/scripts/run_quantization_table.sh
-bash benchmark/scripts/run_vae_tiling_table.sh
+python3 benchmark/run.py \
+  --job  benchmark/jobs/<manifest>.yaml \
+  --site benchmark/sites/<machine>.yaml
 ```
 
-The CUDA operator ablation table is reproduced with the two ablation suites:
+Add `--dry-run` to print the expanded run plan without generating, and
+`--device N` to lock the job to one GPU. Report tables land in
+`benchmark/reports/<name>/` (committed) and raw per-run artifacts in
+`benchmark/results/<name>/` (git-ignored). See
+[the benchmark harness README](../benchmark/README.md) for the manifest schema,
+the model/method libraries, and ready-made `example-*` manifests.
+
+The single-card tables on this page — the README main table, quantization,
+Low-VRAM profiles, and VAE tiling — reproduce as run.py jobs: write a manifest
+that pins the workload, precision, offload, and VAE-tiling tiers documented in
+each table's contract, then run the command above. The offline
+quantization/tiling/placement flags map to the manifest fields `quant`,
+`offload`, `max_vram`, and `vae_tiling`.
+
+The parallel-execution (CFG / sequence-parallel) and CUDA-operator-ablation
+tables are **not** currently expressible as a run.py job: run.py executes
+single-card runs and has no job field for multi-GPU parallelism or for
+build-variant operator ablations yet. Those tables were produced by the
+multi-GPU / build-variant tooling that has since been archived under
+`benchmark/archive/` (the old `orchestration/`, `configs/suites/`, and
+`run_*_table.sh` suite scripts); reproduce them for now with the parallel and
+build-variant switches described in
+[Parallel execution](optimization/parallel-execution.md) and
+[Build and installation](build.md), driving `ed-cli` / `ed-sample` directly.
+
+For any run that relies on cuDNN SDPA, put the NVIDIA CUDA runtime libraries on
+`LD_LIBRARY_PATH` and confirm from stderr that cuDNN SDPA executes rather than
+falling back to ggml CUDA flash attention; a fallback changes the timings and
+must not be mixed into these tables.
+
+### Re-evaluating without re-generating
+
+To recompute metrics or regenerate tables from existing run artifacts without
+re-running generation, call the standalone evaluation scripts against a result
+root:
 
 ```bash
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/cuda-optimization-ablation.yaml \
-  --site benchmark/configs/local/site-h200-readme-build.yaml \
-  --execute \
-  --systems edge-dit.cpp \
-  --output-root benchmark/results/perf-cuda-optimization-ablation-YYYYMMDD
-
-python3 benchmark/orchestration/run_suite.py \
-  --suite benchmark/configs/suites/cuda-optimization-ablation-qwen.yaml \
-  --site benchmark/configs/local/site-h200-readme-build.yaml \
-  --execute \
-  --systems edge-dit.cpp \
-  --output-root benchmark/results/perf-cuda-optimization-ablation-qwen-YYYYMMDD
+python3 benchmark/scripts/eval_all.py \
+  --results-root benchmark/results/<name> \
+  --site benchmark/sites/<machine>.yaml
+python3 benchmark/scripts/make_matrix_tables.py \
+  --results-root benchmark/results/<name> \
+  --output benchmark/reports/<name>/tables.md
 ```
 
-Each runner validates its workload expansion and writes the raw measurements,
-runtime logs, and aggregated table outputs to a timestamped result directory.
-For benchmarks that rely on cuDNN SDPA, the runner also configures the required
-NVIDIA CUDA runtime library paths and rejects runs that fall back to another
-attention implementation.
-
-The command below does not rerun benchmarks. It only aggregates the selected
-frozen result roots as a consistency check:
-
-```bash
-python3 benchmark/analysis/aggregate.py \
-  --results-dir benchmark/results/perf-quantization-20260715-gpu7-rerun \
-  --results-dir benchmark/results/perf-resource-profiles-20260715-gpu7 \
-  --results-dir benchmark/results/perf-vae-tiling-20260715-gpu5 \
-  --results-dir benchmark/results/parallel-check-20260715 \
-  --suite-id performance-page-rerun-subset \
-  --output benchmark/results/performance-page-20260715/rerun-subset-summary.json
-```
-
-Generate Markdown tables from the aggregated subset with:
-
-```bash
-python3 benchmark/analysis/generate_tables.py \
-  benchmark/results/performance-page-20260715/rerun-subset-summary.json \
-  --output benchmark/results/performance-page-20260715/rerun-subset-tables.md
-```
-
-This subset aggregation currently covers parallel execution, quantization,
-Low-VRAM profiles, and VAE tiling. `benchmark/results/parallel-check-20260715`
-is the frozen local CFG/SP result root for this snapshot. The README main
-table, cache results, and CUDA operator ablations remain governed by their own
-frozen result roots and runner outputs and should not be described as part of
-this subset summary.
-
-Cache quality metrics are generated by:
-
-```bash
-bash benchmark/scripts/run_cache_reuse_table.sh
-```
-
-The runner evaluates PSNR and LPIPS against prompt- and seed-matched
-full-compute outputs after generation.
+`eval_all.py` treats each run's `config.resolved.yaml` as authoritative
+(task / system / precision / prompt), routes quality metrics by task (t2i CLIP /
+aesthetic / ImageReward; editing directional CLIP + preservation SSIM / LPIPS;
+video per-frame + temporal consistency), and backfills `result.json`. The cache
+speed-quality table's PSNR and LPIPS are computed here, against prompt- and
+seed-matched full-compute outputs.
 
 ## Limitations
 
@@ -371,7 +375,6 @@ full-compute outputs after generation.
 ## Related Documentation
 
 - [Benchmark harness](../benchmark/README.md)
-- [Consumer-GPU budget benchmarks (RTX 4090)](consumer-gpu-benchmarks.md)
 - [Build and installation](build.md)
 - [Supported models and usage](models.md)
 - [Command line usage](cli.md)

@@ -1,0 +1,15 @@
+# Text-to-video task: Wan 1.3b + distilled. Video metrics (per-frame CLIP/aesthetic,
+# temporal consistency) auto-selected by task. sd.cpp omitted (needs component-
+# separated Wan loading, not supported by the single --model runner path).
+name: example-video
+task: text-to-video
+prompts: 3
+
+edge-dit:
+  model: [wan2-t2v-1.3b, wan21-t2v-1.3b-distill]
+  quant:
+    - fp16
+    - q8
+diffusers:
+  model: [wan2-t2v-1.3b]
+  quant: [bf16]

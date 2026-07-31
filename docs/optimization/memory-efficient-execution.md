@@ -13,9 +13,12 @@ runnable configuration into an out-of-memory failure. edge-dit.cpp therefore
 separates memory control into mechanisms that act on different parts of this
 budget:
 
-1. **Weight placement** — where model weights reside (GPU or CPU), per component.
-2. **Parameter offload** — keeping weights in CPU memory and staging them onto
-   the GPU only while they are needed.
+1. **Component-selective offload** — offloading an individual component's
+   weights (diffusion transformer, text encoders, or VAE) to CPU memory and
+   staging that component onto the GPU only while it computes.
+2. **Parameter offload** — the shared staging mechanism, plus the full-model
+   offload that keeps every weight in CPU memory and moves it onto the GPU only
+   while it is needed.
 3. **Graph VRAM control** — bounding the peak workspace of the compute graph.
 4. **VAE tiling** — decoding large images in overlapping tiles instead of one
    allocation.
@@ -33,31 +36,42 @@ detail in [Graph and operator optimization](graph-and-operator-optimization.md).
 
 ---
 
-## 2. Component Placement
+## 2. Component-Selective Offload
 
 A pipeline is composed of separately loaded components — the diffusion
-transformer, one or more text encoders, and the VAE. These do not all have to
-live on the same backend.
+transformer, one or more text encoders, and the VAE. Their weights do not all
+have to stay resident on the GPU at once.
 
-edge-dit.cpp can place individual components on the CPU backend while the
-diffusion transformer runs on the GPU:
+edge-dit.cpp can offload an individual component's weights to CPU memory while
+the pipeline still runs on the GPU. Each component has its own flag:
 
-| Control | Component moved to CPU |
+| Control | Component whose weights are offloaded |
 |---|---|
-| Text-encoder placement | CLIP / T5 text encoders |
-| VAE placement | VAE encoder / decoder |
+| `--dit-offload` | Diffusion transformer |
+| `--text-encoder-offload` | CLIP / T5 text encoders |
+| `--vae-offload` | VAE encoder / decoder |
+
+For every one of these, the semantics are identical: the component's weights
+are kept in CPU memory and staged onto the GPU only for the duration of that
+component's compute (a DiT step, a text encode, or a VAE decode), then released
+again. **Compute always happens on the GPU** — offload changes only where the
+weights rest between uses, not where the math runs. The shared staging
+mechanism is described in Section 3.
 
 Each component is handled independently, so a configuration can, for example,
-keep the text encoders on the CPU while leaving the VAE on the GPU.
+offload the text encoders while leaving the VAE resident on the GPU.
+`--offload-to-cpu` is the union of all three: it offloads the diffusion
+transformer, text encoders, and VAE together (full-model offload).
 
-Because these controls move a component from the GPU to the CPU, they only have
-an effect when the runtime backend is not already the CPU. When inference is
-already running on the CPU backend, the placement controls are no-ops.
+Because these controls stage weights between CPU and a GPU backend, they only
+have an effect when the runtime backend is a GPU. When inference is already
+running on the CPU backend, weights already live where compute happens and the
+offload controls are no-ops.
 
-Moving a component to the CPU frees the device memory its weights would
-otherwise occupy. This is most useful for large text encoders, which can hold
-several gigabytes of weights that are only needed during a short conditioning
-phase.
+Offloading a component frees the device memory its weights would otherwise
+occupy between uses. This is most useful for large text encoders, which can
+hold several gigabytes of weights that are only needed during a short
+conditioning phase.
 
 ### Skipping the T5 text encoder
 
@@ -75,9 +89,10 @@ of the text conditioning signal is no longer available.
 
 ## 3. Parameter Offload
 
-Component placement decides where weights are stored for the whole run.
-Parameter offload goes further: it keeps weights resident in CPU memory and
-brings them onto the GPU only for the duration of computation.
+Section 2 selects *which* components offload. This section describes the shared
+staging mechanism they all use, and `--offload-to-cpu`, which applies it to the
+whole model at once: weights stay resident in CPU memory and are brought onto
+the GPU only for the duration of computation.
 
 The lifecycle around a graph execution is:
 
@@ -102,6 +117,47 @@ Offload reduces the steady-state device footprint of the weights at the cost of
 repeated CPU-to-GPU transfers. It is therefore a memory-for-bandwidth trade:
 most valuable when weights would not otherwise fit, and counterproductive when
 device memory is already sufficient.
+
+### Staged text-encoder offload
+
+`--text-encoder-offload` applies this stage-per-use pattern to the text
+encoders specifically: their weights are kept in CPU memory and staged onto the
+GPU only for the encode pass, then released, while the encode itself still runs
+on the GPU. Staging keeps the faster GPU compute while freeing the encoder's
+device residency between conditioning phases. `--dit-offload` and
+`--vae-offload` are the equivalent single-component controls for the diffusion
+transformer and the VAE.
+
+### Automatic placement (`--auto-allocate`)
+
+Rather than deciding offload per component by hand, `--auto-allocate` fits
+components against a hard VRAM budget of `min(--max-vram, live free VRAM)`.
+Components are considered in priority order — diffusion transformer, then text
+encoders, then VAE — and each is placed resident on the GPU if its
+(post-quantization) weights plus a compute-headroom reserve still fit the
+remaining budget; otherwise it is offloaded. After placement, the leftover
+budget becomes the graph VRAM budget (Section 4) for whatever was offloaded, so
+the largest, most-reused weights get first claim on resident VRAM and the rest
+is graph-segmented to stay within the cap.
+
+### Fully automatic budgeting (`--auto-fit`)
+
+`--auto-fit` is a superset of `--auto-allocate`: enabling it implicitly enables
+placement, so one flag covers the whole budget. On top of the resident/offload
+decision, `--auto-fit` also **chooses the quantization** to make components fit,
+ignoring `--type`:
+
+- the text encoders are forced to `q8_0` unconditionally — TE compute time is
+  negligible next to the DiT, so `q8_0` is near-lossless yet frees the budget
+  that a bf16 TE (FLUX's T5 alone is ~9 GB) would otherwise consume;
+- the diffusion transformer walks a `q8_0 → q4_K` ladder, picking the highest
+  precision that still fits resident under the budget; if even `q4_K` does not
+  fit, it stays at `q8_0` and is offloaded (an offloaded `q8_0` beats a `q4_K`
+  that would have to offload anyway).
+
+Use `--auto-fit` when you just want a model to fit a hard VRAM cap without
+hand-tuning `--type` and placement; use `--auto-allocate` when you want to keep
+control of the quantization (`--type`) and only automate placement.
 
 ### Unified memory (Apple Silicon)
 
@@ -141,7 +197,13 @@ Two caveats matter in practice:
   not validated against a lower bound, and the runtime cannot merge below the
   finest segmentation.
 
-A value of zero (the default) disables graph VRAM control. See
+A value of zero (the default) disables explicit graph VRAM control. One case
+overrides this: when any offload flag is set on a GPU backend but no
+`--max-vram` is given, the runtime auto-derives a budget of `0.85 × free VRAM`
+so that graph-cut segmentation still engages — without it, offload would copy
+every weight back onto the GPU at once and defeat the purpose (a large DiT such
+as FLUX would OOM on a 24 GB card). Passing `--max-vram` explicitly overrides
+this default. See
 [Graph and operator optimization](graph-and-operator-optimization.md) for the
 underlying segmentation mechanism and plan caching.
 
@@ -157,9 +219,10 @@ together, so that only one tile's workspace is allocated at a time.
 
 Tiling is controlled by a relative tile size and a target overlap:
 
-- The relative tile size expresses how many tiles span each dimension. A value
-  of `2.0` corresponds to roughly a 2×2 tile grid, while a larger value such as
-  `4.0` produces a finer grid of smaller tiles and a correspondingly lower peak.
+- The relative tile size expresses how many tiles span each dimension. The
+  default is `5.0` (roughly a 5×5 grid, about a 32×32 latent tile, which
+  minimizes the VAE peak empirically); a smaller value such as `2.0` gives a
+  coarser 2×2 grid with a higher peak.
 - The target overlap is the fractional overlap between neighboring tiles,
   clamped to a sensible range. Overlap exists so that tile boundaries can be
   blended smoothly.
@@ -189,14 +252,14 @@ The controls above target different parts of the memory budget, so they
 compose. A typical constrained-device configuration layers several of them:
 
 ```bash
-# Constrained GPU: quantize weights, drop T5, tile the VAE, keep encoders on CPU
+# Constrained GPU: quantize weights, drop T5, tile the VAE, offload the text encoders
 ./build-cuda/bin/ed-cli --backend cuda --model /path/to/sd3 \
-  --type q4_k --no-t5 --vae-tiling --keep-text-encoder-on-cpu \
+  --type q4_k --no-t5 --vae-tiling on --text-encoder-offload \
   -p "a glass teapot on a wooden table" -W 1024 -H 1024 --steps 20 -o output.png
 
 # Very constrained GPU: full offload with a graph VRAM budget
 ./build-cuda/bin/ed-cli --backend cuda --model /path/to/sd3 \
-  --type q4_k --no-t5 --vae-tiling --offload-to-cpu --max-vram 4 \
+  --type q4_k --no-t5 --vae-tiling on --offload-to-cpu --max-vram 4 \
   -p "a glass teapot on a wooden table" -W 512 -H 512 --steps 20 -o output.png
 ```
 
@@ -213,11 +276,14 @@ exact model and resolution being targeted.
 
 | Flag | Effect |
 |---|---|
-| `--offload-to-cpu` | Keep weights in CPU memory and stage them onto the GPU for compute |
-| `--keep-text-encoder-on-cpu` | Place the text encoders on the CPU backend |
-| `--keep-vae-on-cpu` | Place the VAE on the CPU backend |
-| `--max-vram <GB>` | Compute-graph VRAM budget; drives graph-cut segmentation (used with offload) |
-| `--vae-tiling` | Enable VAE tiling with the default relative tile size |
+| `--offload-to-cpu` | Full-model offload: keep all weights (DiT, text encoders, VAE) in CPU memory and stage each component onto the GPU for its compute |
+| `--dit-offload` | Keep diffusion-transformer weights in CPU memory and stage them onto the GPU per step (compute runs on the GPU) |
+| `--text-encoder-offload` | Keep text-encoder weights in CPU memory and stage them onto the GPU per encode (compute runs on the GPU) |
+| `--vae-offload` | Keep VAE weights in CPU memory and stage them onto the GPU per decode (compute runs on the GPU) |
+| `--auto-allocate` | Budget-capped automatic placement: fit components (DiT, then text encoders, then VAE) resident on the GPU under a hard `min(--max-vram, free VRAM)` cap, offloading and graph-segmenting whatever does not fit |
+| `--auto-fit` | Superset of `--auto-allocate`: also chooses quantization to fit the budget (text encoders forced to `q8_0`, DiT walks a `q8_0 → q4_K` ladder), ignoring `--type` |
+| `--max-vram <GB>` | Compute-graph VRAM budget; drives graph-cut segmentation. Used with offload or `--auto-allocate`; when offload is set without it, the runtime defaults to `0.85 × free VRAM` |
+| `--vae-tiling <on\|off\|auto>` | VAE tiling: `on` forces it, `off` forces it off (suppressing the low-VRAM auto-enable), `auto` (the default) enables it only on lower-VRAM GPUs (<=25 GiB total) |
 | `--vae-tile-size <float>` | Enable VAE tiling and set the relative tile size (larger value = finer grid) |
 | `--no-t5` | Skip loading the T5 text encoder (SD3-family only) |
 
@@ -225,22 +291,27 @@ exact model and resolution being targeted.
 
 These map to fields on `ed_context_params_t`:
 
-- `bool offload_params_to_cpu` — parameter offload.
-- `bool keep_text_encoder_on_cpu`, `bool keep_vae_on_cpu` — per-component CPU
-  placement.
-- `float max_vram_gb` — graph VRAM budget in gigabytes; `0` disables it.
+- `bool offload_params_to_cpu` — full-model parameter offload (DiT, text
+  encoders, and VAE together).
+- `bool dit_offload`, `bool text_encoder_offload`, `bool vae_offload` —
+  offload a single component's weights to CPU and stage it onto the GPU per
+  compute. Each is the union with `offload_params_to_cpu` for that component.
+- `bool auto_allocate` — budget-capped automatic per-component placement.
+- `bool auto_fit` — superset of `auto_allocate` that also picks per-component quantization (TE `q8_0`, DiT `q8_0 → q4_K` ladder) to fit the budget.
+- `float max_vram_gb` — graph VRAM budget in gigabytes; `0` disables it (or, with offload on a GPU, defers to the `0.85 × free VRAM` default).
 - `bool skip_t5` — skip the T5 text encoder.
 - `ed_tiling_params_t vae_tiling` — VAE tiling configuration, with
-  `enabled`, `rel_size_x` / `rel_size_y` (relative tile size, default `2.0`),
+  `enabled`, `force_disable` (explicit off; suppresses the low-VRAM auto-enable),
+  `rel_size_x` / `rel_size_y` (relative tile size, default `5.0`),
   `target_overlap` (default `0.25`), and `tile_size_x` / `tile_size_y`
   (absolute, used only when a relative size is not set).
 
 ### Python bindings
 
-`EngineConfig` exposes the same controls: `offload_params_to_cpu`,
-`keep_text_encoder_on_cpu`, `keep_vae_on_cpu`, `max_vram_gb`, `skip_t5`,
-`vae_tiling`, and `vae_tile_size`. Setting `vae_tile_size` enables tiling and
-sets the relative tile size in both dimensions.
+`EngineConfig` exposes the offload and memory controls, including
+`offload_params_to_cpu`, `max_vram_gb`, `skip_t5`, `vae_tiling`, and
+`vae_tile_size`. Setting `vae_tile_size` enables tiling and sets the relative
+tile size in both dimensions.
 
 ---
 

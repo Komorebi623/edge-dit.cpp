@@ -1,0 +1,14 @@
+# Single-system sweeps: section-level list values sweep a dimension. Shows offload
+# sweep [none, full], cache sweep [none, easycache, taylorseer] (calibration-free),
+# vae_tiling, and the metrics toggles (here: quality only, speed/vram hidden).
+name: example-sweeps
+task: text-to-image
+prompts: 1
+metrics: {speed: false, vram: false}   # table shows quality columns only
+
+edge-dit:
+  model: [sd3-medium]
+  quant: [q8]
+  offload: [none, full]                # sweep: each quant runs both
+  cache: [none, easycache, taylorseer] # sweep: calibration-free caches
+  vae_tiling: auto

@@ -1,27 +1,35 @@
-# text-to-video benchmark manifest: cross-system compare (base + quant + offload + distilled)
-# single 24G budget: 1.3b runs bare at bf16 (peak ~20.4G); 14b requires offload at bf16
-# quality auto-uses video metrics: per-frame CLIP / per-frame aesthetic / temporal consistency (LPIPS/SSIM/flicker)
-# offload: full on all three systems; te-cpu edge-dit only
+# text-to-video benchmark manifest: cross-system compare. Wan is 832x480, few frames.
+# Per model: fp16/bf16 baseline (large via offload+max_vram), q8/q4_k resident, edge-only
+# offload/auto tiers, then bare sentinels expected to OOM. Rows grouped by model.
+# stable-diffusion.cpp omitted: cannot load Wan via a single --model dir (needs component-
+# separated loading). Distilled wan21-t2v-1.3b-distill is transformer-only -> edge only.
 name: video
 task: text-to-video
-models: [wan2-t2v-1.3b, wan21-t2v-1.3b-distill, wan2-t2v-14b]   # distill is distilled
 prompts: 3
-device: 2                          # lock this job to GPU 2 (avoid multiple jobs contending for one card -> OOM)
+device: 0
 
 edge-dit:
+  model: [wan2-t2v-1.3b]                               # small: fp16 resident
   quant:
     - fp16
-    - {type: fp16, offload: full}     # baseline A: full offload (required for 14b, safe for 1.3b too)
-    - {type: fp16, offload: te-cpu}   # baseline B: text encoder on CPU only (edge-only)
+    - {type: fp16, offload: te-cpu}                    # edge-only: TE on CPU
     - q8
     - q4_k
-diffusers:
+    - {model: wan21-t2v-1.3b-distill, type: fp16}
+    - {model: wan21-t2v-1.3b-distill, type: q8}
+    - {model: wan21-t2v-1.3b-distill, type: q4_k}
+    - {model: wan2-t2v-14b,           type: fp16, offload: full, max_vram: 20}
+    - {model: wan2-t2v-14b,           type: fp16, offload: te-cpu, max_vram: 20}
+    - {model: wan2-t2v-14b,           type: q4_k}
+    - {model: wan2-t2v-14b,           offload: auto-fit, max_vram: 20}
+    - {model: wan2-t2v-14b,           type: q8, offload: auto-allocate, max_vram: 20}
+    - {model: wan2-t2v-14b,           type: fp16}                                # sentinel: expected OOM
+    - {model: wan2-t2v-14b,           type: q8}                                  # sentinel: expected OOM
+diffusers:                            # full-directory Wan only (transformer-only distill unsupported)
+  model: [wan2-t2v-1.3b]
   quant:
     - bf16
-    - {type: bf16, offload: full}     # baseline: full offload (no te-cpu)
     - fp8
-stable-diffusion.cpp:
-  quant:
-    - fp16
-    - {type: fp16, offload: full}     # baseline: full offload (no te-cpu)
-    - q8
+    - {model: wan2-t2v-14b, type: bf16, offload: sequential}
+    - {model: wan2-t2v-14b, type: fp8}
+    - {model: wan2-t2v-14b, type: bf16}                                          # sentinel: expected OOM

@@ -79,6 +79,12 @@ Key properties:
   bit-identical to the load-time path, works across all model families, and
   records the model version in GGUF metadata so the correct pipeline is selected
   by any file name. See [CLI usage](../cli.md#pre-quantized-gguf-with-ed-convert).
+- **Activation-calibrated quantization (`--imatrix`).** `ed-convert` optionally
+  takes an importance vector (per-input-channel `E[x^2]`, produced by
+  `tools/imatrix/calibrate.py`) via `--imatrix`. When supplied, the quantizer
+  weights each input channel by how much it drives the output instead of the
+  uniform default, improving low-bit (e.g. q4_k) quality at no runtime cost.
+  See [CLI usage](../cli.md#activation-calibrated-imatrix-quantization).
 - **Purpose.** Quantization reduces the resident weight footprint approximately
   in proportion to the bits used per weight. It is primarily a memory-saving
   mechanism; on high-bandwidth GPUs it does not by itself speed up inference,

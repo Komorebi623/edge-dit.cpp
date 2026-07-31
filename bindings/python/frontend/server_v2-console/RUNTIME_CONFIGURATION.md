@@ -138,8 +138,8 @@ Recommended naming:
     "backend": "cuda",
     "weight_type": "q4_k",
     "offload_params_to_cpu": true,
-    "keep_text_encoder_on_cpu": true,
-    "keep_vae_on_cpu": true,
+    "text_encoder_offload": true,
+    "vae_offload": true,
     "max_vram_gb": 12.0
   }
 }
@@ -149,8 +149,8 @@ It's recommended to change only the fields that are truly related to machine res
 
 - `max_vram_gb`
 - `offload_params_to_cpu`
-- `keep_text_encoder_on_cpu`
-- `keep_vae_on_cpu`
+- `text_encoder_offload`
+- `vae_offload`
 - `weight_type`
 - `backend`
 

@@ -31,7 +31,7 @@ class OptionalRealSmokeTests(unittest.TestCase):
             model_path=model_path,
             backend=os.environ.get("EDGE_DIT_BACKEND", "cuda"),
             offload_params_to_cpu=True,
-            keep_text_encoder_on_cpu=True,
+            text_encoder_offload=True,
             max_vram_gb=float(os.environ.get("EDGE_DIT_MAX_VRAM_GB", "8.0")),
             _library_path=library_path,
         ) as engine:

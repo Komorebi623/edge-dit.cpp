@@ -50,7 +50,7 @@ Common tools:
 
 Optional backend-specific tools:
 
-- CUDA Toolkit and `nvcc` for CUDA.
+- CUDA Toolkit and `nvcc` for CUDA (CUDA 12.x or 13.x).
 - NCCL, MPI, cuDNN, and cudnn-frontend for the official CUDA performance
   profile.
 - Apple build tools and frameworks for Metal on macOS.
@@ -81,25 +81,32 @@ CUDA builds use `ED_BUILD_PROFILE`.
 
 `performance` is the default and official performance configuration.
 
-It enables the CUDA backend and the full performance dependency path:
+It enables the CUDA backend and the single-GPU performance optimizations:
 
-- NCCL
-- MPI
 - cuDNN SDPA
 - CUDA Norm
 - CUDA RoPE
 - CUDA Modulation
-- parallel runtime support
+- benchmark phase markers (`ED_BENCHMARK_MARKERS`, for component-level timing)
 
-If an explicitly enabled dependency is missing, the script fails before CMake
-configure. It does not silently downgrade to a slower configuration.
+Multi-GPU dependencies -- **NCCL**, **MPI**, and **parallel runtime**
+(`ED_ENABLE_NCCL` / `ED_ENABLE_MPI` / `ED_ENABLE_PARALLEL`) -- default to
+**OFF**, so a single-GPU build needs neither NCCL nor MPI installed. Enable them
+explicitly for multi-GPU / distributed runs:
 
 ```bash
-CUDA_HOME=/path/to/cuda \
-NCCL_ROOT=/path/to/nccl \
-CUDNN_ROOT=/path/to/cudnn \
-MPI_HOME=/path/to/mpi \
+ED_ENABLE_NCCL=ON NCCL_ROOT=/path/to/nccl \
+ED_ENABLE_MPI=ON MPI_HOME=/path/to/mpi \
+ED_ENABLE_PARALLEL=ON \
 ED_BUILD_PROFILE=performance \
+bash scripts/build_cuda.sh
+```
+
+If an explicitly enabled dependency is missing, the script fails before CMake
+configure. It does not silently downgrade to a slower configuration. The
+default single-GPU build needs no extra flags:
+
+```bash
 bash scripts/build_cuda.sh
 ```
 

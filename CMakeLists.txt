@@ -30,7 +30,7 @@ option(ED_ENABLE_CUDA_NORM "Enable edge CUDA norm fast paths for ggml CUDA backe
 option(ED_ENABLE_CUDA_ROPE "Enable edge CUDA RoPE fast paths for ggml CUDA backend" ON)
 option(ED_ENABLE_CUDA_MODULATION "Enable edge CUDA fused modulation fast paths for ggml CUDA backend" ON)
 option(ED_ENABLE_CUDA_SAGE_ATTN "Enable SageAttention2-style INT8-QK + F16-PV fused attention for ggml CUDA backend" OFF)
-option(ED_ENABLE_PARALLEL "Enable edge-dit lightweight parallel runtime" ON)
+option(ED_ENABLE_PARALLEL "Enable edge-dit lightweight parallel runtime" OFF)
 option(ED_ENABLE_NCCL "Enable NCCL communication backend" OFF)
 option(ED_ENABLE_MPI "Enable MPI bootstrap for distributed process groups" OFF)
 option(ED_DEBUG_SP_COMM "Enable debug sequence-parallel communication markers" OFF)

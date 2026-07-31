@@ -12,6 +12,9 @@ import sys
 import time
 import re
 
+# Reuse the auto-fit/auto-allocate stderr parser (same engine logs) from the e2e runner.
+from run_edge_e2e import parse_auto_placement
+
 
 CACHE_SUMMARY_RE = re.compile(
     r"\b(?P<mode>EasyCache|UCache|DBCache|CacheDiT|TaylorSeer|MagCache|DiCache|SenCache)\s+"
@@ -51,6 +54,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--diffusion-model", default=None, help="standalone DiT transformer weights (distilled models); --model then points to the base")
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--task", required=True, choices=["text-to-image", "image-editing", "text-to-video"])
@@ -63,6 +67,7 @@ def main() -> int:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--guidance", type=float, required=True)
     parser.add_argument("--cfg-scale", type=float, default=1.0)
+    parser.add_argument("--flow-shift", type=float, default=None)
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--backend", default="cuda")
     parser.add_argument("--warmup-runs", type=int, required=True)
@@ -98,11 +103,14 @@ def main() -> int:
     parser.add_argument("--vae-tile-size")
     parser.add_argument("--tensor-type-rules")
     parser.add_argument("--offload-to-cpu", action="store_true")
-    parser.add_argument("--keep-text-encoder-on-cpu", action="store_true")
-    parser.add_argument("--keep-vae-on-cpu", action="store_true")
+    parser.add_argument("--text-encoder-offload", action="store_true")
+    parser.add_argument("--vae-offload", action="store_true")
+    parser.add_argument("--dit-offload", action="store_true")
     parser.add_argument("--max-vram")
     parser.add_argument("--no-flash-attention", action="store_true")
     parser.add_argument("--profile-graph-cuts", action="store_true")
+    parser.add_argument("--auto-fit", action="store_true")
+    parser.add_argument("--auto-allocate", action="store_true")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir).resolve()
@@ -114,6 +122,7 @@ def main() -> int:
     runs: list[dict[str, object]] = []
     cache_events: list[dict[str, object]] = []
     last_measured_stdout = ""
+    last_measured_stderr = ""
     total_runs = args.warmup_runs + args.measured_runs
     for index in range(total_runs):
         phase = "warmup" if index < args.warmup_runs else "measured"
@@ -152,6 +161,7 @@ def main() -> int:
         else:
             measured_ms.append(elapsed_ms)
             last_measured_stdout = completed.stdout
+            last_measured_stderr = completed.stderr
 
     write_metadata(output_dir, sample_dir, runs)
     component_ms, stage_boundaries = parse_phase_markers(last_measured_stdout)
@@ -169,6 +179,7 @@ def main() -> int:
         "cache_events": cache_events,
         "component_ms": component_ms,
         "stage_boundaries": stage_boundaries,
+        "actual_placement": parse_auto_placement(last_measured_stderr),
         "sample_output_dir": str(sample_dir),
     }
     (output_dir / "runner_metrics.json").write_text(
@@ -185,6 +196,10 @@ def build_command(args: argparse.Namespace, output: Path) -> list[str]:
         args.backend,
         "--model",
         args.model,
+    ]
+    if args.diffusion_model:
+        command += ["--diffusion-model", args.diffusion_model]
+    command += [
         "--prompt",
         args.prompt,
         "--width",
@@ -197,6 +212,7 @@ def build_command(args: argparse.Namespace, output: Path) -> list[str]:
         str(args.seed),
         "--guidance",
         str(args.guidance),
+        *(["--flow-shift", str(args.flow_shift)] if args.flow_shift is not None else []),
         "--cfg-scale",
         str(args.cfg_scale),
         "--output",
@@ -232,12 +248,18 @@ def build_command(args: argparse.Namespace, output: Path) -> list[str]:
         command.extend(["--tensor-type-rules", str(args.tensor_type_rules)])
     if args.offload_to_cpu:
         command.append("--offload-to-cpu")
-    if args.keep_text_encoder_on_cpu:
-        command.append("--keep-text-encoder-on-cpu")
-    if args.keep_vae_on_cpu:
-        command.append("--keep-vae-on-cpu")
+    if args.text_encoder_offload:
+        command.append("--text-encoder-offload")
+    if args.vae_offload:
+        command.append("--vae-offload")
+    if args.dit_offload:
+        command.append("--dit-offload")
     if args.max_vram:
         command.extend(["--max-vram", args.max_vram])
+    if args.auto_fit:
+        command.append("--auto-fit")
+    if args.auto_allocate:
+        command.append("--auto-allocate")
     if args.no_flash_attention:
         command.append("--no-flash-attention")
     if args.profile_graph_cuts:

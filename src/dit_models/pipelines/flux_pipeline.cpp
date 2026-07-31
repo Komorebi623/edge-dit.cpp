@@ -295,10 +295,12 @@ bool FluxPipeline::prepare(const ed_context_params_t& params,
 
     const size_t eff_budget = runtime_->effective_budget_bytes();
     size_t remaining_free = eff_budget;
-    const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
+    const bool diffusion_offload = runtime_->dit_offload_params_to_cpu() ||
+                                   runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
     const bool te_offload = runtime_->clip_offload_params_to_cpu() ||
                             runtime_->plan_component_offload(loader, "text_encoders", remaining_free);
-    const bool vae_offload = runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
+    const bool vae_offload = runtime_->vae_offload_params_to_cpu() ||
+                             runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
     runtime_->finalize_auto_segment_budget(eff_budget);
 
     // The spec built above for measurement used the pre-decision offload flag, which sets
@@ -1019,6 +1021,15 @@ bool FluxPipeline::generate_one_image(const ed_image_generation_params_t* params
                         return flux_runner_->compute_substep_inject_slot(
                             n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
                             cond_in.c_vector, guidance, {}, false, std::move(exts));
+                    };
+                    // Substep-path tap-driven HOST capture (MagCache calibration only):
+                    // reads the residual back to host so the policy can measure the
+                    // per-step magnitude ratio. Coexists with the device capture above;
+                    // device_slot (host-backed slot on a calibrate run) selects which runs.
+                    hooks.substep_capture_host = [&]() {
+                        return flux_runner_->compute_substep_capture_host(
+                            n_threads, noised_input, timesteps, cond_in.c_crossattn, {},
+                            cond_in.c_vector, guidance, {}, false);
                     };
                 }
                 if (cache_runtime.granularity() == cache::CacheGranularity::Probe) {
