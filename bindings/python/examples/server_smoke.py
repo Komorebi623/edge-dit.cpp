@@ -17,13 +17,13 @@ from PIL import Image
 
 from edge_dit.config import EngineConfig
 from edge_dit.engine import Engine
-from edge_dit.server_v2 import ImageJobService, create_http_server
+from edge_dit.server import ImageJobService, create_http_server
 
 _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run a real smoke test through server_v2")
+    parser = argparse.ArgumentParser(description="Run a real smoke test through server")
     parser.add_argument("--config", required=True, help="Path to an image or video smoke JSON config")
     parser.add_argument("--kind", choices=("image", "video"), default="image")
     parser.add_argument("--output", default=None, help="Optional output path override")
@@ -65,7 +65,7 @@ def resolve_output_path(payload: dict[str, Any], override: str | None = None) ->
     output = payload.get("output")
     if isinstance(output, str) and output:
         return output
-    return "/tmp/edge_dit_server_v2_smoke.gif" if payload.get("kind") == "video" else "/tmp/edge_dit_server_v2_smoke.png"
+    return "/tmp/edge_dit_server_smoke.gif" if payload.get("kind") == "video" else "/tmp/edge_dit_server_smoke.png"
 
 
 def request_json(
@@ -75,7 +75,7 @@ def request_json(
     payload: dict[str, object] | None = None,
 ) -> tuple[int, dict[str, object]]:
     data = None
-    headers = {"X-Request-ID": "server-v2-smoke"}
+    headers = {"X-Request-ID": "server-smoke"}
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -171,7 +171,7 @@ def main() -> int:
         else:
             save_video_result(result, output)
 
-        print(f"saved server_v2 {args.kind} smoke output to {output}")
+        print(f"saved server {args.kind} smoke output to {output}")
         return 0
     finally:
         server.shutdown()

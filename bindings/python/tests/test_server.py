@@ -12,7 +12,7 @@ from io import BytesIO
 from PIL import Image
 
 from edge_dit.errors import GenerationCancelledError
-from edge_dit.server_v2 import ImageJobService, create_http_server
+from edge_dit.server import ImageJobService, create_http_server
 
 _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -108,7 +108,7 @@ class FakeEngine:
         self.allow_finish.set()
 
 
-class ServerV2HTTPTests(unittest.TestCase):
+class ServerHTTPTests(unittest.TestCase):
     @staticmethod
     def encode_image(image: Image.Image) -> str:
         buf = BytesIO()

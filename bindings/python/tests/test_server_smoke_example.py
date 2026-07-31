@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "examples" / "server_v2_smoke.py"
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "examples" / "server_smoke.py"
 SCRIPT_GLOBALS = runpy.run_path(str(SCRIPT_PATH), run_name="__test__")
 
 build_parser = SCRIPT_GLOBALS["build_parser"]
@@ -20,12 +20,11 @@ resolve_output_path = SCRIPT_GLOBALS["resolve_output_path"]
 
 EXPECTED_HELP = textwrap.dedent(
     """\
-    usage: server_v2_smoke.py [-h] --config CONFIG [--kind {image,video}]
-                              [--output OUTPUT]
-                              [--timeout-seconds TIMEOUT_SECONDS]
-                              [--job-ttl-seconds JOB_TTL_SECONDS]
+    usage: server_smoke.py [-h] --config CONFIG [--kind {image,video}]
+                           [--output OUTPUT] [--timeout-seconds TIMEOUT_SECONDS]
+                           [--job-ttl-seconds JOB_TTL_SECONDS]
 
-    Run a real smoke test through server_v2
+    Run a real smoke test through server
 
     options:
       -h, --help            show this help message and exit
@@ -38,10 +37,10 @@ EXPECTED_HELP = textwrap.dedent(
 )
 
 
-class ServerV2SmokeExampleTests(unittest.TestCase):
+class ServerSmokeExampleTests(unittest.TestCase):
     def test_help_output_snapshot(self) -> None:
         parser = build_parser()
-        parser.prog = "server_v2_smoke.py"
+        parser.prog = "server_smoke.py"
         self.assertEqual(parser.format_help(), EXPECTED_HELP)
 
     def test_load_config_file_expands_environment_variables(self) -> None:
@@ -63,7 +62,7 @@ class ServerV2SmokeExampleTests(unittest.TestCase):
     def test_resolve_output_path_prefers_override(self) -> None:
         payload = {"output": "/tmp/from-config.png", "kind": "image"}
         self.assertEqual(resolve_output_path(payload, "/tmp/override.png"), "/tmp/override.png")
-        self.assertEqual(resolve_output_path({"kind": "video"}), "/tmp/edge_dit_server_v2_smoke.gif")
+        self.assertEqual(resolve_output_path({"kind": "video"}), "/tmp/edge_dit_server_smoke.gif")
 
     def test_main_runs_minimal_image_happy_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -157,7 +156,7 @@ class ServerV2SmokeExampleTests(unittest.TestCase):
         self.assertTrue(captured["service_closed"])
         self.assertTrue(captured["server_shutdown"])
         self.assertTrue(captured["server_closed"])
-        self.assertIn("saved server_v2 image smoke output to /tmp/override.png", stdout.getvalue())
+        self.assertIn("saved server image smoke output to /tmp/override.png", stdout.getvalue())
 
 
 if __name__ == "__main__":

@@ -195,7 +195,7 @@ class GenerationJobService:
         self._lock = threading.Lock()
         self._active_job_id: str | None = None
         self._closed = False
-        self._worker = threading.Thread(target=self._worker_loop, name="edge-dit-server-v2", daemon=True)
+        self._worker = threading.Thread(target=self._worker_loop, name="edge-dit-server", daemon=True)
         self._worker.start()
 
     @property
@@ -229,7 +229,7 @@ class GenerationJobService:
             default_scheduler = None
 
         return {
-            "service": "edge-dit-python-server-v2",
+            "service": "edge-dit-python-server",
             "package_version": __version__,
             "model": self._model_name,
             "pipeline_name": getattr(self._engine, "pipeline_name", None),
@@ -507,7 +507,7 @@ class GenerationJobService:
         encoded = []
         for index, image in enumerate(images):
             if not isinstance(image, Image.Image):
-                raise TypeError("server_v2 currently expects PIL image outputs")
+                raise TypeError("server currently expects PIL image outputs")
             encoded.append(
                 {
                     "b64_png": _base64_png(image),
@@ -535,7 +535,7 @@ class GenerationJobService:
         encoded = []
         for index, frame in enumerate(frames):
             if not isinstance(frame, Image.Image):
-                raise TypeError("server_v2 currently expects PIL frame outputs")
+                raise TypeError("server currently expects PIL frame outputs")
             encoded.append(
                 {
                     "b64_png": _base64_png(frame),
@@ -564,7 +564,7 @@ class GenerationJobService:
 ImageJobService = GenerationJobService
 
 
-class EdgeDitServerV2Handler(BaseHTTPRequestHandler):
+class EdgeDitServerHandler(BaseHTTPRequestHandler):
     service: ImageJobService
     _request_id: str
 
@@ -594,8 +594,8 @@ class EdgeDitServerV2Handler(BaseHTTPRequestHandler):
             self._write_json(
                 HTTPStatus.OK,
                 {
-                    "service": "edge-dit-python-server-v2",
-                    "message": "edge-dit server_v2 is running",
+                    "service": "edge-dit-python-server",
+                    "message": "edge-dit server is running",
                     "health": "/ed/v2/health",
                     "capabilities": "/ed/v2/capabilities",
                     "image_generation": "/ed/v2/images/generations",
@@ -612,7 +612,7 @@ class EdgeDitServerV2Handler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     {
                         "status": "ok",
-                        "service": "edge-dit-python-server-v2",
+                        "service": "edge-dit-python-server",
                         "model": self.service.capabilities()["model"],
                     },
                 )
@@ -852,7 +852,7 @@ class EdgeDitHTTPServer(ThreadingHTTPServer):
 
 
 def create_http_server(address: tuple[str, int], service: ImageJobService) -> EdgeDitHTTPServer:
-    handler = type("BoundEdgeDitServerV2Handler", (EdgeDitServerV2Handler,), {"service": service})
+    handler = type("BoundEdgeDitServerHandler", (EdgeDitServerHandler,), {"service": service})
     return EdgeDitHTTPServer(address, handler)
 
 
@@ -879,7 +879,7 @@ def serve(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the edge-dit Python server_v2")
+    parser = argparse.ArgumentParser(description="Run the edge-dit Python server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--model")

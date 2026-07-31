@@ -17,9 +17,9 @@ from PIL import Image
 
 from edge_dit import Engine
 from edge_dit.config import EngineConfig
-from edge_dit.server_v2 import ImageJobService, create_http_server
+from edge_dit.server import ImageJobService, create_http_server
 
-_REQUEST_ID = "optional-real-server-v2-smoke"
+_REQUEST_ID = "optional-real-server-smoke"
 _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -33,7 +33,7 @@ class ScenarioRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class ServerV2MatrixScenario:
+class ServerMatrixScenario:
     name: str
     slug: str
     prefix: str
@@ -183,7 +183,7 @@ def _build_flux_request() -> ScenarioRequest:
     height = int(os.environ.get("EDGE_DIT_FLUX_HEIGHT", "256"))
     return ScenarioRequest(
         payload={
-            "prompt": os.environ.get("EDGE_DIT_FLUX_PROMPT", "server v2 matrix smoke teapot"),
+            "prompt": os.environ.get("EDGE_DIT_FLUX_PROMPT", "Python Server matrix smoke teapot"),
             "width": width,
             "height": height,
             "steps": int(os.environ.get("EDGE_DIT_FLUX_STEPS", "1")),
@@ -297,17 +297,17 @@ def _build_wan_video_request() -> ScenarioRequest:
     os.environ.get("EDGE_DIT_RUN_INTEGRATION") == "1",
     "set EDGE_DIT_RUN_INTEGRATION=1 to run real native smoke tests",
 )
-class OptionalRealServerV2SmokeTests(unittest.TestCase):
+class OptionalRealServerSmokeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.library_path = os.environ.get("EDGE_DIT_LIBRARY")
         if not cls.library_path:
-            raise unittest.SkipTest("EDGE_DIT_LIBRARY is required for server_v2 integration smoke tests")
+            raise unittest.SkipTest("EDGE_DIT_LIBRARY is required for server integration smoke tests")
 
     def _require_model_path(self, env_name: str, default: str | None = None) -> str:
         model_path = os.environ.get(env_name, default)
         if not model_path:
-            self.skipTest(f"{env_name} is required for this server_v2 integration smoke test")
+            self.skipTest(f"{env_name} is required for this server integration smoke test")
         if not Path(model_path).exists():
             self.skipTest(f"model path does not exist: {model_path}")
         return model_path
@@ -367,7 +367,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
 
     def _save_result_artifact(
         self,
-        scenario: ServerV2MatrixScenario,
+        scenario: ServerMatrixScenario,
         request_spec: ScenarioRequest,
         result: dict[str, object],
         output_path: Path,
@@ -402,75 +402,75 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 self.assertEqual(actual["height"], metadata["height"])
 
     def _matrix_output_dir(self) -> Path:
-        return Path(os.environ.get("EDGE_DIT_SERVER_V2_MATRIX_OUTPUT_DIR", "/tmp/edge_dit_server_v2_matrix"))
+        return Path(os.environ.get("EDGE_DIT_SERVER_MATRIX_OUTPUT_DIR", "/tmp/edge_dit_server_matrix"))
 
-    def _scenario_timeout(self, scenario: ServerV2MatrixScenario) -> float:
+    def _scenario_timeout(self, scenario: ServerMatrixScenario) -> float:
         default_text = str(scenario.default_timeout_seconds)
         return float(
             os.environ.get(
                 scenario.timeout_env,
-                os.environ.get("EDGE_DIT_SERVER_V2_MATRIX_TIMEOUT_SECONDS", default_text),
+                os.environ.get("EDGE_DIT_SERVER_MATRIX_TIMEOUT_SECONDS", default_text),
             )
         )
 
-    def _matrix_scenarios(self) -> list[ServerV2MatrixScenario]:
+    def _matrix_scenarios(self) -> list[ServerMatrixScenario]:
         scenarios = [
-            ServerV2MatrixScenario(
+            ServerMatrixScenario(
                 name="FLUX.1-dev",
                 slug="flux-dev",
                 prefix="/ed/v2",
                 kind="image",
                 model_env="EDGE_DIT_FLUX_MODEL_PATH",
                 model_default="",
-                timeout_env="EDGE_DIT_SERVER_V2_FLUX_TIMEOUT_SECONDS",
+                timeout_env="EDGE_DIT_SERVER_FLUX_TIMEOUT_SECONDS",
                 default_timeout_seconds=600.0,
                 engine_overrides={},
                 request_builder=_build_flux_request,
             ),
-            ServerV2MatrixScenario(
+            ServerMatrixScenario(
                 name="stable-diffusion-3-medium-diffusers",
                 slug="sd3-medium",
                 prefix="/edgedit/v2",
                 kind="image",
                 model_env="EDGE_DIT_SD3_MODEL_PATH",
                 model_default="",
-                timeout_env="EDGE_DIT_SERVER_V2_SD3_TIMEOUT_SECONDS",
+                timeout_env="EDGE_DIT_SERVER_SD3_TIMEOUT_SECONDS",
                 default_timeout_seconds=600.0,
                 engine_overrides={"skip_t5": True},
                 request_builder=_build_sd3_request,
             ),
-            ServerV2MatrixScenario(
+            ServerMatrixScenario(
                 name="Qwen-Image",
                 slug="qwen-image",
                 prefix="/edge-dit/v2",
                 kind="image",
                 model_env="EDGE_DIT_QWEN_IMAGE_MODEL_PATH",
                 model_default="",
-                timeout_env="EDGE_DIT_SERVER_V2_QWEN_IMAGE_TIMEOUT_SECONDS",
+                timeout_env="EDGE_DIT_SERVER_QWEN_IMAGE_TIMEOUT_SECONDS",
                 default_timeout_seconds=900.0,
                 engine_overrides={"weight_type": "q4_k", "vae_offload": True},
                 request_builder=_build_qwen_image_request,
             ),
-            ServerV2MatrixScenario(
+            ServerMatrixScenario(
                 name="Qwen-Image-Edit",
                 slug="qwen-image-edit",
                 prefix="/ed/v2",
                 kind="image",
                 model_env="EDGE_DIT_QWEN_IMAGE_EDIT_MODEL_PATH",
                 model_default="",
-                timeout_env="EDGE_DIT_SERVER_V2_QWEN_IMAGE_EDIT_TIMEOUT_SECONDS",
+                timeout_env="EDGE_DIT_SERVER_QWEN_IMAGE_EDIT_TIMEOUT_SECONDS",
                 default_timeout_seconds=900.0,
                 engine_overrides={"weight_type": "q4_k", "vae_offload": True},
                 request_builder=_build_qwen_image_edit_request,
             ),
-            ServerV2MatrixScenario(
+            ServerMatrixScenario(
                 name="FLUX.1-Kontext-dev",
                 slug="flux-kontext",
                 prefix="/edgedit/v2",
                 kind="image",
                 model_env="EDGE_DIT_FLUX_KONTEXT_MODEL_PATH",
                 model_default="",
-                timeout_env="EDGE_DIT_SERVER_V2_FLUX_KONTEXT_TIMEOUT_SECONDS",
+                timeout_env="EDGE_DIT_SERVER_FLUX_KONTEXT_TIMEOUT_SECONDS",
                 default_timeout_seconds=900.0,
                 engine_overrides={
                     "vae_offload": True
@@ -480,20 +480,20 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 },
                 request_builder=_build_flux_kontext_request,
             ),
-            ServerV2MatrixScenario(
+            ServerMatrixScenario(
                 name="Wan2.1-T2V-1.3B-Diffusers",
                 slug="wan-t2v",
                 prefix="/edge-dit/v2",
                 kind="video",
                 model_env="EDGE_DIT_WAN_VIDEO_MODEL_PATH",
                 model_default="",
-                timeout_env="EDGE_DIT_SERVER_V2_VIDEO_TIMEOUT_SECONDS",
+                timeout_env="EDGE_DIT_SERVER_VIDEO_TIMEOUT_SECONDS",
                 default_timeout_seconds=900.0,
                 engine_overrides={"vae_offload": True},
                 request_builder=_build_wan_video_request,
             ),
         ]
-        selected = os.environ.get("EDGE_DIT_SERVER_V2_MATRIX_MODELS")
+        selected = os.environ.get("EDGE_DIT_SERVER_MATRIX_MODELS")
         if not selected:
             return scenarios
 
@@ -501,10 +501,10 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
         filtered = [scenario for scenario in scenarios if scenario.slug in selected_slugs]
         if len(filtered) != len(selected_slugs):
             missing = sorted(selected_slugs - {scenario.slug for scenario in filtered})
-            raise AssertionError(f"unknown EDGE_DIT_SERVER_V2_MATRIX_MODELS entries: {', '.join(missing)}")
+            raise AssertionError(f"unknown EDGE_DIT_SERVER_MATRIX_MODELS entries: {', '.join(missing)}")
         return filtered
 
-    def _exercise_matrix_scenario(self, scenario: ServerV2MatrixScenario) -> None:
+    def _exercise_matrix_scenario(self, scenario: ServerMatrixScenario) -> None:
         model_path = self._require_model_path(scenario.model_env, scenario.model_default)
         request_spec = scenario.request_builder()
         timeout_seconds = self._scenario_timeout(scenario)
@@ -660,12 +660,12 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
         finally:
             self._stop_server()
 
-    def test_generate_image_through_real_server_v2(self) -> None:
+    def test_generate_image_through_real_server(self) -> None:
         model_path = self._require_model_path("EDGE_DIT_MODEL_PATH")
         self._start_server(model_path=model_path)
 
         output_path = Path(
-            os.environ.get("EDGE_DIT_SERVER_V2_INTEGRATION_OUTPUT", "/tmp/edge_dit_server_v2_integration.png")
+            os.environ.get("EDGE_DIT_SERVER_INTEGRATION_OUTPUT", "/tmp/edge_dit_server_integration.png")
         )
 
         status_code, job = _request_json(
@@ -673,7 +673,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
             "POST",
             "/ed/v2/images/generations",
             {
-                "prompt": os.environ.get("EDGE_DIT_PROMPT", "server v2 integration smoke teapot"),
+                "prompt": os.environ.get("EDGE_DIT_PROMPT", "Python Server integration smoke teapot"),
                 "width": int(os.environ.get("EDGE_DIT_WIDTH", "256")),
                 "height": int(os.environ.get("EDGE_DIT_HEIGHT", "256")),
                 "steps": int(os.environ.get("EDGE_DIT_STEPS", "1")),
@@ -686,7 +686,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
         terminal = _wait_for_terminal_job(
             self.base_url,
             str(job["status_url"]),
-            timeout_seconds=float(os.environ.get("EDGE_DIT_SERVER_V2_TIMEOUT_SECONDS", "600")),
+            timeout_seconds=float(os.environ.get("EDGE_DIT_SERVER_TIMEOUT_SECONDS", "600")),
         )
         self.assertEqual(terminal["status"], "succeeded", terminal)
 
@@ -706,10 +706,10 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
         image.save(output_path)
         self.assertTrue(output_path.exists())
 
-    def test_generate_qwen_image_edit_through_real_server_v2_when_enabled(self) -> None:
-        if os.environ.get("EDGE_DIT_RUN_SERVER_V2_QWEN_IMAGE_EDIT") != "1":
+    def test_generate_qwen_image_edit_through_real_server_when_enabled(self) -> None:
+        if os.environ.get("EDGE_DIT_RUN_SERVER_QWEN_IMAGE_EDIT") != "1":
             self.skipTest(
-                "set EDGE_DIT_RUN_SERVER_V2_QWEN_IMAGE_EDIT=1 to run the real server_v2 Qwen image-edit smoke test"
+                "set EDGE_DIT_RUN_SERVER_QWEN_IMAGE_EDIT=1 to run the real server Qwen image-edit smoke test"
             )
 
         model_path = self._require_model_path(
@@ -725,8 +725,8 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
 
         output_path = Path(
             os.environ.get(
-                "EDGE_DIT_SERVER_V2_QWEN_IMAGE_EDIT_OUTPUT",
-                "/tmp/edge_dit_server_v2_qwen_image_edit_integration.png",
+                "EDGE_DIT_SERVER_QWEN_IMAGE_EDIT_OUTPUT",
+                "/tmp/edge_dit_server_qwen_image_edit_integration.png",
             )
         )
         steps = int(os.environ.get("EDGE_DIT_QWEN_IMAGE_EDIT_STEPS", "2"))
@@ -759,7 +759,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
             str(job["status_url"]),
             expected_total_steps=steps,
             timeout_seconds=float(
-                os.environ.get("EDGE_DIT_SERVER_V2_QWEN_IMAGE_EDIT_TIMEOUT_SECONDS", "900")
+                os.environ.get("EDGE_DIT_SERVER_QWEN_IMAGE_EDIT_TIMEOUT_SECONDS", "900")
             ),
         )
 
@@ -767,7 +767,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
             self.base_url,
             str(job["status_url"]),
             timeout_seconds=float(
-                os.environ.get("EDGE_DIT_SERVER_V2_QWEN_IMAGE_EDIT_TIMEOUT_SECONDS", "900")
+                os.environ.get("EDGE_DIT_SERVER_QWEN_IMAGE_EDIT_TIMEOUT_SECONDS", "900")
             ),
         )
         self.assertEqual(terminal["status"], "succeeded", terminal)
@@ -782,10 +782,10 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
         image.save(output_path)
         self.assertTrue(output_path.exists())
 
-    def test_generate_flux_kontext_through_real_server_v2_when_enabled(self) -> None:
-        if os.environ.get("EDGE_DIT_RUN_SERVER_V2_FLUX_KONTEXT") != "1":
+    def test_generate_flux_kontext_through_real_server_when_enabled(self) -> None:
+        if os.environ.get("EDGE_DIT_RUN_SERVER_FLUX_KONTEXT") != "1":
             self.skipTest(
-                "set EDGE_DIT_RUN_SERVER_V2_FLUX_KONTEXT=1 to run the real server_v2 FLUX Kontext smoke test"
+                "set EDGE_DIT_RUN_SERVER_FLUX_KONTEXT=1 to run the real server FLUX Kontext smoke test"
             )
 
         model_path = self._require_model_path(
@@ -806,8 +806,8 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
 
         output_path = Path(
             os.environ.get(
-                "EDGE_DIT_SERVER_V2_FLUX_KONTEXT_OUTPUT",
-                "/tmp/edge_dit_server_v2_flux_kontext_integration.png",
+                "EDGE_DIT_SERVER_FLUX_KONTEXT_OUTPUT",
+                "/tmp/edge_dit_server_flux_kontext_integration.png",
             )
         )
         steps = int(os.environ.get("EDGE_DIT_FLUX_KONTEXT_STEPS", "2"))
@@ -841,7 +841,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
             str(job["status_url"]),
             expected_total_steps=steps,
             timeout_seconds=float(
-                os.environ.get("EDGE_DIT_SERVER_V2_FLUX_KONTEXT_TIMEOUT_SECONDS", "900")
+                os.environ.get("EDGE_DIT_SERVER_FLUX_KONTEXT_TIMEOUT_SECONDS", "900")
             ),
         )
 
@@ -849,7 +849,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
             self.base_url,
             str(job["status_url"]),
             timeout_seconds=float(
-                os.environ.get("EDGE_DIT_SERVER_V2_FLUX_KONTEXT_TIMEOUT_SECONDS", "900")
+                os.environ.get("EDGE_DIT_SERVER_FLUX_KONTEXT_TIMEOUT_SECONDS", "900")
             ),
         )
         self.assertEqual(terminal["status"], "succeeded", terminal)
@@ -864,9 +864,9 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
         image.save(output_path)
         self.assertTrue(output_path.exists())
 
-    def test_generate_video_through_real_server_v2_when_enabled(self) -> None:
-        if os.environ.get("EDGE_DIT_RUN_SERVER_V2_VIDEO") != "1":
-            self.skipTest("set EDGE_DIT_RUN_SERVER_V2_VIDEO=1 to run the real server_v2 video smoke test")
+    def test_generate_video_through_real_server_when_enabled(self) -> None:
+        if os.environ.get("EDGE_DIT_RUN_SERVER_VIDEO") != "1":
+            self.skipTest("set EDGE_DIT_RUN_SERVER_VIDEO=1 to run the real server video smoke test")
 
         video_model_path = self._require_model_path(
             "EDGE_DIT_VIDEO_MODEL_PATH",
@@ -877,8 +877,8 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
 
         output_path = Path(
             os.environ.get(
-                "EDGE_DIT_SERVER_V2_VIDEO_OUTPUT",
-                "/tmp/edge_dit_server_v2_integration.gif",
+                "EDGE_DIT_SERVER_VIDEO_OUTPUT",
+                "/tmp/edge_dit_server_integration.gif",
             )
         )
 
@@ -906,7 +906,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
         terminal = _wait_for_terminal_job(
             self.base_url,
             str(job["status_url"]),
-            timeout_seconds=float(os.environ.get("EDGE_DIT_SERVER_V2_VIDEO_TIMEOUT_SECONDS", "900")),
+            timeout_seconds=float(os.environ.get("EDGE_DIT_SERVER_VIDEO_TIMEOUT_SECONDS", "900")),
         )
         self.assertEqual(terminal["status"], "succeeded", terminal)
 
@@ -920,10 +920,10 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
         frames[0].save(output_path, save_all=True, append_images=frames[1:], duration=100, loop=0)
         self.assertTrue(output_path.exists())
 
-    def test_run_full_server_v2_model_matrix_when_enabled(self) -> None:
-        if os.environ.get("EDGE_DIT_RUN_SERVER_V2_MATRIX") != "1":
+    def test_run_full_server_model_matrix_when_enabled(self) -> None:
+        if os.environ.get("EDGE_DIT_RUN_SERVER_MATRIX") != "1":
             self.skipTest(
-                "set EDGE_DIT_RUN_SERVER_V2_MATRIX=1 to run the full sequential server_v2 model matrix"
+                "set EDGE_DIT_RUN_SERVER_MATRIX=1 to run the full sequential server model matrix"
             )
 
         for scenario in self._matrix_scenarios():
