@@ -33,7 +33,7 @@ paths:
   wan21_t2v_distill_weights:    /path/to/models/distilled/wan21-t2v-1.3b-distill/Wan2.1-T2V-1.3B-Distill-iter6000.safetensors      # single weights file; base wan2_t2v_1.3b_dir
 
   # -- image-editing input image (only needed when testing image-editing) --
-  edit_input_image: /path/to/edge-dit.cpp/assets/logo.png
+  edit_input_image: /path/to/edge-dit.cpp/benchmark/assets/edit_input.png
 
   # -- optional: only for cross-system compare (omit entirely if edge-dit only) --
   diffusers_python:          /path/to/conda/envs/edge/bin/python  # python used to compare diffusers

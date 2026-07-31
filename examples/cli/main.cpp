@@ -92,12 +92,12 @@ static void print_usage(const char* prog) {
         "  --tensor-type-rules <csv> Per-tensor quant overrides (mixed quant), e.g. \"attn=q4_0,norm=f16\"\n"
         "                            Each rule is <name-regex>=<ggml-type-name>, comma-separated\n"
         "  --no-t5                   Skip loading T5XXL text encoder (SD3 only; reduces memory, degrades prompt adherence)\n"
-        "  --vae-tiling <on|off|auto>  VAE tiled decode (reduces VRAM). auto=enable on low-VRAM GPUs (<=16G); default: auto\n"
+        "  --vae-tiling <on|off|auto>  VAE tiled decode (reduces VRAM). auto=enable on low-VRAM GPUs (<=25G); default: auto\n"
         "  --vae-tile-size <float>   VAE tile relative size, default: 5.0 (~32x32 tile). Larger = finer tiles = less VRAM\n"
         "  --offload-to-cpu          Keep model weights on CPU, copy to GPU per-compute (saves VRAM)\n"
-        "  --keep-text-encoder-on-cpu  Run text encoder on CPU backend\n"
+        "  --dit-offload             Keep DiT weights on CPU, stage to GPU per step (compute on GPU)\n"
         "  --text-encoder-offload    Keep text-encoder weights on CPU, stage to GPU per encode (compute on GPU)\n"
-        "  --keep-vae-on-cpu         Run VAE on CPU backend\n"
+        "  --vae-offload             Keep VAE weights on CPU, stage to GPU per decode (compute on GPU)\n"
         "  --max-vram <GB>           Limit VRAM usage for compute graphs (e.g. 8.0)\n"
         "  --auto-allocate           Auto per-component placement under a hard VRAM cap\n"
         "                            = min(--max-vram, free); keeps components resident\n"
@@ -616,7 +616,7 @@ int main(int argc, char** argv) {
     ctx_params.sp_parallel_size = args.sp_parallel_size;
     ctx_params.flash_attention = args.flash_attention;
     ctx_params.offload_params_to_cpu = args.offload_to_cpu;
-    ctx_params.keep_text_encoder_on_cpu = args.keep_text_encoder_on_cpu;
+    ctx_params.dit_offload = args.dit_offload;
     ctx_params.text_encoder_offload = args.text_encoder_offload;
     ctx_params.auto_allocate = args.auto_allocate;
     ctx_params.auto_fit = args.auto_fit;
@@ -626,7 +626,7 @@ int main(int argc, char** argv) {
     ctx_params.fit_width = args.width;
     ctx_params.fit_height = args.height;
     ctx_params.fit_frames = args.frames;
-    ctx_params.keep_vae_on_cpu = args.keep_vae_on_cpu;
+    ctx_params.vae_offload = args.vae_offload;
     if (args.max_vram > 0.0f) {
         ctx_params.max_vram_gb = args.max_vram;
     }

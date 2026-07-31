@@ -9,7 +9,7 @@
   on resource-constrained devices and local deployment environments.</strong>
 </p>
 
-[![Status](https://img.shields.io/badge/status-public_preview-orange)](#supported-models)
+[![Status](https://img.shields.io/badge/status-public_preview-orange)](#latest-news)
 [![Backend](https://img.shields.io/badge/backend-CUDA--first-blue)](#backend-support)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](#license)
 
@@ -17,6 +17,7 @@ edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for loc
 
 ## Latest News
 
+- **2026-07-30:** 🚀 Added **per-component offload** flags — `--dit-offload` / `--text-encoder-offload` / `--vae-offload` (weights on CPU, staged to GPU per compute), unifying all offload paths on one semantics.
 - **2026-07-29:** 🚀 Restructured the **cross-system benchmark**.
 - **2026-07-29:** 🚀 Added **`--auto-fit`** fully-automatic budgeting — one flag picks DiT quantization (`q8_0`/`q4_k`) *and* per-component placement to fit a hard VRAM budget (supersedes `--auto-allocate`).
 - **2026-07-27:** 🚀 Added **`--auto-allocate`** adaptive per-component VRAM placement under a hard budget.
@@ -147,9 +148,11 @@ cd edge-dit.cpp
 ```
 
 If the repository was cloned without submodules (for example from a source ZIP
-archive), fetch them with:
+archive), fetch them with either:
 
 ```bash
+git submodule update --init --recursive   # fetch submodules directly
+# or, equivalently, run the bootstrap helper (also verifies they populated):
 bash scripts/bootstrap.sh
 ```
 

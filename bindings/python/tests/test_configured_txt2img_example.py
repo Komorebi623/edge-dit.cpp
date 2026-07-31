@@ -68,7 +68,7 @@ class ConfiguredTxt2ImgExampleTests(unittest.TestCase):
                 "model_path": "/models/flux",
                 "backend": "cuda",
                 "offload_params_to_cpu": True,
-                "keep_text_encoder_on_cpu": True,
+                "text_encoder_offload": True,
                 "max_vram_gb": 8.0,
             },
             "request": {

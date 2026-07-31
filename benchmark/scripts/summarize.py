@@ -23,7 +23,7 @@ import argparse
 import statistics
 from pathlib import Path
 
-from make_matrix_tables import Row  # same-dir reuse of the reader
+from make_matrix_tables import Row, TASK_COLS  # same-dir reuse of the reader + per-task column specs
 
 
 def mean(vals):
@@ -38,17 +38,18 @@ def fmt(v, nd=1):
 
 
 class Group:
-    """Mean over the prompts of one (workload, system, precision, budget)."""
+    """Mean over the prompts of one (workload, system, precision, budget, cache)."""
     def __init__(self, rows):
         self.rows = rows
         r0 = rows[0]
-        self.workload, self.system, self.precision, self.budget = (
-            r0.workload, r0.system, r0.precision, r0.budget)
+        self.workload, self.system, self.precision, self.budget, self.cache = (
+            r0.workload, r0.system, r0.precision, r0.budget, r0.cache)
         self.n = len(rows)
         self.ok = sum(1 for r in rows if r.status == "success")
         for attr in ("dit_ms", "e2e_ms", "te_ms", "vae_ms", "peak_vram",
                      "te_vram", "dit_vram", "vae_vram", "clip", "aesthetic", "ir",
-                     "psnr", "ssim", "lpips", "dclip", "keep_ssim", "keep_lpips"):
+                     "psnr", "ssim", "lpips", "dclip", "keep_ssim", "keep_lpips",
+                     "tmp_lpips", "tmp_ssim", "tmp_lpips_flk"):
             setattr(self, attr, mean(getattr(r, attr) for r in rows))
 
 
@@ -59,10 +60,10 @@ def collect(root: Path):
         if "_calib" in rj.parts:
             continue
         r = Row(rj.parent)
-        groups.setdefault((r.workload, r.system, r.precision, r.budget), []).append(r)
+        groups.setdefault((r.workload, r.system, r.precision, r.budget, r.cache), []).append(r)
     out = [Group(rs) for rs in groups.values()]
-    # stable order: workload, then system, then precision, then budget
-    out.sort(key=lambda g: (g.workload, g.system, g.precision, g.budget))
+    # stable order: workload, then system, then precision, then budget, then cache
+    out.sort(key=lambda g: (g.workload, g.system, g.precision, g.budget, g.cache))
     return out
 
 
@@ -88,46 +89,53 @@ def write_speed(groups, out: Path):
     for wl in by_workload(groups):
         body.append(f"\n## {wl}\n")
         gs = [g for g in groups if g.workload == wl]
-        body.append(_table(gs, ["system", "precision", "budget", "DiT sampling ms", "end-to-end ms", "TE_ms", "VAE_ms"],
-                            lambda g: [g.system, g.precision, g.budget,
+        body.append(_table(gs, ["system", "precision", "budget", "cache", "DiT sampling ms", "end-to-end ms", "TE_ms", "VAE_ms"],
+                            lambda g: [g.system, g.precision, g.budget, g.cache,
                                        fmt(g.dit_ms), fmt(g.e2e_ms), fmt(g.te_ms), fmt(g.vae_ms)]))
     out.write_text("\n".join(body) + "\n", encoding="utf-8")
 
 
 def write_memory(groups, out: Path):
     body = ["# VRAM summary (mean, unit MiB)\n",
-            "> `full`=no VRAM-saving knobs; `offload`=weights offloaded to CPU; `<N>g`=--max-vram was set.\n"]
+            "> budget names the offloaded components (e.g. `te offload`, `full offload`) + `(max-vram Ng)` when --max-vram was set; auto tiers show the engine's real placement + `(auto-fit)`/`(auto-allocate)`. cache is its own column.\n"]
     for wl in by_workload(groups):
         body.append(f"\n## {wl}\n")
         gs = [g for g in groups if g.workload == wl]
-        body.append(_table(gs, ["system", "precision", "budget", "peak VRAM", "TE VRAM", "DiT VRAM", "VAE VRAM"],
-                            lambda g: [g.system, g.precision, g.budget,
+        body.append(_table(gs, ["system", "precision", "budget", "cache", "peak VRAM", "TE VRAM", "DiT VRAM", "VAE VRAM"],
+                            lambda g: [g.system, g.precision, g.budget, g.cache,
                                        fmt(g.peak_vram, 0), fmt(g.te_vram, 0), fmt(g.dit_vram, 0), fmt(g.vae_vram, 0)]))
     out.write_text("\n".join(body) + "\n", encoding="utf-8")
 
 
 def write_quality(groups, out: Path):
     body = ["# Quality summary (mean)\n",
-            "> CLIP/aesthetic/IR are absolute scores (cross-comparable as reference); PSNR↑/SSIM↑/LPIPS↓ are quantization vs the same system's own FP16 baseline (not comparable across systems). Baseline tiers show —.\n"]
+            "> Quality columns are per task (t2i: CLIP/aesthetic/IR; editing: dir-CLIP/keep-SSIM/keep-LPIPS/aesthetic/IR; video: per-frame CLIP/aesthetic + temporal). PSNR↑/SSIM↑/LPIPS↓ are quantization vs the same system's own FP16 baseline (not comparable across systems). Baseline tiers show —.\n"]
     for wl in by_workload(groups):
-        body.append(f"\n## {wl}\n")
         gs = [g for g in groups if g.workload == wl]
-        body.append(_table(gs, ["system", "precision", "budget", "CLIP", "aesthetic", "IR", "PSNRvsFP16", "SSIMvsFP16", "LPIPSvsFP16"],
-                            lambda g: [g.system, g.precision, g.budget,
-                                       fmt(g.clip, 3), fmt(g.aesthetic, 2), fmt(g.ir, 3),
-                                       fmt(g.psnr, 2), fmt(g.ssim, 3), fmt(g.lpips, 3)]))
+        task = gs[0].rows[0].task if gs and gs[0].rows else "text-to-image"
+        cols = TASK_COLS.get(task, TASK_COLS["text-to-image"])
+        body.append(f"\n## {wl}  ({task})\n")
+        headers = ["system", "precision", "budget", "cache"] + [h for h, _, _ in cols]
+        body.append(_table(gs, headers,
+                            lambda g, cols=cols: [g.system, g.precision, g.budget, g.cache]
+                            + [fmt(getattr(g, attr), prec) for _, attr, prec in cols]))
     out.write_text("\n".join(body) + "\n", encoding="utf-8")
 
 
 def write_all(groups, out: Path):
     body = ["# Summary table (mean, core columns)\n",
-            "> One table at a glance. For speed look at DiT sampling ms; VRAM unit MiB; PSNR/SSIM/LPIPS are quantization vs same-system FP16.\n\n"]
-    body.append(_table(groups,
-                       ["model", "system", "precision", "budget", "DiTms", "end-to-end ms", "peak VRAM", "CLIP", "aesthetic", "IR", "PSNR", "SSIM", "LPIPS"],
-                       lambda g: [g.workload, g.system, g.precision, g.budget,
-                                  fmt(g.dit_ms), fmt(g.e2e_ms), fmt(g.peak_vram, 0),
-                                  fmt(g.clip, 3), fmt(g.aesthetic, 2), fmt(g.ir, 3),
-                                  fmt(g.psnr, 2), fmt(g.ssim, 3), fmt(g.lpips, 3)]))
+            "> One table at a glance, split by task (quality columns differ per task). For speed look at DiT sampling ms; VRAM unit MiB; PSNR/SSIM/LPIPS are quantization vs same-system FP16.\n"]
+    speed_vram = ["DiTms", "end-to-end ms", "peak VRAM"]
+    for wl in by_workload(groups):
+        gs = [g for g in groups if g.workload == wl]
+        task = gs[0].rows[0].task if gs and gs[0].rows else "text-to-image"
+        cols = TASK_COLS.get(task, TASK_COLS["text-to-image"])
+        body.append(f"\n## {wl}  ({task})\n")
+        headers = ["system", "precision", "budget", "cache"] + speed_vram + [h for h, _, _ in cols]
+        body.append(_table(gs, headers,
+                            lambda g, cols=cols: [g.system, g.precision, g.budget, g.cache,
+                                                  fmt(g.dit_ms), fmt(g.e2e_ms), fmt(g.peak_vram, 0)]
+                            + [fmt(getattr(g, attr), prec) for _, attr, prec in cols]))
     out.write_text("\n".join(body) + "\n", encoding="utf-8")
 
 

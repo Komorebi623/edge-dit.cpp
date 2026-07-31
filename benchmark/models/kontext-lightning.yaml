@@ -15,6 +15,6 @@ generation:
   width: 1024
   height: 1024
   steps: 8                             # Kontext Lightning low-step default
-  guidance: 3.5
+  guidance: 2.5                        # FLUX.1-Kontext official guidance_scale=2.5
   cfg_scale: 1.0                        # Lightning single forward pass
   scheduler: model-default

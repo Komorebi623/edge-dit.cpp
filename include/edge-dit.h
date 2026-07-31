@@ -161,7 +161,7 @@ typedef struct ed_context_params_t {
 
     bool use_mmap;
     bool offload_params_to_cpu;
-    bool keep_text_encoder_on_cpu;
+    bool dit_offload;           // DiT weights on CPU, staged to GPU per step (compute on GPU)
     bool text_encoder_offload;  // TE weights on CPU, staged to GPU per encode (compute on GPU)
     bool auto_allocate;         // budget-capped auto placement: min(--max-vram, free) hard cap, per-component resident/offload
     bool auto_fit;              // fully automatic: system picks DiT quantization (q8_0..q4_k) AND placement to fit budget; implies auto_allocate, ignores weight_type
@@ -169,7 +169,7 @@ typedef struct ed_context_params_t {
     int fit_height;             // target generation height (0 = unspecified)
     int fit_frames;             // target video frame count for compute-buffer measurement (video models only; 0 = image/unspecified)
     bool keep_control_net_on_cpu;
-    bool keep_vae_on_cpu;
+    bool vae_offload;           // VAE weights on CPU, staged to GPU per decode (compute on GPU)
     bool skip_t5;
 
     bool flash_attention;

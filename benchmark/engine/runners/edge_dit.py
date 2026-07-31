@@ -141,6 +141,8 @@ class EdgeDitRunner(BenchmarkRunner):
         ]
         self.apply_edge_wrapper_options(command, workload.get("model_options", {}))
         self.apply_edge_wrapper_options(command, run_options)
+        if generation.get("flow_shift") is not None:
+            command.extend(["--flow-shift", str(generation["flow_shift"])])
         if gpu_count > 1:
             devices = edge_device_csv(gpu_count)
             command.extend(["--devices", devices])
@@ -227,6 +229,8 @@ class EdgeDitRunner(BenchmarkRunner):
                 command.extend(["--fps", str(generation["fps"])])
         self.apply_edge_wrapper_options(command, workload.get("model_options", {}))
         self.apply_edge_wrapper_options(command, run_options)
+        if generation.get("flow_shift") is not None:
+            command.extend(["--flow-shift", str(generation["flow_shift"])])
         if gpu_count > 1:
             devices = edge_device_csv(gpu_count)
             command.extend(["--devices", devices])
@@ -326,12 +330,18 @@ class EdgeDitRunner(BenchmarkRunner):
             command.append("--offload-to-cpu")
         if options.get("no_t5"):
             command.append("--no-t5")
-        if options.get("keep_text_encoder_on_cpu"):
-            command.append("--keep-text-encoder-on-cpu")
-        if options.get("keep_vae_on_cpu"):
-            command.append("--keep-vae-on-cpu")
+        if options.get("text_encoder_offload"):
+            command.append("--text-encoder-offload")
+        if options.get("vae_offload"):
+            command.append("--vae-offload")
+        if options.get("dit_offload"):
+            command.append("--dit-offload")
         if options.get("max_vram_gib") is not None:
             command.extend(["--max-vram", str(options["max_vram_gib"])])
+        if options.get("auto_fit"):
+            command.append("--auto-fit")
+        elif options.get("auto_allocate"):
+            command.append("--auto-allocate")
         if options.get("flash_attention") is False:
             command.append("--no-flash-attention")
         if options.get("profile_graph_cuts"):
@@ -354,12 +364,18 @@ class EdgeDitRunner(BenchmarkRunner):
             command.append("--offload-to-cpu")
         if options.get("no_t5"):
             command.append("--no-t5")
-        if options.get("keep_text_encoder_on_cpu"):
-            command.append("--keep-text-encoder-on-cpu")
-        if options.get("keep_vae_on_cpu"):
-            command.append("--keep-vae-on-cpu")
+        if options.get("text_encoder_offload"):
+            command.append("--text-encoder-offload")
+        if options.get("vae_offload"):
+            command.append("--vae-offload")
+        if options.get("dit_offload"):
+            command.append("--dit-offload")
         if options.get("max_vram_gib") is not None:
             command.extend(["--max-vram", str(options["max_vram_gib"])])
+        if options.get("auto_fit"):
+            command.append("--auto-fit")
+        elif options.get("auto_allocate"):
+            command.append("--auto-allocate")
         if options.get("profile_graph_cuts"):
             command.append("--profile-graph-cuts")
         if options.get("flash_attention") is False:

@@ -20,7 +20,6 @@ examples/server/                      Native HTTP server
 bindings/python/                      Python package, tests, server_v2, console
 scripts/                              Build, bootstrap, validation, release tools
 docs/                                 User and developer documentation
-release/                              Release metadata examples
 third_party/                          Submodules and vendored dependencies
 ```
 
@@ -160,10 +159,11 @@ Current public preview state:
 ```text
 Repository-ready: yes
 Public preview-ready: yes
-v0.1.0-alpha release sign-off: pending full CUDA performance validation
+v0.1.0-alpha: released to public preview (2026-07-11)
 ```
 
-Release checklist:
+The checklist below is the release gate each subsequent tagged build runs
+through:
 
 1. Clean clone with submodules.
 2. CPU configure/build.
@@ -182,7 +182,7 @@ Release checklist:
 
 Near-term work:
 
-- Complete full CUDA performance release gate.
+- Keep the full CUDA performance release gate green across tagged builds.
 - Stabilize public C API and runtime interfaces.
 - Expand verified model/backend matrix.
 - Improve benchmark reproducibility and metadata capture.

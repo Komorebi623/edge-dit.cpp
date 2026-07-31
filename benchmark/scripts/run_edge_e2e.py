@@ -27,6 +27,38 @@ CACHE_SUMMARY_RE = re.compile(
     r"(?:\s+\((?P<note>[^)]*)\))?"
 )
 
+# --- Actual auto-fit / auto-allocate decisions (engine LOG_INFO, on STDERR) --------- #
+# Under --auto-fit / --auto-allocate the engine IGNORES the user's --type and picks the
+# real DiT/TE quantization tier and per-component resident/offload placement at load time,
+# logging each decision to stderr (src/core/runtime/model_runtime.cpp). When present these
+# are ground truth of what actually ran, which can differ from the requested tier in the
+# job (e.g. requested q8 but auto-fit downgraded the DiT to q4_K, or offloaded it). We
+# parse them so the report can show the real placement instead of the request.
+AUTOFIT_TE_QUANT_RE = re.compile(
+    r"auto-fit:\s+TE quant set to (?P<q>\S+)"
+)
+# The three DiT ladder OUTCOMES (exactly one is logged per auto-fit run):
+AUTOFIT_DIT_RESIDENT_RE = re.compile(
+    r"auto-fit:\s+DiT (?P<q>\S+)\s+[0-9.]+\s+GB fits\s+[0-9.]+\s+GB budget\s*->\s*resident"
+)
+AUTOFIT_DIT_DOWNGRADE_RE = re.compile(
+    r"auto-fit:\s+DiT q8_0\s+[0-9.]+\s+GB\s*->\s*(?P<q>\S+)\s+[0-9.]+\s+GB to fit\s+"
+    r"[0-9.]+\s+GB budget\s*\(resident\)"
+)
+AUTOFIT_DIT_OFFLOAD_RE = re.compile(
+    r"auto-fit:\s+DiT does not fit\s+[0-9.]+\s+GB budget even at q4_K[^\n]*->\s*(?P<q>\S+),\s*will offload"
+)
+# Per-component placement (auto-allocate; also emitted under auto-fit since it implies it).
+AUTOALLOC_PLACEMENT_RE = re.compile(
+    r"auto-allocate:\s+'(?P<prefix>[^']+)'[^\n]*->\s*(?P<decision>RESIDENT|OFFLOAD)"
+)
+# Weight-prefix -> friendly component name used in the report.
+_AUTO_COMPONENT = {
+    "model.diffusion_model": "dit",
+    "text_encoders": "te",
+    "first_stage_model": "vae",
+}
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -41,6 +73,7 @@ def main() -> int:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--guidance", type=float, required=True)
     parser.add_argument("--cfg-scale", type=float, default=1.0)
+    parser.add_argument("--flow-shift", type=float, default=None)
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--backend", default="cuda")
     parser.add_argument("--warmup-runs", type=int, required=True)
@@ -76,9 +109,14 @@ def main() -> int:
     parser.add_argument("--vae-tile-size")
     parser.add_argument("--tensor-type-rules")
     parser.add_argument("--offload-to-cpu", action="store_true")
-    parser.add_argument("--keep-text-encoder-on-cpu", action="store_true")
-    parser.add_argument("--keep-vae-on-cpu", action="store_true")
+    parser.add_argument("--text-encoder-offload", action="store_true")
+    parser.add_argument("--vae-offload", action="store_true")
+    parser.add_argument("--dit-offload", action="store_true")
     parser.add_argument("--max-vram")
+    parser.add_argument("--auto-fit", action="store_true",
+                        help="engine picks DiT/TE quant + per-component placement (ignores --dtype)")
+    parser.add_argument("--auto-allocate", action="store_true",
+                        help="engine picks per-component resident/offload placement under --max-vram")
     parser.add_argument("--no-flash-attention", action="store_true")
     parser.add_argument("--profile-graph-cuts", action="store_true")
     args = parser.parse_args()
@@ -116,6 +154,7 @@ def main() -> int:
         str(args.seed),
         "--guidance_scale",
         str(args.guidance),
+        *(["--flow_shift", str(args.flow_shift)] if args.flow_shift is not None else []),
         "--cfg_scale",
         str(args.cfg_scale),
         "--warmup",
@@ -148,12 +187,18 @@ def main() -> int:
         command.extend(["--tensor-type-rules", str(args.tensor_type_rules)])
     if args.offload_to_cpu:
         command.append("--offload-to-cpu")
-    if args.keep_text_encoder_on_cpu:
-        command.append("--keep-text-encoder-on-cpu")
-    if args.keep_vae_on_cpu:
-        command.append("--keep-vae-on-cpu")
+    if args.text_encoder_offload:
+        command.append("--text-encoder-offload")
+    if args.vae_offload:
+        command.append("--vae-offload")
+    if args.dit_offload:
+        command.append("--dit-offload")
     if args.max_vram:
         command.extend(["--max-vram", args.max_vram])
+    if args.auto_fit:
+        command.append("--auto-fit")
+    if args.auto_allocate:
+        command.append("--auto-allocate")
     if args.no_flash_attention:
         command.append("--no-flash-attention")
     if args.profile_graph_cuts:
@@ -195,6 +240,7 @@ def main() -> int:
         "cache_events": parse_cache_events(completed.stdout + "\n" + completed.stderr),
         "component_ms": component_ms,
         "stage_boundaries": stage_boundaries,
+        "actual_placement": parse_auto_placement(completed.stderr),
         "sample_output_dir": str(sample_dir),
     }
     (output_dir / "runner_metrics.json").write_text(
@@ -257,6 +303,64 @@ def parse_cache_events(text: str) -> list[dict[str, object]]:
             }
         )
     return events
+
+
+def parse_auto_placement(stderr: str) -> dict[str, object] | None:
+    """Parse the engine's ACTUAL auto-fit / auto-allocate decisions from stderr.
+
+    Under --auto-fit / --auto-allocate the engine ignores the requested --type and
+    decides the real DiT/TE quantization tier and per-component resident/offload
+    placement at load time (logged by src/core/runtime/model_runtime.cpp). We surface
+    those so the report can show what actually ran instead of what the job requested.
+
+    Returns None when no auto-* decision was logged (non-auto runs / manual fixed tier),
+    which is the normal case and must not be treated as an error. Otherwise returns e.g.
+        {"mode": "auto-fit", "dit_quant": "q4_k", "te_quant": "q8_0",
+         "dit_placement": "resident", "te_placement": "offload",
+         "vae_placement": "resident"}
+    Any field the logs didn't reveal is left as None (quant fields are absent under
+    plain --auto-allocate, which owns placement only, not quantization).
+    """
+    def norm_quant(q: str) -> str:
+        # engine logs q8_0 / q4_K; jobs & config use lowercase q8_0 / q4_k tokens.
+        return q.strip().lower()
+
+    out: dict[str, object] = {
+        "mode": None,
+        "dit_quant": None,
+        "te_quant": None,
+        "dit_placement": None,
+        "te_placement": None,
+        "vae_placement": None,
+    }
+    saw_autofit = False
+    saw_autoalloc = False
+
+    # --- DiT quantization tier (exactly one ladder outcome fires per auto-fit run) --- #
+    m = AUTOFIT_TE_QUANT_RE.search(stderr)
+    if m:
+        out["te_quant"] = norm_quant(m.group("q"))
+        saw_autofit = True
+    for rx in (AUTOFIT_DIT_RESIDENT_RE, AUTOFIT_DIT_DOWNGRADE_RE, AUTOFIT_DIT_OFFLOAD_RE):
+        m = rx.search(stderr)
+        if m:
+            out["dit_quant"] = norm_quant(m.group("q"))
+            saw_autofit = True
+            break
+
+    # --- per-component placement (last decision per component wins: a component can be
+    # logged twice, e.g. "fits but would squeeze... -> OFFLOAD instead" then the final
+    # "-> OFFLOAD+segment"; the last line is the authoritative placement). ------------- #
+    for m in AUTOALLOC_PLACEMENT_RE.finditer(stderr):
+        saw_autoalloc = True
+        comp = _AUTO_COMPONENT.get(m.group("prefix"))
+        if comp is not None:
+            out[f"{comp}_placement"] = m.group("decision").lower()
+
+    if not (saw_autofit or saw_autoalloc):
+        return None
+    out["mode"] = "auto-fit" if saw_autofit else "auto-allocate"
+    return out
 
 
 def load_ms_from_ed_sample(path: Path) -> float | None:

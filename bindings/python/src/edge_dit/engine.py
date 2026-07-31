@@ -417,12 +417,24 @@ class Engine:
             params.use_mmap = config.use_mmap
         if config.offload_params_to_cpu is not None:
             params.offload_params_to_cpu = config.offload_params_to_cpu
-        if config.keep_text_encoder_on_cpu is not None:
-            params.keep_text_encoder_on_cpu = config.keep_text_encoder_on_cpu
+        if config.dit_offload is not None:
+            params.dit_offload = config.dit_offload
+        if config.text_encoder_offload is not None:
+            params.text_encoder_offload = config.text_encoder_offload
+        if config.auto_allocate is not None:
+            params.auto_allocate = config.auto_allocate
+        if config.auto_fit is not None:
+            params.auto_fit = config.auto_fit
+        if config.fit_width is not None:
+            params.fit_width = config.fit_width
+        if config.fit_height is not None:
+            params.fit_height = config.fit_height
+        if config.fit_frames is not None:
+            params.fit_frames = config.fit_frames
         if config.keep_control_net_on_cpu is not None:
             params.keep_control_net_on_cpu = config.keep_control_net_on_cpu
-        if config.keep_vae_on_cpu is not None:
-            params.keep_vae_on_cpu = config.keep_vae_on_cpu
+        if config.vae_offload is not None:
+            params.vae_offload = config.vae_offload
         if config.skip_t5 is not None:
             params.skip_t5 = config.skip_t5
         if config.flash_attention is not None:

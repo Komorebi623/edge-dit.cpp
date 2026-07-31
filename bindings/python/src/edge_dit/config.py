@@ -34,9 +34,15 @@ class EngineConfig:
     tensor_type_rules: str | None = None
     use_mmap: bool | None = None
     offload_params_to_cpu: bool | None = None
-    keep_text_encoder_on_cpu: bool | None = None
+    dit_offload: bool | None = None
+    text_encoder_offload: bool | None = None
+    auto_allocate: bool | None = None
+    auto_fit: bool | None = None
+    fit_width: int | None = None
+    fit_height: int | None = None
+    fit_frames: int | None = None
     keep_control_net_on_cpu: bool | None = None
-    keep_vae_on_cpu: bool | None = None
+    vae_offload: bool | None = None
     skip_t5: bool | None = None
     flash_attention: bool | None = None
     max_vram_gb: float | None = None
@@ -90,6 +96,11 @@ class EngineConfig:
             raise InvalidArgumentError("max_vram_gb must be > 0")
         if self.vae_tile_size is not None and self.vae_tile_size <= 0:
             raise InvalidArgumentError("vae_tile_size must be > 0")
+
+        for field_name in ("fit_width", "fit_height", "fit_frames"):
+            value = getattr(self, field_name)
+            if value is not None and value < 0:
+                raise InvalidArgumentError(f"{field_name} must be >= 0")
 
 
 @dataclass(slots=True)

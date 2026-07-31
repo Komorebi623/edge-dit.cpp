@@ -39,19 +39,19 @@ python benchmark/scripts/setup_assets.py
 
 ### 1. Pick / write a manifest
 
-The manifest has a **per-system sectioned** structure: shared fields at the top level, and each system to test opens its own section (with its own quantization tiers). A minimal manifest = 3 required top-level fields + one system section:
+The manifest has a **per-system sectioned** structure: shared fields at the top level, and each system to test opens its own section carrying **its own model list + quantization tiers** (`model` and `steps` are per-section dimensions, not shared top-level fields). A minimal manifest = 2 required top-level fields + one system section (which must carry `model` + `quant`):
 
 ```yaml
 name: my-first-job          # report tables land in reports/my-first-job/, raw artifacts in results/my-first-job/
 task: text-to-image         # task type, must match the model
-models: [sd3-medium]        # model id, see models/
 
-edge-dit:                   # one system section = test that system; quant is required inside the section
+edge-dit:                   # one system section = test that system
+  model: [sd3-medium]       # model id, see models/; required inside the section
   quant: [fp16, q8, q4_k]   # quantization tier id, see methods/quant/
 # everything else uses defaults: offload=none, vae_tiling=auto, cache=none, prompts=3, all three metrics on
 ```
 
-**How to write each manifest field, advanced usage (per-quant object override / per-model steps / metrics three toggles), cross_system filtering, and a batch of ready-to-copy manifests (starting with `example-`) are all explained in [`jobs/README.md`](jobs/README.md).**
+**How to write each manifest field, advanced usage (per-quant object override for model/steps/offload/cache, section-level dimension sweeps, metrics three toggles), cross_system filtering, and a batch of ready-to-copy manifests (starting with `example-`) are all explained in [`jobs/README.md`](jobs/README.md).**
 
 ### 2. Run
 
@@ -86,7 +86,7 @@ Generated images/videos are under `results/<name>/<system>/.../samples/`.
 
 ```
 job.yaml
-   └─ expand  models × each system section (quant × offload × cache) × prompts  into a set of runs
+   └─ expand  each system section (model × quant × offload × cache) × prompts  into a set of runs
        └─ directly call engine/runners/<system>.execute() one by one   generate + collect latency/VRAM, write result.json
            └─ scripts/eval_all.py                        backfill image-quality metrics (when quality=true)
                └─ scripts/make_matrix_tables.py          aggregate into a single tables.md
@@ -100,8 +100,8 @@ Everything runs in-process end-to-end, bypassing the old suite / scenario_matrix
 
 | I want to… | Where to configure |
 |---|---|
-| How to write manifest fields (quant/cache/offload/VAE tiling/per-quant object/per-model steps/metrics) | all in [`jobs/README.md`](jobs/README.md) |
-| Cross-system comparison | open several system sections, each with its own quantization tiers (see "Three-system integration") |
+| How to write manifest fields (model/quant/cache/offload/VAE tiling/per-quant object/steps/metrics) | all in [`jobs/README.md`](jobs/README.md) |
+| Cross-system comparison | open several system sections, each with its own model list + quantization tiers (see "Three-system integration") |
 | Add a model / method / comparison system / switch machine | see "Extending" at the end |
 | Re-run evaluation only (no re-generation) | `scripts/eval_all.py` + `make_matrix_tables.py` (see end) |
 
@@ -129,19 +129,20 @@ System capabilities are defined in `systems/*.yaml`. After configuring each syst
 - **diffusers** (optional, Python reference): needs a Python with `torch`/`diffusers`/`transformers` installed; the site's `diffusers_python` points to it. Quantization uses **Optimum-Quanto**: `bf16` (baseline) / `fp8` (qfloat8) / `w8a8` (qint8, crashes on SD3); **no q4**; CUDA only.
 - **stable-diffusion.cpp** (optional, native baseline): needs `sd-cli` and the e2e wrapper built. dtype `fp16` / `q8` (q8_0) / `q4_k`. Its on-the-fly quantization conversion mixes into the sampling timing, so under quantized tiers "DiT sampling ms" is inflated and speed must be interpreted with care.
 
-**One job runs the entire cross-system matrix**: per-system sectioning lets each system have a section with its own quantization tiers, and one command runs it all — edge/sdcpp accept `fp16/q8/q4_k`, diffusers accepts `bf16/fp8/w8a8`; the three sections expand, generate, evaluate, and aggregate into the same `tables.md`. `jobs/example-xsys.yaml` is the flagship example. If a section writes a method that system doesn't support, run.py **automatically skips it and prints** `[run.py] skip → ...` during expansion, without running to failure (capability ownership is in `CAPABILITIES.md`).
+**One job runs the entire cross-system matrix**: per-system sectioning lets each system have a section with its own model list + quantization tiers, and one command runs it all — edge/sdcpp accept `fp16/q8/q4_k`, diffusers accepts `bf16/fp8/w8a8`; the three sections expand, generate, evaluate, and aggregate into the same `tables.md`. `jobs/example-cross-system.yaml` is the flagship example. If a section writes a method that system doesn't support, run.py **automatically skips it and prints** `[run.py] skip → ...` during expansion, without running to failure (capability ownership is in `CAPABILITIES.md`).
 
 ---
 
 ## Reading the tables
 
-`reports/<name>/tables.md` — several prompt detail rows per config + 1 mean row. Columns include system / precision / budget / component-level times / VRAM / quality. **Metric conventions (important)**:
+`reports/<name>/tables.md` — several prompt detail rows per config + 1 mean row. Columns are system / precision / **budget** / **cache** / component-level times / VRAM / quality. Only rows that are the **same config across different prompts** collapse into one averaged mean row; configs differing in any dimension (precision / budget / cache) stay separate. **Metric conventions (important)**:
 
 - **Compare inference speed with DiT sampling ms** (component-level denoise time), **never with end-to-end ms** — the latter includes one-time on-the-fly quantization conversion and model loading, which contaminates conclusions (especially for sd.cpp quantized tiers).
 - **Quantization loss** (PSNR/SSIM/LPIPS) is only meaningful **within the same system** vs its own baseline (fp16 for edge/sdcpp, bf16 for diffusers), and is **not comparable across systems**.
 - Cross-system **absolute image quality** (CLIP/aesthetic/ImageReward) can be compared side by side; but when a gap is suspiciously large, first check convention alignment (same model/prompt/seed/resolution/steps/dtype) before drawing conclusions.
 - **q8 is the headline usable-quality tier**; q4 is only an extreme VRAM-saving reference point, with obvious quality loss.
-- **budget column**: `full` = no VRAM-saving switch enabled (baseline tier) / `offload` = whole-model CPU offload (i.e. `offload: full`). Note: `offload: te-cpu` (text encoder only) still falls in the `full` bucket under the current classification.
+- **budget column**: directly lists **which components were offloaded** plus the max-vram budget — e.g. `no-offload`, `te offload`, `full offload`, `full offload (max-vram 20g)`, `sequential (full offload)`, and for auto tiers only the components actually offloaded plus the mode, e.g. `te offload + vae offload (max-vram 20g) (auto-fit)`. (Whole-model tiers `full`/`sequential` subsume the per-component names; auto tiers annotate `(auto-fit)`/`(auto-allocate)`.)
+- **cache column**: its own column (separate from budget) showing the cache method used (`none` / `easycache` / `taylorseer` / …); runs differing only in cache method stay distinct rows.
 - Task-specific quality columns are routed automatically: t2i = CLIP/aesthetic/IR; editing = directional CLIP + preservation SSIM/LPIPS; video = per-frame + temporal consistency.
 - The `metrics` three toggles control table output: `speed:false` hides time columns, `vram:false` hides VRAM columns, `quality:false` hides quality columns and actually skips the quality computation (see `jobs/README.md`).
 

@@ -915,8 +915,8 @@ def main(argv: list[str] | None = None) -> int:
             n_threads=args.n_threads,
             max_vram_gb=args.max_vram_gb,
             offload_params_to_cpu=args.offload_params_to_cpu or None,
-            keep_text_encoder_on_cpu=args.keep_text_encoder_on_cpu or None,
-            keep_vae_on_cpu=args.keep_vae_on_cpu or None,
+            text_encoder_offload=args.keep_text_encoder_on_cpu or None,
+            vae_offload=args.keep_vae_on_cpu or None,
             skip_t5=args.skip_t5 or None,
         )
         job_ttl_seconds = None if args.job_ttl_seconds < 0 else args.job_ttl_seconds

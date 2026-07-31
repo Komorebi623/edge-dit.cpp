@@ -47,6 +47,7 @@ class EdLora(ctypes.Structure):
 class EdTilingParams(ctypes.Structure):
     _fields_ = [
         ("enabled", c_bool),
+        ("force_disable", c_bool),
         ("tile_size_x", c_int),
         ("tile_size_y", c_int),
         ("target_overlap", c_float),
@@ -74,9 +75,15 @@ class EdContextParams(ctypes.Structure):
         ("tensor_type_rules", c_char_p),
         ("use_mmap", c_bool),
         ("offload_params_to_cpu", c_bool),
-        ("keep_text_encoder_on_cpu", c_bool),
+        ("dit_offload", c_bool),
+        ("text_encoder_offload", c_bool),
+        ("auto_allocate", c_bool),
+        ("auto_fit", c_bool),
+        ("fit_width", c_int),
+        ("fit_height", c_int),
+        ("fit_frames", c_int),
         ("keep_control_net_on_cpu", c_bool),
-        ("keep_vae_on_cpu", c_bool),
+        ("vae_offload", c_bool),
         ("skip_t5", c_bool),
         ("flash_attention", c_bool),
         ("qwen_image_zero_cond_t", c_bool),
@@ -116,6 +123,8 @@ class EdSampleParams(ctypes.Structure):
         ("cache_taylorseer_skip_interval", c_int),
         ("cache_scm_mask", c_char_p),
         ("cache_scm_policy_dynamic", c_bool),
+        ("cache_calibrate_path", c_char_p),
+        ("cache_profile_path", c_char_p),
     ]
 
 

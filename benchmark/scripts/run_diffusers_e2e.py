@@ -72,6 +72,12 @@ def main() -> int:
         "(needed for large edit/video models on 24G cards).",
     )
     parser.add_argument(
+        "--sequential-offload",
+        action="store_true",
+        help="Use accelerate sequential CPU offload (per-submodule, more aggressive and "
+        "slower than --offload; lowest VRAM). Takes precedence over --offload.",
+    )
+    parser.add_argument(
         "--vae-tiling",
         action="store_true",
         help="Enable VAE tiling to cut the VAE decode memory peak.",
@@ -115,7 +121,9 @@ def main() -> int:
         from_pretrained_kwargs["tokenizer_3"] = None
     pipe = pipeline_cls.from_pretrained(args.model, **from_pretrained_kwargs)
     quant_summary = apply_quantization(args, pipe)
-    if args.offload and device == "cuda":
+    if args.sequential_offload and device == "cuda":
+        pipe.enable_sequential_cpu_offload()
+    elif args.offload and device == "cuda":
         pipe.enable_model_cpu_offload()
     else:
         pipe = pipe.to(device)

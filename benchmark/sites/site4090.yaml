@@ -20,7 +20,7 @@ paths:
   qwen_image_lightning_weights: /home/public/models/distilled/qwen-image-lightning-merged/transformer/diffusion_pytorch_model.safetensors.index.json
   qwen_image_edit_lightning_weights: /home/public/models/distilled/qwen-image-edit-lightning-merged/dit/diffusion_pytorch_model.safetensors.index.json
   wan21_t2v_distill_weights: /home/public/models/distilled/wan21-t2v-1.3b-distill/Wan2.1-T2V-1.3B-Distill-iter6000.safetensors
-  edit_input_image: /home/zhangyichen/work/edge-dit.cpp/assets/logo.png
+  edit_input_image: /home/zhangyichen/work/edge-dit.cpp/benchmark/assets/edit_input.png
   stable_diffusion_cpp_repo: /home/zhangyichen/work/stable-diffusion.cpp
   stable_diffusion_cpp_cli: /home/zhangyichen/work/stable-diffusion.cpp/build-cuda/bin/sd-cli
 notes:

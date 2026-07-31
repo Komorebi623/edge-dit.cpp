@@ -1,30 +1,72 @@
-# text-to-image benchmark manifest: cross-system compare (base + quant + offload + distilled)
-# New schema: model lives inside each system section (per-section model x quant x offload).
-# single 24G budget: only baseline FP16/bf16 tiers get offload so large models can run.
-# smoke test: temporarily set prompts to 1 for a quick table.
+# text-to-image benchmark manifest: cross-system compare.
+# Per model: fp16/bf16 baseline (large models offload+max_vram since bare fp16 OOMs on 24G),
+# q8/q4_k resident, edge-only offload/auto tiers, then bare sentinels that are expected to OOM.
+# Rows are grouped by model within each system. Distilled: diffusers/sd.cpp run only
+# full-directory distills; transformer-only ones are edge-only (see CAPABILITIES.md).
 name: t2i
 task: text-to-image
 prompts: 3
-device: 0                          # lock this job to GPU 0
+device: 0
 
 edge-dit:                             # weight-only, via precision
-  model: [sd3-medium, flux-dev, qwen-image, flux-schnell, sd35-medium-turbo, qwen-image-lightning]
+  model: [sd3-medium, sd35-medium-turbo]              # small models: fp16 resident
   quant:
     - fp16
-    - {type: fp16, offload: full}     # baseline A: full offload
-    - {type: fp16, offload: te-cpu}   # baseline B: text encoder on CPU only (edge-only)
     - q8
     - q4_k
-diffusers:                            # Optimum-Quanto, via quant_weights
-  model: [sd3-medium, flux-dev, qwen-image, flux-schnell, sd35-medium-turbo, qwen-image-lightning]
+    - {model: flux-dev,             type: fp16, offload: full, max_vram: 20}
+    - {model: flux-dev,             type: fp16, offload: te-cpu, max_vram: 20}
+    - {model: flux-dev,             type: q8}
+    - {model: flux-dev,             type: q4_k}
+    - {model: flux-dev,             type: fp16}                                  # sentinel: expected OOM
+    - {model: flux-schnell,         type: fp16, offload: full, max_vram: 20}
+    - {model: flux-schnell,         type: fp16, offload: te-cpu, max_vram: 20}
+    - {model: flux-schnell,         type: q8}
+    - {model: flux-schnell,         type: q4_k}
+    - {model: flux-schnell,         type: fp16}                                  # sentinel: expected OOM
+    - {model: qwen-image,           type: fp16, offload: full, max_vram: 20}
+    - {model: qwen-image,           type: fp16, offload: te-cpu, max_vram: 20}
+    - {model: qwen-image,           type: q4_k}
+    - {model: qwen-image,           offload: auto-fit, max_vram: 20}
+    - {model: qwen-image,           type: q8, offload: auto-allocate, max_vram: 20}
+    - {model: qwen-image,           type: fp16}                                  # sentinel: expected OOM
+    - {model: qwen-image,           type: q8}                                    # sentinel: expected OOM
+    - {model: qwen-image-lightning, type: fp16, offload: full, max_vram: 20}
+    - {model: qwen-image-lightning, type: fp16, offload: te-cpu, max_vram: 20}
+    - {model: qwen-image-lightning, type: q4_k}
+    - {model: qwen-image-lightning, offload: auto-fit, max_vram: 20}
+    - {model: qwen-image-lightning, type: fp16}                                  # sentinel: expected OOM
+    - {model: qwen-image-lightning, type: q8}                                    # sentinel: expected OOM
+diffusers:                            # Optimum-Quanto; baseline bf16. Only full-directory models.
+  model: [sd3-medium, sd35-medium-turbo, flux-schnell]
   quant:
     - bf16
-    - {type: bf16, offload: full}     # baseline: full offload (diffusers has no te-cpu)
     - fp8
+    - {model: flux-dev,   type: bf16, offload: full}
+    - {model: flux-dev,   type: bf16, offload: sequential}
+    - {model: flux-dev,   type: fp8}
+    - {model: flux-dev,   type: bf16}                                            # sentinel: expected OOM
+    - {model: qwen-image, type: bf16, offload: sequential}
+    - {model: qwen-image, type: fp8}
+    - {model: qwen-image, type: bf16}                                            # sentinel: expected OOM
 stable-diffusion.cpp:                 # native baseline
-  model: [sd3-medium, flux-dev, qwen-image, flux-schnell, sd35-medium-turbo, qwen-image-lightning]
+  # sd35-medium-turbo excluded: sd.cpp needs a pre-converted SD3 transformer (like
+  # sd3-medium's), not prepared for turbo -> "get sd version failed" (see CAPABILITIES.md).
+  model: [sd3-medium]                                 # small: fp16 resident
   quant:
     - fp16
-    - {type: fp16, offload: full}     # baseline: full offload (sd.cpp has no te-cpu)
     - q8
     - q4_k
+    - {model: flux-dev,     type: fp16, offload: full, max_vram: 20}
+    - {model: flux-dev,     type: q8}
+    - {model: flux-dev,     type: q4_k}
+    - {model: flux-dev,     type: fp16}                                          # sentinel: expected OOM
+    - {model: flux-schnell, type: fp16, offload: full, max_vram: 20}
+    - {model: flux-schnell, type: q8}
+    - {model: flux-schnell, type: q4_k}
+    - {model: flux-schnell, type: fp16}                                          # sentinel: expected OOM
+    - {model: qwen-image,   type: fp16, offload: full, max_vram: 20}
+    - {model: qwen-image,   type: q8, offload: full, max_vram: 20}
+    - {model: qwen-image,   type: q4_k}
+    - {model: qwen-image,   type: fp16}                                          # sentinel: expected OOM
+    - {model: qwen-image,   type: q8}                                            # sentinel: expected OOM

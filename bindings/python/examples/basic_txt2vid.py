@@ -75,8 +75,8 @@ def build_engine_config(args: argparse.Namespace) -> EngineConfig:
         weight_type=args.weight_type,
         tensor_type_rules=args.tensor_type_rules,
         offload_params_to_cpu=args.offload_to_cpu or None,
-        keep_text_encoder_on_cpu=args.keep_text_encoder_on_cpu or None,
-        keep_vae_on_cpu=args.keep_vae_on_cpu or None,
+        text_encoder_offload=args.keep_text_encoder_on_cpu or None,
+        vae_offload=args.keep_vae_on_cpu or None,
         flash_attention=args.flash_attention,
         max_vram_gb=args.max_vram,
     )

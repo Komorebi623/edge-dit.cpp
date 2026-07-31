@@ -24,6 +24,111 @@ from benchmark.engine.measurement.process_monitor import process_tree_rss_mib
 from benchmark.engine.measurement.timer import summarize_ms
 
 
+# Common out-of-memory signatures across edge-dit / diffusers / sd.cpp backends.
+_OOM_MARKERS = (
+    "out of memory",
+    "cudaMalloc",
+    "alloc params backend buffer failed",
+    "failed to allocate",
+    "CUDA error: out of memory",
+    "torch.cuda.OutOfMemoryError",
+)
+
+# Substrings that mark a stderr line as the likely failure cause. Real backend
+# errors rarely contain the literal word "error" — sd.cpp/ggml say "failed",
+# "out of memory", "wrong shape"; Python raises "Traceback"/"...Error". Matching
+# only "error" (the old behavior) missed all of these and fell through to the
+# last line, which is the wrapper separator (see _is_separator).
+#
+# Keep these markers specific to genuine failures. Bare "missing"/"mismatch"
+# were removed because normal INFO diagnostics report them with a zero count
+# (e.g. "spec declared 776 tensors; missing=0 shape_mismatch=0 unexpected=0"),
+# which is a success line, not a failure cause.
+_ERROR_MARKERS = (
+    "error",
+    "failed",
+    "failure",
+    "abort",
+    "assert",
+    "exception",
+    "traceback",
+    "invalid",
+    "not implemented",
+    "out of memory",
+    "cudamalloc",
+    "wrong shape",
+    "no such file",
+)
+
+
+def _is_separator(line: str) -> bool:
+    """True for the e2e wrappers' "===== benchmark N =====" section markers.
+
+    These are flushed to stderr last, so a naive lines[-1] returns the separator
+    instead of the actual failure line. Excluded from cause detection.
+    """
+    return line.startswith("=====") and "benchmark" in line.lower()
+
+
+def _is_log_line(line: str) -> bool:
+    """True for INFO/DEBUG diagnostic lines from the native logger.
+
+    edge-dit's logger prefixes a level tag, e.g.
+    "...flux_pipeline.cpp:531 [info] flux transformer spec declared 776 tensors;
+    missing=0 shape_mismatch=0 unexpected=0". These are normal progress output,
+    not failure causes, so they must not be picked as the error line even when
+    they happen to contain an _ERROR_MARKER substring. Genuine failures are
+    logged at "[error]" (or come from Python tracebacks / sd.cpp), which are not
+    excluded here.
+    """
+    low = line.lower()
+    return "[info]" in low or "[debug]" in low or "[warn]" in low
+
+
+def summarize_stderr(stderr_path: Path, returncode: int) -> str:
+    """Turn a failed run's stderr into a one-line, human-readable cause.
+
+    result.json/status.json otherwise just say "benchmark process failed", which
+    hides whether it was an OOM, a missing file, or a real crash. Pull the last
+    error line (and flag OOM explicitly) so the failure is legible without opening
+    stderr.log.
+    """
+    try:
+        text = stderr_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return f"process failed (exit {returncode}); stderr unavailable"
+    lines = [
+        ln.strip()
+        for ln in text.splitlines()
+        if ln.strip() and not _is_separator(ln.strip())
+    ]
+    if not lines:
+        return f"process failed (exit {returncode}); stderr empty"
+    is_oom = any(m.lower() in text.lower() for m in _OOM_MARKERS)
+    if is_oom:
+        # OOM: pull the last line that names the allocation failure itself (the
+        # cudaMalloc / "failed to allocate" line with the size and component), not
+        # the generic "generate_image failed" tail that follows it.
+        oom_lines = [
+            ln for ln in lines if any(m.lower() in ln.lower() for m in _OOM_MARKERS)
+        ]
+        tail = (oom_lines[-1] if oom_lines else lines[-1])[:300]
+        return f"OOM: {tail} (exit {returncode})"
+    # Non-OOM: prefer the last line that looks like an error, but never attribute
+    # the failure to an INFO/DEBUG diagnostic — those are normal log output (e.g.
+    # a "[info] ... missing=0" tensor-spec report), not the cause. If no genuine
+    # error line exists, say so explicitly rather than mislabeling a log line: a
+    # nonzero exit with clean stderr is usually a teardown-stage exit code.
+    error_lines = [
+        ln
+        for ln in lines
+        if any(m in ln.lower() for m in _ERROR_MARKERS) and not _is_log_line(ln)
+    ]
+    if error_lines:
+        return f"{error_lines[-1][:300]} (exit {returncode})"
+    return f"process exited {returncode} with no error line in stderr (likely teardown-stage exit code)"
+
+
 @dataclass
 class PreflightResult:
     system_id: str
@@ -299,7 +404,9 @@ class BenchmarkRunner:
                 runs.append(run)
                 if run["returncode"] != 0:
                     status = "failed"
-                    error_message = "benchmark process failed"
+                    error_message = summarize_stderr(
+                        stderr_path, run["returncode"]
+                    )
         except NotImplementedError as exc:
             status = "unsupported"
             error_message = str(exc)
@@ -378,6 +485,7 @@ class BenchmarkRunner:
             peak_host,
             component_vram_mib,
             component_weight_bytes if isinstance(component_weight_bytes, dict) else None,
+            error=error_message,
         )
         measurement_boundary = (
             runner_metrics.get("measurement_boundary")
@@ -471,6 +579,7 @@ class BenchmarkRunner:
             {},
             None,
             None,
+            error="; ".join(reason) if reason else None,
         )
         (output_dir / "status.json").write_text(
             json.dumps(
@@ -615,6 +724,7 @@ class BenchmarkRunner:
         peak_host_rss_mib: float | None,
         component_vram_mib: dict[str, int | None] | None = None,
         component_weight_bytes: dict[str, Any] | None = None,
+        error: str | None = None,
     ) -> dict[str, Any]:
         component_vram_mib = component_vram_mib or {
             "text_encoder": None,
@@ -624,6 +734,7 @@ class BenchmarkRunner:
         return {
             "run_id": run_id,
             "status": status,
+            "error": error,
             "system": self.system_id,
             "workload": workload["workload_id"],
             "model": workload["model_name"],

@@ -233,6 +233,8 @@ bool ModelRuntime::init_flags(const ed_context_params_t& params, std::string* er
     use_mmap_ = params.use_mmap;
     offload_params_to_cpu_ = params.offload_params_to_cpu;
     text_encoder_offload_ = params.text_encoder_offload;
+    dit_offload_ = params.dit_offload;
+    vae_offload_ = params.vae_offload;
     auto_fit_ = params.auto_fit;
     // auto-fit is a superset of auto-allocate: it decides quantization AND placement, and
     // the placement path (plan_component_offload) is gated on auto_allocate_. So enabling
@@ -280,25 +282,13 @@ bool ModelRuntime::init_backends(const ed_context_params_t& params, std::string*
     }
     LOG_INFO("default backend: %s", ggml_backend_name(backends_.backend));
 
+    // Text encoder and VAE no longer run on a dedicated CPU backend. When their
+    // offload flags are set they keep weights on CPU but stage to the GPU per
+    // encode/decode (compute on GPU), handled by the GGMLRunner offload path via
+    // the offload bool passed to each component's constructor. So both share the
+    // default (GPU) backend here.
     backends_.clip_backend = backends_.backend;
-    if (params.keep_text_encoder_on_cpu && !ggml_backend_is_cpu(backends_.backend)) {
-        backends_.clip_backend = ggml_backend_cpu_init();
-        if (backends_.clip_backend == nullptr) {
-            return fail(error, "failed to initialize CPU backend for text encoder");
-        }
-        backends_.clip_owns_backend = true;
-        LOG_INFO("text encoder backend: CPU");
-    }
-
     backends_.vae_backend = backends_.backend;
-    if (params.keep_vae_on_cpu && !ggml_backend_is_cpu(backends_.backend)) {
-        backends_.vae_backend = ggml_backend_cpu_init();
-        if (backends_.vae_backend == nullptr) {
-            return fail(error, "failed to initialize CPU backend for VAE");
-        }
-        backends_.vae_owns_backend = true;
-        LOG_INFO("VAE backend: CPU");
-    }
 
     backends_.control_net_backend = backends_.backend;
     if (params.keep_control_net_on_cpu && !ggml_backend_is_cpu(backends_.backend)) {
@@ -317,7 +307,8 @@ bool ModelRuntime::init_backends(const ed_context_params_t& params, std::string*
     // offload_all_params() copies every weight back to the GPU at once, which OOMs
     // for large DiTs (e.g. FLUX ~22.7GB on a 24GB card). Segment the compute graph
     // against most of the device's free VRAM instead of failing.
-    if ((offload_params_to_cpu_ || text_encoder_offload_) && max_graph_vram_bytes_ == 0 &&
+    if ((offload_params_to_cpu_ || text_encoder_offload_ || dit_offload_ || vae_offload_) &&
+        max_graph_vram_bytes_ == 0 &&
         backends_.backend != nullptr && !ggml_backend_is_cpu(backends_.backend)) {
         ggml_backend_dev_t dev = ggml_backend_get_device(backends_.backend);
         if (dev != nullptr) {
@@ -639,6 +630,8 @@ void ModelRuntime::reset() {
     use_mmap_ = false;
     offload_params_to_cpu_ = false;
     text_encoder_offload_ = false;
+    dit_offload_ = false;
+    vae_offload_ = false;
     free_params_immediately_ = false;
     max_vram_ = 0.0f;
     max_graph_vram_bytes_ = 0;
