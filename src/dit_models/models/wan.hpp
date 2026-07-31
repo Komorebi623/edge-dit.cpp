@@ -3321,8 +3321,15 @@ namespace WAN {
             // to both encode (img2img/edit input encoding, ~13s otherwise) and decode. The conv3d
             // use_direct gate (ggml_extend.hpp) guards on kernel 3x3x3 / in_channels>=64 /
             // spatial>=128 / w f16, so early small convs fall back automatically.
-            runner_ctx.conv2d_direct_enabled      = true;
-            runner_ctx.conv3d_auto_direct_enabled = true;
+            //
+            // Vulkan is exempt: ggml-vulkan has NO GGML_OP_CONV_3D support, so the direct path
+            // emits an op the backend silently skips (single-backend compute, no fallback) ->
+            // uninitialized output -> corrupted VAE decode. The non-direct ggml_conv_3d
+            // (im2col_3d + mul_mat, both Vulkan-supported) is correct there.
+            if (!sd_backend_is(runner_ctx.backend, "Vulkan")) {
+                runner_ctx.conv2d_direct_enabled      = true;
+                runner_ctx.conv3d_auto_direct_enabled = true;
+            }
 #endif
 
             ggml_tensor* out = decode_graph ? ae.decode(&runner_ctx, z) : ae.encode(&runner_ctx, z);
