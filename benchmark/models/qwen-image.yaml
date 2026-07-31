@@ -12,7 +12,7 @@ prompt_set: ../prompts/text-to-image-v1.jsonl
 generation:                            # defaults; job can override
   width: 1024
   height: 1024
-  steps: 20
-  guidance: 4.0
+  steps: 30                            # Qwen-Image official recommends 30-50
+  guidance: 1.0                        # Qwen-Image: guidance_scale=1.0 (official); true CFG is cfg_scale
   cfg_scale: 4.0                        # Qwen-Image uses CFG (two forward passes)
   scheduler: model-default

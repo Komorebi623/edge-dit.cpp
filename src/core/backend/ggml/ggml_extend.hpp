@@ -1168,7 +1168,7 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_pad(ggml_context* ctx,
     return ggml_ext_pad_ext(ctx, x, 0, p0, 0, p1, 0, p2, 0, p3, circular_x, circular_y);
 }
 
-// w: [OC，IC, KH, KW]
+// w: [OC, IC, KH, KW]
 // x: [N, IC, IH, IW]
 // b: [OC,]
 // result: [N, OC, OH, OW]
@@ -1227,7 +1227,7 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_conv_2d(ggml_context* ctx,
     return x;
 }
 
-// w: [OC，IC, KD, 1 * 1]
+// w: [OC, IC, KD, 1 * 1]
 // x: [N, IC, IH, IW]
 // b: [OC,]
 // result: [N*OC, OD, OH, OW]
@@ -1279,7 +1279,7 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_conv_3d(ggml_context* ctx,
     return x;
 }
 
-// w: [OC，IC, KD, 1 * 1]
+// w: [OC, IC, KD, 1 * 1]
 // x: [N, IC, ID, IH*IW]
 // b: [OC,]
 // result: [N, OC, OD, OH*OW]

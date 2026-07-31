@@ -512,11 +512,11 @@ struct FluxCliArgs {
     int vae_tiling = -1;  // -1=auto(low-VRAM auto-enable), 0=force off, 1=force on
     float vae_tile_size = 0.0f;
     bool offload_to_cpu = false;
-    bool keep_text_encoder_on_cpu = false;
     bool text_encoder_offload = false;
+    bool dit_offload = false;
     bool auto_allocate = false;
     bool auto_fit = false;
-    bool keep_vae_on_cpu = false;
+    bool vae_offload = false;
     float max_vram = 0.0f;
 
     // --- batch / timing extension (used by ed-sample, ignored by ed-cli) ---
@@ -762,16 +762,16 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->vae_tile_size = parse_float_value(v, 0.0f);
         } else if (std::strcmp(key, "--offload-to-cpu") == 0) {
             args->offload_to_cpu = true;
-        } else if (std::strcmp(key, "--keep-text-encoder-on-cpu") == 0) {
-            args->keep_text_encoder_on_cpu = true;
         } else if (std::strcmp(key, "--text-encoder-offload") == 0) {
             args->text_encoder_offload = true;
+        } else if (std::strcmp(key, "--dit-offload") == 0) {
+            args->dit_offload = true;
         } else if (std::strcmp(key, "--auto-allocate") == 0) {
             args->auto_allocate = true;
         } else if (std::strcmp(key, "--auto-fit") == 0) {
             args->auto_fit = true;
-        } else if (std::strcmp(key, "--keep-vae-on-cpu") == 0) {
-            args->keep_vae_on_cpu = true;
+        } else if (std::strcmp(key, "--vae-offload") == 0) {
+            args->vae_offload = true;
         } else if (std::strcmp(key, "--max-vram") == 0) {
             const char* v = require_value(key);
             if (!v) return false;

@@ -322,7 +322,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
             "model_path": model_path,
             "backend": os.environ.get("EDGE_DIT_BACKEND", "cuda"),
             "offload_params_to_cpu": True,
-            "keep_text_encoder_on_cpu": True,
+            "text_encoder_offload": True,
             "max_vram_gb": float(os.environ.get("EDGE_DIT_MAX_VRAM_GB", "8.0")),
         }
         for key, value in (engine_overrides or {}).items():
@@ -448,7 +448,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 model_default="",
                 timeout_env="EDGE_DIT_SERVER_V2_QWEN_IMAGE_TIMEOUT_SECONDS",
                 default_timeout_seconds=900.0,
-                engine_overrides={"weight_type": "q4_k", "keep_vae_on_cpu": True},
+                engine_overrides={"weight_type": "q4_k", "vae_offload": True},
                 request_builder=_build_qwen_image_request,
             ),
             ServerV2MatrixScenario(
@@ -460,7 +460,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 model_default="",
                 timeout_env="EDGE_DIT_SERVER_V2_QWEN_IMAGE_EDIT_TIMEOUT_SECONDS",
                 default_timeout_seconds=900.0,
-                engine_overrides={"weight_type": "q4_k", "keep_vae_on_cpu": True},
+                engine_overrides={"weight_type": "q4_k", "vae_offload": True},
                 request_builder=_build_qwen_image_edit_request,
             ),
             ServerV2MatrixScenario(
@@ -473,7 +473,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 timeout_env="EDGE_DIT_SERVER_V2_FLUX_KONTEXT_TIMEOUT_SECONDS",
                 default_timeout_seconds=900.0,
                 engine_overrides={
-                    "keep_vae_on_cpu": True
+                    "vae_offload": True
                     if os.environ.get("EDGE_DIT_FLUX_KONTEXT_KEEP_VAE_ON_CPU") == "1"
                     else None,
                     "weight_type": os.environ.get("EDGE_DIT_FLUX_KONTEXT_WEIGHT_TYPE"),
@@ -489,7 +489,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
                 model_default="",
                 timeout_env="EDGE_DIT_SERVER_V2_VIDEO_TIMEOUT_SECONDS",
                 default_timeout_seconds=900.0,
-                engine_overrides={"keep_vae_on_cpu": True},
+                engine_overrides={"vae_offload": True},
                 request_builder=_build_wan_video_request,
             ),
         ]
@@ -720,7 +720,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
 
         self._start_server(
             model_path=model_path,
-            engine_overrides={"keep_vae_on_cpu": True, "weight_type": "q4_k"},
+            engine_overrides={"vae_offload": True, "weight_type": "q4_k"},
         )
 
         output_path = Path(
@@ -797,7 +797,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
         self._start_server(
             model_path=model_path,
             engine_overrides={
-                "keep_vae_on_cpu": True
+                "vae_offload": True
                 if os.environ.get("EDGE_DIT_FLUX_KONTEXT_KEEP_VAE_ON_CPU") == "1"
                 else None,
                 "weight_type": os.environ.get("EDGE_DIT_FLUX_KONTEXT_WEIGHT_TYPE"),
@@ -873,7 +873,7 @@ class OptionalRealServerV2SmokeTests(unittest.TestCase):
             _DEFAULT_WAN_VIDEO_MODEL_PATH,
         )
 
-        self._start_server(model_path=video_model_path, engine_overrides={"keep_vae_on_cpu": True})
+        self._start_server(model_path=video_model_path, engine_overrides={"vae_offload": True})
 
         output_path = Path(
             os.environ.get(

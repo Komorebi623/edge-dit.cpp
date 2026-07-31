@@ -8,8 +8,8 @@
     "model_path": "/path/to/Wan2.1-T2V-1.3B-Diffusers",
     "backend": "cuda",
     "offload_params_to_cpu": true,
-    "keep_text_encoder_on_cpu": true,
-    "keep_vae_on_cpu": true,
+    "text_encoder_offload": true,
+    "vae_offload": true,
     "max_vram_gb": 8.0
   },
   "request_example": {

@@ -263,7 +263,7 @@ Full-weight distilled directory (auto step count):
   --backend cuda --type q8_0 \
   --model /path/to/sd3.5-medium-turbo \
   --steps -1 \
-  --auto-allocate --vae-tiling \
+  --auto-allocate --vae-tiling auto \
   --prompt "a glass teapot on a wooden table" \
   --output turbo.png
 ```
@@ -277,7 +277,7 @@ Distilled DiT weights combined with a base model's VAE and text encoders via
   --model /path/to/qwen-image \
   --diffusion-model /path/to/qwen-image-lightning/transformer/diffusion_pytorch_model.safetensors.index.json \
   --steps -1 --cfg-scale 1.0 \
-  --auto-allocate --vae-tiling \
+  --auto-allocate --vae-tiling auto \
   --prompt "a red apple on a wooden table" \
   --output lightning.png
 ```
@@ -314,13 +314,25 @@ Per-tensor type rules:
 Memory-oriented flags:
 
 ```text
---vae-tiling
+--vae-tiling on|off|auto
 --vae-tile-size <float>
 --offload-to-cpu
---keep-text-encoder-on-cpu
---keep-vae-on-cpu
+--dit-offload
+--text-encoder-offload
+--vae-offload
 --max-vram <GB>
+--auto-allocate
 ```
+
+`--vae-tiling` is tri-state `on|off|auto` and defaults to `auto`, which enables
+tiled VAE decode automatically on low-VRAM GPUs (<=25 GB); pass `off` to force
+it off. The offload flags share one semantics — **weights kept on CPU and staged
+to the GPU per compute** (compute always runs on the GPU): `--offload-to-cpu`
+offloads the whole model, while `--dit-offload` / `--text-encoder-offload` /
+`--vae-offload` offload just that one component. `--auto-allocate` places each
+component (DiT, text encoder, VAE) under a hard VRAM cap of `min(--max-vram,
+free)`, keeping a component resident when it fits and offloading (staging) it
+otherwise.
 
 These options are workload dependent. Validate output quality and latency for
 the exact model and resolution you plan to run.
@@ -356,11 +368,11 @@ back to a conservative fixed headroom.
   --output flux-autofit.png
 ```
 
-The largest win is a big DiT under a mid-size budget: at 16/24 GiB, Qwen-Image's
-~20 GiB transformer is kept resident at `q4_k` instead of being offloaded,
-making DiT sampling roughly 3x faster. Validated across FLUX / Kontext / SD3 /
-Qwen-Image / Qwen-Image-Edit / Wan at 24/16/8 GiB on an RTX 4090. See
-[consumer-GPU benchmarks](consumer-gpu-benchmarks.md).
+The largest win is a big DiT under a mid-size budget: for a model like
+Qwen-Image (~20 GiB transformer), a mid-size budget can keep the DiT resident at
+`q4_k` instead of offloading it, so DiT sampling avoids the per-step host-to-GPU
+streaming cost. The benefit is largest exactly when a higher precision would not
+fit resident but `q4_k` does.
 
 ### Pre-quantized GGUF with `ed-convert`
 

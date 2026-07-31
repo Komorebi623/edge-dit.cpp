@@ -3,7 +3,7 @@
     "model_path": "${EDGE_DIT_MODEL_PATH}",
     "backend": "cuda",
     "offload_params_to_cpu": true,
-    "keep_text_encoder_on_cpu": true,
+    "text_encoder_offload": true,
     "max_vram_gb": 8.0,
     "skip_t5": true
   },

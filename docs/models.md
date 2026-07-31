@@ -43,9 +43,14 @@ for both forms.
 Each supported family has step-distilled variants (FLUX.1-schnell, SD3.5-Turbo,
 Qwen-Image-Lightning, Wan distill, …) that generate in 4–8 steps instead of 20+.
 They load through the same pipeline as the base model; the runtime auto-detects
-them and applies a few-step default when `--steps` is unset. Full-weight
-distilled checkpoints load directly (`--model` or `--diffusion-model`);
-LoRA-form distills must be merged into the base weights offline first. See
+them and applies a few-step default when `--steps` is unset. Most distilled
+checkpoints (FLUX.1-schnell, FLUX.1-Kontext Lightning, SD3.5-Turbo, Wan distill)
+ship as full weights and load directly via `--model` or `--diffusion-model`.
+**The two Qwen-Image ones (Qwen-Image-Lightning and Qwen-Image-Edit-Lightning)
+are published as LoRA adapters and must be merged into the base weights offline
+first** with `scripts/merge_qwen_lora.py` — see
+[Merging LoRA weights](optimization/merging-lora-weights.md). For step defaults
+and the auto-detection rule, see
 [Few-step distilled models](optimization/few-step-distilled-models.md).
 
 ## Text-to-Image
@@ -78,6 +83,10 @@ Command example: [SD3 / SD3.5 CLI](cli.md#sd3-sd35).
 Qwen-Image text-to-image support uses Diffusers-style directories or component
 weights.
 
+Its few-step **Qwen-Image-Lightning** variant ships as a LoRA adapter, so merge
+it into the base weights first (`scripts/merge_qwen_lora.py`); see
+[Merging LoRA weights](optimization/merging-lora-weights.md).
+
 Command example: [Qwen-Image CLI](cli.md#qwen-image).
 
 ## Image Editing
@@ -93,6 +102,10 @@ Command example: [FLUX.1-Kontext CLI](cli.md#flux1-kontext).
 ### Qwen-Image-Edit
 
 Qwen-Image-Edit uses an input/reference image via `--image`.
+
+Its few-step **Qwen-Image-Edit-Lightning** variant ships as a LoRA adapter, so
+merge it into the base weights first (`scripts/merge_qwen_lora.py`); see
+[Merging LoRA weights](optimization/merging-lora-weights.md).
 
 For Qwen-Image-Edit-2511, use:
 
@@ -139,13 +152,25 @@ Per-tensor overrides are available with:
 Memory-oriented options:
 
 ```bash
---vae-tiling
+--vae-tiling on|off|auto
 --vae-tile-size <float>
 --offload-to-cpu
---keep-text-encoder-on-cpu
---keep-vae-on-cpu
+--dit-offload
+--text-encoder-offload
+--vae-offload
+--auto-allocate
+--auto-fit
 --max-vram <GB>
 ```
+
+`--vae-tiling` takes an explicit `on|off|auto` value. Under `--auto-allocate`
+with a `--max-vram` budget, the runtime decides per component (diffusion
+transformer, text encoder, VAE) what stays resident on the GPU and what streams
+from host memory, so large models can run within a fixed VRAM budget.
+`--auto-fit` goes one step further — a superset of `--auto-allocate` that also
+picks the quantization to fit the budget (text encoders forced to `q8_0`, the
+diffusion transformer walking a `q8_0 → q4_K` ladder), ignoring `--type`; use it
+to fit a hard VRAM cap without hand-tuning quantization and placement.
 
 See [Command line usage](cli.md#quantization-and-memory) for runnable examples
 and [Performance and optimization](performance.md) for cache, parallelism, and

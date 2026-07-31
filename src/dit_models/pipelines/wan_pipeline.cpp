@@ -320,10 +320,12 @@ bool WanPipeline::build_components(const ModelLoader& loader, std::string* error
 
     const size_t eff_budget = runtime_->effective_budget_bytes();
     size_t remaining_free = eff_budget;
-    const bool diffusion_offload = runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
+    const bool diffusion_offload = runtime_->dit_offload_params_to_cpu() ||
+                                   runtime_->plan_component_offload(loader, "model.diffusion_model", remaining_free);
     const bool te_offload = runtime_->clip_offload_params_to_cpu() ||
                             runtime_->plan_component_offload(loader, "text_encoders", remaining_free);
-    const bool vae_offload = runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
+    const bool vae_offload = runtime_->vae_offload_params_to_cpu() ||
+                             runtime_->plan_component_offload(loader, "first_stage_model", remaining_free);
     runtime_->finalize_auto_segment_budget(eff_budget);
 
     conditioner_ = std::make_shared<T5CLIPEmbedder>(runtime_->clip_backend(),

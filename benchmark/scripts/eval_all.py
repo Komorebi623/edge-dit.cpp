@@ -154,6 +154,10 @@ class RunView:
         self.precision = precision_of(ro)
         self.budget = budget_of(ro)
         self.prompt_id = ro.get("prompt_id", "")
+        # cache method (if any) on this run. A cached run alters the image, so it can
+        # NOT serve as a quantization baseline even at fp16/bf16.
+        _cache = ro.get("cache")
+        self.cache = str(_cache) if _cache and _cache not in ("none", "off", False) else "none"
         self.prompt = true_prompt(cfg) or ""
         self.input_image_ref = wl.get("input_image_ref")
         subdir, prefix, exts = image_dir_and_prefix(self.system, self.task)
@@ -167,9 +171,6 @@ class RunView:
             return None
         d = self.dir / "samples" / self.image_subdir
         return d if d.is_dir() else None
-
-    def is_fp16_baseline(self) -> bool:
-        return self.precision in ("bf16", "f16", "fp16") and self.budget == "full"
 
 
 def discover_runs(root: Path) -> List[RunView]:
@@ -538,16 +539,17 @@ def _baseline_rank(budget: str) -> int:
 
 
 def find_baseline(quant: RunView, runs: List[RunView]) -> Optional[RunView]:
-    """Same system + workload + prompt_id FP16/bf16 baseline. Picks the least
-    VRAM-saving FP16 run available: prefer un-offloaded (budget 'full'); fall back
-    to an offloaded FP16 when the model OOMs un-offloaded (offload doesn't alter
-    the image, so it's a valid baseline). Requires the run to have produced an image."""
+    """Same system + workload + prompt_id FP16/bf16 baseline. Any FP16/bf16 run that
+    produced an image qualifies regardless of how it ran (offload/te-cpu/full/auto all
+    only move where weights live, not the image), EXCEPT cached runs (cache alters the
+    image). Prefers the least VRAM-saving one (un-offloaded first) when several exist."""
     candidates = [
         r for r in runs
         if r.system == quant.system
         and r.workload == quant.workload
         and r.prompt_id == quant.prompt_id
         and r.precision in ("bf16", "f16", "fp16")
+        and r.cache == "none"          # cached fp16 is not a valid baseline (image differs)
         and r.sample_dir is not None
     ]
     if not candidates:

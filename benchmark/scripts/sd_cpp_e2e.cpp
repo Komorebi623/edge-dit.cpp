@@ -33,6 +33,7 @@ struct Args {
     std::string backend;
     std::string params_backend;
     std::string max_vram = "0";
+    bool stream_layers = false;
     std::string model_args;
     std::string sample_method;
     std::string scheduler;
@@ -127,6 +128,10 @@ Args parse_args(int argc, char** argv) {
             if (args.params_backend.empty()) {
                 args.params_backend = "*=cpu";
             }
+        } else if (key == "--stream-layers") {
+            // residency+prefetch streaming on top of --max-vram; only takes effect
+            // when the diffusion params backend is cpu (i.e. with --offload-to-cpu).
+            args.stream_layers = true;
         } else if (key == "--model-args") {
             args.model_args = take_value(i, argc, argv);
         } else if (key == "--sample-method") {
@@ -417,6 +422,7 @@ int main(int argc, char** argv) {
         ctx_params.backend = args.backend.empty() ? nullptr : args.backend.c_str();
         ctx_params.params_backend = args.params_backend.empty() ? nullptr : args.params_backend.c_str();
         ctx_params.max_vram = args.max_vram.empty() ? "0" : args.max_vram.c_str();
+        ctx_params.stream_layers = args.stream_layers;
         ctx_params.model_args = args.model_args.empty() ? nullptr : args.model_args.c_str();
         ctx_params.wtype = str_to_sd_type(args.dtype.c_str());
         ctx_params.rng_type = CUDA_RNG;

@@ -273,8 +273,9 @@ Important fields include:
 - Runtime/backend:
   `backend`, `n_threads`, `weight_type`, `tensor_type_rules`, `use_mmap`
 - Memory/offload:
-  `offload_params_to_cpu`, `keep_text_encoder_on_cpu`,
-  `keep_control_net_on_cpu`, `keep_vae_on_cpu`, `max_vram_gb`
+  `offload_params_to_cpu`, `dit_offload`, `text_encoder_offload`,
+  `vae_offload`, `keep_control_net_on_cpu`, `auto_allocate`, `auto_fit`,
+  `max_vram_gb`
 - Model/runtime options:
   `skip_t5`, `flash_attention`, `vae_tiling`, `vae_tile_size`
 - Parallelism:
@@ -430,7 +431,7 @@ Useful CLI flags include:
 - `--model`
 - `--diffusion-model`, `--vae`, `--clip_l`, `--clip_g`, `--t5xxl`
 - `--backend`, `--threads`, `--max-vram`
-- `--offload-to-cpu`, `--keep-text-encoder-on-cpu`, `--keep-vae-on-cpu`
+- `--offload-to-cpu`, `--dit-offload`, `--text-encoder-offload`, `--vae-offload`, `--auto-allocate`, `--auto-fit`
 - `--skip-t5`
 - `--job-ttl-seconds`
 

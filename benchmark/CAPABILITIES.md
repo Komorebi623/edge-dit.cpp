@@ -21,7 +21,7 @@ Placed in a system section's `quant:` list. edge/sd.cpp are weight-only (via `pr
 | `fp8` | runtime | — | ✓ | — | Optimum-Quanto qfloat8 (weights + activations) |
 | `w8a8` | runtime | — | ✓ | — | Optimum-Quanto qint8 (weights + activations); crashes on SD3 |
 
-**To compare quantization across systems**: write `[fp16, q8, q4_k]` in the edge/sd.cpp sections and `[bf16, fp8, w8a8]` in the diffusers section, and one job runs all three sections together (see `jobs/example-xsys.yaml`). Quantization loss is only comparable within the same system vs its own baseline, not across systems; CLIP/aesthetic/IR absolute quality can be compared side by side.
+**To compare quantization across systems**: write `[fp16, q8, q4_k]` in the edge/sd.cpp sections and `[bf16, fp8, w8a8]` in the diffusers section, and one job runs all three sections together (see `jobs/example-cross-system.yaml`). Quantization loss is only comparable within the same system vs its own baseline, not across systems; CLIP/aesthetic/IR absolute quality can be compared side by side.
 
 ---
 
@@ -51,13 +51,22 @@ Placed in a system section's `cache:` list (scalar single tier / list to sweep).
 | attention | `flash` | runtime | ✓ | ✓ | ✓ | indirect | on by default (included in baseline); turn it off to compare |
 | attention | `cudnn-sdpa` | build-variant | ✓ | ✓ | — | — | auto-triggered at L≥4096, from the performance build |
 | attention | `sage` | build-variant | ✓ | — | — | — | SageAttention2; needs `-DED_ENABLE_CUDA_SAGE_ATTN=ON` build + `ED_SAGE_ATTN=1`; **edge-only** |
-| memory | `offload-te` | runtime | ✓ | — | — | ✓ (`offload: te-cpu` in section) | text encoder only kept on CPU; **edge-only** — diffusers/sd.cpp runners have no separate TE offload, only whole-model offload |
-| memory | `offload-full` | runtime | ✓ | ✓ | ✓ | ✓ (`offload: full` in section) | whole-model CPU offload |
-| memory | `vae-tiling` | runtime | ✓ | — | ✓ | ✓ (`vae_tiling: yes` in section) | high-resolution VAE tiling; diffusers does not list this memory_mode |
+| memory | `offload: te-cpu` | runtime | ✓ | — | — | ✓ | TE weights offloaded to CPU, **staged to GPU for compute** (not computed on CPU); **edge-only** — diffusers/sd.cpp have no per-component offload. ⚠ large TE models (e.g. FLUX T5-XXL ~9G) can OOM when staged — use `full` or set `max_vram` |
+| memory | `offload: vae-offload` | runtime | ✓ | — | — | ✓ | VAE weights offloaded to CPU, staged to GPU for compute; **edge-only**. Same large-model staging OOM caveat as `te-cpu` |
+| memory | `offload: dit-offload` | runtime | ✓ | — | — | ✓ | DiT weights offloaded to CPU, staged to GPU for compute; **edge-only** |
+| memory | `offload: full` | runtime | ✓ | ✓ | ✓ | ✓ | whole-model CPU offload (all weights on CPU, staged to GPU per compute); the only offload tier shared by all three systems |
+| memory | `offload: sequential` | runtime | — | ✓ | — | ✓ | accelerate per-submodule offload, more aggressive/slower than `full`; **diffusers-only** |
+| memory | `offload: auto-allocate` | runtime | ✓ | — | — | ✓ | engine decides resident/offload per component under the `max_vram` budget; **edge-only** |
+| memory | `offload: auto-fit` | runtime | ✓ | — | — | ✓ | superset of `auto-allocate` that also auto-picks the DiT quant (q8_0→q4_k, **ignores the quant tier**); **edge-only** |
+| memory | `vae-tiling` | runtime | ✓ | — | ✓ | ✓ (`vae_tiling: yes`) | high-resolution VAE tiling; diffusers does not list this memory_mode |
 | parallel | `cfg-parallel` | runtime (multi-GPU) | ✓ | ✓ | — | — | CFG parallelism, ~1.77× @ 2 GPUs |
 | parallel | `sequence-parallel` | runtime (multi-GPU) | ✓ | — | — | — | Ulysses sequence parallelism, up to 2.59× measured on FLUX; **edge-only** |
 
 **"job-orchestrable"**: currently `run.py` executes single-card, so the only dimensions a job section can sweep directly are **quant / cache / offload / vae_tiling**. `flash` is the on-by-default baseline (marked "indirect": to compare, turn it off via an engine-side switch); `cudnn-sdpa`/`sage` need build variants; `cfg-parallel`/`sequence-parallel` need a multi-GPU path — these three categories have no dedicated job field yet and must go through engine-side switches or the corresponding binary.
+
+**Offload semantics (unified)**: all `offload` tiers now mean "**weights kept on CPU, staged to the GPU for compute**" — there is no longer any "compute on CPU" mode. `none`/`full` work on all three systems; `te-cpu`/`vae-offload`/`dit-offload`/`auto-allocate`/`auto-fit` are edge-only; `sequential` is diffusers-only. Configuring a tier for a system that doesn't support it makes `run.py` skip that combination during expansion (prints `[run.py] skip → ...`). ⚠ **Known cost of the unified staging**: `te-cpu`/`vae-offload` on a **large text encoder (e.g. FLUX's T5-XXL ~9G) can OOM** because the whole component must fit on the GPU while it computes — for big TE models prefer `full` or pair the offload with a `max_vram` budget.
+
+**`max_vram` budget**: a job's system section and each `quant` object accept `max_vram: <GB>`, which caps the compute-graph VRAM via graph-cut segmentation (**edge-dit and sd.cpp** both honor it → `--max-vram`). When offloading without an explicit `max_vram`, the edge engine defaults to `0.85 × free VRAM` to enable segmented compute. sd.cpp additionally gets `--stream-layers` (paired with `--max-vram` + offload) to actually cap weight residency rather than just the compute graph.
 
 ---
 
@@ -66,11 +75,33 @@ Placed in a system section's `cache:` list (scalar single tier / list to sweep).
 | capability | edge-dit.cpp | diffusers | stable-diffusion.cpp |
 |---|---|---|---|
 | role | primary (main subject) | python_reference (reference) | native_baseline (native baseline) |
-| tasks | t2i / editing / t2v | t2i / editing / t2v | t2i / editing / t2v |
+| tasks | t2i / editing / t2v | t2i / editing / t2v | t2i / editing / t2v (**Wan: see note**) |
 | backends | cuda / cpu / metal / vulkan | **cuda only** | cuda / cpu / metal / vulkan |
 | parallel | cfg / sequence | — | — |
-| memory_modes | quantization / cpu_offload / component_placement (TE-offload) / vae_tiling / graph_cut | torch_dtype / cpu_offload (whole) / attention_backend | quantization / offload (whole) / vae_tiling / graph_cut |
+| memory_modes | quantization / cpu_offload (full) / component_placement (te / vae / dit offload, staged) / auto-allocate / auto-fit / vae_tiling / graph_cut (max_vram) | torch_dtype / cpu_offload (full) / sequential_offload / attention_backend | quantization / offload (full) / vae_tiling / graph_cut (max_vram + stream-layers) |
 
-All three systems cover all three tasks (text-to-image / image-editing / text-to-video). edge-dit.cpp is the most capable tier (four backends + multi-GPU parallelism + the most memory modes); diffusers, as the Python reference, is CUDA-only with quantization via torch_dtype/Quanto; sd.cpp is the native baseline, four backends + quantization/offload/VAE tiling, but no multi-GPU parallelism and no exclusive cache.
+All three systems cover all three tasks (text-to-image / image-editing / text-to-video). edge-dit.cpp is the most capable tier (four backends + multi-GPU parallelism + the most memory modes); diffusers, as the Python reference, is CUDA-only with quantization via torch_dtype/Quanto; sd.cpp is the native baseline, four backends + quantization/offload/VAE tiling, but no multi-GPU parallelism and no exclusive cache. **Note on Wan: stable-diffusion.cpp DOES support Wan, but it needs component-separated loading (--diffusion-model + --vae + --t5xxl, with -M vid_gen). This benchmark runner currently passes a single --model directory, which Wan does not accept ("get sd version from file failed"). So Wan is not benchmarkable on the stable-diffusion.cpp side until the runner implements component-separated loading; do not put Wan in a stable-diffusion.cpp section for now.**
+
+**sd.cpp commit lock**: because sd.cpp's offload / `--stream-layers` / `--max-vram` / component-loading behavior is version-specific, the benchmark records the validated commit in `systems/stable-diffusion-cpp.yaml` (`expected_commit: ea4e566`). Preflight only **warns** (does not block) when the checked-out sd.cpp is at a different commit — results may not reproduce and the e2e wrapper may need re-validating.
+
+---
+
+## Distilled (few-step) model support
+
+Distilled variants come in two packaging formats, and support differs by format:
+
+| format | distilled models | edge-dit | diffusers | sd.cpp |
+|---|---|:--:|:--:|:--:|
+| full diffusers directory (loads standalone) | `flux-schnell` | ✓ | ✓ | ✓ |
+| full diffusers directory, but SD3 needs a pre-converted sd.cpp transformer | `sd35-medium-turbo` | ✓ | ✓ | — |
+| transformer-only / single-weights-file (needs a `base_model_ref` for TE/VAE/scheduler) | `kontext-lightning`, `qwen-image-lightning`, `wan21-t2v-1.3b-distill` | ✓ | — | — |
+
+**diffusers** currently runs the two full-directory distills (`flux-schnell`, `sd35-medium-turbo`): its runner takes a single `--model` directory and loads it standalone, which those two already are.
+
+**stable-diffusion.cpp runs `flux-schnell` but not `sd35-medium-turbo`.** sd.cpp loads every family by separate components (`--diffusion-model`/`--vae`/`--clip-l`/…), not a single directory. FLUX ships a native fused single file (`flux1-schnell.safetensors`) sd.cpp reads directly, so schnell works. SD3/SD3.5 instead need the transformer **pre-converted** to sd.cpp's layout (as `sd3-medium` does via a `stable_diffusion_cpp_transformer_ref` pointing at a cached `*-transformer-sdcpp.safetensors`) — feeding the raw diffusers `transformer/` shards fails with `get sd version from file failed`. `sd35-medium-turbo` has no such conversion prepared, so it is sd.cpp-unsupported until one is produced; it is omitted from the sd.cpp section of the t2i job.
+
+The other three distills ship as a transformer only (a `diffusers-transformer-only` subdir or a single `transformer-weights-file`) and declare a `base_model_ref` in their model yaml — the base supplies the text encoder / VAE / scheduler. **Only the edge-dit runner reads `base_model_ref`** (composing base + `--diffusion-model`); the diffusers and sd.cpp runners do not, so those three are edge-only for now. Putting one in a `diffusers:` / `stable-diffusion.cpp:` section fails at load (diffusers raises "neither a valid local path nor a valid repo id" on the transformer index). Adapting them means teaching each runner to load the base and swap in the distilled transformer.
+
+---
 
 > A method's `kind`/`needs calibration`/description is authoritative in `methods/<category>/<id>.yaml`; cross-system attribution is authoritative in its `cross_system` field (this table is aggregated from it). After adding a method/system, please sync this table.

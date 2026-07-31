@@ -174,6 +174,8 @@ print(json.dumps(versions, sort_keys=True))
                 command.extend(["--fps", str(generation["fps"])])
         if run_options.get("offload_to_cpu"):
             command.append("--offload")
+        if run_options.get("sequential_offload"):
+            command.append("--sequential-offload")
         if run_options.get("vae_tiling"):
             command.append("--vae-tiling")
         if run_options.get("no_t5"):

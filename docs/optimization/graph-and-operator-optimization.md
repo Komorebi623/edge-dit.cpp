@@ -90,6 +90,16 @@ optimized path, the runtime checks properties such as:
 When the requirements of an optimized implementation are not satisfied,
 execution falls back to the generic path without changing model semantics.
 
+#### Per-step RoPE table memoization
+
+The rotary position-embedding table is a pure function of shape and scalar
+inputs (resolution, head dimension, rope parameters), not of tensor data, so it
+is identical on every denoising step at a fixed resolution. Recomputing it each
+step nonetheless dominated the per-step graph-build cost (on the order of most
+of it for FLUX at 1024x1024). Each model runner therefore memoizes the table
+and recomputes it only when its key changes, removing that cost from every step
+after the first.
+
 ### 2.2 Attention execution optimization
 
 Attention performance depends on both the SDPA kernel and the preparation of

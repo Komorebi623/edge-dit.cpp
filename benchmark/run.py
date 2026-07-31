@@ -42,8 +42,35 @@ sys.path.insert(0, str(REPO))
 # offload semantic tier -> run_options knobs. edge/sdcpp honor these directly.
 OFFLOAD_KNOBS = {
     "none": {},
-    "te-cpu": {"keep_text_encoder_on_cpu": True},
-    "full": {"offload_to_cpu": True, "keep_text_encoder_on_cpu": True},
+    # component offload = weights on CPU, staged to GPU per compute (engine renamed the
+    # old keep-*-on-cpu flags; these now map to the stage-based --*-offload flags).
+    "te-cpu": {"text_encoder_offload": True},     # text encoder weights offloaded (edge-only)
+    "vae-offload": {"vae_offload": True},          # VAE weights offloaded (edge-only)
+    "dit-offload": {"dit_offload": True},          # DiT weights offloaded (edge-only)
+    "full": {"offload_to_cpu": True},              # whole model offloaded
+    # diffusers-only: sequential per-submodule offload (more aggressive than full
+    # model_cpu_offload, slower). edge/sdcpp runners don't read this key.
+    "sequential": {"sequential_offload": True},
+    # edge-only: engine-driven automatic placement. auto-allocate decides
+    # resident/offload per component under --max-vram; auto-fit is a superset that
+    # also picks the DiT/TE quantization (ignoring --type). Pair with max_vram.
+    "auto-allocate": {"auto_allocate": True},
+    "auto-fit": {"auto_fit": True},
+}
+
+# Which systems support each offload tier (normalized system ids). A tier applied
+# to a system not listed here is skipped during expansion (cross_system), the same
+# way an unsupported quant/cache is — otherwise the knob's key is silently ignored
+# by that system's runner and the run misleadingly reports no offload.
+OFFLOAD_SYSTEMS = {
+    "none": {"edge-dit", "diffusers", "stable-diffusion-cpp"},
+    "full": {"edge-dit", "diffusers", "stable-diffusion-cpp"},
+    "te-cpu": {"edge-dit"},        # per-component offload, edge-only
+    "vae-offload": {"edge-dit"},   # per-component offload, edge-only
+    "dit-offload": {"edge-dit"},   # per-component offload, edge-only
+    "sequential": {"diffusers"},   # accelerate sequential CPU offload, diffusers-only
+    "auto-allocate": {"edge-dit"}, # engine-driven placement, edge-only
+    "auto-fit": {"edge-dit"},      # engine-driven placement + quant, edge-only
 }
 
 # vae_tiling manifest value -> run_options.vae_tiling. auto = omit (engine decides by VRAM).
@@ -110,7 +137,7 @@ def die(msg: str) -> None:
 def load_job(path: Path) -> dict:
     """Parse a per-system job manifest.
 
-    Top-level shared fields: name, task, models, prompts, steps, metrics.
+    Top-level shared fields: name, task, prompts, steps, metrics, device.
     Each benchmarked system is its own section keyed by a system alias
     (edge-dit / diffusers / stable-diffusion.cpp / sdcpp); a section carries that
     system's own quant (required) + offload / vae_tiling / cache. A system with no
@@ -118,7 +145,7 @@ def load_job(path: Path) -> dict:
     matrix with per-system quant tiers (edge q8_0 vs diffusers fp8) in one run.
     """
     job = load_yaml(path)
-    for req in ("name", "task", "models"):
+    for req in ("name", "task"):
         if req not in job:
             die(f"job missing required field: {req}")
     job.setdefault("prompts", 3)
@@ -133,9 +160,12 @@ def load_job(path: Path) -> dict:
             seg = dict(val or {})
             if "quant" not in seg:
                 die(f"system section '{key}' missing required field: quant")
+            if "model" not in seg:
+                die(f"system section '{key}' missing required field: model")
             seg.setdefault("offload", "none")
             seg.setdefault("vae_tiling", "auto")
             seg.setdefault("cache", "none")
+            seg.setdefault("max_vram", None)   # GB budget for --max-vram; None = don't pass it
             segments[key] = seg
     if not segments:
         die("job has no system section (add e.g. 'edge-dit:' with a quant list)")
@@ -149,11 +179,17 @@ def as_list(v):
 
 
 def normalize_quant(item) -> dict:
-    """A quant list item is either an id string or {type, offload, vae_tiling, convert, cache}."""
+    """A quant list item is either an id string or {type, offload, vae_tiling, convert, cache}.
+    `type` is required EXCEPT when offload is auto-fit: auto-fit ignores --type and drives the
+    DiT quant itself (q8_0->q4_k ladder), so a type there would be misleading. We fill fp16 as a
+    neutral placeholder (the engine discards it); the table shows the engine's actual chosen tier."""
     if isinstance(item, str):
         return {"type": item}
-    if isinstance(item, dict) and "type" in item:
-        return dict(item)
+    if isinstance(item, dict):
+        if "type" in item:
+            return dict(item)
+        if item.get("offload") == "auto-fit":
+            return {**item, "type": "fp16"}   # auto-fit owns quant; type is a placeholder
     die(f"bad quant item (need id or object with 'type'): {item!r}")
 
 
@@ -209,15 +245,9 @@ def build_workload(model: dict, task: str, steps, pset_map: dict, pset_file: Pat
     """In-memory workload dict for runner.execute(). Mirrors what config.py used to
     load + inject, but built directly (no suite, no yaml round-trip)."""
     gen = dict(model.get("generation", {}))
-    # steps: "default" = each model's own generation.steps; a number = global override;
-    # a dict {model_id: N, default: N} = per-model override (falls back to the model's own).
-    if isinstance(steps, dict):
-        mid = model["model_id"]
-        if mid in steps:
-            gen["steps"] = int(steps[mid])
-        elif "default" in steps:
-            gen["steps"] = int(steps["default"])
-    elif steps != "default":
+    # steps: "default" = the model's own generation.steps; a number = explicit override.
+    # (per-model / per-run selection happens at expansion time; here steps is a single value.)
+    if steps is not None and steps != "default":
         gen["steps"] = int(steps)
     gen.setdefault("frames", 1)
     gen.setdefault("seed", 0)
@@ -256,13 +286,15 @@ def build_workload(model: dict, task: str, steps, pset_map: dict, pset_file: Pat
     }
 
 
-def build_run_options(quant_method: dict, offload: str, vae_tiling, cache_id: str | None) -> dict:
+def build_run_options(quant_method: dict, offload: str, vae_tiling, cache_id: str | None, max_vram=None) -> dict:
     """Assemble run_options from a quant method + one offload/vae_tiling/cache combo.
     quant_method options are per-system (edge: {precision: q8_0}; diffusers: {quant_weights: qfloat8})."""
     opts = dict(quant_method.get("options", {}))
     opts.update(OFFLOAD_KNOBS.get(offload, {}))
     if VAE_TILING.get(vae_tiling) is not None:
         opts["vae_tiling"] = VAE_TILING[vae_tiling]
+    if max_vram is not None:
+        opts["max_vram_gib"] = float(max_vram)
     if cache_id and cache_id != "none":
         cache_method = resolve_method("cache", cache_id)
         opts.update(cache_method.get("options", {}))
@@ -302,9 +334,10 @@ def profile_path_for(model_id: str, task: str, gen: dict, cache_id: str) -> Path
     return (BENCH / "cache" / name).resolve()
 
 
-def stage(argv: list[str], label: str) -> None:
-    print(f"[run.py] → {label}: {' '.join(argv)}")
-    r = subprocess.run([sys.executable, *argv])
+def stage(argv: list[str], label: str, python: str | None = None) -> None:
+    interpreter = python or sys.executable
+    print(f"[run.py] → {label}: {interpreter} {' '.join(argv)}")
+    r = subprocess.run([interpreter, *argv])
     if r.returncode != 0:
         die(f"{label} failed (exit {r.returncode})")
 
@@ -339,38 +372,55 @@ def main() -> None:
     plan: list[dict] = []  # each: {system_id, runner_key, workload, run_options, run_dir, run_id}
     seen_calib: set = set()  # (model, quant, cache) -> one calibration run regardless of offload
     skips: list = []  # (system, method) combos skipped because cross_system doesn't support them
-    for mid in job["models"]:
+    model_cache: dict = {}
+    def get_model_bundle(mid, steps):
+        # (mid, steps) -> (model, workload, pset_map, pids). model/prompts are steps-independent
+        # but workload bakes in steps, so key by both.
+        key = (mid, steps)
+        if key in model_cache:
+            return model_cache[key]
         model = load_model(mid)
         if model.get("task") != task:
             die(f"model {mid} is task={model.get('task')}, job task={task}")
         pset_file = prompt_set_path(model)
         pset_map = load_prompt_set(pset_file)
         pids = first_prompt_ids(pset_map, int(job["prompts"]))
-        workload = build_workload(model, task, job["steps"], pset_map, pset_file)
+        workload = build_workload(model, task, steps, pset_map, pset_file)
+        model_cache[key] = (model, workload, pset_map, pids)
+        return model_cache[key]
 
-        for system_id, seg in segments.items():
-            sys_cfg = load_system(system_id)
-            runner_key = sys_cfg.get("runner")
-            if runner_key not in RUNNERS:
-                die(f"system '{system_id}' has unknown runner '{runner_key}'")
-            for raw_q in seg["quant"]:
-                q = normalize_quant(raw_q)          # id string or {type, offload, vae_tiling, cache}
-                quant_id = q["type"]
-                method = resolve_method("quant", quant_id)
-                if not method_supports(method, system_id):
-                    skips.append(f"{system_id}: quant '{quant_id}' not supported (cross_system), skipped")
-                    continue
-                # per-quant override wins over the segment default; else sweep the segment list
-                offloads = [q["offload"]] if "offload" in q else as_list(seg["offload"])
-                caches = [q["cache"]] if "cache" in q else as_list(seg["cache"])
-                vtile = q.get("vae_tiling", seg["vae_tiling"])
+    for system_id, seg in segments.items():
+        sys_cfg = load_system(system_id)
+        runner_key = sys_cfg.get("runner")
+        if runner_key not in RUNNERS:
+            die(f"system '{system_id}' has unknown runner '{runner_key}'")
+        for raw_q in seg["quant"]:
+            q = normalize_quant(raw_q)  # id string or {type, model, offload, vae_tiling, cache, steps}
+            quant_id = q["type"]
+            method = resolve_method("quant", quant_id)
+            if not method_supports(method, system_id):
+                skips.append(f"{system_id}: quant '{quant_id}' not supported (cross_system), skipped")
+                continue
+            # per-quant object overrides win over the segment default; else sweep the segment list.
+            # model / offload / cache / steps are all section dimensions with the same rule.
+            models = [q["model"]] if "model" in q else as_list(seg["model"])
+            offloads = [q["offload"]] if "offload" in q else as_list(seg["offload"])
+            caches = [q["cache"]] if "cache" in q else as_list(seg["cache"])
+            vtile = q.get("vae_tiling", seg["vae_tiling"])
+            mvram = q.get("max_vram", seg.get("max_vram"))
+            steps = q.get("steps", seg.get("steps", job["steps"]))
+            for mid in models:
+                model, workload, pset_map, pids = get_model_bundle(mid, steps)
                 for offload in offloads:
+                    if SYSTEM_YAML.get(system_id, system_id) not in OFFLOAD_SYSTEMS.get(offload, set()):
+                        skips.append(f"{system_id}: offload '{offload}' not supported (cross_system), skipped")
+                        continue
                     for cache_id in caches:
                         if cache_id and cache_id != "none" and not method_supports(
                                 resolve_method("cache", cache_id), system_id):
                             skips.append(f"{system_id}: cache '{cache_id}' not supported (cross_system), skipped")
                             continue
-                        run_options = build_run_options(method, offload, vtile, cache_id)
+                        run_options = build_run_options(method, offload, vtile, cache_id, mvram)
                         # Calibration two-step: sencache/magcache(SD3,Wan) need a profile first.
                         if cache_id and cache_id != "none":
                             cm = resolve_method("cache", cache_id)
@@ -380,7 +430,7 @@ def main() -> None:
                                 ck = (mid, quant_id, cache_id)  # profile is offload-independent
                                 if ck not in seen_calib:
                                     seen_calib.add(ck)
-                                    calib_ro = build_run_options(method, "none", vtile, cache_id)
+                                    calib_ro = build_run_options(method, "none", vtile, cache_id, mvram)
                                     calib_ro["cache_calibrate"] = str(calib_profile)
                                     calib_ro["prompt_id"] = pids[0]
                                     calib_wl = dict(workload)
@@ -409,9 +459,16 @@ def main() -> None:
                             })
 
     n_bench = sum(1 for p in plan if not p.get("is_calib"))
+    all_models = set()
+    for seg in segments.values():
+        all_models.update(as_list(seg["model"]))
+        for raw_q in seg["quant"]:
+            qq = normalize_quant(raw_q)
+            if "model" in qq:
+                all_models.add(qq["model"])
     print(f"[run.py] expanded {n_bench} runs "
-          f"({len(job['models'])} models x {len(segments)} systems x "
-          f"{int(job['prompts'])} prompts + per-system quant/offload/cache)")
+          f"({len(all_models)} models x {len(segments)} systems x "
+          f"{int(job['prompts'])} prompts; per-section model/quant/offload/cache/steps)")
     for s in dict.fromkeys(skips):  # de-dup (same skip repeats across models)
         print(f"[run.py] skip → {s}")
 
@@ -421,6 +478,18 @@ def main() -> None:
             print(f"  - {tag}{p['system_id']}/{p['workload']['workload_id']}/{p['run_id']}"
                   f"  run_options={p['run_options']}")
         return
+
+    # Per-system preflight before any real run: surfaces environment problems
+    # (e.g. sd.cpp checked out at a commit the benchmark wasn't validated against).
+    seen_pf = set()
+    for p in plan:
+        key = p["runner_key"]
+        if key in seen_pf:
+            continue
+        seen_pf.add(key)
+        pf = RUNNERS[key](p["sys_cfg"], site, REPO).preflight()
+        for msg in pf.messages:
+            print(f"[run.py] preflight {p['system_id']}: {msg}")
 
     # Drive each run directly through its system runner.
     n_ok = n_skip = n_fail = n_calib = 0
@@ -480,8 +549,14 @@ def main() -> None:
         eval_argv = [str(BENCH / "scripts/eval_all.py"), "--results-root", str(out_root),
                      "--site", str(args.site)]
         if device is not None:
-            eval_argv += ["--device", f"cuda:{device}"]   # eval runs on the same card as generation (when locked)
-        stage(eval_argv, "evaluate (eval_all)")
+            # eval inherits CUDA_VISIBLE_DEVICES from this process, so the locked
+            # card is remapped to logical cuda:0. Passing the physical index (cuda:2)
+            # would be out of range; cuda:0 = the first (or only) locked card.
+            eval_argv += ["--device", "cuda:0"]
+        # eval_all.py needs torch/transformers (CLIP/aesthetic/LPIPS), which live in the
+        # site's diffusers_python env, not necessarily the interpreter running run.py.
+        eval_python = site.get("paths", {}).get("diffusers_python")
+        stage(eval_argv, "evaluate (eval_all)", python=eval_python)
     else:
         print("[run.py] metrics.quality=false → skipping quality eval")
 

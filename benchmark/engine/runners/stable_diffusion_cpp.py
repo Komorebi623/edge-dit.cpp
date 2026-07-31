@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from typing import Any
 
 from .base import BenchmarkRunner, PreflightResult
@@ -32,6 +33,20 @@ class StableDiffusionCppRunner(BenchmarkRunner):
         else:
             metadata["commit"] = self.git_commit(repo)
             metadata["dirty"] = self.git_dirty(repo)
+            # Warn (do not block) if the checked-out sd.cpp commit differs from the one
+            # the benchmark was validated against. offload / --stream-layers / --max-vram
+            # and component-loading behavior are version-specific, so a mismatch means the
+            # results may not reproduce and the e2e wrapper may need re-validating.
+            expected = self.system_config.get("repo", {}).get("expected_commit")
+            actual = metadata["commit"]
+            if expected and actual and not actual.startswith(str(expected)):
+                metadata["commit_mismatch"] = f"expected {expected}, found {actual[:12]}"
+                print(
+                    f"[preflight] WARNING: stable-diffusion.cpp is at {actual[:12]}, "
+                    f"benchmark validated on {expected}; results may not reproduce "
+                    f"(offload/stream-layers/component-loading are version-specific).",
+                    file=sys.stderr,
+                )
             if (
                 self.system_config.get("repo", {}).get("commit_policy")
                 == "force_latest_origin_main"
@@ -165,6 +180,20 @@ class StableDiffusionCppRunner(BenchmarkRunner):
                 del command[idx:idx + 2]
         self.apply_wrapper_options(command, workload.get("model_options", {}))
         self.apply_wrapper_options(command, run_options)
+        # VAE tiling defaults ON for stable-diffusion.cpp: it decodes the whole latent
+        # in one buffer, so a large VAE (flux/qwen ~6-8 GiB) OOMs at the decode step
+        # even after DiT sampling succeeds. Tiling caps that. Inject once here (not in
+        # apply_wrapper_options, which is called twice) unless a job forces it off with
+        # `vae_tiling: no` or an explicit-yes already added the flag.
+        vae_tiling_off = run_options.get("vae_tiling") is False or \
+            workload.get("model_options", {}).get("vae_tiling") is False
+        if not vae_tiling_off and "--vae-tiling" not in command:
+            command.append("--vae-tiling")
+        # flow_shift lives in the model yaml's generation block (not run_options), same
+        # source the edge runner reads. Forward it so sd.cpp uses the configured shift
+        # (e.g. SD3 3.0) instead of its built-in per-model default.
+        if generation.get("flow_shift") is not None:
+            command.extend(["--flow-shift", str(generation["flow_shift"])])
         return command
 
     def build_command(
@@ -242,8 +271,14 @@ class StableDiffusionCppRunner(BenchmarkRunner):
             command.append("--diffusion-fa")
         if options.get("vae_tiling"):
             command.append("--vae-tiling")
+        if options.get("offload_to_cpu"):
+            command.append("--offload-to-cpu")
         if options.get("max_vram_gib") is not None:
             command.extend(["--max-vram", str(options["max_vram_gib"])])
+            # stream-layers makes --max-vram actually cap weight residency (not just the
+            # compute graph). Pairs with offload; no effect without --max-vram.
+            if options.get("offload_to_cpu"):
+                command.append("--stream-layers")
         if options.get("model_args"):
             command.extend(["--model-args", str(options["model_args"])])
         if options.get("sample_method"):
@@ -275,6 +310,7 @@ def sd_cpp_component_args(workload: dict[str, Any], model_path, resolve_path) ->
                 ("--diffusion-model", first_existing(model_path, [
                     "flux1-kontext-dev.safetensors",
                     "flux1-dev.safetensors",
+                    "flux1-schnell.safetensors",
                     "transformer/diffusion_pytorch_model.safetensors.index.json",
                 ])),
                 ("--vae", first_existing(model_path, [
@@ -290,7 +326,7 @@ def sd_cpp_component_args(workload: dict[str, Any], model_path, resolve_path) ->
                 ])),
             ]
         )
-    if family == "SD3":
+    if family in ("SD3", "SD3.5"):
         converted_ref = workload.get("model_options", {}).get(
             "stable_diffusion_cpp_transformer_ref"
         ) or "stable_diffusion_cpp_sd3_transformer"
