@@ -17,7 +17,7 @@ src/core/optimization/cache/          Cache runtime, policies, and contracts
 src/dit_models/                       Model and pipeline implementations
 examples/cli/                         ed-cli, ed-sample, and ed-convert
 examples/server/                      Native HTTP server
-bindings/python/                      Python package, tests, server_v2, console
+bindings/python/                      Python package, tests, Python Server, console
 scripts/                              Build, bootstrap, validation, release tools
 docs/                                 User and developer documentation
 third_party/                          Submodules and vendored dependencies

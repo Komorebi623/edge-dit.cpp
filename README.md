@@ -134,7 +134,7 @@ surfaces:
 | C API | `include/edge-dit.h` | [API and bindings](docs/api.md#c-api) |
 | Native HTTP server | `ed-server` | [API and bindings](docs/api.md#native-http-server) |
 | Python bindings | `edge_dit` package | [API and bindings](docs/api.md#python-bindings) |
-| Python job server / console | `edge_dit.server_v2`, managed console | [API and bindings](docs/api.md#python-server-v2) |
+| Python job server / console | `edge_dit.server`, Python Server Console | [API and bindings](docs/api.md#python-server) |
 
 The v0.x API, ABI, CLI flags, and HTTP schemas are public but not yet stable.
 
