@@ -6030,6 +6030,29 @@ protected:
             profile_out->offload_ms = t_offload_end - t_offload_begin;
         }
 
+        // Vulkan-only: after a weight is streamed to the device by offload_*_params(),
+        // its buffer/data pointers change, but any reshape/view tensor built over that
+        // weight while it still lived on the host params buffer keeps the stale host
+        // buffer. ggml_gallocr_init_tensor() only re-derives a view (via
+        // ggml_backend_view_init) when the view's ->buffer is NULL, so a view that
+        // already carries the pre-swap host buffer is never fixed up, and
+        // ggml_vk_mul_mat_q_f16 then reads that host buffer's context as a
+        // ggml_backend_vk_buffer_context -> garbage vk_buffer shared_ptr -> SIGSEGV
+        // (seen in qwen2.5vl vision encode when its 8GB budget forces the encoder to
+        // offload+segment). Re-derive view bindings from view_src so those views pick
+        // up the swapped device buffer. refresh_graph_view_bindings() only touches
+        // views whose view_src is already materialized (view_src->data != nullptr),
+        // i.e. the just-swapped weights, so compute intermediates are untouched.
+        // Guarded to Vulkan: CPU/CUDA/Metal keep their exact prior behavior. Skipped
+        // when params were pre-swapped by the async double-buffer caller
+        // (params_already_resident) or when no offload is configured
+        // (params_backend == runtime_backend, offload_*_params was a no-op).
+        if (!params_already_resident &&
+            params_backend != runtime_backend &&
+            sd_backend_is(runtime_backend, "Vulkan")) {
+            refresh_graph_view_bindings(gf);
+        }
+
         int64_t t_alloc_begin = ggml_time_ms();
         if (!alloc_compute_buffer(gf)) {
             LOG_ERROR("%s alloc compute buffer failed", get_desc().c_str());
