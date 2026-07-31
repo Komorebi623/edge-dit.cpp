@@ -74,33 +74,158 @@ want.
 
 ## 3. Usage
 
-Let the runtime pick the step count by leaving `--steps` unset (or `-1`):
+The only thing that changes versus running the base model is the step count, and
+the runtime fills it in for you: leave `--steps` unset (or pass `-1`) and it
+detects the distilled checkpoint and applies the few-step default (see §2).
+Keep `--cfg-scale` at its default `1.0` (single forward). A minimal run:
 
 ```bash
-# FLUX.1-schnell: weight-signal detected -> 4 steps automatically
+# schnell detected via weight signal -> 4 steps automatically
 ed-cli --backend cuda --type q8_0 --model models/flux.1-schnell \
-  --steps -1 --auto-allocate --vae-tiling \
+  --steps -1 --cfg-scale 1.0 \
   --prompt "a glass teapot on a wooden table" -o out.png
-
-# SD3.5-Turbo: path contains "turbo" -> 8 steps automatically
-ed-cli --backend cuda --type q8_0 --model models/sd3.5-medium-turbo \
-  --steps -1 --auto-allocate --vae-tiling --prompt "..." -o out.png
 ```
 
-Distilled DiT weights shipped as a standalone file can be combined with a base
-model's VAE and text encoders via `--diffusion-model` (the base supplies the
-non-DiT components):
+Two loading shapes come up: a **full checkpoint** (Diffusers directory) loads via
+`--model`; a **transformer-only file** (or a distilled DiT shipped separately)
+loads via `--diffusion-model` while a base `--model` directory supplies the VAE
+and text encoders. Variants distributed as **LoRA adapters** are not runnable
+directly — they must be merged into the base weights offline first; the CLI
+loads full weights, not LoRA deltas (see [Merging LoRA
+weights](merging-lora-weights.md)).
+
+**For a ready-to-run command for each specific variant** — with the exact
+`--cfg-scale` / `--guidance` / `--flow-shift`, the correct model paths, and which
+ones need a LoRA merge — see [§4 Per-variant commands](#4-per-variant-commands)
+below. See also [Command line usage](../cli.md) for the full option reference and
+[Supported models](../models.md) for per-family notes.
+
+---
+
+## 4. Per-variant commands
+
+Below is a ready-to-run command for **each** distilled variant validated in the
+[consumer-GPU benchmarks](../consumer-gpu-benchmarks.md). Notes that apply to all
+of them:
+
+- **`--steps -1`** lets the runtime auto-pick the few-step count (shown per
+  variant). Pass an explicit `--steps N` to override.
+- **`--cfg-scale 1.0`** (the default) keeps the single-forward path distilled
+  models are trained for. Do **not** raise it (see §2.3).
+- **`--guidance`** (FLUX distilled guidance embedding, default `3.5`) applies to
+  the FLUX-family and Wan pipelines (FLUX.1-dev, Kontext-dev, Wan). It has **no
+  effect** on SD3 and Qwen-Image, and on FLUX.1-schnell (which has no
+  `guidance_in` layer), so it is omitted for those.
+- **`--flow-shift`** (flow-scheduler shift) has a correct **per-family default**
+  applied automatically when omitted (FLUX dev `1.15` / schnell `1.0`, Kontext
+  `1.15`, SD3 `3.0`, Wan `5.0`, Qwen dynamic). It is therefore only spelled out
+  below for **Wan** (`5.0`), where the benchmark commands set it explicitly for
+  clarity; every other family is left at its default.
+- **"Standalone file" / "single full-weight `.safetensors`"** means the
+  distilled **transformer** is packed into **one `.safetensors` file** (or a
+  shard set) rather than a Diffusers directory tree. These files are
+  **transformer-only** — they carry no text encoders or VAE — so they load via
+  **`--diffusion-model`** while a base `--model` directory supplies the CLIP /
+  T5 / VAE components (e.g. the Wan distill file, or FLUX's top-level
+  `flux1-schnell.safetensors`). Loading a transformer-only file directly with
+  `--model` fails with a "needs … text encoder … and VAE weights" error. This is
+  distinct from a **LoRA adapter**, which is not a full transformer at all and
+  must be merged into the base weights first.
+- Memory flags are omitted for clarity. Add `--auto-fit --max-vram <N>
+  --vae-tiling auto` (validated at 24/16/8 GiB) to fit a budget — see
+  [budget-driven placement](../cli.md#budget-driven-placement---auto-allocate-and-full-auto---auto-fit).
+- Paths are relative to a `models/` directory; adjust to your layout.
+
+### FLUX.1-schnell (auto 4 steps)
+
+schnell is guidance-distilled and **lacks the `guidance_in` layer**, so
+`--guidance` does not apply. The published repo is a full Diffusers directory
+(transformer + CLIP-L + T5XXL + VAE), so load it with `--model`:
+
+```bash
+ed-cli --backend cuda --type q8_0 --model models/flux.1-schnell \
+  --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
+  --prompt "a glass teapot on a wooden table" -o schnell.png
+```
+
+The top-level `flux1-schnell.safetensors` inside that directory is a
+**transformer-only** file (it carries no text encoders or VAE), so it cannot be
+loaded alone with `--model`. To use just that file, pass it via
+`--diffusion-model` and let a full directory (or explicit component flags)
+supply CLIP-L / T5XXL / VAE:
+
+```bash
+ed-cli --backend cuda --type q8_0 \
+  --model models/flux.1-schnell \
+  --diffusion-model models/flux.1-schnell/flux1-schnell.safetensors \
+  --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
+  --prompt "a glass teapot on a wooden table" -o schnell.png
+```
+
+### SD3.5-medium-turbo (auto 8 steps)
+
+SD3 family: uses `--cfg-scale` (keep `1.0`). `--guidance` does not apply, and
+`--flow-shift` is left at the SD3 default (`3.0`). Full Diffusers directory:
+
+```bash
+ed-cli --backend cuda --type q8_0 --model models/distilled/sd35-medium-turbo \
+  --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
+  --prompt "a glass teapot on a wooden table" -o turbo.png
+```
+
+### FLUX.1-Kontext Lightning (auto 8 steps, image editing)
+
+Kontext is FLUX-family and dev-based, so **`--guidance` applies** (default 3.5).
+Requires `--image`. Shipped as full transformer shards — load the distilled
+transformer with the base Kontext model supplying VAE + text encoders:
+
+```bash
+ed-cli --backend cuda --type q8_0 \
+  --model models/flux.1-kontext-dev \
+  --diffusion-model models/distilled/kontext-lightning/transformer/diffusion_pytorch_model.safetensors.index.json \
+  --image input.png --steps -1 --guidance 3.5 --cfg-scale 1.0 -W 1024 -H 1024 \
+  --prompt "make the object look like brushed metal" -o kontext-lightning.png
+```
+
+### Qwen-Image Lightning (auto 8 steps) — merge LoRA first
+
+Published as a **LoRA adapter**; merge it into the base Qwen-Image transformer
+offline first (see [Merging LoRA weights](merging-lora-weights.md)), then point
+`--diffusion-model` at the merged transformer. Qwen uses `--cfg-scale` (keep
+1.0); `--guidance` does not apply.
 
 ```bash
 ed-cli --backend cuda --type q8_0 --model models/qwen-image \
-  --diffusion-model models/qwen-image-lightning/transformer/diffusion_pytorch_model.safetensors.index.json \
-  --steps -1 --auto-allocate --vae-tiling --prompt "..." -o out.png
+  --diffusion-model models/distilled/qwen-image-lightning-merged/transformer/diffusion_pytorch_model.safetensors.index.json \
+  --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
+  --prompt "a red apple on a wooden table" -o qwen-lightning.png
 ```
 
-Distilled variants distributed as LoRA adapters must be merged into the base
-weights offline before use; the CLI loads full weights, not LoRA deltas. See
-[Merging LoRA weights](merging-lora-weights.md) for which variants need this and
-a step-by-step guide.
+### Qwen-Image-Edit Lightning (auto 8 steps, image editing) — merge LoRA first
 
-See [Command line usage](../cli.md) for the full option reference and
-[Supported models](../models.md) for per-family notes.
+Same LoRA-merge requirement, plus `--image`. Add `--qwen-image-zero-cond-t`
+**only** for Qwen-Image-Edit-2511:
+
+```bash
+ed-cli --backend cuda --type q8_0 --model models/qwen-image-edit --qwen-image-zero-cond-t \
+  --diffusion-model models/distilled/qwen-image-edit-lightning-merged/dit/diffusion_pytorch_model.safetensors.index.json \
+  --image input.png --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
+  --prompt "make it brushed metal" -o qwen-edit-lightning.png
+```
+
+### Wan2.1-T2V-1.3B Distill (auto 8 steps, video)
+
+Shipped as a **standalone single full-weight `.safetensors`** file. Load it via
+`--diffusion-model` with the base Wan model supplying VAE + text encoders. Wan's
+flow-shift default is already `5.0`; the command sets `--flow-shift 5.0`
+explicitly to match the benchmark. `--cfg-scale` stays `1.0` (distilled runs
+single-forward). `--guidance` is accepted by the Wan pipeline (default `3.5`) but
+is left at default here.
+
+```bash
+ed-cli --backend cuda --type q8_0 --video \
+  --model models/wan2.1-t2v-1.3b \
+  --diffusion-model models/distilled/wan21-t2v-1.3b-distill/Wan2.1-T2V-1.3B-Distill-iter6000.safetensors \
+  --steps -1 --cfg-scale 1.0 --flow-shift 5.0 -W 832 -H 480 --frames 41 --fps 16 \
+  --prompt "a glass teapot rotating on a wooden table" -o wan-distill.mp4
+```
