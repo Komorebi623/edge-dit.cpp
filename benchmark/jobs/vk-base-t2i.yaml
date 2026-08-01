@@ -1,0 +1,24 @@
+# Edge-dit VULKAN base-model T2I, edge-only (no diffusers/sd.cpp).
+# Mirrors the prior vulkan_perf_report matrix: sd3 + flux variants x {resident, 16g, 8g}.
+# quality:false -> speed+vram only (skips the torch eval env).
+name: vk-base-t2i
+task: text-to-image
+prompts: 1
+device: 1
+warmup: 1
+measured: 1
+metrics: {quality: false}
+
+edge-dit:
+  backend: vulkan
+  model: [sd3-medium]
+  quant:
+    - q8
+    - {type: q8, offload: auto-fit, max_vram: 16, vae_tiling: auto}
+    - {type: q8, offload: auto-fit, max_vram: 8,  vae_tiling: auto}
+    - {model: flux-dev,     type: q8}
+    - {model: flux-dev,     type: q8, offload: auto-fit, max_vram: 16, vae_tiling: auto}
+    - {model: flux-dev,     type: q8, offload: auto-fit, max_vram: 8,  vae_tiling: auto}
+    - {model: flux-schnell, type: q8}
+    - {model: flux-schnell, type: q8, offload: auto-fit, max_vram: 16, vae_tiling: auto}
+    - {model: flux-schnell, type: q8, offload: auto-fit, max_vram: 8,  vae_tiling: auto}

@@ -1,0 +1,10 @@
+name: vk-smoke
+task: text-to-image
+prompts: 1
+device: 1
+metrics: {quality: false}
+edge-dit:
+  backend: vulkan
+  model: [flux-dev]
+  quant:
+    - q8

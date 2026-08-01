@@ -1,0 +1,22 @@
+# Edge-dit CUDA base-model T2I, edge-only. Mirror of vk-base-t2i for A/B comparison.
+name: cuda-base-t2i
+task: text-to-image
+prompts: 1
+device: 2
+warmup: 1
+measured: 1
+metrics: {quality: false}
+
+edge-dit:
+  backend: cuda
+  model: [sd3-medium]
+  quant:
+    - q8
+    - {type: q8, offload: auto-fit, max_vram: 16, vae_tiling: auto}
+    - {type: q8, offload: auto-fit, max_vram: 8,  vae_tiling: auto}
+    - {model: flux-dev,     type: q8}
+    - {model: flux-dev,     type: q8, offload: auto-fit, max_vram: 16, vae_tiling: auto}
+    - {model: flux-dev,     type: q8, offload: auto-fit, max_vram: 8,  vae_tiling: auto}
+    - {model: flux-schnell, type: q8}
+    - {model: flux-schnell, type: q8, offload: auto-fit, max_vram: 16, vae_tiling: auto}
+    - {model: flux-schnell, type: q8, offload: auto-fit, max_vram: 8,  vae_tiling: auto}
