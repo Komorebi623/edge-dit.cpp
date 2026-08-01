@@ -82,7 +82,7 @@ Keep `--cfg-scale` at its default `1.0` (single forward). A minimal run:
 
 ```bash
 # schnell detected via weight signal -> 4 steps automatically
-ed-cli --backend cuda --type q8_0 --model models/flux.1-schnell \
+ed-cli --backend cuda --type q8_0 --model /path/to/models/flux.1-schnell \
   --steps -1 --cfg-scale 1.0 \
   --prompt "a glass teapot on a wooden table" -o out.png
 ```
@@ -122,20 +122,31 @@ of them:
   `1.15`, SD3 `3.0`, Wan `5.0`, Qwen dynamic). It is therefore only spelled out
   below for **Wan** (`5.0`), where the benchmark commands set it explicitly for
   clarity; every other family is left at its default.
-- **"Standalone file" / "single full-weight `.safetensors`"** means the
-  distilled **transformer** is packed into **one `.safetensors` file** (or a
-  shard set) rather than a Diffusers directory tree. These files are
-  **transformer-only** — they carry no text encoders or VAE — so they load via
-  **`--diffusion-model`** while a base `--model` directory supplies the CLIP /
-  T5 / VAE components (e.g. the Wan distill file, or FLUX's top-level
-  `flux1-schnell.safetensors`). Loading a transformer-only file directly with
-  `--model` fails with a "needs … text encoder … and VAE weights" error. This is
-  distinct from a **LoRA adapter**, which is not a full transformer at all and
-  must be merged into the base weights first.
+- **How a variant is packaged decides which flag you use.** Check what you
+  actually downloaded with `ls <dir>`:
+  - **Full Diffusers directory** — contains `model_index.json` plus `vae/`,
+    `text_encoder*/`, `transformer/`. Load the whole thing with **`--model`**;
+    no `--diffusion-model` needed. (Several distilled repos ship this way, e.g.
+    SD3.5-medium-turbo, and the Kontext-Lightning repo also has a full layout.)
+  - **Transformer-only** — just a `transformer/` (or `dit/`) subfolder, or a
+    single top-level `.safetensors`, with **no** `model_index.json` / `vae/` /
+    `text_encoder*/`. It carries no text encoders or VAE, so load it via
+    **`--diffusion-model`** while a base `--model` directory supplies CLIP / T5 /
+    VAE. Loading a transformer-only file directly with `--model` fails with a
+    "needs … text encoder … and VAE weights" error.
+  - **LoRA adapter** — not a full transformer at all (a small `.safetensors` of
+    low-rank deltas); it must be merged into the base weights offline first (the
+    two Qwen-Image variants).
+
+  `--diffusion-model` overrides the DiT weights from the base `--model` directory
+  (the loader applies `--model` first, then overwrites the `model.diffusion_model.*`
+  tensors with `--diffusion-model`), so the pair gives you "base VAE/TE + distilled
+  DiT". If your download is already a full directory, prefer plain `--model`.
 - Memory flags are omitted for clarity. Add `--auto-fit --max-vram <N>
   --vae-tiling auto` (validated at 24/16/8 GiB) to fit a budget — see
   [budget-driven placement](../cli.md#budget-driven-placement---auto-allocate-and-full-auto---auto-fit).
-- Paths are relative to a `models/` directory; adjust to your layout.
+- Paths below use `/path/to/models/` as a placeholder — substitute your actual
+  models directory.
 
 ### FLUX.1-schnell (auto 4 steps)
 
@@ -144,7 +155,7 @@ schnell is guidance-distilled and **lacks the `guidance_in` layer**, so
 (transformer + CLIP-L + T5XXL + VAE), so load it with `--model`:
 
 ```bash
-ed-cli --backend cuda --type q8_0 --model models/flux.1-schnell \
+ed-cli --backend cuda --type q8_0 --model /path/to/models/flux.1-schnell \
   --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "a glass teapot on a wooden table" -o schnell.png
 ```
@@ -157,8 +168,8 @@ supply CLIP-L / T5XXL / VAE:
 
 ```bash
 ed-cli --backend cuda --type q8_0 \
-  --model models/flux.1-schnell \
-  --diffusion-model models/flux.1-schnell/flux1-schnell.safetensors \
+  --model /path/to/models/flux.1-schnell \
+  --diffusion-model /path/to/models/flux.1-schnell/flux1-schnell.safetensors \
   --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "a glass teapot on a wooden table" -o schnell.png
 ```
@@ -169,7 +180,7 @@ SD3 family: uses `--cfg-scale` (keep `1.0`). `--guidance` does not apply, and
 `--flow-shift` is left at the SD3 default (`3.0`). Full Diffusers directory:
 
 ```bash
-ed-cli --backend cuda --type q8_0 --model models/distilled/sd35-medium-turbo \
+ed-cli --backend cuda --type q8_0 --model /path/to/models/distilled/sd35-medium-turbo \
   --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "a glass teapot on a wooden table" -o turbo.png
 ```
@@ -177,13 +188,25 @@ ed-cli --backend cuda --type q8_0 --model models/distilled/sd35-medium-turbo \
 ### FLUX.1-Kontext Lightning (auto 8 steps, image editing)
 
 Kontext is FLUX-family and dev-based, so **`--guidance` applies** (default 3.5).
-Requires `--image`. Shipped as full transformer shards — load the distilled
-transformer with the base Kontext model supplying VAE + text encoders:
+Requires `--image`. The [`camenduru/FLUX.1_Kontext-Lightning`](https://huggingface.co/camenduru/FLUX.1_Kontext-Lightning)
+repo has a **full Diffusers directory** (with `model_index.json`, VAE, text
+encoders), so if you download the whole thing just point `--model` at it:
 
 ```bash
 ed-cli --backend cuda --type q8_0 \
-  --model models/flux.1-kontext-dev \
-  --diffusion-model models/distilled/kontext-lightning/transformer/diffusion_pytorch_model.safetensors.index.json \
+  --model /path/to/models/distilled/kontext-lightning \
+  --image input.png --steps -1 --guidance 3.5 --cfg-scale 1.0 -W 1024 -H 1024 \
+  --prompt "make the object look like brushed metal" -o kontext-lightning.png
+```
+
+If instead you downloaded only the `transformer/` shards (no VAE/TE), load them
+via `--diffusion-model` over the base Kontext model, which supplies VAE + text
+encoders:
+
+```bash
+ed-cli --backend cuda --type q8_0 \
+  --model /path/to/models/flux.1-kontext-dev \
+  --diffusion-model /path/to/models/distilled/kontext-lightning/transformer/diffusion_pytorch_model.safetensors.index.json \
   --image input.png --steps -1 --guidance 3.5 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "make the object look like brushed metal" -o kontext-lightning.png
 ```
@@ -196,8 +219,8 @@ offline first (see [Merging LoRA weights](merging-lora-weights.md)), then point
 1.0); `--guidance` does not apply.
 
 ```bash
-ed-cli --backend cuda --type q8_0 --model models/qwen-image \
-  --diffusion-model models/distilled/qwen-image-lightning-merged/transformer/diffusion_pytorch_model.safetensors.index.json \
+ed-cli --backend cuda --type q8_0 --model /path/to/models/qwen-image \
+  --diffusion-model /path/to/models/distilled/qwen-image-lightning-merged/transformer/diffusion_pytorch_model.safetensors.index.json \
   --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "a red apple on a wooden table" -o qwen-lightning.png
 ```
@@ -208,8 +231,8 @@ Same LoRA-merge requirement, plus `--image`. Add `--qwen-image-zero-cond-t`
 **only** for Qwen-Image-Edit-2511:
 
 ```bash
-ed-cli --backend cuda --type q8_0 --model models/qwen-image-edit --qwen-image-zero-cond-t \
-  --diffusion-model models/distilled/qwen-image-edit-lightning-merged/dit/diffusion_pytorch_model.safetensors.index.json \
+ed-cli --backend cuda --type q8_0 --model /path/to/models/qwen-image-edit --qwen-image-zero-cond-t \
+  --diffusion-model /path/to/models/distilled/qwen-image-edit-lightning-merged/dit/diffusion_pytorch_model.safetensors.index.json \
   --image input.png --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "make it brushed metal" -o qwen-edit-lightning.png
 ```
@@ -225,8 +248,8 @@ is left at default here.
 
 ```bash
 ed-cli --backend cuda --type q8_0 --video \
-  --model models/wan2.1-t2v-1.3b \
-  --diffusion-model models/distilled/wan21-t2v-1.3b-distill/Wan2.1-T2V-1.3B-Distill-iter6000.safetensors \
+  --model /path/to/models/wan2.1-t2v-1.3b \
+  --diffusion-model /path/to/models/distilled/wan21-t2v-1.3b-distill/Wan2.1-T2V-1.3B-Distill-iter6000.safetensors \
   --steps -1 --cfg-scale 1.0 --flow-shift 5.0 -W 832 -H 480 --frames 41 --fps 16 \
   --prompt "a glass teapot rotating on a wooden table" -o wan-distill.mp4
 ```

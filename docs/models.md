@@ -56,11 +56,11 @@ support matrix above:
 | Distilled variant | Task | HuggingFace repo | Common format | Backend coverage | Status |
 |---|---|---|---|---|---|
 | FLUX.1-schnell | Text-to-image | [`black-forest-labs/FLUX.1-schnell`](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | Full Diffusers directory (its top-level `.safetensors` is transformer-only → `--diffusion-model`) | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| SD3.5-medium-turbo | Text-to-image | `tensorart/stable-diffusion-3.5-medium-turbo` — confirm exact repo on HF | Full Diffusers directory | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| FLUX.1-Kontext Lightning | Image editing | confirm exact repo on HF | Full transformer shards (load via `--diffusion-model`) | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| SD3.5-medium-turbo | Text-to-image | [`tensorart/stable-diffusion-3.5-medium-turbo`](https://huggingface.co/tensorart/stable-diffusion-3.5-medium-turbo) | Full Diffusers directory (`--model`) | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| FLUX.1-Kontext Lightning | Image editing | [`camenduru/FLUX.1_Kontext-Lightning`](https://huggingface.co/camenduru/FLUX.1_Kontext-Lightning) | Full Diffusers directory (`--model`); the repo also has a standalone `transformer/` you can load via `--diffusion-model` over a base Kontext | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
 | Qwen-Image Lightning | Text-to-image | [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) | **LoRA adapter — merge into base first** | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
 | Qwen-Image-Edit Lightning | Image editing | [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) (Edit file) | **LoRA adapter — merge into base first** | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
-| Wan2.1-T2V-1.3B Distill | Video generation | confirm exact repo on HF | Standalone single full-weight `.safetensors` (load via `--diffusion-model`) | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized |
+| Wan2.1-T2V-1.3B Distill | Video generation | [`lightx2v/Wan2.1-T2V-1.3B-Distill-Models`](https://huggingface.co/lightx2v/Wan2.1-T2V-1.3B-Distill-Models) | Standalone single full-weight `.safetensors` (load via `--diffusion-model` over a base Wan) | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized |
 
 All distilled variants default to a **4–8 step** schedule when `--steps` is unset
 (schnell 4, the rest 8). Only the two Qwen-Image variants ship as LoRA adapters

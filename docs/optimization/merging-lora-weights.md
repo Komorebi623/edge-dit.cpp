@@ -13,7 +13,7 @@ Qwen-Image ones require merging**; the rest ship as ready-to-use full weights.
 | Distilled variant | Published as | Needs merge? |
 |---|---|---|
 | FLUX.1-schnell | Official base (already distilled) | No — use directly |
-| FLUX.1-Kontext Lightning | Full transformer shards | No — download directly |
+| FLUX.1-Kontext Lightning | Full Diffusers directory (also has a standalone `transformer/`) | No — download directly |
 | SD3.5-medium-turbo | Full diffusers directory | No — download directly |
 | Wan2.1-T2V-1.3B Distill | Single full-weight file | No — drop-in |
 | **Qwen-Image Lightning** | **LoRA adapter** | **Yes** |
