@@ -105,14 +105,13 @@ below. See also [Command line usage](../cli.md) for the full option reference an
 
 ## 4. Per-variant commands
 
-Below is a ready-to-run command for **each** distilled variant validated in the
-[consumer-GPU benchmarks](../consumer-gpu-benchmarks.md). Notes that apply to all
-of them:
+Below is a ready-to-run command for **each** distilled variant. Notes that apply
+to all of them:
 
 - **`--steps -1`** lets the runtime auto-pick the few-step count (shown per
   variant). Pass an explicit `--steps N` to override.
 - **`--cfg-scale 1.0`** (the default) keeps the single-forward path distilled
-  models are trained for. Do **not** raise it (see §2.3).
+  models are trained for. Do **not** raise it (see [CFG and guidance](#cfg-and-guidance)).
 - **`--guidance`** (FLUX distilled guidance embedding, default `3.5`) applies to
   the FLUX-family and Wan pipelines (FLUX.1-dev, Kontext-dev, Wan). It has **no
   effect** on SD3 and Qwen-Image, and on FLUX.1-schnell (which has no
