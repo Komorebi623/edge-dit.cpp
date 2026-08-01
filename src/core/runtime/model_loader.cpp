@@ -232,17 +232,40 @@ int detect_distilled_default_steps(const std::vector<std::string>& file_paths,
 
     auto has = [&](const char* kw) { return haystack.find(kw) != std::string::npos; };
 
-    // schnell-class distills target ~4 steps; turbo/lightning/hyper/distill ~8.
+    // Reliability ladder, most authoritative first. Step count and "is this
+    // distilled" are independent facts: a keyword like `lightning` only says
+    // distilled, not how many steps (Lightning/Hyper ship 4- and 8-step variants
+    // alike), so the explicit `Nstep` marker in the path wins over any keyword.
+
+    // 1. Explicit step marker in the path, e.g. `4steps`, `8-step`, `2_steps`.
+    //    Bounded to a sane few-step range so long shard indices (…00009.safetensors)
+    //    can never be misread as a step count.
+    std::smatch m;
+    static const std::regex step_re(R"(([0-9]{1,2})[ _-]?steps?)");
+    if (std::regex_search(haystack, m, step_re)) {
+        const int n = std::stoi(m[1].str());
+        if (n >= 1 && n <= 64) {
+            LOG_INFO("distilled step detection: explicit '%dstep' marker in path -> %d steps", n, n);
+            return n;
+        }
+    }
+
+    // 2. FLUX.1-schnell path fallback (the authoritative schnell signal is the
+    //    architecture check in FluxPipeline::resolve_steps; this only helps
+    //    same-family path scans). schnell is a fixed 4-step model.
     if (has("schnell")) {
+        LOG_INFO("distilled step detection: 'schnell' in path -> 4 steps");
         return 4;
     }
+
+    // 3. Distill keyword but no explicit step count: we know it is distilled but
+    //    not how many steps. Default to 8 (the common Lightning/Turbo case) and
+    //    say so, since a 4-step checkpoint here would run at the wrong step count.
     if (has("lightning") || has("lightx2v") || has("hyper") ||
-        has("turbo") || has("distill") ||
-        has("4step") || has("4steps") || has("8step") || has("8steps")) {
-        // 4-step variants (Lightning/Hyper commonly ship 4-step) -> 4, else 8.
-        if (has("4step") || has("4steps")) {
-            return 4;
-        }
+        has("turbo") || has("distill")) {
+        LOG_WARN("distilled step detection: distill keyword matched but no explicit "
+                 "step count in path; defaulting to 8 steps. Pass --steps N to "
+                 "override, or add an 'Nsteps' marker to the path/filename.");
         return 8;
     }
     return 0;

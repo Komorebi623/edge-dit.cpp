@@ -64,22 +64,26 @@ PY
 
 # 2. Merge LoRA into the base transformer
 #    args: <base transformer dir> <lora .safetensors> <output dir>
+#    The script tags the output directory with the LoRA's step count
+#    (here 4steps), so the runtime selects the right few-step default.
 python scripts/merge_qwen_lora.py \
   /path/to/models/Qwen-Image/transformer \
   /path/to/models/qwen-image-lightning/Qwen-Image-Lightning-4steps-V1.0-bf16.safetensors \
   /path/to/models/qwen-image-lightning-merged/transformer
 
-# 3. Run with the merged full-weight transformer
+# 3. Run with the merged full-weight transformer. The 4steps marker on the
+#    output path lets --steps -1 select 4 steps; pass --steps 4 to be explicit.
 ./build-cuda/bin/ed-cli --backend cuda \
   --model /path/to/models/Qwen-Image \
-  --diffusion-model /path/to/models/qwen-image-lightning-merged/transformer/diffusion_pytorch_model.safetensors.index.json \
-  --steps 8 --cfg-scale 1.0 -W 1024 -H 1024 \
+  --diffusion-model /path/to/models/qwen-image-lightning-merged-4steps/transformer/diffusion_pytorch_model.safetensors.index.json \
+  --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "a photorealistic red apple on a wooden table" -o qwen_lightning.png
 ```
 
 For **Qwen-Image-Edit**, use the base `Qwen/Qwen-Image-Edit/transformer`, the
-`Qwen-Image-Edit-Lightning-4steps` LoRA file, and a `.../dit/` output dir; run
-with `--model .../qwen-image-edit --qwen-image-zero-cond-t -i <input image>`.
+`Qwen-Image-Edit-Lightning-4steps` LoRA file, and a `.../dit/` output dir (the
+script tags it `...-4steps` the same way); run with `--model
+.../qwen-image-edit --qwen-image-zero-cond-t -i <input image>`.
 
 ## How the script works
 
@@ -95,4 +99,11 @@ with `--model .../qwen-image-edit --qwen-image-zero-cond-t -i <input image>`.
 4. Copies `config.json` + the index unchanged and re-saves each shard, so the
    output is a drop-in diffusers transformer directory.
 5. Asserts every LoRA module was merged (`merged_count == len(mods)`), so a
-   naming mismatch fails loudly instead of silently producing a bad model.
+   naming mismatch is reported rather than silently producing a bad model.
+
+The script also derives a step marker (for example `4steps`) from the LoRA
+filename and applies it to the model directory of the output path, so a
+`.../qwen-image-lightning-merged/transformer` output becomes
+`.../qwen-image-lightning-merged-4steps/transformer`. This lets the runtime read
+the correct few-step default from the path. If the filename has no step count,
+the output path is left unchanged and the runtime defaults to 8 steps.
