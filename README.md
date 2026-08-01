@@ -93,9 +93,9 @@ model-specific options, examples, and known limitations.
 | Backend | Status | Notes |
 |---|---|---|
 | CUDA | First-class | Primary backend for optimized inference |
-| CPU | Functional | Portable execution, fallback, and offload |
+| CPU | Functional | Portable execution and fallback; optional oneDNN bf16 AMX matmul |
 | Metal | Experimental | Early macOS support |
-| Vulkan | Experimental | Early cross-vendor GPU support |
+| Vulkan | Functional | Cross-vendor GPU; base model families validated, ~1.3x slower than CUDA |
 
 For dependencies, build profiles, and platform-specific instructions, see
 [Build and installation](docs/build.md).
