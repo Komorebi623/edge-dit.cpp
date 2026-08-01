@@ -49,17 +49,23 @@ signals, in order of reliability:
   guidance-distilled architecture: it lacks the `guidance_in` layer that
   FLUX.1-dev has. The FLUX pipeline detects this directly and defaults schnell
   to 4 steps, dev to 20.
-- **Path-keyword signal (all families).** For same-architecture distills, the
-  model or `--diffusion-model` path is scanned (case-insensitive) for
-  `schnell`, `turbo`, `lightning`, `lightx2v`, `distill`, `hyper`, and the
-  explicit step markers `4step`/`4steps`/`8step`/`8steps`. A `schnell`,
-  `4step`, or `4steps` hit defaults to 4 steps; any other hit defaults to 8.
-  No hit means the base default is used.
+- **Path signal (all families).** For same-architecture distills, the model or
+  `--diffusion-model` path is scanned (case-insensitive) in order of reliability:
+  1. An explicit step marker such as `4steps`, `8-step`, or `2_steps` is taken
+     as the step count directly, for any value in a sensible few-step range.
+     This is the most reliable signal, because the step count is an independent
+     property of the checkpoint that a family keyword alone does not convey.
+  2. Otherwise, `schnell` defaults to 4 steps.
+  3. Otherwise, a distillation keyword (`turbo`, `lightning`, `lightx2v`,
+     `distill`, `hyper`) marks the checkpoint as distilled but carries no step
+     count, so the runtime defaults to 8 steps and logs that it is doing so.
+  4. No match means the base default is used.
 
-The keyword list is deliberately conservative. A miss is harmless — it just
-falls back to the base step count (slower, not broken). A false positive would
-run a base model at too few steps, so keep the list tight and prefer the
-explicit `--steps` override when a distilled checkpoint has an unusual path.
+Because a family keyword (for example `lightning`) does not itself state the
+step count — the same family ships both 4-step and 8-step releases — a checkpoint
+whose intended count is not 8 should carry an explicit `Nsteps` marker in its
+path, or be run with an explicit `--steps N`. A missing marker is not an error:
+the runtime falls back to 8 steps and logs a note, and `--steps` always overrides.
 
 ### CFG and guidance
 
@@ -210,28 +216,35 @@ ed-cli --backend cuda --type q8_0 \
   --prompt "make the object look like brushed metal" -o kontext-lightning.png
 ```
 
-### Qwen-Image Lightning (auto 8 steps) — merge LoRA first
+### Qwen-Image Lightning (4 steps) — merge LoRA first
 
 Published as a **LoRA adapter**; merge it into the base Qwen-Image transformer
 offline first (see [Merging LoRA weights](merging-lora-weights.md)), then point
 `--diffusion-model` at the merged transformer. Qwen uses `--cfg-scale` (keep
 1.0); `--guidance` does not apply.
 
+The published adapter is the 4-step release, so the merged output directory
+should carry a `4steps` marker (the merge script adds one automatically from the
+LoRA filename) for the runtime to select 4 steps under `--steps -1`. Without the
+marker it would default to 8; passing `--steps 4` also forces it explicitly.
+
 ```bash
 ed-cli --backend cuda --type q8_0 --model /path/to/models/qwen-image \
-  --diffusion-model /path/to/models/distilled/qwen-image-lightning-merged/transformer/diffusion_pytorch_model.safetensors.index.json \
+  --diffusion-model /path/to/models/distilled/qwen-image-lightning-4steps-merged/transformer/diffusion_pytorch_model.safetensors.index.json \
   --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "a red apple on a wooden table" -o qwen-lightning.png
 ```
 
-### Qwen-Image-Edit Lightning (auto 8 steps, image editing) — merge LoRA first
+### Qwen-Image-Edit Lightning (4 steps, image editing) — merge LoRA first
 
-Same LoRA-merge requirement, plus `--image`. Add `--qwen-image-zero-cond-t`
-**only** for Qwen-Image-Edit-2511:
+Same LoRA-merge requirement, plus `--image`. As with Qwen-Image Lightning, the
+adapter is the 4-step release, so keep the `4steps` marker on the merged output
+directory (or pass `--steps 4`). Add `--qwen-image-zero-cond-t` **only** for
+Qwen-Image-Edit-2511:
 
 ```bash
 ed-cli --backend cuda --type q8_0 --model /path/to/models/qwen-image-edit --qwen-image-zero-cond-t \
-  --diffusion-model /path/to/models/distilled/qwen-image-edit-lightning-merged/dit/diffusion_pytorch_model.safetensors.index.json \
+  --diffusion-model /path/to/models/distilled/qwen-image-edit-lightning-4steps-merged/dit/diffusion_pytorch_model.safetensors.index.json \
   --image input.png --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "make it brushed metal" -o qwen-edit-lightning.png
 ```
