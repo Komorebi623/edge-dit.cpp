@@ -37,25 +37,26 @@ edge-dit.cpp can load:
 - GGUF files.
 
 The simplest path is a model directory. Component loading is useful when
-weights are stored separately. See [Command line usage](cli.md#model-loading)
+weights are stored separately. See [Command line usage](cli.md#basic-invocation)
 for both forms.
 
 ### Step-distilled variants
 
 Each supported family has step-distilled variants that generate in 4–8 steps
-instead of 20+. They load through the same pipeline as the base model; the
-runtime auto-detects them and applies a few-step default when `--steps` is
-unset. Full-weight distilled checkpoints load directly (`--model` or
-`--diffusion-model`); LoRA-form distills must be merged into the base weights
-offline first.
+instead of the base model's default. When `--steps` is unset the runtime picks a
+default step count per family: 20 for most (FLUX.1, SD3/SD3.5, Qwen-Image,
+FLUX.1-Kontext, Wan 2.x), 50 for Qwen-Image-Edit. Distilled checkpoints load
+through the same pipeline as the base model; the runtime auto-detects them and
+applies a few-step default (schnell 4, the rest 8) instead. Full-weight
+distilled checkpoints load directly (`--model` or `--diffusion-model`); LoRA-form
+distills must be merged into the base weights offline first.
 
-The distilled variants validated in the [consumer-GPU
-benchmarks](consumer-gpu-benchmarks.md), using the same columns as the base
-support matrix above:
+The distilled variants below use the same columns as the base support matrix
+above:
 
 | Distilled variant | Task | HuggingFace repo | Common format | Backend coverage | Status |
 |---|---|---|---|---|---|
-| FLUX.1-schnell | Text-to-image | [`black-forest-labs/FLUX.1-schnell`](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | Full Diffusers directory (its top-level `.safetensors` is transformer-only → `--diffusion-model`) | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
+| FLUX.1-schnell | Text-to-image | [`black-forest-labs/FLUX.1-schnell`](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | Full Diffusers directory (`--model`); the repo also has a standalone `transformer/` you can load via `--diffusion-model`  | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
 | SD3.5-medium-turbo | Text-to-image | [`tensorart/stable-diffusion-3.5-medium-turbo`](https://huggingface.co/tensorart/stable-diffusion-3.5-medium-turbo) | Full Diffusers directory (`--model`) | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
 | FLUX.1-Kontext Lightning | Image editing | [`camenduru/FLUX.1_Kontext-Lightning`](https://huggingface.co/camenduru/FLUX.1_Kontext-Lightning) | Full Diffusers directory (`--model`); the repo also has a standalone `transformer/` you can load via `--diffusion-model` over a base Kontext | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |
 | Qwen-Image Lightning | Text-to-image | [`lightx2v/Qwen-Image-Lightning`](https://huggingface.co/lightx2v/Qwen-Image-Lightning) | **LoRA adapter — merge into base first** | CUDA first, CPU functional, Metal/Vulkan experimental | Public preview |

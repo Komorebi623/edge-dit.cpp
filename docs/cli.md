@@ -227,7 +227,7 @@ Wan text-to-video uses `--video`:
   --prompt "a glass teapot rotating on a wooden table" \
   --width 832 \
   --height 480 \
-  --frames 40 \
+  --frames 41 \
   --fps 16 \
   --steps 20 \
   --cfg-scale 5.0 \
