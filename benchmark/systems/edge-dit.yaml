@@ -12,6 +12,12 @@ binary:
 sample_binary:
   path_ref: edge_dit_sample
   help_command: ["{binary}", "--help"]
+# Backend-specific binaries; used only when a job section sets `backend: vulkan`.
+# CUDA runs ignore these and use binary/sample_binary above (unchanged behavior).
+vulkan_binary:
+  path_ref: edge_dit_vk_cli
+vulkan_sample_binary:
+  path_ref: edge_dit_vk_sample
 capabilities:
   tasks: [text-to-image, image-editing, text-to-video]
   backends: [cuda, cpu, metal, vulkan]

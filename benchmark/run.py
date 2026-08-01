@@ -391,6 +391,9 @@ def main() -> None:
 
     for system_id, seg in segments.items():
         sys_cfg = load_system(system_id)
+        if seg.get("backend"):
+            sys_cfg = dict(sys_cfg)
+            sys_cfg["backend"] = seg["backend"]
         runner_key = sys_cfg.get("runner")
         if runner_key not in RUNNERS:
             die(f"system '{system_id}' has unknown runner '{runner_key}'")
