@@ -4812,6 +4812,7 @@ protected:
             ggml_free(compute_ctx);
             compute_ctx = nullptr;
         }
+        sd::ggml_graph_cut::clear_graph_cut_marks();
         backend_tensor_data_map.clear();
         invalidate_persistent_graph();
     }
@@ -5977,6 +5978,15 @@ protected:
                                        ggml_cgraph* gf) {
         GGML_ASSERT(gf != nullptr);
 
+        auto reset_runtime_binding = [](ggml_tensor* tensor) {
+            if (tensor == nullptr) {
+                return;
+            }
+            tensor->buffer = nullptr;
+            tensor->data   = nullptr;
+            tensor->extra  = nullptr;
+        };
+
         for (const auto& input : segment.input_refs) {
             ggml_tensor* input_tensor = sd::ggml_graph_cut::input_tensor(gf, input);
             if (input_tensor == nullptr) {
@@ -5985,28 +5995,36 @@ protected:
             switch (input.type) {
                 case GraphCutSegment::INPUT_PREVIOUS_CUT:
                 case GraphCutSegment::INPUT_EXTERNAL:
-                    input_tensor->buffer = nullptr;
-                    input_tensor->data   = nullptr;
-                    input_tensor->extra  = nullptr;
+                    reset_runtime_binding(input_tensor);
                     break;
                 case GraphCutSegment::INPUT_PARAM:
                     break;
             }
         }
 
-        for (int node_idx : segment.internal_node_indices) {
-            ggml_tensor* node = ggml_graph_node(gf, node_idx);
-            if (node == nullptr) {
+        const int n_leafs = sd::ggml_graph_cut::leaf_count(gf);
+        for (int leaf_idx = 0; leaf_idx < n_leafs; ++leaf_idx) {
+            ggml_tensor* leaf = sd::ggml_graph_cut::leaf_tensor(gf, leaf_idx);
+            if (leaf == nullptr || leaf->name[0] == '\0') {
                 continue;
             }
-            node->buffer = nullptr;
-            node->data   = nullptr;
-            node->extra  = nullptr;
+            static constexpr const char* k_runner_builtin_prefix = "ggml_runner_build_in_tensor:";
+            if (std::strncmp(leaf->name,
+                             k_runner_builtin_prefix,
+                             std::strlen(k_runner_builtin_prefix)) == 0) {
+                reset_runtime_binding(leaf);
+            }
+        }
+
+        for (int node_idx : segment.internal_node_indices) {
+            ggml_tensor* node = ggml_graph_node(gf, node_idx);
+            reset_runtime_binding(node);
         }
     }
 
     bool bind_segment_cached_inputs(ggml_cgraph* gf, const GraphCutSegment& segment) {
         GGML_ASSERT(gf != nullptr);
+        std::unordered_map<ggml_tensor*, ggml_tensor*> cached_view_sources;
         for (const auto& input : segment.input_refs) {
             ggml_tensor* input_tensor = sd::ggml_graph_cut::input_tensor(gf, input);
             if (input_tensor == nullptr) {
@@ -6022,6 +6040,8 @@ protected:
                         return false;
                     }
                     if (input_tensor->view_src != nullptr) {
+                        ggml_tensor* original_view_src = input_tensor->view_src;
+                        cached_view_sources[original_view_src] = cache_tensor;
                         input_tensor->view_src = cache_tensor;
                         input_tensor->buffer   = cache_tensor->buffer;
                         input_tensor->data     = cache_tensor->data == nullptr
@@ -6042,6 +6062,36 @@ protected:
                 case GraphCutSegment::INPUT_EXTERNAL:
                 case GraphCutSegment::INPUT_PARAM:
                     break;
+            }
+        }
+        if (!cached_view_sources.empty()) {
+            auto rebind_cached_view = [&cached_view_sources](ggml_tensor* tensor) {
+                if (tensor == nullptr || tensor->view_src == nullptr) {
+                    return;
+                }
+                auto it = cached_view_sources.find(tensor->view_src);
+                if (it == cached_view_sources.end()) {
+                    return;
+                }
+                tensor->view_src = it->second;
+                tensor->buffer   = it->second->buffer;
+                tensor->data     = it->second->data == nullptr
+                                       ? nullptr
+                                       : static_cast<void*>(static_cast<char*>(it->second->data) + tensor->view_offs);
+                tensor->extra    = it->second->extra;
+            };
+            for (const auto& input : segment.input_refs) {
+                rebind_cached_view(sd::ggml_graph_cut::input_tensor(gf, input));
+            }
+            for (int node_idx : segment.internal_node_indices) {
+                ggml_tensor* node = ggml_graph_node(gf, node_idx);
+                rebind_cached_view(node);
+                if (node == nullptr) {
+                    continue;
+                }
+                for (int src_idx = 0; src_idx < GGML_MAX_SRC; ++src_idx) {
+                    rebind_cached_view(node->src[src_idx]);
+                }
             }
         }
         for (int node_idx : segment.internal_node_indices) {
@@ -6095,26 +6145,18 @@ protected:
             profile_out->offload_ms = t_offload_end - t_offload_begin;
         }
 
-        // Vulkan-only: after a weight is streamed to the device by offload_*_params(),
-        // its buffer/data pointers change, but any reshape/view tensor built over that
+        // After a weight is streamed to the device by offload_*_params(), its
+        // buffer/data pointers change, but any reshape/view tensor built over that
         // weight while it still lived on the host params buffer keeps the stale host
-        // buffer. ggml_gallocr_init_tensor() only re-derives a view (via
-        // ggml_backend_view_init) when the view's ->buffer is NULL, so a view that
-        // already carries the pre-swap host buffer is never fixed up, and
-        // ggml_vk_mul_mat_q_f16 then reads that host buffer's context as a
-        // ggml_backend_vk_buffer_context -> garbage vk_buffer shared_ptr -> SIGSEGV
-        // (seen in qwen2.5vl vision encode when its 8GB budget forces the encoder to
-        // offload+segment). Re-derive view bindings from view_src so those views pick
-        // up the swapped device buffer. refresh_graph_view_bindings() only touches
-        // views whose view_src is already materialized (view_src->data != nullptr),
-        // i.e. the just-swapped weights, so compute intermediates are untouched.
-        // Guarded to Vulkan: CPU/CUDA/Metal keep their exact prior behavior. Skipped
-        // when params were pre-swapped by the async double-buffer caller
-        // (params_already_resident) or when no offload is configured
-        // (params_backend == runtime_backend, offload_*_params was a no-op).
+        // binding. ggml_gallocr_init_tensor() only re-derives a view when the view's
+        // ->buffer is NULL, so a view that already carries the pre-swap host buffer
+        // is never fixed up. Re-derive view bindings from view_src so segmented
+        // graph-cut runs see the same weight views as whole-graph offload. This only
+        // touches views whose view_src is already materialized, so compute
+        // intermediates are untouched. Skipped when params were pre-swapped by the
+        // async double-buffer caller or when no offload is configured.
         if (!params_already_resident &&
-            params_backend != runtime_backend &&
-            sd_backend_is(runtime_backend, "Vulkan")) {
+            params_backend != runtime_backend) {
             refresh_graph_view_bindings(gf);
         }
 

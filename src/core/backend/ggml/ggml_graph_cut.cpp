@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stack>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -19,6 +20,7 @@ namespace sd::ggml_graph_cut {
 
     namespace {
         thread_local std::vector<CommMark> g_comm_marks;
+        thread_local std::unordered_set<const ggml_tensor*> g_graph_cut_marks;
     }
 
     const char* comm_kind_name(Segment::CommKind kind);
@@ -97,6 +99,11 @@ namespace sd::ggml_graph_cut {
             ggml_tensor* node = graph->nodes[i];
             if (node == nullptr) {
                 continue;
+            }
+            if (node->view_src != nullptr) {
+                const size_t view_src_hash_pos =
+                    ggml_hash_find_or_insert(&graph->visited_hash_set, node->view_src);
+                graph->use_counts[view_src_hash_pos]++;
             }
             for (int src_idx = 0; src_idx < GGML_MAX_SRC; ++src_idx) {
                 ggml_tensor* src = node->src[src_idx];
@@ -387,11 +394,34 @@ namespace sd::ggml_graph_cut {
         return sorted_segments;
     }
 
-    bool is_graph_cut_tensor(const ggml_tensor* tensor) {
+    static bool has_graph_cut_name(const ggml_tensor* tensor) {
         if (tensor == nullptr || tensor->name[0] == '\0') {
             return false;
         }
-        return std::strncmp(tensor->name, GGML_RUNNER_CUT_PREFIX, std::strlen(GGML_RUNNER_CUT_PREFIX)) == 0;
+        const size_t prefix_len = std::strlen(GGML_RUNNER_CUT_PREFIX);
+        if (std::strncmp(tensor->name, GGML_RUNNER_CUT_PREFIX, prefix_len) != 0) {
+            return false;
+        }
+        const char* payload = tensor->name + prefix_len;
+        const char* sep     = std::strchr(payload, '|');
+        if (sep == nullptr || sep == payload || sep[1] == '\0') {
+            return false;
+        }
+        return std::strstr(sep + 1, " (") == nullptr;
+    }
+
+    static bool is_runner_builtin_tensor(const ggml_tensor* tensor) {
+        if (tensor == nullptr || tensor->name[0] == '\0') {
+            return false;
+        }
+        return std::strncmp(tensor->name,
+                            "ggml_runner_build_in_tensor:",
+                            std::strlen("ggml_runner_build_in_tensor:")) == 0;
+    }
+
+    bool is_graph_cut_tensor(const ggml_tensor* tensor) {
+        return has_graph_cut_name(tensor) &&
+               g_graph_cut_marks.find(tensor) != g_graph_cut_marks.end();
     }
 
     std::string make_graph_cut_name(const std::string& group, const std::string& output) {
@@ -404,6 +434,11 @@ namespace sd::ggml_graph_cut {
         }
         auto name = make_graph_cut_name(group, output);
         ggml_set_name(tensor, name.c_str());
+        g_graph_cut_marks.insert(tensor);
+    }
+
+    void clear_graph_cut_marks() {
+        g_graph_cut_marks.clear();
     }
 
     void mark_comm_op(ggml_tensor* input,
@@ -745,6 +780,12 @@ namespace sd::ggml_graph_cut {
         for (const auto& input : segment.input_refs) {
             add_segment_leaf(input_tensor(gf, input));
         }
+        for (int leaf_idx = 0; leaf_idx < gf->n_leafs; ++leaf_idx) {
+            ggml_tensor* leaf = gf->leafs[leaf_idx];
+            if (is_runner_builtin_tensor(leaf)) {
+                add_segment_leaf(leaf);
+            }
+        }
         for (int node_idx : segment.internal_node_indices) {
             ggml_tensor* node = ggml_graph_node(gf, node_idx);
             if (node == nullptr) {
@@ -762,12 +803,22 @@ namespace sd::ggml_graph_cut {
             }
         }
 
+        auto mark_segment_output = [](ggml_tensor* output) {
+            if (output == nullptr) {
+                return;
+            }
+            ggml_set_output(output);
+            if (output->view_src != nullptr) {
+                ggml_set_output(output->view_src);
+            }
+        };
+
         for (int output_node_index : segment.output_node_indices) {
             ggml_tensor* output = ggml_graph_node(gf, output_node_index);
             if (output == nullptr) {
                 continue;
             }
-            ggml_set_output(output);
+            mark_segment_output(output);
         }
         for (const auto& comm_op : segment.comm_ops) {
             ggml_tensor* input = comm_input_tensor(gf, comm_op);
@@ -775,11 +826,11 @@ namespace sd::ggml_graph_cut {
                 // Communication runs from the post-compute callback. Keep the
                 // send tensor alive after graph compute instead of letting the
                 // allocator recycle its buffer as an internal temporary.
-                ggml_set_output(input);
+                mark_segment_output(input);
             }
             ggml_tensor* output = comm_output_tensor(gf, comm_op);
             if (output != nullptr) {
-                ggml_set_output(output);
+                mark_segment_output(output);
             }
         }
         for (int node_idx : segment.internal_node_indices) {
