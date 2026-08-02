@@ -1,0 +1,16 @@
+# Vulkan video sweep: Wan 2.1 T2V 1.3B base + distilled, edge-only.
+# Small model, fits resident. Wan VAE conv3d routed through im2col on Vulkan.
+name: cuda-full-video
+task: text-to-video
+prompts: 1
+device: 1
+warmup: 1
+measured: 1
+metrics: {quality: false}
+
+edge-dit:
+  backend: cuda
+  model: [wan2-t2v-1.3b]
+  quant:
+    - q8
+    - {model: wan21-t2v-1.3b-distill, type: q8}

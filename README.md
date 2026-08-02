@@ -15,78 +15,67 @@
 
 edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for local, edge, and resource-constrained deployment. Built on ggml, it provides a unified runtime for image generation, image editing, and video generation, with explicit control over model loading, memory usage, graph execution, and backend selection.
 
-## Latest News
-
-- **2026-07-30:** 🚀 Added **per-component offload** flags — `--dit-offload` / `--text-encoder-offload` / `--vae-offload` (weights on CPU, staged to GPU per compute), unifying all offload paths on one semantics.
-- **2026-07-29:** 🚀 Restructured the **cross-system benchmark**.
-- **2026-07-29:** 🚀 Added **`--auto-fit`** fully-automatic budgeting — one flag picks DiT quantization (`q8_0`/`q4_k`) *and* per-component placement to fit a hard VRAM budget (supersedes `--auto-allocate`).
-- **2026-07-27:** 🚀 Added **`--auto-allocate`** adaptive per-component VRAM placement under a hard budget.
-- **2026-07-27:** 🚀 Added **few-step distilled model** auto-detection (Turbo/Lightning/schnell default to 4–8 steps).
-- **2026-07-27:** 🚀 Added **unified-memory offload short-circuit** on Apple Silicon (`--offload-to-cpu` is a no-op on UMA).
-- **2026-07-27:** 🚀 Added optional **SageAttention** (INT8-QK + F16-PV) for SD3/Wan attention (`ED_SAGE_ATTN=1`).
-- **2026-07-24:** 🚀 Added **activation-calibrated imatrix quantization** to `ed-convert` (`--imatrix`).
-- **2026-07-23:** 🚀 Added **`ed-convert`** for offline weight quantization to portable pre-quantized GGUF.
-- **2026-07-11:** 🚀 **edge-dit.cpp v0.1.0-alpha** enters **public preview**.
-- **2026-07-08:** 🚀 Added the **managed development console** for the
-  **Python job server**.
-- **2026-07-07:** 🚀 Added **FLUX.1-Kontext** image generation and editing
-  support.
-- **2026-07-05:** 🚀 Added **Python bindings** and examples for native runtime
-  integration.
-- **2026-07-02:** 🚀 Added **Qwen-Image-Edit** image editing support.
-- **2026-05-27:** 🚀 Added **Qwen-Image**, **native C API**, **CLI**, and
-  **HTTP server** support.
-- **2026-05-26:** 🚀 Added native **SD3** and **Wan 2.1** video pipeline support.
-- **2026-05-25:** 🚀 Added the first **FLUX.1-dev** text-to-image backend.
-
 ## Features
 
 - **Lightweight native DiT runtime**
-  - Pure C/C++ inference built on [ggml-org/ggml](https://github.com/ggml-org/ggml)
-  - No Python or PyTorch required at runtime
-  - Explicit tensor, graph, memory, and device control
-  - Designed for local and resource-constrained deployment
+  - Pure **C/C++** inference built on [ggml](https://github.com/ggml-org/ggml) — **no Python or PyTorch at runtime**
+  - Explicit control over tensors, graph execution, memory, and device placement
+  - **Multi-backend**: **CUDA** (first-class), **CPU** (portable, optional oneDNN **bf16 AMX** matmul), **Vulkan** (cross-vendor GPU), **Metal** (experimental)
+  - Loads **Diffusers** directories, standalone components, **safetensors** (+ shard index), and **GGUF**
 
-- **DiT engine abstraction and architecture**
-  - Loader layer for Diffusers directories, standalone components, safetensors shards, and GGUF
-  - Runtime layer for tensor storage, graph execution, memory management, devices, and backend dispatch
-  - Model layer for architecture-specific DiT blocks, conditioning, and output adapters
-  - Pipeline layer for image generation, image editing, and video generation
-  - Shared C API, CLI, HTTP server, and Python interfaces across model families
+- **Unified across tasks and model families**
+  - **Text-to-image**, **image editing**, and **video generation** in one runtime
+  - SD3/SD3.5, FLUX.1, FLUX.1-Kontext, Qwen-Image, Qwen-Image-Edit, and Wan 2.1
+  - **Few-step distilled models** auto-detected — Turbo / Lightning / schnell default to a **4–8 step** schedule
+  - Shared **C API, CLI, HTTP server, and Python** interfaces across every family
+
+- **Fits large models into limited VRAM**
+  - **`--auto-fit`** — one flag auto-picks DiT **quantization** (`q8_0`→`q4_K`) *and* per-component placement to meet a hard VRAM budget
+  - **Layered offload** — streams the diffusion transformer **one block at a time** (async double-buffered on CUDA), so 20 GB+ models run on a 24 GB or smaller card
+  - **Per-component offload** (`--dit-offload` / `--text-encoder-offload` / `--vae-offload`) and **VAE tiling**
+  - **`ed-convert`** — offline weight quantization to a **portable pre-quantized GGUF** (skips per-load CPU quantization), with per-tensor dtype rules and activation-calibrated **imatrix**
 
 - **System-level optimization for efficient DiT inference**
-  - **[Model representation and precision](docs/optimization/model-representation-and-precision.md)**
-    - Quantization, mixed precision, and per-tensor dtype control
-    - Offline quantization to portable pre-quantized GGUF (\`ed-convert\`)
-  - **[Memory-efficient execution](docs/optimization/memory-efficient-execution.md)**
-    - CPU offload, graph VRAM control, VAE tiling, and component placement
-  - **[Graph and operator optimization](docs/optimization/graph-and-operator-optimization.md)**
-    - cuDNN SDPA, DiT-specific CUDA operators, and tensor-layout optimization
-  - **[Computation reuse](docs/optimization/computation-reuse.md)**
-    - Timestep- and block-level cache reuse with output, feature, and probe policies
-  - **[Few-step distilled models](docs/optimization/few-step-distilled-models.md)**
-    - Automatic detection of Turbo/Lightning/schnell checkpoints with few-step scheduling
-  - **[Parallel execution](docs/optimization/parallel-execution.md)**
-    - CFG parallelism, sequence parallelism, and NCCL/MPI multi-worker execution
+  - **[Model representation and precision](docs/optimization/model-representation-and-precision.md)** — quantization, mixed precision, per-tensor dtype, offline GGUF (`ed-convert`)
+  - **[Memory-efficient execution](docs/optimization/memory-efficient-execution.md)** — CPU offload, layered offload, graph VRAM budget, VAE tiling, component placement
+  - **[Graph and operator optimization](docs/optimization/graph-and-operator-optimization.md)** — cuDNN SDPA, DiT-specific CUDA operators, tensor-layout optimization
+  - **[Computation reuse](docs/optimization/computation-reuse.md)** — timestep- and block-level cache reuse
+  - **[Few-step distilled models](docs/optimization/few-step-distilled-models.md)** — automatic Turbo/Lightning/schnell scheduling
+  - **[Parallel execution](docs/optimization/parallel-execution.md)** — CFG and sequence parallelism, NCCL/MPI multi-worker execution
+
+## Latest News
+
+- **2026-07-30:** 🚀 Added **per-component offload** (`--dit-offload` / `--text-encoder-offload` / `--vae-offload`), unifying all offload paths on one semantics.
+- **2026-07-29:** 🚀 Added **`--auto-fit`** — one flag picks DiT quantization *and* per-component placement to fit a hard VRAM budget.
+- **2026-07-27:** 🚀 Added **few-step distilled** auto-detection (Turbo/Lightning/schnell → 4–8 steps) and optional **SageAttention** for SD3/Wan.
+- **2026-07-23:** 🚀 Added **`ed-convert`** for offline weight quantization to portable pre-quantized GGUF (with activation-calibrated `--imatrix`).
+- **2026-07-11:** 🚀 **edge-dit.cpp v0.1.0-alpha** enters **public preview**.
+- **2026-07-02:** 🚀 Added **FLUX.1-Kontext** and **Qwen-Image-Edit** image editing.
+- **2026-05-26:** 🚀 First pipelines — **FLUX.1-dev**, **SD3**, **Qwen-Image**, **Wan 2.1**, plus **C API / CLI / HTTP server / Python bindings**.
 
 ## Supported Models
 
-The public preview focuses on the model families below. Some source files
-contain experimental model scaffolding beyond this table; those are not part of
-the current public support commitment unless documented in
+The public preview focuses on the model families below, each with a base
+checkpoint and a **few-step distilled variant**. Some source files contain
+experimental model scaffolding beyond this table; those are not part of the
+current public support commitment unless documented in
 [Supported Models](docs/models.md).
 
-| Model family | Task | Status |
-|---|---|---|
-| SD3 / SD3.5 | Text-to-image | Public preview |
-| FLUX.1 | Text-to-image | Public preview |
-| FLUX.1-Kontext | Image editing / reference-guided generation | Public preview |
-| Qwen-Image | Text-to-image | Public preview |
-| Qwen-Image-Edit | Image editing | Public preview |
-| Wan 2.1 | Video generation | Public preview |
+| Model family | Task | Base checkpoint | Distilled variant (few-step) | Status |
+|---|---|---|---|---|
+| **SD3 / SD3.5** | Text-to-image | `stabilityai/stable-diffusion-3-medium` | SD3.5-medium-turbo | Public preview |
+| **FLUX.1** | Text-to-image | `black-forest-labs/FLUX.1-dev` | FLUX.1-schnell | Public preview |
+| **FLUX.1-Kontext** | Image editing / reference-guided | `black-forest-labs/FLUX.1-Kontext-dev` | Kontext Lightning | Public preview |
+| **Qwen-Image** | Text-to-image | `Qwen/Qwen-Image` | Qwen-Image Lightning *(LoRA)* | Public preview |
+| **Qwen-Image-Edit** | Image editing | `Qwen/Qwen-Image-Edit` | Qwen-Image-Edit Lightning *(LoRA)* | Public preview |
+| **Wan 2.1** | Video generation | `Wan-AI/Wan2.1-T2V-1.3B` (and 14B) | Wan2.1-T2V-1.3B Distill | Public preview, optimizing |
 
-See [Supported Models](docs/models.md) for formats, backend coverage,
-model-specific options, examples, and known limitations.
+Distilled checkpoints load through the same pipeline as the base model and are
+**auto-detected** (default **4–8 steps** when `--steps` is unset). Most ship as
+drop-in full weights; the two Qwen-Image Lightning variants ship as **LoRA
+adapters** and must be merged into the base first (`scripts/merge_qwen_lora.py`).
+See [Supported Models](docs/models.md) for exact HuggingFace repos, formats,
+per-variant run commands, backend coverage, and known limitations.
 
 ## Backend Support
 

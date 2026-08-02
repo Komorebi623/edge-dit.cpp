@@ -5,7 +5,7 @@ model_name: Qwen-Image-Edit Lightning (8-step)
 task: image-editing
 distilled: true                        # distilled, few steps
 model:
-  public_id: lightx2v/Qwen-Image-Edit-Lightning
+  public_id: lightx2v/Qwen-Image-Lightning   # Edit file (Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors) from this repo; see docs/models.md
   local_path_ref: qwen_image_edit_lightning_weights  # site -> distilled/qwen-image-edit-lightning-merged/dit/...index.json
   format: transformer-weights-file      # merged transformer index (needs rest of qwen-image-edit base components)
   base_model_ref: qwen_image_edit_dir   # base provides text_encoder/vae/scheduler

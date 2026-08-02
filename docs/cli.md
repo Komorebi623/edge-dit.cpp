@@ -254,8 +254,10 @@ Step-distilled checkpoints (FLUX.1-schnell, SD3.5-medium-turbo,
 Qwen-Image-Lightning, Kontext Lightning, Wan distill, …) generate in 4-8 steps.
 Pass `--steps -1` (or omit `--steps`) to let the runtime detect the distilled
 model and choose the few-step default; an explicit `--steps N` always overrides.
-Distilled models are guidance-distilled, so leave `--cfg-scale` at its default
-`1.0` (single forward) rather than raising it.
+Most distilled models are guidance-distilled, so leave `--cfg-scale` at its
+default `1.0` (single forward) rather than raising it — **except** where the
+model card says otherwise (SD3.5-medium-turbo wants `--cfg-scale 1.5`; at `1.0`
+its geometry collapses).
 
 Two loading shapes, depending on how the variant is published:
 
@@ -264,7 +266,7 @@ Two loading shapes, depending on how the variant is published:
 ./build-cuda/bin/ed-cli \
   --backend cuda --type q8_0 \
   --model /path/to/sd3.5-medium-turbo \
-  --steps -1 --cfg-scale 1.0 \
+  --steps -1 --cfg-scale 1.5 \
   --auto-fit --max-vram 8 --vae-tiling auto \
   --prompt "a glass teapot on a wooden table" \
   --output turbo.png

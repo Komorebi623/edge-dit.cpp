@@ -77,6 +77,14 @@ models run single-forward out of the box. Passing `--cfg-scale > 1` on a
 distilled model re-enables the two-forward path and is generally not what you
 want.
 
+**Exception — some "turbo" checkpoints still want a small CFG.** Not every
+distilled release is fully guidance-distilled. `tensorart/stable-diffusion-3.5-medium-turbo`,
+for example, follows its HF card's `guidance_scale=1.5` (i.e. `--cfg-scale 1.5`):
+at `--cfg-scale 1.0` its geometry collapses (blurry, malformed objects), and a
+small CFG of `1.5` restores correct structure. If a distilled checkpoint produces
+degraded images at `cfg-scale 1.0`, check its model card for a recommended
+`guidance_scale` before assuming the weights are bad.
+
 ---
 
 ## 3. Usage
@@ -116,8 +124,9 @@ to all of them:
 
 - **`--steps -1`** lets the runtime auto-pick the few-step count (shown per
   variant). Pass an explicit `--steps N` to override.
-- **`--cfg-scale 1.0`** (the default) keeps the single-forward path distilled
-  models are trained for. Do **not** raise it (see [CFG and guidance](#cfg-and-guidance)).
+- **`--cfg-scale 1.0`** (the default) keeps the single-forward path most distilled
+  models are trained for. Do **not** raise it — **except** where a model card
+  specifies otherwise (SD3.5-medium-turbo wants `1.5`; see [CFG and guidance](#cfg-and-guidance)).
 - **`--guidance`** (FLUX distilled guidance embedding, default `3.5`) applies to
   the FLUX-family and Wan pipelines (FLUX.1-dev, Kontext-dev, Wan). It has **no
   effect** on SD3 and Qwen-Image, and on FLUX.1-schnell (which has no
@@ -179,12 +188,14 @@ ed-cli --backend cuda --type q8_0 \
 
 ### SD3.5-medium-turbo (auto 8 steps)
 
-SD3 family: uses `--cfg-scale` (keep `1.0`). `--guidance` does not apply, and
-`--flow-shift` is left at the SD3 default (`3.0`). Full Diffusers directory:
+SD3 family: uses `--cfg-scale`. Unlike most distilled models, this checkpoint's
+HF card specifies `guidance_scale=1.5`, so set **`--cfg-scale 1.5`** (at `1.0`
+the geometry collapses). `--guidance` does not apply, and `--flow-shift` is left
+at the SD3 default (`3.0`). Full Diffusers directory:
 
 ```bash
 ed-cli --backend cuda --type q8_0 --model /path/to/models/sd35-medium-turbo \
-  --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
+  --steps -1 --cfg-scale 1.5 -W 1024 -H 1024 \
   --prompt "a glass teapot on a wooden table" -o turbo.png
 ```
 

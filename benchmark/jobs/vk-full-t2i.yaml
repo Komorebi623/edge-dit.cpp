@@ -1,0 +1,21 @@
+# Vulkan full T2I sweep: all text-to-image base + distilled models, edge-only.
+# q8 resident where it fits (sd3/flux ~ fit 24G); qwen-image needs auto-fit (huge
+# Qwen2.5-VL TE + ~20G DiT). quality:false -> speed+vram only.
+name: vk-full-t2i
+task: text-to-image
+prompts: 1
+device: 1
+warmup: 1
+measured: 1
+metrics: {quality: false}
+
+edge-dit:
+  backend: vulkan
+  model: [sd3-medium]
+  quant:
+    - q8
+    - {model: sd35-medium-turbo, type: q8}
+    - {model: flux-dev,          type: q8}
+    - {model: flux-schnell,      type: q8}
+    - {model: qwen-image,           type: q8, offload: auto-fit, max_vram: 24, vae_tiling: auto}
+    - {model: qwen-image-lightning, type: q8, offload: auto-fit, max_vram: 24, vae_tiling: auto}
