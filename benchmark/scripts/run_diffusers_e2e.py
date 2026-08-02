@@ -21,6 +21,8 @@ def main() -> int:
     parser.add_argument("--steps", type=int, required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--guidance", type=float, required=True)
+    parser.add_argument("--cfg-scale", type=float, default=1.0)
+    parser.add_argument("--negative-prompt", default=None)
     parser.add_argument("--dtype", choices=["bf16", "fp16", "f16", "fp32", "f32"], default="bf16")
     parser.add_argument("--task", default="text-to-image")
     parser.add_argument("--model-family", default="FLUX.1")
@@ -351,18 +353,40 @@ def run_generation(args: argparse.Namespace, pipe: Any, device: str) -> tuple[fl
     return elapsed_ms, result, markers
 
 
+FLUX_FAMILIES = {"FLUX.1", "FLUX.1-Kontext"}
+QWEN_FAMILIES = {"Qwen-Image", "Qwen-Image-Edit"}
+
+
 def build_call_kwargs(args: argparse.Namespace, generator: Any) -> dict[str, Any]:
     """Assemble pipeline __call__ kwargs for the requested task.
 
-    All three task families share prompt/steps/guidance/generator; edit adds the
-    reference image and video swaps width/height for num_frames output.
+    All families share prompt/steps/generator; edit adds the reference image and
+    video swaps width/height for num_frames output. Guidance mapping is per family
+    so all three benchmark systems drive the same knob:
+      - FLUX: guidance_scale = distilled guidance (yaml `guidance`)
+      - Qwen: true_cfg_scale = real CFG (yaml `cfg_scale`); guidance_scale unused
+      - SD3/SD3.5/Wan: guidance_scale = real CFG (yaml `cfg_scale`)
     """
     kwargs: dict[str, Any] = {
         "prompt": args.prompt,
         "num_inference_steps": args.steps,
-        "guidance_scale": args.guidance,
         "generator": generator,
     }
+    if args.model_family in FLUX_FAMILIES:
+        kwargs["guidance_scale"] = args.guidance
+        if args.task == "image-editing":
+            kwargs["true_cfg_scale"] = args.cfg_scale
+            if args.negative_prompt is not None and (args.cfg_scale > 1 or args.negative_prompt != ""):
+                kwargs["negative_prompt"] = args.negative_prompt
+    elif args.model_family in QWEN_FAMILIES:
+        kwargs["true_cfg_scale"] = args.cfg_scale
+        negative_prompt = args.negative_prompt
+        if args.cfg_scale > 1 and negative_prompt is None:
+            negative_prompt = " "
+        if negative_prompt is not None and (args.cfg_scale > 1 or negative_prompt != ""):
+            kwargs["negative_prompt"] = negative_prompt
+    else:
+        kwargs["guidance_scale"] = args.cfg_scale
     if args.task == "text-to-video":
         kwargs["width"] = args.width
         kwargs["height"] = args.height

@@ -2,6 +2,7 @@
 
 #include "common.cuh"
 
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cudnn.h>
@@ -40,6 +41,7 @@ constexpr int64_t MIN_CUDNN_SDPA_FAST_SEQ = 4096;
 
 struct ed_cudnn_sdpa_key {
     int device = 0;
+    ggml_type io_type = GGML_TYPE_COUNT;
     ggml_type dst_type = GGML_TYPE_COUNT;
     int64_t b = 0;
     int64_t h = 0;
@@ -56,7 +58,7 @@ struct ed_cudnn_sdpa_key {
     int64_t o_stride[4] = {};
 
     bool operator==(const ed_cudnn_sdpa_key & other) const {
-        return device == other.device && dst_type == other.dst_type && b == other.b && h == other.h && sq == other.sq && sk == other.sk &&
+        return device == other.device && io_type == other.io_type && dst_type == other.dst_type && b == other.b && h == other.h && sq == other.sq && sk == other.sk &&
                sk_actual == other.sk_actual && d == other.d && attn_scale == other.attn_scale && padding_mask == other.padding_mask &&
                allow_short_kv_cross_attn == other.allow_short_kv_cross_attn &&
                std::memcmp(q_stride, other.q_stride, sizeof(q_stride)) == 0 &&
@@ -72,6 +74,7 @@ struct ed_cudnn_sdpa_key_hash {
         auto mix = [&h](int64_t v) {
             h ^= std::hash<int64_t>()(v) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
         };
+        mix(static_cast<int64_t>(key.io_type));
         mix(static_cast<int64_t>(key.dst_type));
         mix(key.b);
         mix(key.h);
@@ -99,8 +102,8 @@ struct ed_cudnn_sdpa_plan {
     std::shared_ptr<fe::graph::Graph> graph;
     int64_t workspace_size = 0;
     void * workspace = nullptr;
-    half * q_f16 = nullptr;
-    half * o_f16 = nullptr;
+    void * q_io = nullptr;
+    void * o_io = nullptr;
     int32_t * seq_len_q = nullptr;
     int32_t * seq_len_kv = nullptr;
     int64_t elements = 0;
@@ -112,11 +115,11 @@ struct ed_cudnn_sdpa_plan {
         if (seq_len_q != nullptr) {
             cudaFree(seq_len_q);
         }
-        if (o_f16 != nullptr) {
-            cudaFree(o_f16);
+        if (o_io != nullptr) {
+            cudaFree(o_io);
         }
-        if (q_f16 != nullptr) {
-            cudaFree(q_f16);
+        if (q_io != nullptr) {
+            cudaFree(q_io);
         }
         if (workspace != nullptr) {
             cudaFree(workspace);
@@ -227,11 +230,32 @@ static void append_unique_path(std::vector<std::string> & paths, const std::stri
     }
 }
 
+static void append_conda_cuda_package_paths(std::vector<std::string> & paths, const char * prefix) {
+    if (prefix == nullptr || prefix[0] == '\0') {
+        return;
+    }
+
+    const std::string root(prefix);
+    append_unique_path(paths, root + "/lib");
+    for (int minor = 8; minor <= 13; ++minor) {
+        const std::string py = root + "/lib/python3." + std::to_string(minor) + "/site-packages/nvidia";
+        append_unique_path(paths, py + "/cuda_nvrtc/lib");
+        append_unique_path(paths, py + "/cublas/lib");
+    }
+}
+
 static std::vector<std::string> cudnn_runtime_paths() {
     std::vector<std::string> paths;
     for (const auto & path : split_paths(getenv("LD_LIBRARY_PATH"))) {
         append_unique_path(paths, path);
     }
+    append_conda_cuda_package_paths(paths, getenv("CONDA_PREFIX"));
+    append_conda_cuda_package_paths(paths, getenv("CONDA_PREFIX_1"));
+    append_conda_cuda_package_paths(paths, getenv("CONDA_PREFIX_2"));
+    append_conda_cuda_package_paths(paths, getenv("CONDA_PREFIX_3"));
+    append_conda_cuda_package_paths(paths, getenv("CONDA_PREFIX_4"));
+    append_conda_cuda_package_paths(paths, getenv("CONDA_PREFIX_5"));
+    append_conda_cuda_package_paths(paths, getenv("_CONDA_ROOT"));
 #ifdef ED_CUDNN_RUNTIME_LIBRARY_DIRS
     for (const auto & path : split_paths(ED_CUDNN_RUNTIME_LIBRARY_DIRS)) {
         append_unique_path(paths, path);
@@ -254,21 +278,19 @@ static bool dlopen_any_global(const std::vector<std::string> & names,
         if (err != nullptr) {
             last_error = err;
         }
-    }
 
-    for (const std::string & path : paths) {
-        for (const std::string & name : names) {
+        for (const std::string & path : paths) {
             const std::string candidate = path + "/" + name;
-            void * handle = dlopen(candidate.c_str(), RTLD_NOW | RTLD_GLOBAL);
-            if (handle != nullptr) {
+            void * path_handle = dlopen(candidate.c_str(), RTLD_NOW | RTLD_GLOBAL);
+            if (path_handle != nullptr) {
                 if (profile_enabled()) {
                     GGML_LOG_INFO("ED_CUDNN_SDPA loaded %s\n", candidate.c_str());
                 }
                 return true;
             }
-            const char * err = dlerror();
-            if (err != nullptr) {
-                last_error = err;
+            const char * path_err = dlerror();
+            if (path_err != nullptr) {
+                last_error = path_err;
             }
         }
     }
@@ -290,9 +312,9 @@ static bool ensure_cuda_graph_build_libraries_loaded() {
     static const bool loaded = [] {
         const std::vector<std::string> paths = cudnn_runtime_paths();
         bool ok = true;
-        ok = dlopen_any_global({"libcublasLt.so", "libcublasLt.so.13", "libcublasLt.so.12"}, paths, "cuBLASLt") && ok;
-        ok = dlopen_any_global({"libcublas.so", "libcublas.so.13", "libcublas.so.12"}, paths, "cuBLAS") && ok;
-        ok = dlopen_any_global({"libnvrtc.so", "libnvrtc.so.13", "libnvrtc.so.12"}, paths, "NVRTC") && ok;
+        ok = dlopen_any_global({"libcublasLt.so.12", "libcublasLt.so.13", "libcublasLt.so"}, paths, "cuBLASLt") && ok;
+        ok = dlopen_any_global({"libcublas.so.12", "libcublas.so.13", "libcublas.so"}, paths, "cuBLAS") && ok;
+        ok = dlopen_any_global({"libnvrtc.so.12", "libnvrtc.so.13", "libnvrtc.so"}, paths, "NVRTC") && ok;
         return ok;
     }();
     return loaded;
@@ -303,6 +325,15 @@ static bool ensure_cuda_graph_build_libraries_loaded() {
 
 static size_t type_size(ggml_type type) {
     return ggml_type_size(type) / ggml_blck_size(type);
+}
+
+static bool is_cudnn_sdpa_io_type(ggml_type type) {
+    return type == GGML_TYPE_F16 || type == GGML_TYPE_BF16;
+}
+
+static fe::DataType_t cudnn_frontend_io_type(ggml_type type) {
+    GGML_ASSERT(is_cudnn_sdpa_io_type(type));
+    return type == GGML_TYPE_BF16 ? fe::DataType_t::BFLOAT16 : fe::DataType_t::HALF;
 }
 
 static bool is_contiguous_3d(const ggml_tensor * t) {
@@ -367,11 +398,16 @@ static bool make_key(const ggml_tensor * dst, ed_cudnn_sdpa_key & key, int devic
         log_unsupported_shape("null_tensor", q, k, v, dst, mask);
         return false;
     }
-    if ((q->type != GGML_TYPE_F32 && q->type != GGML_TYPE_F16) ||
-        k->type != GGML_TYPE_F16 ||
-        v->type != GGML_TYPE_F16 ||
+    if (!is_cudnn_sdpa_io_type(k->type) ||
+        v->type != k->type ||
+        (q->type != GGML_TYPE_F32 && q->type != k->type) ||
         (dst->type != GGML_TYPE_F32 && dst->type != GGML_TYPE_F16)) {
         log_unsupported_shape("type", q, k, v, dst, mask);
+        return false;
+    }
+    const ggml_type io_type = k->type;
+    if (io_type == GGML_TYPE_BF16 && dst->type != GGML_TYPE_F32) {
+        log_unsupported_shape("bf16_dst_type", q, k, v, dst, mask);
         return false;
     }
 
@@ -407,8 +443,8 @@ static bool make_key(const ggml_tensor * dst, ed_cudnn_sdpa_key & key, int devic
         return false;
     }
     if (!supports_tensor_shape(q, q->type, d, sq, h) ||
-        !supports_tensor_shape(k, GGML_TYPE_F16, d, sk, h) ||
-        !supports_tensor_shape(v, GGML_TYPE_F16, d, sk, h)) {
+        !supports_tensor_shape(k, io_type, d, sk, h) ||
+        !supports_tensor_shape(v, io_type, d, sk, h)) {
         log_unsupported_shape("input_layout", q, k, v, dst, mask);
         return false;
     }
@@ -424,6 +460,7 @@ static bool make_key(const ggml_tensor * dst, ed_cudnn_sdpa_key & key, int devic
 
     key = {};
     key.device = device;
+    key.io_type = io_type;
     key.dst_type = dst->type;
     key.b = 1;
     key.h = h;
@@ -478,6 +515,7 @@ static bool make_self_attn_key(int device,
 
     key = {};
     key.device = device;
+    key.io_type = GGML_TYPE_F16;
     key.dst_type = dst_type;
     key.b = 1;
     key.h = h;
@@ -532,6 +570,7 @@ static bool make_cross_attn_key(int device,
 
     key = {};
     key.device = device;
+    key.io_type = GGML_TYPE_F16;
     key.dst_type = dst_type;
     key.b = 1;
     key.h = h;
@@ -571,10 +610,16 @@ static bool make_cross_attn_key(int device,
 }
 
 static bool should_use_cudnn_sdpa(const ed_cudnn_sdpa_key & key) {
-    const bool supported_head_dim = key.d == 64 || key.d == 128;
+    const bool supported_head_dim = key.d > 0 && key.d <= 128 && (key.d % 8) == 0;
     const bool supported_self_sequence = key.sq >= MIN_CUDNN_SDPA_FAST_SEQ &&
                                          ((key.sq == key.sk && !key.padding_mask) ||
                                           (key.padding_mask && key.sk_actual == key.sq && key.sk >= key.sq));
+    const bool supported_small_bf16_self_sequence =
+        key.io_type == GGML_TYPE_BF16 &&
+        !key.padding_mask &&
+        key.sq == key.sk &&
+        key.sq > 0 &&
+        key.sq <= 128;
     const bool supported_cross_sequence =
         key.allow_short_kv_cross_attn &&
         !key.padding_mask &&
@@ -582,16 +627,17 @@ static bool should_use_cudnn_sdpa(const ed_cudnn_sdpa_key & key) {
         key.sk > 0 &&
         key.sk <= 1024 &&
         key.sk_actual == key.sk;
-    const bool supported_sequence = supported_self_sequence || supported_cross_sequence;
+    const bool supported_sequence = supported_self_sequence || supported_small_bf16_self_sequence || supported_cross_sequence;
     const bool use_cudnn = supported_head_dim && supported_sequence;
 
     if (!use_cudnn && profile_enabled()) {
-        GGML_LOG_INFO("ED_CUDNN_SDPA unsupported: gate d=%lld sq=%lld sk=%lld sk_actual=%lld scale=%g padding_mask=%d allow_cross=%d supported_head_dim=%d supported_sequence=%d\n",
+        GGML_LOG_INFO("ED_CUDNN_SDPA unsupported: gate d=%lld sq=%lld sk=%lld sk_actual=%lld scale=%g io_type=%d padding_mask=%d allow_cross=%d supported_head_dim=%d supported_sequence=%d\n",
                       (long long) key.d,
                       (long long) key.sq,
                       (long long) key.sk,
                       (long long) key.sk_actual,
                       key.attn_scale,
+                      (int) key.io_type,
                       key.padding_mask ? 1 : 0,
                       key.allow_short_kv_cross_attn ? 1 : 0,
                       supported_head_dim ? 1 : 0,
@@ -602,7 +648,7 @@ static bool should_use_cudnn_sdpa(const ed_cudnn_sdpa_key & key) {
 }
 
 static bool should_sync_plan_build(const ed_cudnn_sdpa_key & key) {
-    if (key.dst_type == GGML_TYPE_F16) {
+    if (key.io_type == GGML_TYPE_BF16 || key.dst_type == GGML_TYPE_F16) {
         return true;
     }
     return key.dst_type == GGML_TYPE_F32 &&
@@ -614,7 +660,7 @@ static bool should_sync_plan_build(const ed_cudnn_sdpa_key & key) {
 
 static std::shared_ptr<fe::graph::Graph> create_graph(const ed_cudnn_sdpa_key & key) {
     auto graph = std::make_shared<fe::graph::Graph>();
-    graph->set_io_data_type(fe::DataType_t::HALF)
+    graph->set_io_data_type(cudnn_frontend_io_type(key.io_type))
         .set_intermediate_data_type(fe::DataType_t::FLOAT)
         .set_compute_data_type(fe::DataType_t::FLOAT);
 
@@ -697,9 +743,9 @@ static std::unique_ptr<ed_cudnn_sdpa_plan> create_plan(const ed_cudnn_sdpa_key &
         CUDA_CHECK(cudaMalloc(&plan->workspace, (size_t) plan->workspace_size));
     }
     plan->elements = key.b * key.h * key.sq * key.d;
-    CUDA_CHECK(cudaMalloc(&plan->q_f16, (size_t) plan->elements * sizeof(half)));
-    if (key.dst_type != GGML_TYPE_F16) {
-        CUDA_CHECK(cudaMalloc(&plan->o_f16, (size_t) plan->elements * sizeof(half)));
+    CUDA_CHECK(cudaMalloc(&plan->q_io, (size_t) plan->elements * type_size(key.io_type)));
+    if (key.dst_type != key.io_type) {
+        CUDA_CHECK(cudaMalloc(&plan->o_io, (size_t) plan->elements * type_size(key.io_type)));
     }
     if (key.padding_mask) {
         const int32_t seq_q = (int32_t) key.sq;
@@ -835,6 +881,13 @@ __global__ void f32_to_f16_vec2_kernel(const float * src, half * dst, int64_t n)
     }
 }
 
+__global__ void f32_to_bf16_kernel(const float * src, __nv_bfloat16 * dst, int64_t n) {
+    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        dst[i] = __float2bfloat16_rn(src[i]);
+    }
+}
+
 __global__ void f16_bhsd_to_f32_dst_kernel(const half * src, float * dst, int64_t d, int64_t sq, int64_t h) {
     const int64_t n = d * sq * h;
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
@@ -921,6 +974,18 @@ static void profile_record(const ed_cudnn_sdpa_key & key,
                       stat.execute_ms,
                       stat.o_cast_ms);
     }
+}
+
+__global__ void bf16_bhsd_to_f32_dst_kernel(const __nv_bfloat16 * src, float * dst, int64_t d, int64_t sq, int64_t h) {
+    const int64_t n = d * sq * h;
+    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) {
+        return;
+    }
+    const int64_t dd = i % d;
+    const int64_t ss = (i / d) % sq;
+    const int64_t hh = i / (d * sq);
+    dst[dd + hh * d + ss * d * h] = __bfloat162float(src[i]);
 }
 
 } // namespace
@@ -1029,7 +1094,7 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
     double execute_ms = 0.0;
     double o_cast_ms = 0.0;
     const double get_plan_start_ms = do_profile ? now_ms() : 0.0;
-    const bool direct_f16_output = dst->type == GGML_TYPE_F16;
+    const bool direct_io_output = dst->type == key.io_type;
     ed_cudnn_sdpa_plan * plan = get_plan(key, stream, result, should_sync_plan_build(key));
     if (do_profile) {
         cudaEventCreate(&profile_start);
@@ -1056,28 +1121,31 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
         if (do_profile) {
             cudaEventRecord(profile_start, stream);
         }
-        if (can_use_vec2_convert(q->data, plan->q_f16)) {
+        if (key.io_type == GGML_TYPE_F16 && can_use_vec2_convert(q->data, plan->q_io)) {
             const int blocks_vec = (int) (((n + 1) / 2 + threads - 1) / threads);
-            f32_to_f16_vec2_kernel<<<blocks_vec, threads, 0, stream>>>((const float *) q->data, plan->q_f16, n);
+            f32_to_f16_vec2_kernel<<<blocks_vec, threads, 0, stream>>>((const float *) q->data, (half *) plan->q_io, n);
+        } else if (key.io_type == GGML_TYPE_F16) {
+            f32_to_f16_kernel<<<blocks, threads, 0, stream>>>((const float *) q->data, (half *) plan->q_io, n);
         } else {
-            f32_to_f16_kernel<<<blocks, threads, 0, stream>>>((const float *) q->data, plan->q_f16, n);
+            GGML_ASSERT(key.io_type == GGML_TYPE_BF16);
+            f32_to_bf16_kernel<<<blocks, threads, 0, stream>>>((const float *) q->data, (__nv_bfloat16 *) plan->q_io, n);
         }
         CUDA_CHECK(cudaGetLastError());
-        q_data = plan->q_f16;
+        q_data = plan->q_io;
         if (do_profile) {
             cudaEventRecord(profile_stop, stream);
             cudaEventSynchronize(profile_stop);
             q_cast_ms = elapsed_ms(profile_start, profile_stop);
         }
     } else {
-        GGML_ASSERT(q->type == GGML_TYPE_F16);
+        GGML_ASSERT(q->type == key.io_type);
     }
 
     std::unordered_map<fe::graph::Tensor_attributes::uid_t, void *> variant_pack = {
         {Q_UID, const_cast<void *>(q_data)},
         {K_UID, k->data},
         {V_UID, v->data},
-        {O_UID, direct_f16_output ? dst->data : static_cast<void *>(plan->o_f16)},
+        {O_UID, direct_io_output ? dst->data : plan->o_io},
     };
     if (key.padding_mask) {
         variant_pack[SEQ_LEN_Q_UID] = plan->seq_len_q;
@@ -1104,15 +1172,18 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
         return ED_CUDNN_SDPA_EXECUTE_FAILED;
     }
 
-    if (!direct_f16_output) {
+    if (!direct_io_output) {
         if (do_profile) {
             cudaEventRecord(profile_start, stream);
         }
-        if (can_use_vec2_output_convert(plan->o_f16, dst->data, key.d)) {
+        if (key.io_type == GGML_TYPE_F16 && can_use_vec2_output_convert(plan->o_io, dst->data, key.d)) {
             const int blocks_vec = (int) (((n / 2) + threads - 1) / threads);
-            f16_bhsd_to_f32_dst_vec2_kernel<<<blocks_vec, threads, 0, stream>>>(plan->o_f16, (float *) dst->data, key.d, key.sq, key.h);
+            f16_bhsd_to_f32_dst_vec2_kernel<<<blocks_vec, threads, 0, stream>>>((const half *) plan->o_io, (float *) dst->data, key.d, key.sq, key.h);
+        } else if (key.io_type == GGML_TYPE_F16) {
+            f16_bhsd_to_f32_dst_kernel<<<blocks, threads, 0, stream>>>((const half *) plan->o_io, (float *) dst->data, key.d, key.sq, key.h);
         } else {
-            f16_bhsd_to_f32_dst_kernel<<<blocks, threads, 0, stream>>>(plan->o_f16, (float *) dst->data, key.d, key.sq, key.h);
+            GGML_ASSERT(key.io_type == GGML_TYPE_BF16);
+            bf16_bhsd_to_f32_dst_kernel<<<blocks, threads, 0, stream>>>((const __nv_bfloat16 *) plan->o_io, (float *) dst->data, key.d, key.sq, key.h);
         }
         CUDA_CHECK(cudaGetLastError());
         if (do_profile) {
@@ -1124,7 +1195,7 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
 
     if (profile_enabled()) {
         profile_record(key, get_plan_ms, q_cast_ms, execute_ms, o_cast_ms);
-        GGML_LOG_INFO("ED_CUDNN_SDPA success b=%lld h=%lld sq=%lld sk=%lld sk_actual=%lld d=%lld scale=%g padding_mask=%d workspace=%lld\n",
+        GGML_LOG_INFO("ED_CUDNN_SDPA success b=%lld h=%lld sq=%lld sk=%lld sk_actual=%lld d=%lld scale=%g io_type=%d padding_mask=%d workspace=%lld\n",
                       (long long) key.b,
                       (long long) key.h,
                       (long long) key.sq,
@@ -1132,6 +1203,7 @@ ed_cudnn_sdpa_result_t ed_cudnn_sdpa_compute(ggml_tensor * dst, ed_cudnn_sdpa_st
                       (long long) key.sk_actual,
                       (long long) key.d,
                       key.attn_scale,
+                      (int) key.io_type,
                       key.padding_mask ? 1 : 0,
                       (long long) plan->workspace_size);
     }

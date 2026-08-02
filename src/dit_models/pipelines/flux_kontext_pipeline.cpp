@@ -3,9 +3,13 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
+#include <fstream>
+#include <limits>
 #include <memory>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include "core/optimization/cache/runtime/cache_engine.hpp"
@@ -20,6 +24,168 @@
 namespace {
 
 static constexpr size_t KONTEXT_MODEL_EXAMPLE_LIMIT = 3;
+
+bool kontext_debug_align_enabled() {
+    const char* env = std::getenv("ED_DEBUG_FLUX_KONTEXT_ALIGN");
+    return env != nullptr && env[0] != '\0' && std::strcmp(env, "0") != 0;
+}
+
+bool kontext_csv_contains(const char* csv, const std::string& name) {
+    if (csv == nullptr || csv[0] == '\0') {
+        return false;
+    }
+    const char* begin = csv;
+    while (*begin != '\0') {
+        while (*begin == ' ' || *begin == '\t' || *begin == ',') {
+            ++begin;
+        }
+        const char* end = begin;
+        while (*end != '\0' && *end != ',') {
+            ++end;
+        }
+        const char* trimmed_end = end;
+        while (trimmed_end > begin && (trimmed_end[-1] == ' ' || trimmed_end[-1] == '\t')) {
+            --trimmed_end;
+        }
+        if (name.size() == static_cast<size_t>(trimmed_end - begin) &&
+            std::equal(name.begin(), name.end(), begin)) {
+            return true;
+        }
+        begin = end;
+    }
+    return false;
+}
+
+std::string kontext_dump_safe_name(const std::string& name) {
+    std::string safe = name;
+    for (char& ch : safe) {
+        const bool ok = (ch >= 'a' && ch <= 'z') ||
+                        (ch >= 'A' && ch <= 'Z') ||
+                        (ch >= '0' && ch <= '9') ||
+                        ch == '.' ||
+                        ch == '_' ||
+                        ch == '-';
+        if (!ok) {
+            ch = '_';
+        }
+    }
+    return safe;
+}
+
+void kontext_dump_tensor_if_requested(const char* name, const sd::Tensor<float>& tensor) {
+    const char* dump_dir = std::getenv("ED_FLUX_KONTEXT_ALIGN_DUMP_DIR");
+    const char* targets  = std::getenv("ED_FLUX_KONTEXT_ALIGN_DUMP_TARGETS");
+    if (dump_dir == nullptr || dump_dir[0] == '\0' ||
+        !kontext_csv_contains(targets, name)) {
+        return;
+    }
+    const std::string base_path = std::string(dump_dir) + "/" +
+                                  kontext_dump_safe_name(name != nullptr ? name : "tensor");
+    {
+        std::ofstream shape_out(base_path + ".shape");
+        if (shape_out) {
+            for (size_t i = 0; i < tensor.shape().size(); ++i) {
+                if (i > 0) {
+                    shape_out << ' ';
+                }
+                shape_out << tensor.shape()[i];
+            }
+            shape_out << '\n';
+        }
+    }
+    {
+        std::ofstream data_out(base_path + ".f32.bin", std::ios::binary);
+        if (data_out) {
+            const auto& values = tensor.values();
+            data_out.write(reinterpret_cast<const char*>(values.data()),
+                           static_cast<std::streamsize>(values.size() * sizeof(float)));
+        }
+    }
+}
+
+void kontext_log_tensor_stats(const char* name, const sd::Tensor<float>& tensor) {
+    if (!kontext_debug_align_enabled()) {
+        return;
+    }
+    if (tensor.empty()) {
+        LOG_INFO("flux-kontext-align %s: empty", name);
+        return;
+    }
+    kontext_dump_tensor_if_requested(name, tensor);
+
+    double sum = 0.0;
+    double sum_sq = 0.0;
+    float min_value = std::numeric_limits<float>::infinity();
+    float max_value = -std::numeric_limits<float>::infinity();
+    for (float value : tensor.values()) {
+        sum += static_cast<double>(value);
+        sum_sq += static_cast<double>(value) * static_cast<double>(value);
+        min_value = std::min(min_value, value);
+        max_value = std::max(max_value, value);
+    }
+
+    const double count = static_cast<double>(tensor.values().size());
+    const double mean = sum / count;
+    const double variance = std::max(0.0, sum_sq / count - mean * mean);
+    LOG_INFO("flux-kontext-align %s: shape=%s numel=%zu mean=%.9g std=%.9g min=%.9g max=%.9g l2=%.9g",
+             name,
+             sd::tensor_shape_to_string(tensor.shape()).c_str(),
+             tensor.values().size(),
+             mean,
+             std::sqrt(variance),
+             static_cast<double>(min_value),
+             static_cast<double>(max_value),
+             std::sqrt(sum_sq));
+}
+
+void kontext_round_tensor_to_bf16(sd::Tensor<float>& tensor) {
+    for (float& value : tensor.values()) {
+        value = ggml_bf16_to_fp32(ggml_fp32_to_bf16(value));
+    }
+}
+
+struct KontextResolution {
+    int width;
+    int height;
+};
+
+static constexpr KontextResolution KONTEXT_PREFERRED_RESOLUTIONS[] = {
+    {672, 1568},
+    {688, 1504},
+    {720, 1456},
+    {752, 1392},
+    {800, 1328},
+    {832, 1248},
+    {880, 1184},
+    {944, 1104},
+    {1024, 1024},
+    {1104, 944},
+    {1184, 880},
+    {1248, 832},
+    {1328, 800},
+    {1392, 752},
+    {1456, 720},
+    {1504, 688},
+    {1568, 672},
+};
+
+KontextResolution kontext_preferred_resolution(uint32_t src_width, uint32_t src_height) {
+    if (src_width == 0 || src_height == 0) {
+        return {1024, 1024};
+    }
+
+    const double aspect = static_cast<double>(src_width) / static_cast<double>(src_height);
+    KontextResolution best = KONTEXT_PREFERRED_RESOLUTIONS[0];
+    double best_diff = std::fabs(aspect - static_cast<double>(best.width) / static_cast<double>(best.height));
+    for (const auto& candidate : KONTEXT_PREFERRED_RESOLUTIONS) {
+        const double diff = std::fabs(aspect - static_cast<double>(candidate.width) / static_cast<double>(candidate.height));
+        if (diff < best_diff) {
+            best = candidate;
+            best_diff = diff;
+        }
+    }
+    return best;
+}
 
 std::string kontext_tensor_component_name(const std::string& name) {
     if (starts_with(name, "model.diffusion_model.")) {
@@ -207,6 +373,60 @@ uint8_t kontext_float_to_u8(float value) {
     return static_cast<uint8_t>(value * 255.0f + 0.5f);
 }
 
+sd::Tensor<float> kontext_vae_output_to_argmax_latents(const sd::Tensor<float>& vae_output) {
+    return sd::ops::chunk(vae_output, 2, 2)[0];
+}
+
+sd::Tensor<float> kontext_pack_latents_2x2(const sd::Tensor<float>& tensor) {
+    const auto& shape = tensor.shape();
+    if (shape.size() != 4 || shape[3] <= 0 || shape[2] <= 0 ||
+        shape[0] <= 0 || shape[1] <= 0 ||
+        (shape[0] % 2) != 0 || (shape[1] % 2) != 0) {
+        return {};
+    }
+
+    const int64_t width = shape[0];
+    const int64_t height = shape[1];
+    const int64_t channels = shape[2];
+    const int64_t batch = shape[3];
+    const int64_t packed_channels = channels * 4;
+    const int64_t packed_tokens = (width / 2) * (height / 2);
+    sd::Tensor<float> packed({packed_channels, packed_tokens, batch});
+
+    const float* src = tensor.data();
+    float* dst = packed.data();
+    auto src_at = [&](int64_t x, int64_t y, int64_t c, int64_t n) -> float {
+        return src[x + width * y + width * height * c + width * height * channels * n];
+    };
+    for (int64_t n = 0; n < batch; ++n) {
+        for (int64_t py = 0; py < height / 2; ++py) {
+            for (int64_t px = 0; px < width / 2; ++px) {
+                const int64_t token = py * (width / 2) + px;
+                for (int64_t c = 0; c < channels; ++c) {
+                    for (int64_t dy = 0; dy < 2; ++dy) {
+                        for (int64_t dx = 0; dx < 2; ++dx) {
+                            const int64_t packed_c = c * 4 + dy * 2 + dx;
+                            dst[packed_c + packed_channels * token + packed_channels * packed_tokens * n] =
+                                src_at(px * 2 + dx, py * 2 + dy, c, n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return packed;
+}
+
+void kontext_log_packed_latent_stats(const char* name, const sd::Tensor<float>& tensor) {
+    if (!kontext_debug_align_enabled()) {
+        return;
+    }
+    sd::Tensor<float> packed = kontext_pack_latents_2x2(tensor);
+    if (!packed.empty()) {
+        kontext_log_tensor_stats(name, packed);
+    }
+}
+
 void kontext_tensor_to_image_data(const sd::Tensor<float>& tensor, uint8_t* image_data) {
     const auto& shape = tensor.shape();
     const int width = static_cast<int>(shape[0]);
@@ -235,6 +455,171 @@ void kontext_tensor_to_image_data(const sd::Tensor<float>& tensor, uint8_t* imag
     }
 }
 
+double kontext_sinc(double x) {
+    if (x == 0.0) {
+        return 1.0;
+    }
+    x *= 3.14159265358979323846;
+    return std::sin(x) / x;
+}
+
+double kontext_lanczos_filter(double x) {
+    if (-3.0 <= x && x < 3.0) {
+        return kontext_sinc(x) * kontext_sinc(x / 3.0);
+    }
+    return 0.0;
+}
+
+struct KontextResizeAxisContrib {
+    int start = 0;
+    std::vector<int32_t> coeffs;
+};
+
+std::vector<KontextResizeAxisContrib> kontext_precompute_pillow_lanczos_coeffs(int in_size,
+                                                                               int out_size) {
+    static constexpr int precision_bits = 22;
+    const double scale = static_cast<double>(in_size) / static_cast<double>(out_size);
+    const double filterscale = std::max(1.0, scale);
+    const double support = 3.0 * filterscale;
+    const int ksize = static_cast<int>(std::ceil(support)) * 2 + 1;
+    const double ss = 1.0 / filterscale;
+
+    std::vector<KontextResizeAxisContrib> result(static_cast<size_t>(out_size));
+    for (int out = 0; out < out_size; ++out) {
+        const double center = (static_cast<double>(out) + 0.5) * scale;
+        int xmin = static_cast<int>(center - support + 0.5);
+        xmin = std::max(0, xmin);
+        int xmax = static_cast<int>(center + support + 0.5);
+        xmax = std::min(in_size, xmax);
+        const int count = std::max(0, xmax - xmin);
+
+        std::vector<double> weights(static_cast<size_t>(ksize), 0.0);
+        double weight_sum = 0.0;
+        for (int i = 0; i < count; ++i) {
+            const double weight = kontext_lanczos_filter((static_cast<double>(i + xmin) - center + 0.5) * ss);
+            weights[static_cast<size_t>(i)] = weight;
+            weight_sum += weight;
+        }
+        if (weight_sum != 0.0) {
+            for (int i = 0; i < count; ++i) {
+                weights[static_cast<size_t>(i)] /= weight_sum;
+            }
+        }
+
+        auto& axis = result[static_cast<size_t>(out)];
+        axis.start = xmin;
+        axis.coeffs.resize(static_cast<size_t>(count));
+        for (int i = 0; i < count; ++i) {
+            const double scaled = weights[static_cast<size_t>(i)] * static_cast<double>(1 << precision_bits);
+            axis.coeffs[static_cast<size_t>(i)] = static_cast<int32_t>((scaled < 0.0 ? -0.5 : 0.5) + scaled);
+        }
+    }
+    return result;
+}
+
+uint8_t kontext_pillow_clip8(int64_t value) {
+    static constexpr int precision_bits = 22;
+    const int64_t shifted = value >> precision_bits;
+    if (shifted <= 0) {
+        return 0;
+    }
+    if (shifted >= 255) {
+        return 255;
+    }
+    return static_cast<uint8_t>(shifted);
+}
+
+sd::Tensor<float> kontext_resize_image_to_tensor_lanczos(const ed_image_t& image,
+                                                         int width,
+                                                         int height,
+                                                         int channels) {
+    if (image.data == nullptr || image.width == 0 || image.height == 0 || image.channels == 0 ||
+        width <= 0 || height <= 0 || channels <= 0) {
+        return {};
+    }
+
+    const int src_width = static_cast<int>(image.width);
+    const int src_height = static_cast<int>(image.height);
+    const int src_channels = static_cast<int>(image.channels);
+    if (src_width == width && src_height == height) {
+        sd::Tensor<float> tensor({width, height, channels, 1});
+        float* dst = tensor.data();
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const uint8_t* pixel = image.data +
+                    (static_cast<size_t>(y) * static_cast<size_t>(src_width) + static_cast<size_t>(x)) *
+                        static_cast<size_t>(src_channels);
+                for (int c = 0; c < channels; ++c) {
+                    const uint8_t value = c < src_channels ? pixel[c] : pixel[0];
+                    dst[static_cast<int64_t>(x) +
+                        static_cast<int64_t>(width) * static_cast<int64_t>(y) +
+                        static_cast<int64_t>(width) * static_cast<int64_t>(height) * static_cast<int64_t>(c)] =
+                        static_cast<float>(value) / 255.0f;
+                }
+            }
+        }
+        return tensor;
+    }
+
+    const auto x_coeffs = kontext_precompute_pillow_lanczos_coeffs(src_width, width);
+    const auto y_coeffs = kontext_precompute_pillow_lanczos_coeffs(src_height, height);
+    std::vector<uint8_t> tmp(static_cast<size_t>(src_height) *
+                             static_cast<size_t>(width) *
+                             static_cast<size_t>(channels));
+
+    for (int y = 0; y < src_height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const auto& coeff = x_coeffs[static_cast<size_t>(x)];
+            std::vector<int64_t> accum(static_cast<size_t>(channels), 1LL << 21);
+            for (size_t k = 0; k < coeff.coeffs.size(); ++k) {
+                const int src_x = coeff.start + static_cast<int>(k);
+                const uint8_t* pixel = image.data +
+                    (static_cast<size_t>(y) * static_cast<size_t>(src_width) + static_cast<size_t>(src_x)) *
+                        static_cast<size_t>(src_channels);
+                for (int c = 0; c < channels; ++c) {
+                    const uint8_t value = c < src_channels ? pixel[c] : pixel[0];
+                    accum[static_cast<size_t>(c)] +=
+                        static_cast<int64_t>(value) * static_cast<int64_t>(coeff.coeffs[k]);
+                }
+            }
+
+            uint8_t* out = tmp.data() +
+                (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) *
+                    static_cast<size_t>(channels);
+            for (int c = 0; c < channels; ++c) {
+                out[c] = kontext_pillow_clip8(accum[static_cast<size_t>(c)]);
+            }
+        }
+    }
+
+    sd::Tensor<float> tensor({width, height, channels, 1});
+    float* dst = tensor.data();
+    for (int y = 0; y < height; ++y) {
+        const auto& coeff = y_coeffs[static_cast<size_t>(y)];
+        for (int x = 0; x < width; ++x) {
+            std::vector<int64_t> accum(static_cast<size_t>(channels), 1LL << 21);
+            for (size_t k = 0; k < coeff.coeffs.size(); ++k) {
+                const int src_y = coeff.start + static_cast<int>(k);
+                const uint8_t* pixel = tmp.data() +
+                    (static_cast<size_t>(src_y) * static_cast<size_t>(width) + static_cast<size_t>(x)) *
+                        static_cast<size_t>(channels);
+                for (int c = 0; c < channels; ++c) {
+                    accum[static_cast<size_t>(c)] +=
+                        static_cast<int64_t>(pixel[c]) * static_cast<int64_t>(coeff.coeffs[k]);
+                }
+            }
+
+            for (int c = 0; c < channels; ++c) {
+                dst[static_cast<int64_t>(x) +
+                    static_cast<int64_t>(width) * static_cast<int64_t>(y) +
+                    static_cast<int64_t>(width) * static_cast<int64_t>(height) * static_cast<int64_t>(c)] =
+                    static_cast<float>(kontext_pillow_clip8(accum[static_cast<size_t>(c)])) / 255.0f;
+            }
+        }
+    }
+    return tensor;
+}
+
 float kontext_time_shift(float mu, float sigma, float t) {
     return std::exp(mu) / (std::exp(mu) + std::pow((1.0f / t - 1.0f), sigma));
 }
@@ -261,6 +646,37 @@ std::vector<float> kontext_discrete_sigmas(int steps, float shift) {
         const float t = 999.0f - step * static_cast<float>(i);
         result.push_back(kontext_t_to_sigma(t, shift));
     }
+    result.push_back(0.0f);
+    return result;
+}
+
+std::vector<float> kontext_diffusers_sigmas(int steps, int64_t image_seq_len, float* out_mu = nullptr) {
+    std::vector<float> result;
+    if (steps <= 0) {
+        return result;
+    }
+
+    const float mu = edgedit::calculate_shift(image_seq_len,
+                                              /*base_seq_len=*/256,
+                                              /*max_seq_len=*/4096,
+                                              /*base_shift=*/0.5f,
+                                              /*max_shift=*/1.15f);
+    if (out_mu != nullptr) {
+        *out_mu = mu;
+    }
+
+    result.reserve(static_cast<size_t>(steps) + 1);
+    if (steps == 1) {
+        result.push_back(1.0f);
+    } else {
+        const float end = 1.0f / static_cast<float>(steps);
+        for (int i = 0; i < steps; ++i) {
+            const float r = static_cast<float>(i) / static_cast<float>(steps - 1);
+            const float sigma = 1.0f + (end - 1.0f) * r;
+            result.push_back(kontext_time_shift(mu, 1.0f, sigma));
+        }
+    }
+
     result.push_back(0.0f);
     return result;
 }
@@ -299,24 +715,7 @@ sd::Tensor<float> kontext_image_to_tensor(const ed_image_t& image,
         return {};
     }
 
-    sd::Tensor<float> tensor({static_cast<int64_t>(image.width),
-                              static_cast<int64_t>(image.height),
-                              static_cast<int64_t>(channels),
-                              1});
-    for (uint32_t y = 0; y < image.height; ++y) {
-        for (uint32_t x = 0; x < image.width; ++x) {
-            const uint8_t* pixel = image.data + (static_cast<size_t>(y) * image.width + x) * image.channels;
-            for (int c = 0; c < channels; ++c) {
-                const uint32_t src_c = static_cast<uint32_t>(std::min<int>(c, static_cast<int>(image.channels) - 1));
-                kontext_set_4d(tensor, pixel[src_c] / 255.0f, x, y, c, 0);
-            }
-        }
-    }
-
-    if (static_cast<int>(image.width) == width && static_cast<int>(image.height) == height) {
-        return tensor;
-    }
-    return sd::ops::interpolate(tensor, {width, height, channels, 1});
+    return kontext_resize_image_to_tensor_lanczos(image, width, height, channels);
 }
 
 }  // namespace
@@ -350,6 +749,12 @@ bool FluxKontextPipeline::prepare(const ed_context_params_t& params,
     }
 
     build_manifest(loader);
+    const auto diffusion_wtypes = loader.get_diffusion_model_wtype_stat();
+    const auto bf16_it = diffusion_wtypes.find(GGML_TYPE_BF16);
+    const bool diffusion_bf16 = bf16_it != diffusion_wtypes.end() &&
+                                bf16_it->second > 0 &&
+                                diffusion_wtypes.size() == 1;
+    diffusion_bf16_ = diffusion_bf16;
     if (!validate(error)) {
         return false;
     }
@@ -393,15 +798,21 @@ bool FluxKontextPipeline::prepare(const ed_context_params_t& params,
     // decided placement (cheap, no weights loaded; measure already freed its compute ctx).
     reset_flux_runner();
 
-    return prepare_flux_runtime_weights(loader,
-                                        runtime_->backend(),
-                                        runtime_->clip_backend(),
-                                        runtime_->vae_backend(),
-                                        diffusion_offload,
-                                        te_offload,
-                                        vae_offload,
-                                        registry,
-                                        error);
+    const bool prepared = prepare_flux_runtime_weights(loader,
+                                                       runtime_->backend(),
+                                                       runtime_->clip_backend(),
+                                                       runtime_->vae_backend(),
+                                                       diffusion_offload,
+                                                       te_offload,
+                                                       vae_offload,
+                                                       registry,
+                                                       error);
+    if (prepared) {
+        diffusion_bf16_ = diffusion_bf16;
+        LOG_INFO("flux-kontext diffusion intermediate dtype: %s",
+                 diffusion_bf16_ ? "bf16" : "f32");
+    }
+    return prepared;
 }
 
 void FluxKontextPipeline::mark_ready() {
@@ -422,6 +833,7 @@ void FluxKontextPipeline::reset_flux_runner() {
     conditioner_backend_ = nullptr;
     vae_backend_ = nullptr;
     flux_declared_tensors_ = 0;
+    diffusion_bf16_ = false;
     runtime_weights_loaded_ = false;
     flux_missing_tensors_.clear();
     flux_shape_mismatch_tensors_.clear();
@@ -669,7 +1081,8 @@ bool FluxKontextPipeline::prepare_flux_runtime_weights(const ModelLoader& loader
 
         conditioner_ = std::make_shared<FluxCLIPEmbedder>(conditioner_backend_,
                                                           te_offload,
-                                                          loader.get_tensor_storage_map());
+                                                          loader.get_tensor_storage_map(),
+                                                          512);
 
         conditioner_->set_max_graph_vram_bytes(runtime_->max_graph_vram_bytes());
         conditioner_->alloc_params_buffer();
@@ -914,6 +1327,10 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
         }
         return false;
     }
+    if (diffusion_bf16_) {
+        kontext_round_tensor_to_bf16(condition.c_crossattn);
+        kontext_round_tensor_to_bf16(condition.c_vector);
+    }
 
     const float cfg_scale = params->sample.cfg_scale > 0.0f ? params->sample.cfg_scale : 1.0f;
     SDCondition uncond;
@@ -928,10 +1345,16 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
             }
             return false;
         }
+        if (diffusion_bf16_) {
+            kontext_round_tensor_to_bf16(uncond.c_crossattn);
+            kontext_round_tensor_to_bf16(uncond.c_vector);
+        }
     }
     LOG_INFO("flux-kontext prompt encoded: cross_attn=%s vector=%s",
              kontext_tensor_shape(condition.c_crossattn).c_str(),
              kontext_tensor_shape(condition.c_vector).c_str());
+    kontext_log_tensor_stats("cond.c_crossattn", condition.c_crossattn);
+    kontext_log_tensor_stats("cond.c_vector", condition.c_vector);
 
     std::shared_ptr<RNG> rng = runtime_->rng_ptr();
     if (!rng) {
@@ -945,15 +1368,31 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
     ref_latents.reserve(static_cast<size_t>(params->ref_image_count));
     const int64_t encode_start_ms = ggml_time_ms();
     for (int i = 0; i < params->ref_image_count; ++i) {
+        const KontextResolution ref_resolution = kontext_preferred_resolution(params->ref_images[i].width,
+                                                                              params->ref_images[i].height);
+        LOG_INFO("flux-kontext reference image %d resized from %ux%u to %dx%d",
+                 i,
+                 params->ref_images[i].width,
+                 params->ref_images[i].height,
+                 ref_resolution.width,
+                 ref_resolution.height);
         sd::Tensor<float> ref_image = kontext_image_to_tensor(params->ref_images[i],
-                                                              params->width,
-                                                              params->height,
+                                                              ref_resolution.width,
+                                                              ref_resolution.height,
                                                               3);
         if (ref_image.empty()) {
             if (error != nullptr) {
                 *error = sd_format("FLUX.1-Kontext-dev reference image %d is invalid", i);
             }
             return false;
+        }
+        kontext_log_tensor_stats("ref.image_resized_unit", ref_image);
+        if (kontext_debug_align_enabled()) {
+            sd::Tensor<float> vae_image_tensor = ref_image;
+            for (int64_t j = 0; j < vae_image_tensor.numel(); ++j) {
+                vae_image_tensor[j] = vae_image_tensor[j] * 2.0f - 1.0f;
+            }
+            kontext_log_tensor_stats("ref.vae_image_tensor", vae_image_tensor);
         }
         sd::Tensor<float> encoded = vae_->encode(n_threads,
                                                  ref_image,
@@ -966,8 +1405,14 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
             }
             return false;
         }
-        sd::Tensor<float> latent = vae_->vae_output_to_latents(encoded, rng);
+        kontext_log_tensor_stats("ref.vae_encoded", encoded);
+        sd::Tensor<float> latent = kontext_vae_output_to_argmax_latents(encoded);
         latent = vae_->vae_to_diffusion_latents(latent);
+        if (diffusion_bf16_) {
+            kontext_round_tensor_to_bf16(latent);
+        }
+        kontext_log_tensor_stats("ref.latent", latent);
+        kontext_log_packed_latent_stats("ref.latent_packed", latent);
         ref_latents.push_back(std::move(latent));
     }
     LOG_INFO("flux-kontext reference encoding completed: refs=%zu taking %.2fs",
@@ -975,10 +1420,8 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
              (ggml_time_ms() - encode_start_ms) / 1000.0f);
 
     const int steps = resolve_steps(params->sample.steps);
-    float flow_shift = params->sample.flow_shift;
-    if (!(flow_shift > 0.0f) || !std::isfinite(flow_shift)) {
-        flow_shift = flux_runner_->flux_params.guidance_embed ? 1.15f : 1.0f;
-    }
+    const bool has_explicit_flow_shift = params->sample.flow_shift > 0.0f &&
+                                         std::isfinite(params->sample.flow_shift);
     const float distilled_guidance = params->sample.distilled_guidance != 0.0f
                                          ? params->sample.distilled_guidance
                                          : 3.5f;
@@ -987,27 +1430,63 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
 
     sd::Tensor<float> init_latent = sd::zeros<float>({latent_w, latent_h, 16, 1});
     sd::Tensor<float> noise = sd::Tensor<float>::randn(init_latent.shape(), rng);
-    std::vector<float> sigmas = kontext_discrete_sigmas(steps, flow_shift);
+    if (diffusion_bf16_) {
+        kontext_round_tensor_to_bf16(noise);
+    }
+    kontext_log_tensor_stats("noise.randn", noise);
+    kontext_log_packed_latent_stats("noise.randn_packed", noise);
+    const int64_t image_seq_len = (latent_w / patch_size) * (latent_h / patch_size);
+    float dynamic_mu = 0.0f;
+    std::vector<float> sigmas = has_explicit_flow_shift
+                                    ? kontext_discrete_sigmas(steps, params->sample.flow_shift)
+                                    : kontext_diffusers_sigmas(steps, image_seq_len, &dynamic_mu);
     if (sigmas.size() < 2) {
         if (error != nullptr) {
             *error = "failed to create FLUX.1-Kontext-dev sigma schedule";
         }
         return false;
     }
+    kontext_log_tensor_stats("scheduler.sigmas",
+                             sd::Tensor<float>({static_cast<int64_t>(sigmas.size())}, sigmas));
 
-    LOG_INFO("flux-kontext img2img: %dx%d latent=%dx%d refs=%zu steps=%d shift=%.2f guidance=%.2f cfg=%.2f seed=%" PRId64,
-             params->width,
-             params->height,
-             latent_w,
-             latent_h,
-             ref_latents.size(),
-             steps,
-             flow_shift,
-             distilled_guidance,
-             cfg_scale,
-             seed + batch_index);
+    if (has_explicit_flow_shift) {
+        LOG_INFO("flux-kontext img2img: %dx%d latent=%dx%d image_seq_len=%" PRId64 " refs=%zu steps=%d shift=%.2f guidance=%.2f cfg=%.2f sigma0=%.6f sigma_end=%.6f seed=%" PRId64,
+                 params->width,
+                 params->height,
+                 latent_w,
+                 latent_h,
+                 image_seq_len,
+                 ref_latents.size(),
+                 steps,
+                 params->sample.flow_shift,
+                 distilled_guidance,
+                 cfg_scale,
+                 sigmas.front(),
+                 sigmas[static_cast<size_t>(steps - 1)],
+                 seed + batch_index);
+    } else {
+        LOG_INFO("flux-kontext img2img: %dx%d latent=%dx%d image_seq_len=%" PRId64 " refs=%zu steps=%d dynamic_mu=%.6f guidance=%.2f cfg=%.2f sigma0=%.6f sigma_end=%.6f seed=%" PRId64,
+                 params->width,
+                 params->height,
+                 latent_w,
+                 latent_h,
+                 image_seq_len,
+                 ref_latents.size(),
+                 steps,
+                 dynamic_mu,
+                 distilled_guidance,
+                 cfg_scale,
+                 sigmas.front(),
+                 sigmas[static_cast<size_t>(steps - 1)],
+                 seed + batch_index);
+    }
 
     sd::Tensor<float> x = init_latent * (1.0f - sigmas[0]) + noise * sigmas[0];
+    if (diffusion_bf16_) {
+        kontext_round_tensor_to_bf16(x);
+    }
+    kontext_log_tensor_stats("latents.initial_x", x);
+    kontext_log_packed_latent_stats("latents.initial_x_packed", x);
     cache::CacheRuntime cache_runtime;
     const bool cache_use_cfg_parallel = !uncond.empty() &&
                                         parallel::cfg_parallel_available(runtime_->parallel_context());
@@ -1048,7 +1527,16 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
 
         sd::Tensor<float> timesteps({1}, std::vector<float>{sigma});
         sd::Tensor<float> guidance({1}, std::vector<float>{distilled_guidance});
+        if (diffusion_bf16_) {
+            kontext_round_tensor_to_bf16(timesteps);
+        }
         sd::Tensor<float> noised_input = x;
+        if (step == 0) {
+            kontext_log_tensor_stats("step0.timestep", timesteps);
+            kontext_log_tensor_stats("step0.guidance", guidance);
+            kontext_log_tensor_stats("step0.noised_input", noised_input);
+            kontext_log_packed_latent_stats("step0.noised_input_packed", noised_input);
+        }
 
         cache::CacheStepInfo cache_step;
         cache_step.step_index = step;
@@ -1176,6 +1664,13 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
             flux_runner_->free_compute_buffer();
             return false;
         }
+        if (diffusion_bf16_) {
+            kontext_round_tensor_to_bf16(model_out);
+        }
+        if (step == 0) {
+            kontext_log_tensor_stats("step0.model_out", model_out);
+            kontext_log_packed_latent_stats("step0.model_out_packed", model_out);
+        }
 
         // SenCache calibration: finite-diff sensitivities on the CFG-combined
         // velocity. Two extra plain forwards/step, calibration only; off under
@@ -1207,6 +1702,13 @@ bool FluxKontextPipeline::generate_one_image(const ed_image_generation_params_t*
         } else {
             const sd::Tensor<float> d = (x - denoised) / sigma;
             x += d * (sigma_next - sigma);
+        }
+        if (diffusion_bf16_) {
+            kontext_round_tensor_to_bf16(x);
+        }
+        if (step == 0) {
+            kontext_log_tensor_stats("step0.latents_after", x);
+            kontext_log_packed_latent_stats("step0.latents_after_packed", x);
         }
         LOG_INFO("flux-kontext step %d/%d sigma=%.6f next=%.6f", step + 1, steps, sigma, sigma_next);
         if (cache_enabled) {

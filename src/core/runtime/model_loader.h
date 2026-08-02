@@ -146,11 +146,13 @@ using TensorTypeRules = std::vector<std::pair<std::string, ggml_type>>;
 TensorTypeRules parse_tensor_type_rules(const std::string& tensor_type_rules);
 const char* ed_version_name(SDVersion version);
 
-// Detect a few-step distilled checkpoint from model/DiT file paths (turbo /
-// lightning / schnell / lightx2v / distill / hyper / N-step keywords). Returns
-// the default step count for a detected distilled model (4 for schnell-class,
-// 8 otherwise), or 0 when no distill signal is found. Used only when the user
-// did not pass an explicit --steps, so a miss just falls back to the base default.
+// Detect a few-step distilled checkpoint's default step count from model/DiT
+// file paths, using a reliability ladder: (1) an explicit `Nstep(s)` marker in
+// the path wins for any N in [1,64]; (2) `schnell` -> 4; (3) a distill keyword
+// (lightning / lightx2v / turbo / hyper / distill) with no step marker defaults
+// to 8 and logs a warning. Returns 0 when no distill signal is found. Used only
+// when the user did not pass an explicit --steps, so a miss just falls back to
+// the base default.
 int detect_distilled_default_steps(const std::vector<std::string>& file_paths,
                                    const char* diffusion_model_path);
 
@@ -175,6 +177,7 @@ public:
     bool use_tae() const { return use_tae_; }
     bool tae_preview_only() const { return tae_preview_only_; }
     bool use_pmid() const { return use_pmid_; }
+    bool qwen_image_zero_cond_t() const { return qwen_image_zero_cond_t_; }
 
     String2TensorStorage& get_tensor_storage_map() {
         return tensor_storage_map_;
@@ -301,6 +304,7 @@ private:
     bool tae_preview_only_ = false;
     bool use_pmid_ = false;
     bool skip_t5_ = false;
+    bool qwen_image_zero_cond_t_ = false;
 };
 
 #endif

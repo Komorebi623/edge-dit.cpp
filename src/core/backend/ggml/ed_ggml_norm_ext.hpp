@@ -11,6 +11,7 @@ namespace edgedit::ggml_ext {
 
 constexpr uint32_t kChannelRmsNormCustomMagic = 0x4543524eu; // "ECRN"
 constexpr uint32_t kRmsNormMulF16CustomMagic = 0x45524d48u; // "ERMH"
+constexpr uint32_t kQwenVlRmsNormMulBf16CustomMagic = 0x45515242u; // "EQRB"
 
 struct ChannelRmsNormCustomParams {
     uint32_t magic = kChannelRmsNormCustomMagic;
@@ -18,6 +19,11 @@ struct ChannelRmsNormCustomParams {
 
 struct RmsNormMulF16CustomParams {
     uint32_t magic = kRmsNormMulF16CustomMagic;
+    uint32_t eps_bits = 0;
+};
+
+struct QwenVlRmsNormMulBf16CustomParams {
+    uint32_t magic = kQwenVlRmsNormMulBf16CustomMagic;
     uint32_t eps_bits = 0;
 };
 
@@ -30,6 +36,14 @@ inline ChannelRmsNormCustomParams channel_rms_norm_params_from_userdata(void* us
 
 inline RmsNormMulF16CustomParams rms_norm_mul_f16_params_from_userdata(void* userdata) {
     RmsNormMulF16CustomParams params;
+    uintptr_t packed = reinterpret_cast<uintptr_t>(userdata);
+    params.magic = static_cast<uint32_t>(packed & 0xffffffffu);
+    params.eps_bits = static_cast<uint32_t>((packed >> 32) & 0xffffffffu);
+    return params;
+}
+
+inline QwenVlRmsNormMulBf16CustomParams qwen_vl_rms_norm_mul_bf16_params_from_userdata(void* userdata) {
+    QwenVlRmsNormMulBf16CustomParams params;
     uintptr_t packed = reinterpret_cast<uintptr_t>(userdata);
     params.magic = static_cast<uint32_t>(packed & 0xffffffffu);
     params.eps_bits = static_cast<uint32_t>((packed >> 32) & 0xffffffffu);
@@ -49,6 +63,15 @@ inline void* rms_norm_mul_f16_params_to_userdata(float eps) {
     return reinterpret_cast<void*>(packed);
 }
 
+inline void* qwen_vl_rms_norm_mul_bf16_params_to_userdata(float eps) {
+    uint32_t eps_bits = 0;
+    static_assert(sizeof(eps_bits) == sizeof(eps), "float eps must pack into uint32");
+    std::memcpy(&eps_bits, &eps, sizeof(eps_bits));
+    uintptr_t packed = static_cast<uintptr_t>(kQwenVlRmsNormMulBf16CustomMagic);
+    packed |= static_cast<uintptr_t>(eps_bits) << 32;
+    return reinterpret_cast<void*>(packed);
+}
+
 inline bool channel_rms_norm_params_valid(const ChannelRmsNormCustomParams& params) {
     return params.magic == kChannelRmsNormCustomMagic;
 }
@@ -57,7 +80,17 @@ inline bool rms_norm_mul_f16_params_valid(const RmsNormMulF16CustomParams& param
     return params.magic == kRmsNormMulF16CustomMagic;
 }
 
+inline bool qwen_vl_rms_norm_mul_bf16_params_valid(const QwenVlRmsNormMulBf16CustomParams& params) {
+    return params.magic == kQwenVlRmsNormMulBf16CustomMagic;
+}
+
 inline float rms_norm_mul_f16_params_eps(const RmsNormMulF16CustomParams& params) {
+    float eps = 0.0f;
+    std::memcpy(&eps, &params.eps_bits, sizeof(eps));
+    return eps;
+}
+
+inline float qwen_vl_rms_norm_mul_bf16_params_eps(const QwenVlRmsNormMulBf16CustomParams& params) {
     float eps = 0.0f;
     std::memcpy(&eps, &params.eps_bits, sizeof(eps));
     return eps;
@@ -100,6 +133,29 @@ inline bool rms_norm_mul_f16_shape_supported(const ggml_tensor* x,
         return false;
     }
     if (x->nb[0] != ggml_type_size(x->type) || !ggml_is_contiguous(weight)) {
+        return false;
+    }
+    return true;
+}
+
+inline bool qwen_vl_rms_norm_mul_bf16_shape_supported(const ggml_tensor* x,
+                                                      const ggml_tensor* weight) {
+    if (x == nullptr || weight == nullptr) {
+        return false;
+    }
+    if (x->type != GGML_TYPE_F32 || weight->type != GGML_TYPE_F32) {
+        return false;
+    }
+    if (x->ne[0] != 1280 || x->ne[1] <= 0 || x->ne[2] <= 0 || x->ne[3] <= 0) {
+        return false;
+    }
+    if (weight->ne[0] != x->ne[0] ||
+        weight->ne[1] != 1 ||
+        weight->ne[2] != 1 ||
+        weight->ne[3] != 1) {
+        return false;
+    }
+    if (!ggml_is_contiguous(x) || !ggml_is_contiguous(weight)) {
         return false;
     }
     return true;
@@ -206,6 +262,49 @@ inline void rms_norm_mul_f16_cpu_custom_op(ggml_tensor* dst, int ith, int nth, v
     }
 }
 
+inline void qwen_vl_rms_norm_mul_bf16_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdata) {
+    const QwenVlRmsNormMulBf16CustomParams params = qwen_vl_rms_norm_mul_bf16_params_from_userdata(userdata);
+    GGML_ASSERT(qwen_vl_rms_norm_mul_bf16_params_valid(params));
+    GGML_ASSERT(dst->src[0] != nullptr && dst->src[1] != nullptr);
+    const ggml_tensor* x = dst->src[0];
+    const ggml_tensor* weight = dst->src[1];
+    GGML_ASSERT(qwen_vl_rms_norm_mul_bf16_shape_supported(x, weight));
+    GGML_ASSERT(dst->type == GGML_TYPE_BF16);
+    for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+        GGML_ASSERT(dst->ne[i] == x->ne[i]);
+    }
+
+    const float eps = qwen_vl_rms_norm_mul_bf16_params_eps(params);
+    const int64_t ncols = x->ne[0];
+    const int64_t rows = x->ne[1] * x->ne[2] * x->ne[3];
+    const int64_t chunk = (rows + nth - 1) / nth;
+    const int64_t begin = std::min<int64_t>(rows, ith * chunk);
+    const int64_t end = std::min<int64_t>(rows, begin + chunk);
+
+    for (int64_t row = begin; row < end; ++row) {
+        int64_t rem = row;
+        const int64_t i1 = rem % x->ne[1];
+        rem /= x->ne[1];
+        const int64_t i2 = rem % x->ne[2];
+        const int64_t i3 = rem / x->ne[2];
+
+        float sum = 0.0f;
+        for (int64_t i0 = 0; i0 < ncols; ++i0) {
+            const float v = channel_rms_norm_tensor_f32_at(x, i0, i1, i2, i3);
+            sum += v * v;
+        }
+        const float scale = 1.0f / std::sqrt(sum / static_cast<float>(ncols) + eps);
+        for (int64_t i0 = 0; i0 < ncols; ++i0) {
+            const float v = channel_rms_norm_tensor_f32_at(x, i0, i1, i2, i3);
+            const float w = channel_rms_norm_tensor_f32_at(weight, i0, 0, 0, 0);
+            const float normalized = ggml_bf16_to_fp32(ggml_fp32_to_bf16(v * scale));
+            char* base = static_cast<char*>(dst->data);
+            char* ptr = base + i0 * dst->nb[0] + i1 * dst->nb[1] + i2 * dst->nb[2] + i3 * dst->nb[3];
+            *reinterpret_cast<ggml_bf16_t*>(ptr) = ggml_fp32_to_bf16(normalized * w);
+        }
+    }
+}
+
 inline ggml_tensor* channel_rms_norm_custom(ggml_context* ctx, ggml_tensor* x, ggml_tensor* weight) {
     if (!channel_rms_norm_shape_supported(x, weight)) {
         return nullptr;
@@ -246,6 +345,29 @@ inline ggml_tensor* rms_norm_mul_f16_custom(ggml_context* ctx,
                                       GGML_N_TASKS_MAX,
                                       rms_norm_mul_f16_params_to_userdata(eps));
     ggml_set_name(out, "ed_rms_norm_mul_f16");
+    return out;
+}
+
+inline ggml_tensor* qwen_vl_rms_norm_mul_bf16_custom(ggml_context* ctx,
+                                                     ggml_tensor* x,
+                                                     ggml_tensor* weight,
+                                                     float eps) {
+    if (!qwen_vl_rms_norm_mul_bf16_shape_supported(x, weight) || eps < 0.0f) {
+        return nullptr;
+    }
+    ggml_tensor* args[] = { x, weight };
+    ggml_tensor* out = ggml_custom_4d(ctx,
+                                      GGML_TYPE_BF16,
+                                      x->ne[0],
+                                      x->ne[1],
+                                      x->ne[2],
+                                      x->ne[3],
+                                      args,
+                                      2,
+                                      qwen_vl_rms_norm_mul_bf16_cpu_custom_op,
+                                      GGML_N_TASKS_MAX,
+                                      qwen_vl_rms_norm_mul_bf16_params_to_userdata(eps));
+    ggml_set_name(out, "ed_qwen_vl_rms_norm_mul_bf16");
     return out;
 }
 

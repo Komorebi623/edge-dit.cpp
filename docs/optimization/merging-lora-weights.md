@@ -12,8 +12,8 @@ Qwen-Image ones require merging**; the rest ship as ready-to-use full weights.
 
 | Distilled variant | Published as | Needs merge? |
 |---|---|---|
-| FLUX.1-schnell | Official base (already distilled) | No — use directly |
-| FLUX.1-Kontext Lightning | Full Diffusers directory (also has a standalone `transformer/`) | No — download directly |
+| FLUX.1-schnell | Full diffusers directory (also has a standalone `transformer/`) | No — download directly |
+| FLUX.1-Kontext Lightning | Full diffusers directory (also has a standalone `transformer/`) | No — download directly |
 | SD3.5-medium-turbo | Full diffusers directory | No — download directly |
 | Wan2.1-T2V-1.3B Distill | Single full-weight file | No — drop-in |
 | **Qwen-Image Lightning** | **LoRA adapter** | **Yes** |
@@ -59,27 +59,31 @@ python - <<'PY'
 from huggingface_hub import hf_hub_download
 hf_hub_download(repo_id="lightx2v/Qwen-Image-Lightning",
                 filename="Qwen-Image-Lightning-4steps-V1.0-bf16.safetensors",
-                local_dir="/models/distilled/qwen-image-lightning")
+                local_dir="/path/to/models/qwen-image-lightning")
 PY
 
 # 2. Merge LoRA into the base transformer
 #    args: <base transformer dir> <lora .safetensors> <output dir>
+#    The script tags the output directory with the LoRA's step count
+#    (here 4steps), so the runtime selects the right few-step default.
 python scripts/merge_qwen_lora.py \
-  /models/Qwen-Image/transformer \
-  /models/distilled/qwen-image-lightning/Qwen-Image-Lightning-4steps-V1.0-bf16.safetensors \
-  /models/distilled/qwen-image-lightning-merged/transformer
+  /path/to/models/Qwen-Image/transformer \
+  /path/to/models/qwen-image-lightning/Qwen-Image-Lightning-4steps-V1.0-bf16.safetensors \
+  /path/to/models/qwen-image-lightning-merged/transformer
 
-# 3. Run with the merged full-weight transformer
+# 3. Run with the merged full-weight transformer. The 4steps marker on the
+#    output path lets --steps -1 select 4 steps; pass --steps 4 to be explicit.
 ./build-cuda/bin/ed-cli --backend cuda \
-  --model /models/Qwen-Image \
-  --diffusion-model /models/distilled/qwen-image-lightning-merged/transformer/diffusion_pytorch_model.safetensors.index.json \
-  --steps 8 --cfg-scale 1.0 -W 1024 -H 1024 \
+  --model /path/to/models/Qwen-Image \
+  --diffusion-model /path/to/models/qwen-image-lightning-merged-4steps/transformer/diffusion_pytorch_model.safetensors.index.json \
+  --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "a photorealistic red apple on a wooden table" -o qwen_lightning.png
 ```
 
 For **Qwen-Image-Edit**, use the base `Qwen/Qwen-Image-Edit/transformer`, the
-`Qwen-Image-Edit-Lightning-4steps` LoRA file, and a `.../dit/` output dir; run
-with `--model .../qwen-image-edit --qwen-image-zero-cond-t -i <input image>`.
+`Qwen-Image-Edit-Lightning-4steps` LoRA file, and a `.../dit/` output dir (the
+script tags it `...-4steps` the same way); run with `--model
+.../qwen-image-edit --qwen-image-zero-cond-t -i <input image>`.
 
 ## How the script works
 
@@ -95,4 +99,11 @@ with `--model .../qwen-image-edit --qwen-image-zero-cond-t -i <input image>`.
 4. Copies `config.json` + the index unchanged and re-saves each shard, so the
    output is a drop-in diffusers transformer directory.
 5. Asserts every LoRA module was merged (`merged_count == len(mods)`), so a
-   naming mismatch fails loudly instead of silently producing a bad model.
+   naming mismatch is reported rather than silently producing a bad model.
+
+The script also derives a step marker (for example `4steps`) from the LoRA
+filename and applies it to the model directory of the output path, so a
+`.../qwen-image-lightning-merged/transformer` output becomes
+`.../qwen-image-lightning-merged-4steps/transformer`. This lets the runtime read
+the correct few-step default from the path. If the filename has no step count,
+the output path is left unchanged and the runtime defaults to 8 steps.

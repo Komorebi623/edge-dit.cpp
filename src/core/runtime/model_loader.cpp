@@ -232,17 +232,40 @@ int detect_distilled_default_steps(const std::vector<std::string>& file_paths,
 
     auto has = [&](const char* kw) { return haystack.find(kw) != std::string::npos; };
 
-    // schnell-class distills target ~4 steps; turbo/lightning/hyper/distill ~8.
+    // Reliability ladder, most authoritative first. Step count and "is this
+    // distilled" are independent facts: a keyword like `lightning` only says
+    // distilled, not how many steps (Lightning/Hyper ship 4- and 8-step variants
+    // alike), so the explicit `Nstep` marker in the path wins over any keyword.
+
+    // 1. Explicit step marker in the path, e.g. `4steps`, `8-step`, `2_steps`.
+    //    Bounded to a sane few-step range so long shard indices (…00009.safetensors)
+    //    can never be misread as a step count.
+    std::smatch m;
+    static const std::regex step_re(R"(([0-9]{1,2})[ _-]?steps?)");
+    if (std::regex_search(haystack, m, step_re)) {
+        const int n = std::stoi(m[1].str());
+        if (n >= 1 && n <= 64) {
+            LOG_INFO("distilled step detection: explicit '%dstep' marker in path -> %d steps", n, n);
+            return n;
+        }
+    }
+
+    // 2. FLUX.1-schnell path fallback (the authoritative schnell signal is the
+    //    architecture check in FluxPipeline::resolve_steps; this only helps
+    //    same-family path scans). schnell is a fixed 4-step model.
     if (has("schnell")) {
+        LOG_INFO("distilled step detection: 'schnell' in path -> 4 steps");
         return 4;
     }
+
+    // 3. Distill keyword but no explicit step count: we know it is distilled but
+    //    not how many steps. Default to 8 (the common Lightning/Turbo case) and
+    //    say so, since a 4-step checkpoint here would run at the wrong step count.
     if (has("lightning") || has("lightx2v") || has("hyper") ||
-        has("turbo") || has("distill") ||
-        has("4step") || has("4steps") || has("8step") || has("8steps")) {
-        // 4-step variants (Lightning/Hyper commonly ship 4-step) -> 4, else 8.
-        if (has("4step") || has("4steps")) {
-            return 4;
-        }
+        has("turbo") || has("distill")) {
+        LOG_WARN("distilled step detection: distill keyword matched but no explicit "
+                 "step count in path; defaulting to 8 steps. Pass --steps N to "
+                 "override, or add an 'Nsteps' marker to the path/filename.");
         return 8;
     }
     return 0;
@@ -652,6 +675,7 @@ void ModelLoader::clear() {
     tae_preview_only_ = false;
     use_pmid_ = false;
     skip_t5_ = false;
+    qwen_image_zero_cond_t_ = false;
 }
 
 void ModelLoader::reset() {
@@ -1162,6 +1186,21 @@ bool ModelLoader::init_from_safetensors_index_file(const std::string& file_path,
 bool ModelLoader::init_from_diffusers_directory(const std::string& dir_path, const std::string& prefix) {
     (void)prefix;
     version_ = infer_diffusers_version(dir_path);
+    qwen_image_zero_cond_t_ = false;
+    if (ed_version_is_qwen_image(version_) || ed_version_is_qwen_image_edit(version_)) {
+        const std::string transformer_config_path = path_join(path_join(dir_path, "transformer"), "config.json");
+        nlohmann::json transformer_config;
+        std::string error;
+        if (file_exists(transformer_config_path) &&
+            read_json_file(transformer_config_path, &transformer_config, &error) &&
+            transformer_config.contains("zero_cond_t") &&
+            transformer_config["zero_cond_t"].is_boolean()) {
+            qwen_image_zero_cond_t_ = transformer_config["zero_cond_t"].get<bool>();
+            if (qwen_image_zero_cond_t_) {
+                LOG_INFO("qwen-image transformer config enables zero_cond_t");
+            }
+        }
+    }
 
     struct Component {
         const char* dir;

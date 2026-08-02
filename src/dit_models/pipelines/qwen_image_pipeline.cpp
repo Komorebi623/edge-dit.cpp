@@ -297,6 +297,7 @@ bool QwenImagePipeline::build_components(const ed_context_params_t& params,
 
     const auto& storage = loader.get_tensor_storage_map();
     const bool enable_vision = params.llm_vision_path != nullptr && params.llm_vision_path[0] != '\0';
+    const bool qwen_zero_cond_t = params.qwen_image_zero_cond_t || loader.qwen_image_zero_cond_t();
 
     // Auto-allocate: seed the tally with the hard-cap budget min(--max-vram, free) and
     // decide each component's placement (DiT->TE->VAE priority), then finalize the segment
@@ -310,7 +311,7 @@ bool QwenImagePipeline::build_components(const ed_context_params_t& params,
     runtime_->set_measured_dit_headroom(0);
     if (runtime_->auto_fit() && runtime_->fit_width() > 0 && runtime_->fit_height() > 0) {
         auto measure_runner = std::make_unique<Qwen::QwenImageRunner>(
-            runtime_->backend(), false, storage, "model.diffusion_model", version_, false);
+            runtime_->backend(), false, storage, "model.diffusion_model", version_, qwen_zero_cond_t);
         measure_runner->set_flash_attention_enabled(runtime_->flash_attention());
         const int latent_w = runtime_->fit_width() / 8;
         const int latent_h = runtime_->fit_height() / 8;
@@ -344,7 +345,7 @@ bool QwenImagePipeline::build_components(const ed_context_params_t& params,
                                                storage,
                                                "model.diffusion_model",
                                                version_,
-                                               false));
+                                               qwen_zero_cond_t));
     if (runtime_ != nullptr) {
         auto process_group = runtime_->graph_process_group_ref();
         if (process_group != nullptr) {

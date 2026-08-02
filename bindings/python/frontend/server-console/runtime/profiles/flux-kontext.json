@@ -1,0 +1,29 @@
+{
+  "slug": "flux-kontext",
+  "name": "FLUX.1-Kontext-dev",
+  "kind": "image",
+  "model_env": "EDGE_DIT_FLUX_KONTEXT_MODEL_PATH",
+  "description": "Reference-image oriented FLUX Kontext profile for local Python Server demos.",
+  "engine": {
+    "model_path": "/path/to/FLUX.1-Kontext-dev",
+    "backend": "cuda",
+    "offload_params_to_cpu": true,
+    "text_encoder_offload": true,
+    "max_vram_gb": 8.0
+  },
+  "request_example": {
+    "prompt": "reframe this synthetic reference image into a polished cinematic shot",
+    "width": 256,
+    "height": 256,
+    "steps": 1,
+    "seed": 42,
+    "guidance": 3.5,
+    "ref_images_b64": [
+      "<supply via raw JSON editor or future upload control>"
+    ]
+  },
+  "notes": [
+    "Set EDGE_DIT_FLUX_KONTEXT_MODEL_PATH to your local model directory before launching this profile.",
+    "Use the raw JSON pane today for ref_images_b64 payloads."
+  ]
+}

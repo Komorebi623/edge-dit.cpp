@@ -75,6 +75,7 @@ private:
     ggml_backend_t vae_backend_ = nullptr;
 
     int flux_declared_tensors_ = 0;
+    bool diffusion_bf16_ = false;
     bool runtime_weights_loaded_ = false;
     std::vector<std::string> flux_missing_tensors_;
     std::vector<std::string> flux_shape_mismatch_tensors_;

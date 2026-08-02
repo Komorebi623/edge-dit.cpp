@@ -31,7 +31,7 @@ Repository = "https://github.com/yiming-l21/edge-dit.cpp"
 Issues = "https://github.com/yiming-l21/edge-dit.cpp/issues"
 
 [project.scripts]
-edge-dit-server-v2 = "edge_dit.server_v2:main"
+edge-dit-server = "edge_dit.server:main"
 
 [project.optional-dependencies]
 dev = [

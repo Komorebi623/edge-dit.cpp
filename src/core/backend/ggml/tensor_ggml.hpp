@@ -9,6 +9,7 @@
 #include <type_traits>
 
 #include "ggml.h"
+#include "ggml-backend.h"
 #include "utils/tensor.hpp"
 
 namespace sd {
@@ -49,6 +50,34 @@ namespace sd {
     inline Tensor<T> make_sd_tensor_from_ggml(const ggml_tensor* tensor) {
         if (tensor == nullptr) {
             return {};
+        }
+        if constexpr (std::is_same_v<T, float>) {
+            if (tensor->type == GGML_TYPE_F16) {
+                Tensor<float> result(shape_from_ggml(tensor));
+                std::vector<ggml_fp16_t> tmp(static_cast<size_t>(ggml_nelements(tensor)));
+                if (tensor->buffer != nullptr || (tensor->view_src != nullptr && tensor->view_src->buffer != nullptr)) {
+                    ggml_backend_tensor_get(tensor, tmp.data(), 0, ggml_nbytes(tensor));
+                } else {
+                    std::memcpy(tmp.data(), tensor->data, ggml_nbytes(tensor));
+                }
+                for (size_t i = 0; i < tmp.size(); ++i) {
+                    result[i] = ggml_fp16_to_fp32(tmp[i]);
+                }
+                return result;
+            }
+            if (tensor->type == GGML_TYPE_BF16) {
+                Tensor<float> result(shape_from_ggml(tensor));
+                std::vector<ggml_bf16_t> tmp(static_cast<size_t>(ggml_nelements(tensor)));
+                if (tensor->buffer != nullptr || (tensor->view_src != nullptr && tensor->view_src->buffer != nullptr)) {
+                    ggml_backend_tensor_get(tensor, tmp.data(), 0, ggml_nbytes(tensor));
+                } else {
+                    std::memcpy(tmp.data(), tensor->data, ggml_nbytes(tensor));
+                }
+                for (size_t i = 0; i < tmp.size(); ++i) {
+                    result[i] = ggml_bf16_to_fp32(tmp[i]);
+                }
+                return result;
+            }
         }
         if (tensor->type != GGMLTypeTraits<T>::type) {
             GGML_ABORT("ggml tensor type does not match sd::Tensor type");

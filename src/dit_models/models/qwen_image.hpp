@@ -94,6 +94,28 @@ static inline bool qwen_single_fused_attention_enabled() {
     return qwen_env_flag_enabled_or_default("ED_QWEN_SINGLE_FUSED_ATTENTION", true);
 }
 
+static inline bool qwen_bf16_attention_inputs_enabled() {
+    return qwen_env_flag_enabled_or_default("ED_QWEN_BF16_ATTENTION_INPUTS", false);
+}
+
+static inline ggml_tensor* qwen_bf16_roundtrip_to_f32(ggml_context* ctx, ggml_tensor* x) {
+    GGML_ASSERT(ctx != nullptr);
+    GGML_ASSERT(x != nullptr);
+    return ggml_cast(ctx, ggml_cast(ctx, x, GGML_TYPE_BF16), GGML_TYPE_F32);
+}
+
+static inline ggml_tensor* qwen_bf16_attention_roundtrip_to_f32(ggml_context* ctx, ggml_tensor* x) {
+    return qwen_bf16_attention_inputs_enabled() ? qwen_bf16_roundtrip_to_f32(ctx, x) : x;
+}
+
+static inline bool qwen_debug_return_is(const std::string& target, const char* name) {
+    return !target.empty() && target == name;
+}
+
+static inline bool qwen_debug_return_has_prefix(const std::string& target, const char* prefix) {
+    return !target.empty() && target.rfind(prefix, 0) == 0;
+}
+
 static std::mutex& qwen_fused_qkv_pack_params_mutex() {
     static std::mutex mutex;
     return mutex;
@@ -1623,6 +1645,8 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
 
         q = Rope::apply_rope(ctx->ggml_ctx, q, pe, true, ctx->backend);
         k = Rope::apply_rope(ctx->ggml_ctx, k, pe, true, ctx->backend);
+        q = qwen_bf16_attention_roundtrip_to_f32(ctx->ggml_ctx, q);
+        k = qwen_bf16_attention_roundtrip_to_f32(ctx->ggml_ctx, k);
 
         const int64_t n_head = v->ne[1];
         GGML_ASSERT(q->ne[0] == k->ne[0]);
@@ -1665,6 +1689,8 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                                        qwen_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx, pe);
         q = qwen_sp_apply_rope_seq_major(ctx->ggml_ctx, q, pe, prepared_pe, ctx->backend);
         k = qwen_sp_apply_rope_seq_major(ctx->ggml_ctx, k, pe, prepared_pe, ctx->backend);
+        q = qwen_bf16_attention_roundtrip_to_f32(ctx->ggml_ctx, q);
+        k = qwen_bf16_attention_roundtrip_to_f32(ctx->ggml_ctx, k);
 
         ggml_tensor* attn = nullptr;
         if (ctx->flash_attn_enabled) {
@@ -1707,6 +1733,8 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                                        qwen_sp_prepare_rope_pe_seq_major(ctx->ggml_ctx, pe);
         q = qwen_sp_apply_rope_seq_major_work_layout(ctx->ggml_ctx, q, pe, d_head, prepared_pe, ctx->backend);
         k = qwen_sp_apply_rope_seq_major_work_layout(ctx->ggml_ctx, k, pe, d_head, prepared_pe, ctx->backend);
+        q = qwen_bf16_attention_roundtrip_to_f32(ctx->ggml_ctx, q);
+        k = qwen_bf16_attention_roundtrip_to_f32(ctx->ggml_ctx, k);
 
         ggml_tensor* attn = nullptr;
         if (ctx->flash_attn_enabled) {
@@ -1754,6 +1782,8 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
         const int64_t n_head = v->ne[2];
         q = qwen_sp_apply_rope_seq_major(ctx->ggml_ctx, q, pe, nullptr, ctx->backend);
         k = qwen_sp_apply_rope_seq_major(ctx->ggml_ctx, k, pe, nullptr, ctx->backend);
+        q = qwen_bf16_attention_roundtrip_to_f32(ctx->ggml_ctx, q);
+        k = qwen_bf16_attention_roundtrip_to_f32(ctx->ggml_ctx, k);
 
         if (ctx->flash_attn_enabled) {
             ggml_tensor* attn = qwen_sp_flash_attention_seq_major(ctx, q, k, v, n_head, kv_scale);
@@ -2247,7 +2277,8 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                                                       ggml_tensor* img,
                                                       ggml_tensor* txt,
                                                       ggml_tensor* pe,
-                                                      ggml_tensor* mask = nullptr) {
+                                                      ggml_tensor* mask = nullptr,
+                                                      const std::string& debug_return = std::string()) {
             // img: [N, n_img_token, hidden_size]
             // txt: [N, n_txt_token, hidden_size]
             // pe: [n_img_token + n_txt_token, d_head/2, 2, 2]
@@ -2280,23 +2311,79 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
             auto img_q        = to_q->forward(ctx, img);
             int64_t num_heads = img_q->ne[0] / dim_head;
             img_q             = ggml_reshape_4d(ctx->ggml_ctx, img_q, dim_head, num_heads, n_img_token, N);  // [N, n_img_token, n_head, d_head]
+            if (qwen_bf16_attention_inputs_enabled()) {
+                img_q = qwen_bf16_roundtrip_to_f32(ctx->ggml_ctx, img_q);
+            }
+            if (qwen_debug_return_is(debug_return, "block0.attn.img_q_linear")) {
+                return {img_q, nullptr};
+            }
             auto img_k        = to_k->forward(ctx, img);
             img_k             = ggml_reshape_4d(ctx->ggml_ctx, img_k, dim_head, num_heads, n_img_token, N);  // [N, n_img_token, n_head, d_head]
+            if (qwen_bf16_attention_inputs_enabled()) {
+                img_k = qwen_bf16_roundtrip_to_f32(ctx->ggml_ctx, img_k);
+            }
+            if (qwen_debug_return_is(debug_return, "block0.attn.img_k_linear")) {
+                return {img_k, nullptr};
+            }
             auto img_v        = to_v->forward(ctx, img);
             img_v             = ggml_reshape_4d(ctx->ggml_ctx, img_v, dim_head, num_heads, n_img_token, N);  // [N, n_img_token, n_head, d_head]
+            if (qwen_bf16_attention_inputs_enabled()) {
+                img_v = qwen_bf16_roundtrip_to_f32(ctx->ggml_ctx, img_v);
+            }
 
             img_q = norm_q->forward(ctx, img_q);
             img_k = norm_k->forward(ctx, img_k);
+            if (qwen_bf16_attention_inputs_enabled()) {
+                img_q = qwen_bf16_roundtrip_to_f32(ctx->ggml_ctx, img_q);
+                img_k = qwen_bf16_roundtrip_to_f32(ctx->ggml_ctx, img_k);
+            }
+            if (qwen_debug_return_is(debug_return, "block0.attn.img_q")) {
+                return {img_q, nullptr};
+            }
+            if (qwen_debug_return_is(debug_return, "block0.attn.img_k")) {
+                return {img_k, nullptr};
+            }
+            if (qwen_debug_return_is(debug_return, "block0.attn.img_v")) {
+                return {img_v, nullptr};
+            }
 
             auto txt_q = add_q_proj->forward(ctx, txt);
             txt_q      = ggml_reshape_4d(ctx->ggml_ctx, txt_q, dim_head, num_heads, n_txt_token, N);  // [N, n_txt_token, n_head, d_head]
+            if (qwen_bf16_attention_inputs_enabled()) {
+                txt_q = qwen_bf16_roundtrip_to_f32(ctx->ggml_ctx, txt_q);
+            }
+            if (qwen_debug_return_is(debug_return, "block0.attn.txt_q_linear")) {
+                return {txt_q, nullptr};
+            }
             auto txt_k = add_k_proj->forward(ctx, txt);
             txt_k      = ggml_reshape_4d(ctx->ggml_ctx, txt_k, dim_head, num_heads, n_txt_token, N);  // [N, n_txt_token, n_head, d_head]
+            if (qwen_bf16_attention_inputs_enabled()) {
+                txt_k = qwen_bf16_roundtrip_to_f32(ctx->ggml_ctx, txt_k);
+            }
+            if (qwen_debug_return_is(debug_return, "block0.attn.txt_k_linear")) {
+                return {txt_k, nullptr};
+            }
             auto txt_v = add_v_proj->forward(ctx, txt);
             txt_v      = ggml_reshape_4d(ctx->ggml_ctx, txt_v, dim_head, num_heads, n_txt_token, N);  // [N, n_txt_token, n_head, d_head]
+            if (qwen_bf16_attention_inputs_enabled()) {
+                txt_v = qwen_bf16_roundtrip_to_f32(ctx->ggml_ctx, txt_v);
+            }
 
             txt_q = norm_added_q->forward(ctx, txt_q);
             txt_k = norm_added_k->forward(ctx, txt_k);
+            if (qwen_bf16_attention_inputs_enabled()) {
+                txt_q = qwen_bf16_roundtrip_to_f32(ctx->ggml_ctx, txt_q);
+                txt_k = qwen_bf16_roundtrip_to_f32(ctx->ggml_ctx, txt_k);
+            }
+            if (qwen_debug_return_is(debug_return, "block0.attn.txt_q")) {
+                return {txt_q, nullptr};
+            }
+            if (qwen_debug_return_is(debug_return, "block0.attn.txt_k")) {
+                return {txt_k, nullptr};
+            }
+            if (qwen_debug_return_is(debug_return, "block0.attn.txt_v")) {
+                return {txt_v, nullptr};
+            }
 
             const bool qkv_quantized =
                 to_q->weight_is_quantized() ||
@@ -2324,12 +2411,41 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                                      qwen_single_seq_major_view(ctx->ggml_ctx, txt_v, dim_head),
                                      qwen_single_seq_major_view(ctx->ggml_ctx, img_v, dim_head),
                                      1);
+                if (qwen_debug_return_is(debug_return, "block0.attn.joint_v_seq")) {
+                    return {v, nullptr};
+                }
+                if (qwen_debug_return_is(debug_return, "block0.attn.joint_q_rope_seq") ||
+                    qwen_debug_return_is(debug_return, "block0.attn.joint_k_rope_seq")) {
+                    auto q_rope = qwen_sp_apply_rope_seq_major(ctx->ggml_ctx, q, pe, nullptr, ctx->backend);
+                    auto k_rope = qwen_sp_apply_rope_seq_major(ctx->ggml_ctx, k, pe, nullptr, ctx->backend);
+                    q_rope      = qwen_bf16_attention_roundtrip_to_f32(ctx->ggml_ctx, q_rope);
+                    k_rope      = qwen_bf16_attention_roundtrip_to_f32(ctx->ggml_ctx, k_rope);
+                    if (qwen_debug_return_is(debug_return, "block0.attn.joint_q_rope_seq")) {
+                        return {q_rope, nullptr};
+                    }
+                    return {k_rope, nullptr};
+                }
                 attn = qwen_single_attention_seq_major(ctx, q, k, v, pe, 1.0f / 128.f);
             } else {
                 auto q = ggml_concat(ctx->ggml_ctx, txt_q, img_q, 2);  // [N, n_txt_token + n_img_token, n_head, d_head]
                 auto k = ggml_concat(ctx->ggml_ctx, txt_k, img_k, 2);  // [N, n_txt_token + n_img_token, n_head, d_head]
                 auto v = ggml_concat(ctx->ggml_ctx, txt_v, img_v, 2);  // [N, n_txt_token + n_img_token, n_head, d_head]
-                attn   = Rope::attention(ctx, q, k, v, pe, mask, (1.0f / 128.f));  // [N, n_txt_token + n_img_token, n_head*d_head]
+                attn   = Rope::attention(ctx,
+                                          q,
+                                          k,
+                                          v,
+                                          pe,
+                                          mask,
+                                          (1.0f / 128.f),
+                                          true,
+                                          false,
+                                          qwen_bf16_attention_inputs_enabled());  // [N, n_txt_token + n_img_token, n_head*d_head]
+            }
+            if (qwen_bf16_attention_inputs_enabled()) {
+                attn = qwen_bf16_roundtrip_to_f32(ctx->ggml_ctx, attn);
+            }
+            if (qwen_debug_return_is(debug_return, "block0.attn.joint_attn")) {
+                return {attn, nullptr};
             }
             auto txt_attn_out = ggml_view_3d(ctx->ggml_ctx,
                                              attn,
@@ -2349,9 +2465,21 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                                              txt->ne[1] * attn->nb[1]);  // [N, n_img_token, n_head*d_head]
             img_attn_out      = ggml_cont(ctx->ggml_ctx, img_attn_out);
             txt_attn_out      = ggml_cont(ctx->ggml_ctx, txt_attn_out);
+            if (qwen_debug_return_is(debug_return, "block0.attn.img_preproj")) {
+                return {img_attn_out, nullptr};
+            }
+            if (qwen_debug_return_is(debug_return, "block0.attn.txt_preproj")) {
+                return {txt_attn_out, nullptr};
+            }
 
             img_attn_out = to_out_0->forward(ctx, img_attn_out);
             txt_attn_out = to_add_out->forward(ctx, txt_attn_out);
+            if (qwen_debug_return_is(debug_return, "block0.attn.img_out")) {
+                return {img_attn_out, nullptr};
+            }
+            if (qwen_debug_return_is(debug_return, "block0.attn.txt_out")) {
+                return {txt_attn_out, nullptr};
+            }
 
             return {img_attn_out, txt_attn_out};
         }
@@ -2699,7 +2827,8 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                                                               ggml_tensor* txt,
                                                               ggml_tensor* t_emb,
                                                               ggml_tensor* pe,
-                                                              ggml_tensor* modulate_index = nullptr) {
+                                                              ggml_tensor* modulate_index = nullptr,
+                                                              const std::string& debug_return = std::string()) {
             // img: [N, n_img_token, hidden_size]
             // txt: [N, n_txt_token, hidden_size]
             // pe: [n_img_token + n_txt_token, d_head/2, 2, 2]
@@ -2719,42 +2848,120 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
 
             auto img_mod_params    = ggml_silu(ctx->ggml_ctx, t_emb);
             img_mod_params         = img_mod_1->forward(ctx, img_mod_params);
+            if (qwen_debug_return_is(debug_return, "block0.img_mod_params")) {
+                return {img_mod_params, nullptr};
+            }
             auto img_mod_param_vec = get_mod_params_vec(ctx->ggml_ctx, img_mod_params, modulate_index);
+            if (qwen_debug_return_is(debug_return, "block0.img_shift1")) {
+                return {img_mod_param_vec[0], nullptr};
+            }
+            if (qwen_debug_return_is(debug_return, "block0.img_scale1")) {
+                return {img_mod_param_vec[1], nullptr};
+            }
+            if (qwen_debug_return_is(debug_return, "block0.img_gate1")) {
+                return {img_mod_param_vec[2], nullptr};
+            }
 
             if (zero_cond_t) {
                 t_emb = ggml_ext_chunk(ctx->ggml_ctx, t_emb, 2, 1)[0];
             }
+            if (qwen_debug_return_is(debug_return, "block0.txt_t_emb")) {
+                return {t_emb, nullptr};
+            }
 
             auto txt_mod_params    = ggml_silu(ctx->ggml_ctx, t_emb);
             txt_mod_params         = txt_mod_1->forward(ctx, txt_mod_params);
+            if (qwen_debug_return_is(debug_return, "block0.txt_mod_params")) {
+                return {txt_mod_params, nullptr};
+            }
             auto txt_mod_param_vec = get_mod_params_vec(ctx->ggml_ctx, txt_mod_params);
+            if (qwen_debug_return_is(debug_return, "block0.txt_shift1")) {
+                return {txt_mod_param_vec[0], nullptr};
+            }
+            if (qwen_debug_return_is(debug_return, "block0.txt_scale1")) {
+                return {txt_mod_param_vec[1], nullptr};
+            }
+            if (qwen_debug_return_is(debug_return, "block0.txt_gate1")) {
+                return {txt_mod_param_vec[2], nullptr};
+            }
 
             auto img_normed    = img_norm1->forward(ctx, img);
+            if (qwen_debug_return_is(debug_return, "block0.img_normed")) {
+                return {img_normed, nullptr};
+            }
             auto img_modulated = dit::modulate(ctx->ggml_ctx, img_normed, img_mod_param_vec[0], img_mod_param_vec[1], modulate_index != nullptr);
+            if (qwen_debug_return_is(debug_return, "block0.img_modulated")) {
+                return {img_modulated, nullptr};
+            }
             auto img_gate1     = img_mod_param_vec[2];
 
             auto txt_normed    = txt_norm1->forward(ctx, txt);
+            if (qwen_debug_return_is(debug_return, "block0.txt_normed")) {
+                return {txt_normed, nullptr};
+            }
             auto txt_modulated = dit::modulate(ctx->ggml_ctx, txt_normed, txt_mod_param_vec[0], txt_mod_param_vec[1]);
+            if (qwen_debug_return_is(debug_return, "block0.txt_modulated")) {
+                return {txt_modulated, nullptr};
+            }
             auto txt_gate1     = txt_mod_param_vec[2];
 
-            auto [img_attn_output, txt_attn_output] = attn->forward(ctx, img_modulated, txt_modulated, pe);
+            auto [img_attn_output, txt_attn_output] = attn->forward(ctx, img_modulated, txt_modulated, pe, nullptr, debug_return);
+            if (txt_attn_output == nullptr) {
+                return {img_attn_output, nullptr};
+            }
 
             img = residual_gate(ctx->ggml_ctx, img, img_attn_output, img_gate1);
+            if (qwen_debug_return_is(debug_return, "block0.img_after_attn")) {
+                return {img, nullptr};
+            }
             txt = residual_gate(ctx->ggml_ctx, txt, txt_attn_output, txt_gate1);
+            if (qwen_debug_return_is(debug_return, "block0.txt_after_attn")) {
+                return {txt, nullptr};
+            }
 
             auto img_normed2    = img_norm2->forward(ctx, img);
+            if (qwen_debug_return_is(debug_return, "block0.img_normed2")) {
+                return {img_normed2, nullptr};
+            }
             auto img_modulated2 = dit::modulate(ctx->ggml_ctx, img_normed2, img_mod_param_vec[3], img_mod_param_vec[4], modulate_index != nullptr);
+            if (qwen_debug_return_is(debug_return, "block0.img_modulated2")) {
+                return {img_modulated2, nullptr};
+            }
             auto img_gate2      = img_mod_param_vec[5];
+            if (qwen_debug_return_is(debug_return, "block0.img_gate2")) {
+                return {img_gate2, nullptr};
+            }
 
             auto txt_normed2    = txt_norm2->forward(ctx, txt);
+            if (qwen_debug_return_is(debug_return, "block0.txt_normed2")) {
+                return {txt_normed2, nullptr};
+            }
             auto txt_modulated2 = dit::modulate(ctx->ggml_ctx, txt_normed2, txt_mod_param_vec[3], txt_mod_param_vec[4]);
+            if (qwen_debug_return_is(debug_return, "block0.txt_modulated2")) {
+                return {txt_modulated2, nullptr};
+            }
             auto txt_gate2      = txt_mod_param_vec[5];
+            if (qwen_debug_return_is(debug_return, "block0.txt_gate2")) {
+                return {txt_gate2, nullptr};
+            }
 
             auto img_mlp_out = img_mlp->forward(ctx, img_modulated2);
+            if (qwen_debug_return_is(debug_return, "block0.img_mlp_out")) {
+                return {img_mlp_out, nullptr};
+            }
             auto txt_mlp_out = txt_mlp->forward(ctx, txt_modulated2);
+            if (qwen_debug_return_is(debug_return, "block0.txt_mlp_out")) {
+                return {txt_mlp_out, nullptr};
+            }
 
             img = residual_gate(ctx->ggml_ctx, img, img_mlp_out, img_gate2);
+            if (qwen_debug_return_is(debug_return, "block0.img_after_mlp")) {
+                return {img, nullptr};
+            }
             txt = residual_gate(ctx->ggml_ctx, txt, txt_mlp_out, txt_gate2);
+            if (qwen_debug_return_is(debug_return, "block0.txt_after_mlp")) {
+                return {txt, nullptr};
+            }
 
             return {img, txt};
         }
@@ -2911,7 +3118,8 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                                   ggml_tensor* timestep,
                                   ggml_tensor* context,
                                   ggml_tensor* pe,
-                                  ggml_tensor* modulate_index = nullptr) {
+                                  ggml_tensor* modulate_index = nullptr,
+                                  const std::string& debug_return = std::string()) {
             auto time_text_embed = std::dynamic_pointer_cast<QwenTimestepProjEmbeddings>(blocks["time_text_embed"]);
             auto txt_norm        = std::dynamic_pointer_cast<RMSNorm>(blocks["txt_norm"]);
             auto img_in          = std::dynamic_pointer_cast<Linear>(blocks["img_in"]);
@@ -2924,9 +3132,21 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                 auto t_emb_0 = time_text_embed->forward(ctx, ggml_ext_zeros_like(ctx->ggml_ctx, timestep));
                 t_emb        = ggml_concat(ctx->ggml_ctx, t_emb, t_emb_0, 1);
             }
+            if (qwen_debug_return_is(debug_return, "t_emb")) {
+                return t_emb;
+            }
             auto img = img_in->forward(ctx, x);
+            if (qwen_debug_return_is(debug_return, "img_in")) {
+                return img;
+            }
             auto txt = txt_norm->forward(ctx, context);
+            if (qwen_debug_return_is(debug_return, "txt_norm")) {
+                return txt;
+            }
             txt      = txt_in->forward(ctx, txt);
+            if (qwen_debug_return_is(debug_return, "txt_in")) {
+                return txt;
+            }
 
             bool use_sp_mainline = qwen_sp_enabled(ctx);
             edgedit::parallel::SPSequenceSplit img_sp_split;
@@ -3006,6 +3226,8 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                 auto block = std::dynamic_pointer_cast<QwenImageTransformerBlock>(blocks["transformer_blocks." + std::to_string(i)]);
 
                 std::pair<ggml_tensor*, ggml_tensor*> result;
+                const bool block0_debug =
+                    i == 0 && !use_sp_mainline && qwen_debug_return_has_prefix(debug_return, "block0.");
                 if (use_sp_mainline) {
                     result = block->forward_sp(ctx,
                                                img,
@@ -3019,10 +3241,19 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                                                "qwen_image_block" + std::to_string(i));
                 } else
                 {
-                    result = block->forward(ctx, img, txt, t_emb, pe, modulate_index);
+                    result = block->forward(ctx, img, txt, t_emb, pe, modulate_index, block0_debug ? debug_return : std::string());
+                }
+                if (block0_debug) {
+                    return result.first;
                 }
                 img         = result.first;
                 txt         = result.second;
+                if (i == 0 && qwen_debug_return_is(debug_return, "block0_img")) {
+                    return img;
+                }
+                if (i == 0 && qwen_debug_return_is(debug_return, "block0_txt")) {
+                    return txt;
+                }
                 sd::ggml_graph_cut::mark_graph_cut(img, "qwen_image.transformer_blocks." + std::to_string(i), "img");
                 if (i + 1 < params.num_layers) {
                     sd::ggml_graph_cut::mark_graph_cut(txt, "qwen_image.transformer_blocks." + std::to_string(i), "txt");
@@ -3058,7 +3289,13 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
             }
 
             img = norm_out->forward(ctx, img, t_emb);
+            if (qwen_debug_return_is(debug_return, "norm_out")) {
+                return img;
+            }
             img = proj_out->forward(ctx, img);
+            if (qwen_debug_return_is(debug_return, "proj_out")) {
+                return img;
+            }
 
             return img;
         }
@@ -3069,7 +3306,8 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                              ggml_tensor* context,
                              ggml_tensor* pe,
                              std::vector<ggml_tensor*> ref_latents = {},
-                             ggml_tensor* modulate_index           = nullptr) {
+                             ggml_tensor* modulate_index           = nullptr,
+                             const std::string& debug_return       = std::string()) {
             // Forward pass of DiT.
             // x: [N, C, H, W]
             // timestep: [N,]
@@ -3092,7 +3330,11 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                 }
             }
 
-            auto out = forward_orig(ctx, img, timestep, context, pe, modulate_index);  // [N, h_len*w_len, ph*pw*C]
+            auto out = forward_orig(ctx, img, timestep, context, pe, modulate_index, debug_return);  // [N, h_len*w_len, ph*pw*C]
+
+            if (!debug_return.empty()) {
+                return out;
+            }
 
             if (out->ne[1] > img_tokens) {
                 out = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, out, 0, 2, 1, 3));  // [num_tokens, N, C * patch_size * patch_size]
@@ -3178,7 +3420,8 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
                                  const sd::Tensor<float>& timesteps_tensor,
                                  const sd::Tensor<float>& context_tensor,
                                  const std::vector<sd::Tensor<float>>& ref_latents_tensor = {},
-                                 bool increase_ref_index                                  = false) {
+                                 bool increase_ref_index                                  = false,
+                                 const std::string& debug_return                          = std::string()) {
             ggml_cgraph* gf        = new_graph_custom(QWEN_IMAGE_GRAPH_SIZE);
             ggml_tensor* x         = make_input(x_tensor);
             ggml_tensor* timesteps = make_input(timesteps_tensor);
@@ -3256,13 +3499,19 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
 
             auto runner_ctx = get_context();
 
-            ggml_tensor* out = qwen_image.forward(&runner_ctx,
-                                                  x,
-                                                  timesteps,
-                                                  context,
-                                                  pe,
-                                                  ref_latents,
-                                                  modulate_index);
+            ggml_tensor* out = nullptr;
+            if (qwen_debug_return_is(debug_return, "pe")) {
+                out = pe;
+            } else {
+                out = qwen_image.forward(&runner_ctx,
+                                         x,
+                                         timesteps,
+                                         context,
+                                         pe,
+                                         ref_latents,
+                                         modulate_index,
+                                         debug_return);
+            }
 
             ggml_build_forward_expand(gf, out);
 
@@ -3324,6 +3573,22 @@ static inline ggml_tensor* qwen_fused_attn_head_to_seq_recv_unpack(ggml_context*
             }
 
             return restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), x.dim());
+        }
+
+        sd::Tensor<float> compute_debug_target(int n_threads,
+                                               const sd::Tensor<float>& x,
+                                               const sd::Tensor<float>& timesteps,
+                                               const sd::Tensor<float>& context,
+                                               const std::vector<sd::Tensor<float>>& ref_latents,
+                                               bool increase_ref_index,
+                                               const std::string& debug_return) {
+            if (debug_return.empty()) {
+                return {};
+            }
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(x, timesteps, context, ref_latents, increase_ref_index, debug_return);
+            };
+            return take_or_empty(GGMLRunner::compute<float>(get_graph, n_threads, false));
         }
 
         // ---- Feature-granularity on-GPU reuse (MagCache / TaylorSeer-single) ----

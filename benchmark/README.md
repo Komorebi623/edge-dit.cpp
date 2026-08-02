@@ -117,7 +117,7 @@ In one sentence:
 
 - **Dimensions the current job section can orchestrate directly**: quantization (`quant`), cache (`cache`), offload (`offload`), VAE tiling (`vae_tiling`) — single-card runtime.
 - **Attention** (flash on by default; sage/cudnn need build variants) and **parallelism** (cfg/sequence need multi-GPU) already have their capabilities and cross-system comparability registered in `methods/`, but `run.py` currently executes single-card only and has no dedicated job field yet; testing these for now goes through engine-side switches or the corresponding binary.
-- **cache baseline**: `none` already includes flash-attention + CUDA fused operators + cuDNN (performance build), on by default and not listed as a method. **Calibration-free and directly sweepable**: `easycache / ucache / dbcache / taylorseer / cache-dit` (shared by edge and sd.cpp); `magcache` and `sencache` both fail to calibrate on edge on-device (profile can't be generated, the accelerated run degrades quality), **do not put them in the manifest**; edge's own calibration-free option is `dicache`.
+- **cache baseline**: `none` already includes flash-attention + CUDA fused operators + cuDNN (performance build), on by default and not listed as a method. **Calibration-free and directly sweepable**: `easycache / ucache / dbcache / taylorseer / cache-dit` (shared by edge and sd.cpp), plus edge's own `dicache`. `magcache` is also job-orchestrable on edge: FLUX / Qwen-Image use a built-in table (no calibration), while SD3 / Wan are calibrated automatically — run.py runs a `--cache-calibrate` pass to write the profile, then benchmarks with `--cache-profile` (see [jobs/README.md](jobs/README.md#cache-calibration-note)). `sencache` is not benchmarked on edge yet — **do not put it in the manifest** for now.
 
 ---
 
@@ -152,7 +152,7 @@ System capabilities are defined in `systems/*.yaml`. After configuring each syst
 
 **Active (you touch these directly)**
 - `jobs/` — test manifests, your entry point (`README.md` has the full field docs + example walkthroughs + `example-*` ready-made manifests)
-- `models/` — model library, one file per model (14, covering 6 families): SD3 / SD3.5 (incl. distilled turbo) / FLUX.1 (dev/schnell) / FLUX.1-Kontext (incl. distilled lightning) / Qwen-Image (incl. distilled lightning + Edit) / Wan 2.x (incl. distilled distill)
+- `models/` — model library, one file per model (14, covering 6 families): SD3 / SD3.5 (incl. distilled turbo) / FLUX.1 (dev/schnell) / FLUX.1-Kontext (incl. distilled lightning) / Qwen-Image (incl. distilled lightning + Edit) / Wan 2.1 (incl. distilled distill)
 - `methods/` — method library, categorized as `quant/ cache/ attention/ memory/ parallel/` (22)
 - `sites/` — machine config (`site4090.yaml` / `siteh200.yaml` + template), the **only** place allowed to hold machine-specific paths
 - `run.py` — front-end entry point
