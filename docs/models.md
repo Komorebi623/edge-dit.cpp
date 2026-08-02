@@ -126,18 +126,8 @@ Its few-step **Qwen-Image-Edit-Lightning** variant ships as a LoRA adapter, so
 merge it into the base weights first (`scripts/merge_qwen_lora.py`); see
 [Merging LoRA weights](optimization/merging-lora-weights.md).
 
-For Qwen-Image-Edit-2511, use:
-
-```bash
---qwen-image-zero-cond-t
-```
-
-`--qwen-image-zero-cond-t` makes reference-image tokens use the `t = 0`
-timestep condition while the image tokens being generated or edited still use
-the current denoising timestep `t`.
-
-It is an inference compatibility switch introduced for Qwen-Image-Edit-2511.
-For other Qwen-Image-Edit models, ignore this option.
+No extra model-specific CLI switch is required for the documented
+Qwen-Image-Edit checkpoints.
 
 Command example: [Qwen-Image-Edit CLI](cli.md#qwen-image-edit).
 
@@ -204,8 +194,6 @@ profiling behavior.
   runtime behavior.
 - Cache methods and sequence parallelism are workload dependent and may not be
   valid for every model or resolution.
-- Model-specific options such as `--qwen-image-zero-cond-t`
-  should only be used with the model families documented above.
 - Component loading requires a complete, compatible set of text encoders, VAE,
   diffusion transformer, and optional vision components for the selected model.
 

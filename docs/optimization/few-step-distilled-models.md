@@ -237,11 +237,10 @@ ed-cli --backend cuda --type q8_0 --model /path/to/models/qwen-image \
 
 Same LoRA-merge requirement, plus `--image`. As with Qwen-Image Lightning, the
 adapter is the 4-step release, so keep the `4steps` marker on the merged output
-directory (or pass `--steps 4`). Add `--qwen-image-zero-cond-t` **only** for
-Qwen-Image-Edit-2511:
+directory (or pass `--steps 4`):
 
 ```bash
-ed-cli --backend cuda --type q8_0 --model /path/to/models/qwen-image-edit --qwen-image-zero-cond-t \
+ed-cli --backend cuda --type q8_0 --model /path/to/models/qwen-image-edit \
   --diffusion-model /path/to/models/distilled/qwen-image-edit-lightning-4steps-merged/dit/diffusion_pytorch_model.safetensors.index.json \
   --image input.png --steps -1 --cfg-scale 1.0 -W 1024 -H 1024 \
   --prompt "make it brushed metal" -o qwen-edit-lightning.png

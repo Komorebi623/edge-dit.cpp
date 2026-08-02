@@ -83,7 +83,7 @@ python scripts/merge_qwen_lora.py \
 For **Qwen-Image-Edit**, use the base `Qwen/Qwen-Image-Edit/transformer`, the
 `Qwen-Image-Edit-Lightning-4steps` LoRA file, and a `.../dit/` output dir (the
 script tags it `...-4steps` the same way); run with `--model
-.../qwen-image-edit --qwen-image-zero-cond-t -i <input image>`.
+.../qwen-image-edit -i <input image>`.
 
 ## How the script works
 

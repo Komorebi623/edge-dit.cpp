@@ -212,9 +212,6 @@ SD3-family models can skip T5XXL to reduce memory:
   --output qwen-edit.png
 ```
 
-Use `--qwen-image-zero-cond-t` for Qwen-Image-Edit-2511. For other
-Qwen-Image-Edit models, ignore this option.
-
 Image editing support depends on the model family and checkpoint format. See
 [Supported models and usage](models.md) for the public preview support matrix.
 

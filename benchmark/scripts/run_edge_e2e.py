@@ -59,6 +59,47 @@ _AUTO_COMPONENT = {
     "first_stage_model": "vae",
 }
 
+QWEN_FAMILIES = {"Qwen-Image", "Qwen-Image-Edit"}
+
+
+def infer_model_family_from_index(model_path: str) -> str | None:
+    index_path = Path(model_path) / "model_index.json"
+    if not index_path.exists():
+        return None
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    class_name = data.get("_class_name")
+    if class_name == "QwenImageEditPipeline":
+        return "Qwen-Image-Edit"
+    if class_name == "QwenImagePipeline":
+        return "Qwen-Image"
+    return None
+
+
+def resolves_to_qwen_family(model_family: str | None, model_path: str) -> bool:
+    if model_family in QWEN_FAMILIES:
+        return True
+    if model_family:
+        return False
+    return infer_model_family_from_index(model_path) in QWEN_FAMILIES
+
+
+def edge_negative_prompt_default(
+    model_family: str | None,
+    model_path: str,
+    cfg_scale: float,
+    negative_prompt: str | None,
+) -> str | None:
+    if (
+        negative_prompt is None
+        and cfg_scale > 1.0
+        and resolves_to_qwen_family(model_family, model_path)
+    ):
+        return " "
+    return negative_prompt
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -77,6 +118,7 @@ def main() -> int:
     parser.add_argument("--cfg-scale", type=float, default=1.0)
     parser.add_argument("--flow-shift", type=float, default=None)
     parser.add_argument("--negative-prompt", default=None)
+    parser.add_argument("--model-family", default=None)
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--backend", default="cuda")
     parser.add_argument("--warmup-runs", type=int, required=True)
@@ -107,7 +149,7 @@ def main() -> int:
     parser.add_argument("--cache-profile")
     parser.add_argument("--cache-static-scm", action="store_true")
     parser.add_argument("--cache-dynamic-scm", action="store_true")
-    parser.add_argument("--qwen-image-zero-cond-t", action="store_true")
+    parser.add_argument("--qwen-image-zero-cond-t", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--vae-tiling", action="store_true")
     parser.add_argument("--vae-tile-size")
     parser.add_argument("--tensor-type-rules")
@@ -133,6 +175,12 @@ def main() -> int:
 
     sample_dir = output_dir / "samples" / "edge"
     repeat = args.warmup_runs + args.measured_runs
+    negative_prompt = edge_negative_prompt_default(
+        args.model_family,
+        args.model,
+        args.cfg_scale,
+        args.negative_prompt,
+    )
     command = [
         args.binary,
         "--model",
@@ -169,8 +217,8 @@ def main() -> int:
         "--end_index",
         "1",
     ]
-    if args.negative_prompt is not None:
-        command.extend(["--negative_prompt", args.negative_prompt])
+    if negative_prompt is not None:
+        command.extend(["--negative_prompt", negative_prompt])
     if args.task == "image-editing":
         if not args.input_image:
             raise SystemExit("--input-image is required for image-editing")

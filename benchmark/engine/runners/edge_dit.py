@@ -8,6 +8,22 @@ from typing import Any
 
 from .base import BenchmarkRunner, PreflightResult
 
+QWEN_FAMILIES = {"Qwen-Image", "Qwen-Image-Edit"}
+
+
+def edge_negative_prompt_default(
+    model_family: str | None,
+    cfg_scale: float,
+    negative_prompt: str | None,
+) -> str | None:
+    if (
+        negative_prompt is None
+        and cfg_scale > 1.0
+        and model_family in QWEN_FAMILIES
+    ):
+        return " "
+    return negative_prompt
+
 
 class EdgeDitRunner(BenchmarkRunner):
     def preflight(self) -> PreflightResult:
@@ -106,7 +122,11 @@ class EdgeDitRunner(BenchmarkRunner):
         generation = dict(workload["generation"])
         generation.update({k: v for k, v in run_options.items() if k in generation})
         prompt = self.prompt_text(workload, run_options)
-        negative_prompt = self.negative_prompt_text(workload, run_options)
+        negative_prompt = edge_negative_prompt_default(
+            workload.get("model_family"),
+            float(generation.get("cfg_scale", 1.0)),
+            self.negative_prompt_text(workload, run_options),
+        )
         command = [
             "python3",
             str(self.repo_root / "benchmark" / "scripts" / "run_edge_e2e.py"),
@@ -121,6 +141,8 @@ class EdgeDitRunner(BenchmarkRunner):
             str(output_dir.resolve()),
             "--task",
             workload["task"],
+            "--model-family",
+            workload["model_family"],
             "--width",
             str(generation["width"]),
             "--height",
@@ -193,7 +215,11 @@ class EdgeDitRunner(BenchmarkRunner):
         generation = dict(workload["generation"])
         generation.update({k: v for k, v in run_options.items() if k in generation})
         prompt = self.prompt_text(workload, run_options)
-        negative_prompt = self.negative_prompt_text(workload, run_options)
+        negative_prompt = edge_negative_prompt_default(
+            workload.get("model_family"),
+            float(generation.get("cfg_scale", 1.0)),
+            self.negative_prompt_text(workload, run_options),
+        )
         command = [
             "python3",
             str(self.repo_root / "benchmark" / "scripts" / "run_edge_cli_once.py"),
@@ -208,6 +234,8 @@ class EdgeDitRunner(BenchmarkRunner):
             str(output_dir.resolve()),
             "--task",
             workload["task"],
+            "--model-family",
+            workload["model_family"],
             "--width",
             str(generation["width"]),
             "--height",
