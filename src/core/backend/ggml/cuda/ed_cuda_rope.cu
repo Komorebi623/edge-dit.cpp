@@ -2,6 +2,7 @@
 
 #include "backend/ggml/ed_ggml_rope_ext.hpp"
 
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -15,7 +16,7 @@ static inline int64_t elem_stride(const ggml_tensor* t, int dim) {
 }
 
 static bool is_contiguous_3d_output(const ggml_tensor* t) {
-    if (t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16) {
+    if (t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16) {
         return false;
     }
     const size_t ts = ggml_type_size(t->type) / ggml_blck_size(t->type);
@@ -58,8 +59,23 @@ __device__ __forceinline__ __half rope_cast<__half>(float v) {
     return __float2half_rn(v);
 }
 
-template <typename dst_t>
-__global__ void rope_kernel(const float* x,
+template <>
+__device__ __forceinline__ nv_bfloat16 rope_cast<nv_bfloat16>(float v) {
+    return __float2bfloat16_rn(v);
+}
+
+template <typename src_t>
+__device__ __forceinline__ float rope_load_x(const src_t* x, int64_t offset) {
+    return static_cast<float>(x[offset]);
+}
+
+template <>
+__device__ __forceinline__ float rope_load_x<nv_bfloat16>(const nv_bfloat16* x, int64_t offset) {
+    return __bfloat162float(x[offset]);
+}
+
+template <typename src_t, typename dst_t>
+__global__ void rope_kernel(const src_t* x,
                             const float* pe,
                             dst_t* dst,
                             int layout,
@@ -96,31 +112,33 @@ __global__ void rope_kernel(const float* x,
         const int h = h_total % n_head;
         const int b = h_total / n_head;
         if (interleaved) {
-            x0 = x[(2 * p + 0) * x_s0 + h * x_s1 + s * x_s2 + b * x_s3];
-            x1 = x[(2 * p + 1) * x_s0 + h * x_s1 + s * x_s2 + b * x_s3];
+            x0 = rope_load_x(x, (2 * p + 0) * x_s0 + h * x_s1 + s * x_s2 + b * x_s3);
+            x1 = rope_load_x(x, (2 * p + 1) * x_s0 + h * x_s1 + s * x_s2 + b * x_s3);
         } else {
-            x0 = x[p * x_s0 + h * x_s1 + s * x_s2 + b * x_s3];
-            x1 = x[(p + half) * x_s0 + h * x_s1 + s * x_s2 + b * x_s3];
+            x0 = rope_load_x(x, p * x_s0 + h * x_s1 + s * x_s2 + b * x_s3);
+            x1 = rope_load_x(x, (p + half) * x_s0 + h * x_s1 + s * x_s2 + b * x_s3);
         }
     } else if (layout == static_cast<int>(RopeInputLayout::SeqHeadDim)) {
         const int h = h_total % n_head;
         const int b = h_total / n_head;
         if (interleaved) {
-            x0 = x[(2 * p + 0) * x_s0 + s * x_s1 + h * x_s2 + b * x_s3];
-            x1 = x[(2 * p + 1) * x_s0 + s * x_s1 + h * x_s2 + b * x_s3];
+            x0 = rope_load_x(x, (2 * p + 0) * x_s0 + s * x_s1 + h * x_s2 + b * x_s3);
+            x1 = rope_load_x(x, (2 * p + 1) * x_s0 + s * x_s1 + h * x_s2 + b * x_s3);
         } else {
-            x0 = x[p * x_s0 + s * x_s1 + h * x_s2 + b * x_s3];
-            x1 = x[(p + half) * x_s0 + s * x_s1 + h * x_s2 + b * x_s3];
+            x0 = rope_load_x(x, p * x_s0 + s * x_s1 + h * x_s2 + b * x_s3);
+            x1 = rope_load_x(x, (p + half) * x_s0 + s * x_s1 + h * x_s2 + b * x_s3);
         }
     } else {
-        x0 = x[p * x_s0 + s * x_s1 + h_total * x_s2 + 0 * x_s3];
-        x1 = x[p * x_s0 + s * x_s1 + h_total * x_s2 + 1 * x_s3];
+        x0 = rope_load_x(x, p * x_s0 + s * x_s1 + h_total * x_s2 + 0 * x_s3);
+        x1 = rope_load_x(x, p * x_s0 + s * x_s1 + h_total * x_s2 + 1 * x_s3);
     }
 
-    const float y0 = x0 * load_pe(pe, pe_prepared, s, p, 0, 0, pe_s0, pe_s1, pe_s2, pe_s3) +
-                     x1 * load_pe(pe, pe_prepared, s, p, 1, 0, pe_s0, pe_s1, pe_s2, pe_s3);
-    const float y1 = x0 * load_pe(pe, pe_prepared, s, p, 0, 1, pe_s0, pe_s1, pe_s2, pe_s3) +
-                     x1 * load_pe(pe, pe_prepared, s, p, 1, 1, pe_s0, pe_s1, pe_s2, pe_s3);
+    const float y0 = __fadd_rn(
+        __fmul_rn(x0, load_pe(pe, pe_prepared, s, p, 0, 0, pe_s0, pe_s1, pe_s2, pe_s3)),
+        __fmul_rn(x1, load_pe(pe, pe_prepared, s, p, 1, 0, pe_s0, pe_s1, pe_s2, pe_s3)));
+    const float y1 = __fadd_rn(
+        __fmul_rn(x0, load_pe(pe, pe_prepared, s, p, 0, 1, pe_s0, pe_s1, pe_s2, pe_s3)),
+        __fmul_rn(x1, load_pe(pe, pe_prepared, s, p, 1, 1, pe_s0, pe_s1, pe_s2, pe_s3)));
 
     const int64_t dst_base = static_cast<int64_t>(h_total) * d_head * seq + static_cast<int64_t>(s) * d_head;
     if (interleaved || layout == static_cast<int>(RopeInputLayout::Work)) {
@@ -227,11 +245,11 @@ bool ed_cuda_rope_custom_compute(ggml_tensor * dst, ed_cuda_rope_stream_t stream
     const int64_t total = static_cast<int64_t>(half) * seq * n_head * batch;
     constexpr int threads = 256;
     const int blocks = static_cast<int>((total + threads - 1) / threads);
-    if (dst->type == GGML_TYPE_F32) {
-        rope_kernel<float><<<blocks, threads, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
-            static_cast<const float*>(x->data),
+    auto launch = [&](auto* x_ptr, auto* dst_ptr) {
+        rope_kernel<<<blocks, threads, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+            x_ptr,
             static_cast<const float*>(pe->data),
-            static_cast<float*>(dst->data),
+            dst_ptr,
             params.input_layout,
             params.interleaved,
             d_head,
@@ -247,26 +265,18 @@ bool ed_cuda_rope_custom_compute(ggml_tensor * dst, ed_cuda_rope_stream_t stream
             elem_stride(pe, 1),
             elem_stride(pe, 2),
             elem_stride(pe, 3));
-    } else if (dst->type == GGML_TYPE_F16) {
-        rope_kernel<__half><<<blocks, threads, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
-            static_cast<const float*>(x->data),
-            static_cast<const float*>(pe->data),
-            static_cast<__half*>(dst->data),
-            params.input_layout,
-            params.interleaved,
-            d_head,
-            seq,
-            n_head,
-            batch,
-            pe_prepared,
-            elem_stride(x, 0),
-            elem_stride(x, 1),
-            elem_stride(x, 2),
-            elem_stride(x, 3),
-            elem_stride(pe, 0),
-            elem_stride(pe, 1),
-            elem_stride(pe, 2),
-            elem_stride(pe, 3));
+    };
+
+    if (x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+        launch(static_cast<const float*>(x->data), static_cast<float*>(dst->data));
+    } else if (x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F16) {
+        launch(static_cast<const float*>(x->data), static_cast<__half*>(dst->data));
+    } else if (x->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_BF16) {
+        launch(static_cast<const float*>(x->data), static_cast<nv_bfloat16*>(dst->data));
+    } else if (x->type == GGML_TYPE_BF16 && dst->type == GGML_TYPE_BF16) {
+        launch(static_cast<const nv_bfloat16*>(x->data), static_cast<nv_bfloat16*>(dst->data));
+    } else if (x->type == GGML_TYPE_BF16 && dst->type == GGML_TYPE_F32) {
+        launch(static_cast<const nv_bfloat16*>(x->data), static_cast<float*>(dst->data));
     } else {
         return false;
     }

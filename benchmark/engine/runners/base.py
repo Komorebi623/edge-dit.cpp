@@ -189,6 +189,28 @@ class BenchmarkRunner:
             )
         return str(workload.get("resolved_prompt", {}).get("prompt", ""))
 
+    def negative_prompt_text(
+        self,
+        workload: dict[str, Any],
+        run_options: dict[str, Any] | None = None,
+    ) -> str | None:
+        run_options = run_options or {}
+        if "negative_prompt" in run_options:
+            value = run_options.get("negative_prompt")
+            return None if value is None else str(value)
+        prompt_id = run_options.get("prompt_id")
+        if isinstance(prompt_id, str):
+            prompt_set = workload.get("resolved_prompt_set", {})
+            if isinstance(prompt_set, dict):
+                item = prompt_set.get(prompt_id)
+                if isinstance(item, dict) and "negative_prompt" in item:
+                    return str(item.get("negative_prompt", ""))
+            return None
+        resolved_prompt = workload.get("resolved_prompt", {})
+        if isinstance(resolved_prompt, dict) and "negative_prompt" in resolved_prompt:
+            return str(resolved_prompt.get("negative_prompt", ""))
+        return None
+
     def git_commit(self, repo: Path) -> str | None:
         try:
             return subprocess.check_output(

@@ -76,7 +76,7 @@ class EdgeDitRunner(BenchmarkRunner):
         warmup_runs: int,
         measured_runs: int,
     ) -> list[str]:
-        if workload["task"] != "text-to-image":
+        if workload["task"] == "text-to-video":
             return self.build_cli_once_command(
                 workload,
                 gpu_count,
@@ -106,6 +106,7 @@ class EdgeDitRunner(BenchmarkRunner):
         generation = dict(workload["generation"])
         generation.update({k: v for k, v in run_options.items() if k in generation})
         prompt = self.prompt_text(workload, run_options)
+        negative_prompt = self.negative_prompt_text(workload, run_options)
         command = [
             "python3",
             str(self.repo_root / "benchmark" / "scripts" / "run_edge_e2e.py"),
@@ -118,6 +119,8 @@ class EdgeDitRunner(BenchmarkRunner):
             prompt,
             "--output-dir",
             str(output_dir.resolve()),
+            "--task",
+            workload["task"],
             "--width",
             str(generation["width"]),
             "--height",
@@ -139,6 +142,14 @@ class EdgeDitRunner(BenchmarkRunner):
             "--measured-runs",
             str(measured_runs),
         ]
+        if negative_prompt is not None:
+            command.extend(["--negative-prompt", negative_prompt])
+        if workload["task"] == "image-editing":
+            input_ref = workload.get("input_image_ref")
+            input_path = self.resolve_path(input_ref)
+            if input_path is None or not input_path.exists():
+                raise NotImplementedError(f"missing image editing input path for {input_ref}: {input_path}")
+            command.extend(["--input-image", str(input_path)])
         self.apply_edge_wrapper_options(command, workload.get("model_options", {}))
         self.apply_edge_wrapper_options(command, run_options)
         if generation.get("flow_shift") is not None:
@@ -182,6 +193,7 @@ class EdgeDitRunner(BenchmarkRunner):
         generation = dict(workload["generation"])
         generation.update({k: v for k, v in run_options.items() if k in generation})
         prompt = self.prompt_text(workload, run_options)
+        negative_prompt = self.negative_prompt_text(workload, run_options)
         command = [
             "python3",
             str(self.repo_root / "benchmark" / "scripts" / "run_edge_cli_once.py"),
@@ -217,6 +229,8 @@ class EdgeDitRunner(BenchmarkRunner):
             "--measured-runs",
             str(measured_runs),
         ]
+        if negative_prompt is not None:
+            command.extend(["--negative-prompt", negative_prompt])
         if workload["task"] == "image-editing":
             input_ref = workload.get("input_image_ref")
             input_path = self.resolve_path(input_ref)

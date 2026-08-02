@@ -1,13 +1,183 @@
 #ifndef __CONDITIONER_HPP__
 #define __CONDITIONER_HPP__
 
+#include <cctype>
+#include <cinttypes>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <limits>
 #include <optional>
+#include <sstream>
+#include <string>
 
 #include "dit_models/components/text_encoders/clip.hpp"
 #include "dit_models/components/text_encoders/llm.hpp"
 #include "dit_models/components/text_encoders/t5.hpp"
 #include "backend/ggml/tensor_ggml.hpp"
+
+static inline bool qwen_conditioner_debug_align_enabled() {
+    const char* env = std::getenv("ED_DEBUG_QWEN_ALIGN");
+    return env != nullptr && env[0] != '\0' && std::strcmp(env, "0") != 0;
+}
+
+static inline bool qwen_conditioner_csv_contains(const char* csv, const char* target) {
+    if (csv == nullptr || csv[0] == '\0' || target == nullptr) {
+        return false;
+    }
+    const std::string haystack(csv);
+    size_t pos = 0;
+    while (pos <= haystack.size()) {
+        size_t end = haystack.find(',', pos);
+        if (end == std::string::npos) {
+            end = haystack.size();
+        }
+        size_t begin = pos;
+        while (begin < end && std::isspace(static_cast<unsigned char>(haystack[begin]))) {
+            ++begin;
+        }
+        while (end > begin && std::isspace(static_cast<unsigned char>(haystack[end - 1]))) {
+            --end;
+        }
+        if (haystack.compare(begin, end - begin, target) == 0) {
+            return true;
+        }
+        if (end == haystack.size()) {
+            break;
+        }
+        pos = end + 1;
+    }
+    return false;
+}
+
+static inline std::string qwen_conditioner_dump_safe_name(const char* name) {
+    std::string result = name != nullptr ? name : "tensor";
+    for (char& ch : result) {
+        const unsigned char uch = static_cast<unsigned char>(ch);
+        if (!std::isalnum(uch) && ch != '.' && ch != '_' && ch != '-') {
+            ch = '_';
+        }
+    }
+    return result;
+}
+
+static inline void qwen_conditioner_dump_tensor_if_requested(const char* name,
+                                                             const sd::Tensor<float>& tensor) {
+    const char* dump_dir = std::getenv("ED_QWEN_ALIGN_DUMP_DIR");
+    const char* targets  = std::getenv("ED_QWEN_ALIGN_DUMP_TARGETS");
+    if (dump_dir == nullptr || dump_dir[0] == '\0' ||
+        !qwen_conditioner_csv_contains(targets, name)) {
+        return;
+    }
+    const std::string base_path = std::string(dump_dir) + "/" +
+                                  qwen_conditioner_dump_safe_name(name);
+    {
+        std::ofstream shape_out(base_path + ".shape");
+        const auto& shape = tensor.shape();
+        for (size_t i = 0; i < shape.size(); ++i) {
+            if (i > 0) {
+                shape_out << ' ';
+            }
+            shape_out << shape[i];
+        }
+        shape_out << '\n';
+    }
+    std::ofstream data_out(base_path + ".f32.bin", std::ios::binary);
+    const auto& values = tensor.values();
+    data_out.write(reinterpret_cast<const char*>(values.data()),
+                   static_cast<std::streamsize>(values.size() * sizeof(float)));
+}
+
+static inline void qwen_conditioner_log_tensor_stats(const char* name, const sd::Tensor<float>& tensor) {
+    if (!qwen_conditioner_debug_align_enabled()) {
+        return;
+    }
+    if (tensor.empty()) {
+        LOG_INFO("qwen-align %s: empty", name);
+        return;
+    }
+    qwen_conditioner_dump_tensor_if_requested(name, tensor);
+
+    double sum = 0.0;
+    double sum_sq = 0.0;
+    float min_value = std::numeric_limits<float>::infinity();
+    float max_value = -std::numeric_limits<float>::infinity();
+    for (float value : tensor.values()) {
+        sum += static_cast<double>(value);
+        sum_sq += static_cast<double>(value) * static_cast<double>(value);
+        min_value = std::min(min_value, value);
+        max_value = std::max(max_value, value);
+    }
+
+    const double count = static_cast<double>(tensor.values().size());
+    const double mean = sum / count;
+    const double variance = std::max(0.0, sum_sq / count - mean * mean);
+    LOG_INFO("qwen-align %s: shape=%s numel=%zu mean=%.9g std=%.9g min=%.9g max=%.9g l2=%.9g",
+             name,
+             sd::tensor_shape_to_string(tensor.shape()).c_str(),
+             tensor.values().size(),
+             mean,
+             std::sqrt(variance),
+             static_cast<double>(min_value),
+             static_cast<double>(max_value),
+             std::sqrt(sum_sq));
+
+    const auto& shape = tensor.shape();
+    if (shape.size() >= 2 && shape[0] > 0 && shape[1] > 0) {
+        const int64_t dim = shape[0];
+        const int64_t seq = shape[1];
+        auto at = [&](int64_t token, int64_t channel) -> float {
+            token = std::max<int64_t>(0, std::min<int64_t>(seq - 1, token));
+            channel = std::max<int64_t>(0, std::min<int64_t>(dim - 1, channel));
+            return tensor.values()[static_cast<size_t>(channel + dim * token)];
+        };
+        LOG_INFO("qwen-align %s samples: t0=[%.9g %.9g %.9g %.9g] t1=[%.9g %.9g %.9g %.9g] t64=[%.9g %.9g %.9g %.9g] tlast=[%.9g %.9g %.9g %.9g]",
+                 name,
+                 static_cast<double>(at(0, 0)),
+                 static_cast<double>(at(0, 1)),
+                 static_cast<double>(at(0, 2)),
+                 static_cast<double>(at(0, 3)),
+                 static_cast<double>(at(1, 0)),
+                 static_cast<double>(at(1, 1)),
+                 static_cast<double>(at(1, 2)),
+                 static_cast<double>(at(1, 3)),
+                 static_cast<double>(at(64, 0)),
+                 static_cast<double>(at(64, 1)),
+                 static_cast<double>(at(64, 2)),
+                 static_cast<double>(at(64, 3)),
+                 static_cast<double>(at(seq - 1, 0)),
+                 static_cast<double>(at(seq - 1, 1)),
+                 static_cast<double>(at(seq - 1, 2)),
+                 static_cast<double>(at(seq - 1, 3)));
+    }
+}
+
+static inline void qwen_conditioner_log_int_samples(const char* name,
+                                                    const std::vector<int>& values,
+                                                    int start,
+                                                    int count) {
+    if (!qwen_conditioner_debug_align_enabled()) {
+        return;
+    }
+    if (values.empty()) {
+        LOG_INFO("qwen-align %s: empty", name);
+        return;
+    }
+
+    start = std::max(0, std::min<int>(start, static_cast<int>(values.size())));
+    const int end = std::max(start, std::min<int>(start + count, static_cast<int>(values.size())));
+    std::stringstream ss;
+    ss << "qwen-align " << name << ": len=" << values.size() << " range=[" << start << "," << end << ") values=[";
+    for (int i = start; i < end; ++i) {
+        if (i > start) {
+            ss << ' ';
+        }
+        ss << values[static_cast<size_t>(i)];
+    }
+    ss << ']';
+    LOG_INFO("%s", ss.str().c_str());
+}
 
 struct SDCondition {
     sd::Tensor<float> c_crossattn;
@@ -1075,7 +1245,9 @@ struct FluxCLIPEmbedder : public Conditioner {
 
     FluxCLIPEmbedder(ggml_backend_t backend,
                      bool offload_params_to_cpu,
-                     const String2TensorStorage& tensor_storage_map = {}) {
+                     const String2TensorStorage& tensor_storage_map = {},
+                     size_t t5_chunk_len = 256)
+        : chunk_len(t5_chunk_len) {
         bool use_clip_l = false;
         bool use_t5     = false;
         for (auto pair : tensor_storage_map) {
@@ -1766,12 +1938,43 @@ struct LLMEmbedder : public Conditioner {
                                     int min_length,
                                     int hidden_states_min_length,
                                     const std::vector<std::pair<int, sd::Tensor<float>>>& image_embeds,
+                                    const std::vector<LLM::LLMImageEmbedInfo>& image_embed_infos,
                                     const std::set<int>& out_layers,
                                     int prompt_template_encode_start_idx) {
         auto tokens_weights_mask = tokenize(prompt, prompt_attn_range, min_length);
         auto& tokens             = std::get<0>(tokens_weights_mask);
         auto& weights            = std::get<1>(tokens_weights_mask);
         auto& mask               = std::get<2>(tokens_weights_mask);
+        if (qwen_conditioner_debug_align_enabled()) {
+            qwen_conditioner_log_int_samples("input_ids.head", tokens, 0, 80);
+            if (!image_embed_infos.empty()) {
+                for (size_t i = 0; i < image_embed_infos.size(); ++i) {
+                    const auto& info = image_embed_infos[i];
+                    LOG_INFO("qwen-align image_embed_info[%zu]: token_index=%d token_count=%" PRId64 " grid=[%" PRId64 ",%" PRId64 ",%" PRId64 "]",
+                             i,
+                             info.token_index,
+                             info.token_count,
+                             info.grid_t,
+                             info.grid_h,
+                             info.grid_w);
+                    qwen_conditioner_log_int_samples("input_ids.before_image",
+                                                     tokens,
+                                                     info.token_index - 8,
+                                                     16);
+                    qwen_conditioner_log_int_samples("input_ids.after_image",
+                                                     tokens,
+                                                     info.token_index + static_cast<int>(info.token_count) - 8,
+                                                     24);
+                }
+            }
+            if (prompt_template_encode_start_idx >= 0) {
+                qwen_conditioner_log_int_samples("input_ids.drop_window",
+                                                 tokens,
+                                                 prompt_template_encode_start_idx - 8,
+                                                 32);
+            }
+            qwen_conditioner_log_int_samples("input_ids.tail", tokens, static_cast<int>(tokens.size()) - 32, 32);
+        }
 
         sd::Tensor<int32_t> input_ids({static_cast<int64_t>(tokens.size())}, tokens);
         sd::Tensor<float> attention_mask;
@@ -1792,8 +1995,109 @@ struct LLMEmbedder : public Conditioner {
                                           input_ids,
                                           attention_mask,
                                           image_embeds,
-                                          out_layers);
+                                          out_layers,
+                                          image_embed_infos);
         GGML_ASSERT(!hidden_states.empty());
+        if (qwen_conditioner_debug_align_enabled() && out_layers.empty() &&
+            (ed_version_is_qwen_image(version) || ed_version_is_qwen_image_edit(version))) {
+            const std::set<int> debug_layers = {0, 1, 2, 4, 8, 16, 28};
+            auto layer_states = llm->compute(n_threads,
+                                             input_ids,
+                                             attention_mask,
+                                             image_embeds,
+                                             debug_layers,
+                                             image_embed_infos);
+            if (!layer_states.empty() && hidden_states.shape().size() >= 2) {
+                const int64_t hidden_dim = hidden_states.shape()[0];
+                int layer_i = 0;
+                for (int layer : debug_layers) {
+                    if (static_cast<int64_t>(layer_i + 1) * hidden_dim <= layer_states.shape()[0]) {
+                        auto layer_slice = sd::ops::slice(layer_states,
+                                                          0,
+                                                          static_cast<int64_t>(layer_i) * hidden_dim,
+                                                          static_cast<int64_t>(layer_i + 1) * hidden_dim);
+                        if (prompt_template_encode_start_idx > 0 &&
+                            layer_slice.shape()[1] > prompt_template_encode_start_idx) {
+                            layer_slice = sd::ops::slice(layer_slice,
+                                                         1,
+                                                         prompt_template_encode_start_idx,
+                                                         layer_slice.shape()[1]);
+                        }
+                        std::string name = layer == 0 ? "text.input_embed" : "text.layer" + std::to_string(layer);
+                        qwen_conditioner_log_tensor_stats(name.c_str(), layer_slice);
+                    }
+                    ++layer_i;
+                }
+            }
+
+            const char* dump_targets = std::getenv("ED_QWEN_ALIGN_DUMP_TARGETS");
+            if (dump_targets != nullptr && dump_targets[0] != '\0') {
+                const std::vector<int> text_debug_layers = {0, 1, 2};
+                const std::vector<std::string> text_debug_suffixes = {
+                    ".input",
+                    ".norm1",
+                    ".attn.q_proj",
+                    ".attn.k_proj",
+                    ".attn.v_proj",
+                    ".attn.q",
+                    ".attn.k",
+                    ".attn.v",
+                    ".attn.q_rope",
+                    ".attn.k_rope",
+                    ".attn.preproj",
+                    ".attn.out",
+                    ".after_attn",
+                    ".norm2",
+                    ".mlp.gate",
+                    ".mlp.act",
+                    ".mlp.up",
+                    ".mlp.mul",
+                    ".mlp.out",
+                    ".after_mlp",
+                };
+                auto slice_text_debug_tensor = [&](const std::string& target,
+                                                   sd::Tensor<float> tensor) -> sd::Tensor<float> {
+                    if (prompt_template_encode_start_idx <= 0 || tensor.empty()) {
+                        return tensor;
+                    }
+                    int seq_dim = 1;
+                    if (target.find(".attn.q") != std::string::npos ||
+                        target.find(".attn.k") != std::string::npos ||
+                        target.find(".attn.v") != std::string::npos) {
+                        if (tensor.shape().size() >= 3) {
+                            seq_dim = 2;
+                        }
+                    }
+                    if (seq_dim < static_cast<int>(tensor.shape().size()) &&
+                        tensor.shape()[seq_dim] > prompt_template_encode_start_idx) {
+                        tensor = sd::ops::slice(tensor,
+                                                seq_dim,
+                                                prompt_template_encode_start_idx,
+                                                tensor.shape()[seq_dim]);
+                    }
+                    return tensor;
+                };
+                for (int layer : text_debug_layers) {
+                    for (const std::string& suffix : text_debug_suffixes) {
+                        const std::string target = "block" + std::to_string(layer) + suffix;
+                        const std::string name   = "text." + target;
+                        if (!qwen_conditioner_csv_contains(dump_targets, name.c_str()) &&
+                            !qwen_conditioner_csv_contains(dump_targets, target.c_str())) {
+                            continue;
+                        }
+                        auto debug_tensor = llm->compute(n_threads,
+                                                         input_ids,
+                                                         attention_mask,
+                                                         image_embeds,
+                                                         {},
+                                                         image_embed_infos,
+                                                         target);
+                        debug_tensor = slice_text_debug_tensor(target, std::move(debug_tensor));
+                        qwen_conditioner_log_tensor_stats(name.c_str(), debug_tensor);
+                    }
+                }
+            }
+        }
         hidden_states = apply_token_weights(std::move(hidden_states), weights);
         GGML_ASSERT(hidden_states.shape()[1] > prompt_template_encode_start_idx);
 
@@ -1826,6 +2130,7 @@ struct LLMEmbedder : public Conditioner {
         std::vector<std::string> extra_prompts;
         std::vector<std::pair<int, int>> extra_prompts_attn_range;
         std::vector<std::pair<int, sd::Tensor<float>>> image_embeds;
+        std::vector<LLM::LLMImageEmbedInfo> image_embed_infos;
         int prompt_template_encode_start_idx = 34;
         int min_length                       = 0;  // pad tokens
         int hidden_states_min_length         = 0;  // zero pad hidden_states
@@ -1835,55 +2140,129 @@ struct LLMEmbedder : public Conditioner {
 
         if (ed_version_is_qwen_image(version) || ed_version_is_qwen_image_edit(version)) {
             if (llm->enable_vision && conditioner_params.ref_images != nullptr && !conditioner_params.ref_images->empty()) {
-                LOG_INFO("QwenImageEditPlusPipeline");
                 prompt_template_encode_start_idx = 64;
-                int image_embed_idx              = 64 + 6;
 
-                int min_pixels          = 384 * 384;
-                int max_pixels          = 560 * 560;
-                std::string placeholder = "<|image_pad|>";
-                std::string img_prompt;
+                struct EncodedRefImage {
+                    sd::Tensor<float> image_embed;
+                    int64_t llm_grid_t = 1;
+                    int64_t llm_grid_h = 0;
+                    int64_t llm_grid_w = 0;
+                };
 
-                for (int i = 0; i < conditioner_params.ref_images->size(); i++) {
-                    const auto& image = (*conditioner_params.ref_images)[i];
-                    double factor     = llm->params.vision.patch_size * llm->params.vision.spatial_merge_size;
-                    int height        = static_cast<int>(image.shape()[1]);
-                    int width         = static_cast<int>(image.shape()[0]);
-                    int h_bar         = static_cast<int>(std::round(height / factor) * factor);
-                    int w_bar         = static_cast<int>(std::round(width / factor) * factor);
+                auto encode_ref_image = [&](const sd::Tensor<float>& image,
+                                            int image_index,
+                                            int min_pixels,
+                                            int max_pixels) -> EncodedRefImage {
+                    double factor = llm->params.vision.patch_size * llm->params.vision.spatial_merge_size;
+                    factor        = std::max(1.0, factor);
+                    int height    = static_cast<int>(image.shape()[1]);
+                    int width     = static_cast<int>(image.shape()[0]);
+                    int h_bar     = static_cast<int>(std::round(height / factor) * factor);
+                    int w_bar     = static_cast<int>(std::round(width / factor) * factor);
+                    h_bar         = std::max(static_cast<int>(factor), h_bar);
+                    w_bar         = std::max(static_cast<int>(factor), w_bar);
 
-                    if (static_cast<double>(h_bar) * w_bar > max_pixels) {
+                    if (max_pixels > 0 && static_cast<double>(h_bar) * w_bar > max_pixels) {
                         double beta = std::sqrt((height * width) / static_cast<double>(max_pixels));
                         h_bar       = std::max(static_cast<int>(factor),
                                                static_cast<int>(std::floor(height / beta / factor)) * static_cast<int>(factor));
                         w_bar       = std::max(static_cast<int>(factor),
                                                static_cast<int>(std::floor(width / beta / factor)) * static_cast<int>(factor));
-                    } else if (static_cast<double>(h_bar) * w_bar < min_pixels) {
+                    } else if (min_pixels > 0 && static_cast<double>(h_bar) * w_bar < min_pixels) {
                         double beta = std::sqrt(static_cast<double>(min_pixels) / (height * width));
                         h_bar       = static_cast<int>(std::ceil(height * beta / factor)) * static_cast<int>(factor);
                         w_bar       = static_cast<int>(std::ceil(width * beta / factor)) * static_cast<int>(factor);
                     }
 
-                    LOG_DEBUG("resize conditioner ref image %d from %dx%d to %dx%d", i, height, width, h_bar, w_bar);
+                    LOG_DEBUG("resize conditioner ref image %d from %dx%d to %dx%d", image_index, height, width, h_bar, w_bar);
 
                     auto resized_image = clip_preprocess(image, w_bar, h_bar);
-
-                    auto image_embed = llm->encode_image(n_threads, resized_image);
+                    auto image_embed   = llm->encode_image(n_threads, resized_image);
                     GGML_ASSERT(!image_embed.empty());
-                    image_embeds.emplace_back(image_embed_idx, image_embed);
-                    image_embed_idx += 1 + static_cast<int>(image_embed.shape()[1]) + 6;
+                    qwen_conditioner_log_tensor_stats("ref.image_embed", image_embed);
+                    return {
+                        std::move(image_embed),
+                        1,
+                        h_bar / llm->params.vision.patch_size / llm->params.vision.spatial_merge_size,
+                        w_bar / llm->params.vision.patch_size / llm->params.vision.spatial_merge_size,
+                    };
+                };
 
-                    img_prompt += "Picture " + std::to_string(i + 1) + ": <|vision_start|>";  // [24669, 220, index, 25, 220, 151652]
-                    int64_t num_image_tokens = image_embed.shape()[1];
-                    img_prompt.reserve(num_image_tokens * placeholder.size());
-                    for (int j = 0; j < num_image_tokens; j++) {
-                        img_prompt += placeholder;
-                    }
-                    img_prompt += "<|vision_end|>";
-                }
-
+                const std::string placeholder = "<|image_pad|>";
                 prompt = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n";
-                prompt += img_prompt;
+
+                if (ed_version_is_qwen_image_edit(version) && conditioner_params.ref_images->size() == 1) {
+                    LOG_INFO("QwenImageEditPipeline");
+                    const std::string image_prefix = "<|vision_start|>";
+                    auto encoded_ref               = encode_ref_image((*conditioner_params.ref_images)[0],
+                                                         0,
+                                                         0,
+                                                         0);
+                    const int image_embed_idx = static_cast<int>(tokenizer->encode(prompt + image_prefix, nullptr).size());
+                    int64_t num_image_tokens = encoded_ref.image_embed.shape()[1];
+                    image_embeds.emplace_back(image_embed_idx, std::move(encoded_ref.image_embed));
+                    image_embed_infos.push_back({
+                        image_embed_idx,
+                        num_image_tokens,
+                        encoded_ref.llm_grid_t,
+                        encoded_ref.llm_grid_h,
+                        encoded_ref.llm_grid_w,
+                    });
+                    LOG_INFO("qwen-image-edit vision span: idx=%d tokens=%" PRId64 " image_grid_thw=[%" PRId64 ",%" PRId64 ",%" PRId64 "] llm_grid=[%" PRId64 ",%" PRId64 ",%" PRId64 "]",
+                             image_embed_idx,
+                             num_image_tokens,
+                             encoded_ref.llm_grid_t,
+                             encoded_ref.llm_grid_h * llm->params.vision.spatial_merge_size,
+                             encoded_ref.llm_grid_w * llm->params.vision.spatial_merge_size,
+                             encoded_ref.llm_grid_t,
+                             encoded_ref.llm_grid_h,
+                             encoded_ref.llm_grid_w);
+
+                    prompt += image_prefix;
+                    prompt.reserve(prompt.size() + static_cast<size_t>(num_image_tokens) * placeholder.size());
+                    for (int j = 0; j < num_image_tokens; j++) {
+                        prompt += placeholder;
+                    }
+                    prompt += "<|vision_end|>";
+                } else {
+                    LOG_INFO("QwenImageEditPlusPipeline");
+                    const int min_pixels = 384 * 384;
+                    const int max_pixels = 560 * 560;
+                    for (int i = 0; i < conditioner_params.ref_images->size(); i++) {
+                        const std::string image_prefix = "Picture " + std::to_string(i + 1) + ": <|vision_start|>";
+                        auto encoded_ref               = encode_ref_image((*conditioner_params.ref_images)[i],
+                                                             i,
+                                                             min_pixels,
+                                                             max_pixels);
+                        const int image_embed_idx = static_cast<int>(tokenizer->encode(prompt + image_prefix, nullptr).size());
+                        int64_t num_image_tokens = encoded_ref.image_embed.shape()[1];
+                        image_embeds.emplace_back(image_embed_idx, std::move(encoded_ref.image_embed));
+                        image_embed_infos.push_back({
+                            image_embed_idx,
+                            num_image_tokens,
+                            encoded_ref.llm_grid_t,
+                            encoded_ref.llm_grid_h,
+                            encoded_ref.llm_grid_w,
+                        });
+                        LOG_INFO("qwen-image-edit-plus vision span %d: idx=%d tokens=%" PRId64 " image_grid_thw=[%" PRId64 ",%" PRId64 ",%" PRId64 "] llm_grid=[%" PRId64 ",%" PRId64 ",%" PRId64 "]",
+                                 i,
+                                 image_embed_idx,
+                                 num_image_tokens,
+                                 encoded_ref.llm_grid_t,
+                                 encoded_ref.llm_grid_h * llm->params.vision.spatial_merge_size,
+                                 encoded_ref.llm_grid_w * llm->params.vision.spatial_merge_size,
+                                 encoded_ref.llm_grid_t,
+                                 encoded_ref.llm_grid_h,
+                                 encoded_ref.llm_grid_w);
+
+                        prompt += image_prefix;
+                        prompt.reserve(prompt.size() + static_cast<size_t>(num_image_tokens) * placeholder.size());
+                        for (int j = 0; j < num_image_tokens; j++) {
+                            prompt += placeholder;
+                        }
+                        prompt += "<|vision_end|>";
+                    }
+                }
 
                 prompt_attn_range.first = static_cast<int>(prompt.size());
                 prompt += conditioner_params.text;
@@ -1974,6 +2353,7 @@ struct LLMEmbedder : public Conditioner {
                                            min_length,
                                            hidden_states_min_length,
                                            image_embeds,
+                                           image_embed_infos,
                                            out_layers,
                                            prompt_template_encode_start_idx);
         std::vector<sd::Tensor<float>> extra_hidden_states_vec;
@@ -1984,6 +2364,7 @@ struct LLMEmbedder : public Conditioner {
                                                      min_length,
                                                      hidden_states_min_length,
                                                      image_embeds,
+                                                     image_embed_infos,
                                                      out_layers,
                                                      prompt_template_encode_start_idx);
             extra_hidden_states_vec.push_back(std::move(extra_hidden_states));

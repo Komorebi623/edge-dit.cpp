@@ -67,6 +67,8 @@ def main() -> int:
     parser.add_argument("--diffusion-model", default=None, help="standalone DiT transformer weights (distilled models); --model then points to the base")
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--task", default="text-to-image", choices=["text-to-image", "image-editing"])
+    parser.add_argument("--input-image", default=None)
     parser.add_argument("--width", type=int, required=True)
     parser.add_argument("--height", type=int, required=True)
     parser.add_argument("--steps", type=int, required=True)
@@ -74,6 +76,7 @@ def main() -> int:
     parser.add_argument("--guidance", type=float, required=True)
     parser.add_argument("--cfg-scale", type=float, default=1.0)
     parser.add_argument("--flow-shift", type=float, default=None)
+    parser.add_argument("--negative-prompt", default=None)
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--backend", default="cuda")
     parser.add_argument("--warmup-runs", type=int, required=True)
@@ -166,6 +169,12 @@ def main() -> int:
         "--end_index",
         "1",
     ]
+    if args.negative_prompt is not None:
+        command.extend(["--negative_prompt", args.negative_prompt])
+    if args.task == "image-editing":
+        if not args.input_image:
+            raise SystemExit("--input-image is required for image-editing")
+        command.extend(["--image", args.input_image])
     if args.dtype and args.dtype != "auto":
         command.extend(["--type", args.dtype])
     if args.devices:

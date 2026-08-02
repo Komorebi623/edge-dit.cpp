@@ -675,6 +675,7 @@ void ModelLoader::clear() {
     tae_preview_only_ = false;
     use_pmid_ = false;
     skip_t5_ = false;
+    qwen_image_zero_cond_t_ = false;
 }
 
 void ModelLoader::reset() {
@@ -1185,6 +1186,21 @@ bool ModelLoader::init_from_safetensors_index_file(const std::string& file_path,
 bool ModelLoader::init_from_diffusers_directory(const std::string& dir_path, const std::string& prefix) {
     (void)prefix;
     version_ = infer_diffusers_version(dir_path);
+    qwen_image_zero_cond_t_ = false;
+    if (ed_version_is_qwen_image(version_) || ed_version_is_qwen_image_edit(version_)) {
+        const std::string transformer_config_path = path_join(path_join(dir_path, "transformer"), "config.json");
+        nlohmann::json transformer_config;
+        std::string error;
+        if (file_exists(transformer_config_path) &&
+            read_json_file(transformer_config_path, &transformer_config, &error) &&
+            transformer_config.contains("zero_cond_t") &&
+            transformer_config["zero_cond_t"].is_boolean()) {
+            qwen_image_zero_cond_t_ = transformer_config["zero_cond_t"].get<bool>();
+            if (qwen_image_zero_cond_t_) {
+                LOG_INFO("qwen-image transformer config enables zero_cond_t");
+            }
+        }
+    }
 
     struct Component {
         const char* dir;

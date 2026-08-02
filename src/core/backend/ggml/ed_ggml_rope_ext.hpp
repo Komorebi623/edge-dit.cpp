@@ -62,11 +62,17 @@ inline bool rope_params_valid(const RopeCustomParams& params) {
             params.input_layout == static_cast<int32_t>(RopeInputLayout::Work));
 }
 
-inline float tensor_f32_at(const ggml_tensor* t, int64_t i0, int64_t i1, int64_t i2, int64_t i3) {
+inline float tensor_scalar_at(const ggml_tensor* t, int64_t i0, int64_t i1, int64_t i2, int64_t i3) {
     const char* base = static_cast<const char*>(t->data);
     const char* ptr = base + i0 * t->nb[0] + i1 * t->nb[1] + i2 * t->nb[2] + i3 * t->nb[3];
-    GGML_ASSERT(t->type == GGML_TYPE_F32);
-    return *reinterpret_cast<const float*>(ptr);
+    if (t->type == GGML_TYPE_F32) {
+        return *reinterpret_cast<const float*>(ptr);
+    }
+    if (t->type == GGML_TYPE_F16) {
+        return ggml_fp16_to_fp32(*reinterpret_cast<const ggml_fp16_t*>(ptr));
+    }
+    GGML_ASSERT(t->type == GGML_TYPE_BF16);
+    return ggml_bf16_to_fp32(*reinterpret_cast<const ggml_bf16_t*>(ptr));
 }
 
 inline void tensor_f32_set(ggml_tensor* t, int64_t i0, int64_t i1, int64_t i2, int64_t i3, float v) {
@@ -81,6 +87,8 @@ inline void tensor_rope_set(ggml_tensor* t, int64_t i0, int64_t i1, int64_t i2, 
     char* ptr = base + i0 * t->nb[0] + i1 * t->nb[1] + i2 * t->nb[2] + i3 * t->nb[3];
     if (t->type == GGML_TYPE_F32) {
         *reinterpret_cast<float*>(ptr) = v;
+    } else if (t->type == GGML_TYPE_BF16) {
+        *reinterpret_cast<ggml_bf16_t*>(ptr) = ggml_fp32_to_bf16(v);
     } else {
         GGML_ASSERT(t->type == GGML_TYPE_F16);
         *reinterpret_cast<ggml_fp16_t*>(ptr) = ggml_fp32_to_fp16(v);
@@ -89,9 +97,9 @@ inline void tensor_rope_set(ggml_tensor* t, int64_t i0, int64_t i1, int64_t i2, 
 
 inline float rope_pe_at(const ggml_tensor* pe, int64_t seq, int64_t pair, int64_t row, int64_t col) {
     if (pe->ne[0] == 2 && pe->ne[1] == 2) {
-        return tensor_f32_at(pe, row, col, pair, seq);
+        return tensor_scalar_at(pe, row, col, pair, seq);
     }
-    return tensor_f32_at(pe, row, pair, seq, col);
+    return tensor_scalar_at(pe, row, pair, seq, col);
 }
 
 inline void rope_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdata) {
@@ -100,8 +108,9 @@ inline void rope_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdat
     GGML_ASSERT(dst->src[0] != nullptr && dst->src[1] != nullptr);
     const ggml_tensor* x = dst->src[0];
     const ggml_tensor* pe = dst->src[1];
-    GGML_ASSERT(x->type == GGML_TYPE_F32 && pe->type == GGML_TYPE_F32 &&
-                (dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_F16));
+    GGML_ASSERT((x->type == GGML_TYPE_F32 || x->type == GGML_TYPE_BF16) &&
+                pe->type == GGML_TYPE_F32 &&
+                (dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_F16 || dst->type == GGML_TYPE_BF16));
 
     const int64_t d_head = params.d_head;
     const int64_t half = d_head / 2;
@@ -138,26 +147,26 @@ inline void rope_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdat
                     const int64_t head = h % n_head;
                     const int64_t n = h / n_head;
                     if (interleaved) {
-                        x0 = tensor_f32_at(x, 2 * p + 0, head, s, n);
-                        x1 = tensor_f32_at(x, 2 * p + 1, head, s, n);
+                        x0 = tensor_scalar_at(x, 2 * p + 0, head, s, n);
+                        x1 = tensor_scalar_at(x, 2 * p + 1, head, s, n);
                     } else {
-                        x0 = tensor_f32_at(x, p, head, s, n);
-                        x1 = tensor_f32_at(x, p + half, head, s, n);
+                        x0 = tensor_scalar_at(x, p, head, s, n);
+                        x1 = tensor_scalar_at(x, p + half, head, s, n);
                     }
                 } else if (layout == RopeInputLayout::SeqHeadDim) {
                     const int64_t n_head = x->ne[2];
                     const int64_t head = h % n_head;
                     const int64_t n = h / n_head;
                     if (interleaved) {
-                        x0 = tensor_f32_at(x, 2 * p + 0, s, head, n);
-                        x1 = tensor_f32_at(x, 2 * p + 1, s, head, n);
+                        x0 = tensor_scalar_at(x, 2 * p + 0, s, head, n);
+                        x1 = tensor_scalar_at(x, 2 * p + 1, s, head, n);
                     } else {
-                        x0 = tensor_f32_at(x, p, s, head, n);
-                        x1 = tensor_f32_at(x, p + half, s, head, n);
+                        x0 = tensor_scalar_at(x, p, s, head, n);
+                        x1 = tensor_scalar_at(x, p + half, s, head, n);
                     }
                 } else {
-                    x0 = tensor_f32_at(x, p, s, h, 0);
-                    x1 = tensor_f32_at(x, p, s, h, 1);
+                    x0 = tensor_scalar_at(x, p, s, h, 0);
+                    x1 = tensor_scalar_at(x, p, s, h, 1);
                 }
 
                 const float y0 = x0 * rope_pe_at(pe, s, p, 0, 0) + x1 * rope_pe_at(pe, s, p, 1, 0);
@@ -182,7 +191,8 @@ inline bool rope_custom_shape_supported(const ggml_tensor* x,
     if (!rope_fast_path_enabled() || x == nullptr || pe == nullptr) {
         return false;
     }
-    if (x->type != GGML_TYPE_F32 || pe->type != GGML_TYPE_F32 || d_head <= 0 || (d_head % 2) != 0) {
+    if ((x->type != GGML_TYPE_F32 && x->type != GGML_TYPE_BF16) ||
+        pe->type != GGML_TYPE_F32 || d_head <= 0 || (d_head % 2) != 0) {
         return false;
     }
     if (!interleaved && layout == RopeInputLayout::Work) {
@@ -213,7 +223,7 @@ inline ggml_tensor* rope_custom_3d(ggml_context* ctx,
                                    bool interleaved,
                                    int64_t d_head,
                                    ggml_type out_type = GGML_TYPE_F32) {
-    GGML_ASSERT(out_type == GGML_TYPE_F32 || out_type == GGML_TYPE_F16);
+    GGML_ASSERT(out_type == GGML_TYPE_F32 || out_type == GGML_TYPE_F16 || out_type == GGML_TYPE_BF16);
     ggml_tensor* args[] = { x, pe };
     int64_t seq = 0;
     int64_t heads_total = 0;
@@ -245,7 +255,8 @@ inline ggml_tensor* rope_custom_3d(ggml_context* ctx,
 inline ggml_tensor* apply_rope(ggml_context* ctx, ggml_tensor* x, ggml_tensor* pe, bool interleaved) {
     const int64_t d_head = x->ne[0];
     if (rope_custom_shape_supported(x, pe, RopeInputLayout::NSeqHeadDim, interleaved, d_head)) {
-        return rope_custom_3d(ctx, x, pe, RopeInputLayout::NSeqHeadDim, interleaved, d_head);
+        const ggml_type out_type = x->type == GGML_TYPE_BF16 ? GGML_TYPE_BF16 : GGML_TYPE_F32;
+        return rope_custom_3d(ctx, x, pe, RopeInputLayout::NSeqHeadDim, interleaved, d_head, out_type);
     }
     return nullptr;
 }
@@ -253,14 +264,16 @@ inline ggml_tensor* apply_rope(ggml_context* ctx, ggml_tensor* x, ggml_tensor* p
 inline ggml_tensor* apply_rope_seq_major(ggml_context* ctx, ggml_tensor* x, ggml_tensor* pe, bool interleaved) {
     const int64_t d_head = x->ne[0];
     if (rope_custom_shape_supported(x, pe, RopeInputLayout::SeqHeadDim, interleaved, d_head)) {
-        return rope_custom_3d(ctx, x, pe, RopeInputLayout::SeqHeadDim, interleaved, d_head);
+        const ggml_type out_type = x->type == GGML_TYPE_BF16 ? GGML_TYPE_BF16 : GGML_TYPE_F32;
+        return rope_custom_3d(ctx, x, pe, RopeInputLayout::SeqHeadDim, interleaved, d_head, out_type);
     }
     return nullptr;
 }
 
 inline ggml_tensor* apply_rope_work_layout(ggml_context* ctx, ggml_tensor* x, ggml_tensor* pe, int64_t d_head) {
     if (rope_custom_shape_supported(x, pe, RopeInputLayout::Work, true, d_head)) {
-        return rope_custom_3d(ctx, x, pe, RopeInputLayout::Work, true, d_head);
+        const ggml_type out_type = x->type == GGML_TYPE_BF16 ? GGML_TYPE_BF16 : GGML_TYPE_F32;
+        return rope_custom_3d(ctx, x, pe, RopeInputLayout::Work, true, d_head, out_type);
     }
     return nullptr;
 }

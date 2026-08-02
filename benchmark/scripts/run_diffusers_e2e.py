@@ -22,6 +22,7 @@ def main() -> int:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--guidance", type=float, required=True)
     parser.add_argument("--cfg-scale", type=float, default=1.0)
+    parser.add_argument("--negative-prompt", default=None)
     parser.add_argument("--dtype", choices=["bf16", "fp16", "f16", "fp32", "f32"], default="bf16")
     parser.add_argument("--task", default="text-to-image")
     parser.add_argument("--model-family", default="FLUX.1")
@@ -373,8 +374,17 @@ def build_call_kwargs(args: argparse.Namespace, generator: Any) -> dict[str, Any
     }
     if args.model_family in FLUX_FAMILIES:
         kwargs["guidance_scale"] = args.guidance
+        if args.task == "image-editing":
+            kwargs["true_cfg_scale"] = args.cfg_scale
+            if args.negative_prompt is not None and (args.cfg_scale > 1 or args.negative_prompt != ""):
+                kwargs["negative_prompt"] = args.negative_prompt
     elif args.model_family in QWEN_FAMILIES:
         kwargs["true_cfg_scale"] = args.cfg_scale
+        negative_prompt = args.negative_prompt
+        if args.cfg_scale > 1 and negative_prompt is None:
+            negative_prompt = " "
+        if negative_prompt is not None and (args.cfg_scale > 1 or negative_prompt != ""):
+            kwargs["negative_prompt"] = negative_prompt
     else:
         kwargs["guidance_scale"] = args.cfg_scale
     if args.task == "text-to-video":

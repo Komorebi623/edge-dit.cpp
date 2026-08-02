@@ -70,6 +70,7 @@ void print_usage(const char* prog) {
         "  --cfg_scale <float>       Classifier-free guidance scale. Default 1.0\n"
         "  --flow_shift <float>      Flow scheduler shift. Default model default\n"
         "  --negative_prompt <text>  Negative prompt (used when cfg_scale != 1). Default empty\n"
+        "  --image <path>            Input/reference image for image-editing models\n"
         "  --start_index <int>       First prompt index (inclusive). Default 0\n"
         "  --end_index <int>         Last prompt index (exclusive). Default all\n"
         "  --threads <int>           CPU thread count. Default auto\n"
@@ -376,6 +377,16 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
     }
 
+    ed_image_t input_image = {};
+    bool has_input_image = false;
+    if (args.image_path != nullptr && std::strlen(args.image_path) > 0) {
+        if (!load_image(args.image_path, &input_image)) {
+            ed_free_context(ctx);
+            return 6;
+        }
+        has_input_image = true;
+    }
+
     // ---- Generate. warmup generations are untimed (images still written);
     //      the timed pass(es) feed the latency statistics. ----
     std::vector<double> samples;  // timed per-image latencies
@@ -393,6 +404,11 @@ int main(int argc, char** argv) {
             ed_image_generation_params_init(&gen);
             gen.prompt = prompt.c_str();
             gen.negative_prompt = args.negative_prompt;
+            if (has_input_image) {
+                gen.init_image = &input_image;
+                gen.ref_images = &input_image;
+                gen.ref_image_count = 1;
+            }
             gen.width = args.width;
             gen.height = args.height;
             gen.seed = seed;
@@ -479,6 +495,9 @@ int main(int argc, char** argv) {
     }
 
     if (rc != 0) {
+        if (has_input_image) {
+            ed_free_image(&input_image);
+        }
         ed_free_context(ctx);
         return rc;
     }
@@ -516,6 +535,9 @@ int main(int argc, char** argv) {
                     generated);
     }
 
+    if (has_input_image) {
+        ed_free_image(&input_image);
+    }
     ed_free_context(ctx);
     return 0;
 }

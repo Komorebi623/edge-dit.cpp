@@ -3,7 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <limits>
+#include <string>
 #include <vector>
 
 #include "core/optimization/cache/runtime/cache_engine.hpp"
@@ -22,9 +26,391 @@ namespace {
 static constexpr int ED_QWEN_EDIT_IMAGE_ALIGN = 32;
 static constexpr float ED_QWEN_EDIT_SHIFT_TERMINAL = 0.02f;
 
+static bool qwen_edit_debug_align_enabled() {
+    const char* env = std::getenv("ED_DEBUG_QWEN_ALIGN");
+    return env != nullptr && env[0] != '\0' && std::strcmp(env, "0") != 0;
+}
+
+static bool qwen_edit_debug_only_enabled() {
+    const char* env = std::getenv("ED_QWEN_ALIGN_DEBUG_ONLY");
+    return env != nullptr && env[0] != '\0' && std::strcmp(env, "0") != 0;
+}
+
+static bool qwen_edit_csv_contains(const char* csv, const std::string& name) {
+    if (csv == nullptr || csv[0] == '\0') {
+        return false;
+    }
+    const char* begin = csv;
+    while (*begin != '\0') {
+        while (*begin == ' ' || *begin == '\t' || *begin == ',') {
+            ++begin;
+        }
+        const char* end = begin;
+        while (*end != '\0' && *end != ',') {
+            ++end;
+        }
+        const char* trimmed_end = end;
+        while (trimmed_end > begin && (trimmed_end[-1] == ' ' || trimmed_end[-1] == '\t')) {
+            --trimmed_end;
+        }
+        if (name.size() == static_cast<size_t>(trimmed_end - begin) &&
+            std::equal(name.begin(), name.end(), begin)) {
+            return true;
+        }
+        begin = end;
+    }
+    return false;
+}
+
+static std::string qwen_edit_dump_safe_name(const std::string& name) {
+    std::string safe = name;
+    for (char& ch : safe) {
+        const bool ok = (ch >= 'a' && ch <= 'z') ||
+                        (ch >= 'A' && ch <= 'Z') ||
+                        (ch >= '0' && ch <= '9') ||
+                        ch == '.' ||
+                        ch == '_' ||
+                        ch == '-';
+        if (!ok) {
+            ch = '_';
+        }
+    }
+    return safe;
+}
+
+static void qwen_edit_dump_tensor_if_requested(const char* name, const sd::Tensor<float>& tensor) {
+    const char* dump_dir = std::getenv("ED_QWEN_ALIGN_DUMP_DIR");
+    const char* targets  = std::getenv("ED_QWEN_ALIGN_DUMP_TARGETS");
+    if (dump_dir == nullptr || dump_dir[0] == '\0' || !qwen_edit_csv_contains(targets, name)) {
+        return;
+    }
+    const std::string base_path = std::string(dump_dir) + "/" + qwen_edit_dump_safe_name(name);
+    {
+        std::ofstream out(base_path + ".f32.bin", std::ios::binary);
+        if (out) {
+            out.write(reinterpret_cast<const char*>(tensor.values().data()),
+                      static_cast<std::streamsize>(tensor.values().size() * sizeof(float)));
+        }
+    }
+    {
+        std::ofstream shape_out(base_path + ".shape");
+        if (shape_out) {
+            for (size_t i = 0; i < tensor.shape().size(); ++i) {
+                if (i > 0) {
+                    shape_out << " ";
+                }
+                shape_out << tensor.shape()[i];
+            }
+            shape_out << "\n";
+        }
+    }
+}
+
+struct QwenEditDimensions {
+    int width;
+    int height;
+};
+
+static QwenEditDimensions qwen_edit_calculate_dimensions(double target_area, double ratio) {
+    if (!(target_area > 0.0) || !(ratio > 0.0) || !std::isfinite(ratio)) {
+        ratio = 1.0;
+    }
+
+    const double width = std::sqrt(target_area * ratio);
+    const double height = width / ratio;
+    return {
+        std::max(ED_QWEN_EDIT_IMAGE_ALIGN,
+                 static_cast<int>(std::round(width / ED_QWEN_EDIT_IMAGE_ALIGN) * ED_QWEN_EDIT_IMAGE_ALIGN)),
+        std::max(ED_QWEN_EDIT_IMAGE_ALIGN,
+                 static_cast<int>(std::round(height / ED_QWEN_EDIT_IMAGE_ALIGN) * ED_QWEN_EDIT_IMAGE_ALIGN)),
+    };
+}
+
 static void qwen_edit_round_tensor_to_bf16(sd::Tensor<float>& tensor) {
     for (float& value : tensor.values()) {
         value = ggml_bf16_to_fp32(ggml_fp32_to_bf16(value));
+    }
+}
+
+static double qwen_edit_sinc(double x) {
+    if (x == 0.0) {
+        return 1.0;
+    }
+    x *= 3.14159265358979323846;
+    return std::sin(x) / x;
+}
+
+static double qwen_edit_lanczos_filter(double x) {
+    if (-3.0 <= x && x < 3.0) {
+        return qwen_edit_sinc(x) * qwen_edit_sinc(x / 3.0);
+    }
+    return 0.0;
+}
+
+struct QwenEditResizeAxisContrib {
+    int start = 0;
+    std::vector<int32_t> coeffs;
+};
+
+static std::vector<QwenEditResizeAxisContrib> qwen_edit_precompute_pillow_lanczos_coeffs(int in_size,
+                                                                                         int out_size) {
+    static constexpr int precision_bits = 22;
+    const double scale = static_cast<double>(in_size) / static_cast<double>(out_size);
+    const double filterscale = std::max(1.0, scale);
+    const double support = 3.0 * filterscale;
+    const int ksize = static_cast<int>(std::ceil(support)) * 2 + 1;
+    const double ss = 1.0 / filterscale;
+
+    std::vector<QwenEditResizeAxisContrib> result(static_cast<size_t>(out_size));
+    for (int out = 0; out < out_size; ++out) {
+        const double center = (static_cast<double>(out) + 0.5) * scale;
+        int xmin = static_cast<int>(center - support + 0.5);
+        xmin = std::max(0, xmin);
+        int xmax = static_cast<int>(center + support + 0.5);
+        xmax = std::min(in_size, xmax);
+        const int count = std::max(0, xmax - xmin);
+
+        std::vector<double> weights(static_cast<size_t>(ksize), 0.0);
+        double weight_sum = 0.0;
+        for (int i = 0; i < count; ++i) {
+            const double weight = qwen_edit_lanczos_filter((static_cast<double>(i + xmin) - center + 0.5) * ss);
+            weights[static_cast<size_t>(i)] = weight;
+            weight_sum += weight;
+        }
+        if (weight_sum != 0.0) {
+            for (int i = 0; i < count; ++i) {
+                weights[static_cast<size_t>(i)] /= weight_sum;
+            }
+        }
+
+        auto& axis = result[static_cast<size_t>(out)];
+        axis.start = xmin;
+        axis.coeffs.resize(static_cast<size_t>(count));
+        for (int i = 0; i < count; ++i) {
+            const double scaled = weights[static_cast<size_t>(i)] * static_cast<double>(1 << precision_bits);
+            axis.coeffs[static_cast<size_t>(i)] = static_cast<int32_t>((scaled < 0.0 ? -0.5 : 0.5) + scaled);
+        }
+    }
+    return result;
+}
+
+static uint8_t qwen_edit_pillow_clip8(int64_t value) {
+    static constexpr int precision_bits = 22;
+    const int64_t shifted = value >> precision_bits;
+    if (shifted <= 0) {
+        return 0;
+    }
+    if (shifted >= 255) {
+        return 255;
+    }
+    return static_cast<uint8_t>(shifted);
+}
+
+static void qwen_edit_log_tensor_stats(const char* name, const sd::Tensor<float>& tensor) {
+    if (!qwen_edit_debug_align_enabled()) {
+        return;
+    }
+    if (tensor.empty()) {
+        LOG_INFO("qwen-align %s: empty", name);
+        return;
+    }
+    qwen_edit_dump_tensor_if_requested(name, tensor);
+
+    double sum = 0.0;
+    double sum_sq = 0.0;
+    float min_value = std::numeric_limits<float>::infinity();
+    float max_value = -std::numeric_limits<float>::infinity();
+    for (float value : tensor.values()) {
+        sum += static_cast<double>(value);
+        sum_sq += static_cast<double>(value) * static_cast<double>(value);
+        min_value = std::min(min_value, value);
+        max_value = std::max(max_value, value);
+    }
+
+    const double count = static_cast<double>(tensor.values().size());
+    const double mean = sum / count;
+    const double variance = std::max(0.0, sum_sq / count - mean * mean);
+    LOG_INFO("qwen-align %s: shape=%s numel=%zu mean=%.9g std=%.9g min=%.9g max=%.9g l2=%.9g",
+             name,
+             sd::tensor_shape_to_string(tensor.shape()).c_str(),
+             tensor.values().size(),
+             mean,
+             std::sqrt(variance),
+             static_cast<double>(min_value),
+             static_cast<double>(max_value),
+             std::sqrt(sum_sq));
+
+    const auto& values = tensor.values();
+    if (values.size() >= 4) {
+        auto flat_at = [&](size_t index) -> float {
+            index = std::min(index, values.size() - 1);
+            return values[index];
+        };
+        const size_t last = values.size() >= 4 ? values.size() - 4 : 0;
+        LOG_INFO("qwen-align %s flat_samples: i0=[%.9g %.9g %.9g %.9g] i64=[%.9g %.9g %.9g %.9g] ilast=[%.9g %.9g %.9g %.9g]",
+                 name,
+                 static_cast<double>(flat_at(0)),
+                 static_cast<double>(flat_at(1)),
+                 static_cast<double>(flat_at(2)),
+                 static_cast<double>(flat_at(3)),
+                 static_cast<double>(flat_at(64)),
+                 static_cast<double>(flat_at(65)),
+                 static_cast<double>(flat_at(66)),
+                 static_cast<double>(flat_at(67)),
+                 static_cast<double>(flat_at(last + 0)),
+                 static_cast<double>(flat_at(last + 1)),
+                 static_cast<double>(flat_at(last + 2)),
+                 static_cast<double>(flat_at(last + 3)));
+    }
+
+    const auto& shape = tensor.shape();
+    if (shape.size() >= 2 && shape[0] > 0 && shape[1] > 0) {
+        const int64_t dim = shape[0];
+        const int64_t seq = shape[1];
+        auto at = [&](int64_t token, int64_t channel) -> float {
+            token = std::max<int64_t>(0, std::min<int64_t>(seq - 1, token));
+            channel = std::max<int64_t>(0, std::min<int64_t>(dim - 1, channel));
+            return tensor.values()[static_cast<size_t>(channel + dim * token)];
+        };
+        LOG_INFO("qwen-align %s samples: t0=[%.9g %.9g %.9g %.9g] t1=[%.9g %.9g %.9g %.9g] t64=[%.9g %.9g %.9g %.9g] tlast=[%.9g %.9g %.9g %.9g]",
+                 name,
+                 static_cast<double>(at(0, 0)),
+                 static_cast<double>(at(0, 1)),
+                 static_cast<double>(at(0, 2)),
+                 static_cast<double>(at(0, 3)),
+                 static_cast<double>(at(1, 0)),
+                 static_cast<double>(at(1, 1)),
+                 static_cast<double>(at(1, 2)),
+                 static_cast<double>(at(1, 3)),
+                 static_cast<double>(at(64, 0)),
+                 static_cast<double>(at(64, 1)),
+                 static_cast<double>(at(64, 2)),
+                 static_cast<double>(at(64, 3)),
+                 static_cast<double>(at(seq - 1, 0)),
+                 static_cast<double>(at(seq - 1, 1)),
+                 static_cast<double>(at(seq - 1, 2)),
+                 static_cast<double>(at(seq - 1, 3)));
+    }
+}
+
+static sd::Tensor<float> qwen_edit_pack_latents_2x2(const sd::Tensor<float>& tensor) {
+    if (!qwen_edit_debug_align_enabled() || tensor.empty()) {
+        return {};
+    }
+    const auto& shape = tensor.shape();
+    if (shape.size() != 4 || shape[3] <= 0 || shape[2] <= 0 ||
+        shape[0] <= 0 || shape[1] <= 0 ||
+        (shape[0] % 2) != 0 || (shape[1] % 2) != 0) {
+        return {};
+    }
+
+    const int64_t width = shape[0];
+    const int64_t height = shape[1];
+    const int64_t channels = shape[2];
+    const int64_t batch = shape[3];
+    const int64_t packed_channels = channels * 4;
+    const int64_t packed_tokens = (width / 2) * (height / 2);
+    sd::Tensor<float> packed({packed_channels, packed_tokens, batch});
+
+    const float* src = tensor.data();
+    float* dst = packed.data();
+    auto src_at = [&](int64_t x, int64_t y, int64_t c, int64_t n) -> float {
+        return src[x + width * y + width * height * c + width * height * channels * n];
+    };
+    for (int64_t n = 0; n < batch; ++n) {
+        for (int64_t py = 0; py < height / 2; ++py) {
+            for (int64_t px = 0; px < width / 2; ++px) {
+                const int64_t token = py * (width / 2) + px;
+                for (int64_t c = 0; c < channels; ++c) {
+                    for (int64_t dy = 0; dy < 2; ++dy) {
+                        for (int64_t dx = 0; dx < 2; ++dx) {
+                            const int64_t packed_c = c * 4 + dy * 2 + dx;
+                            dst[packed_c + packed_channels * token + packed_channels * packed_tokens * n] =
+                                src_at(px * 2 + dx, py * 2 + dy, c, n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return packed;
+}
+
+static void qwen_edit_log_packed_latent_stats(const char* name, const sd::Tensor<float>& tensor) {
+    if (!qwen_edit_debug_align_enabled()) {
+        return;
+    }
+    sd::Tensor<float> packed = qwen_edit_pack_latents_2x2(tensor);
+    if (!packed.empty()) {
+        qwen_edit_log_tensor_stats(name, packed);
+    }
+}
+
+static void qwen_edit_log_transformer_debug_targets(Qwen::QwenImageRunner* diffusion,
+                                                    int n_threads,
+                                                    const sd::Tensor<float>& x,
+                                                    const sd::Tensor<float>& timesteps,
+                                                    const sd::Tensor<float>& context,
+                                                    const std::vector<sd::Tensor<float>>& ref_latents) {
+    if (!qwen_edit_debug_align_enabled() || diffusion == nullptr) {
+        return;
+    }
+    static const std::vector<const char*> targets = {
+        "pe",
+        "t_emb",
+        "img_in",
+        "txt_norm",
+        "txt_in",
+        "block0.img_mod_params",
+        "block0.txt_t_emb",
+        "block0.txt_mod_params",
+        "block0.img_gate1",
+        "block0.txt_gate1",
+        "block0.img_normed",
+        "block0.img_modulated",
+        "block0.txt_normed",
+        "block0.txt_modulated",
+        "block0.attn.img_q",
+        "block0.attn.img_k",
+        "block0.attn.img_v",
+        "block0.attn.txt_q",
+        "block0.attn.txt_k",
+        "block0.attn.txt_v",
+        "block0.attn.joint_q_rope_seq",
+        "block0.attn.joint_k_rope_seq",
+        "block0.attn.joint_v_seq",
+        "block0.attn.img_preproj",
+        "block0.attn.txt_preproj",
+        "block0.attn.img_out",
+        "block0.attn.txt_out",
+        "block0.img_after_attn",
+        "block0.txt_after_attn",
+        "block0.img_normed2",
+        "block0.img_modulated2",
+        "block0.img_gate2",
+        "block0.img_mlp_out",
+        "block0.img_after_mlp",
+        "block0_img",
+        "block0_txt",
+        "norm_out",
+        "proj_out",
+    };
+    const char* target_filter = std::getenv("ED_QWEN_ALIGN_DEBUG_TARGETS");
+    for (const char* target : targets) {
+        if (target_filter != nullptr &&
+            target_filter[0] != '\0' &&
+            !qwen_edit_csv_contains(target_filter, target)) {
+            continue;
+        }
+        sd::Tensor<float> tensor = diffusion->compute_debug_target(n_threads,
+                                                                   x,
+                                                                   timesteps,
+                                                                   context,
+                                                                   ref_latents,
+                                                                   true,
+                                                                   target);
+        const std::string name = std::string("transformer.cond.") + target;
+        qwen_edit_log_tensor_stats(name.c_str(), tensor);
     }
 }
 
@@ -178,17 +564,80 @@ static sd::Tensor<float> resize_image_to_tensor(const ed_image_t& image, int wid
 }
 
 static sd::Tensor<float> resize_image_to_tensor_lanczos(const ed_image_t& image, int width, int height) {
-    sd::Tensor<float> tensor = resize_image_to_tensor(image,
-                                                      static_cast<int>(image.width),
-                                                      static_cast<int>(image.height));
-    if (tensor.empty() || static_cast<int>(image.width) == width && static_cast<int>(image.height) == height) {
-        return tensor;
+    if (image.data == nullptr || image.width == 0 || image.height == 0 || image.channels == 0 ||
+        width <= 0 || height <= 0) {
+        return {};
     }
-    return sd::ops::interpolate(tensor,
-                                std::vector<int64_t>{width, height, tensor.shape()[2], tensor.shape()[3]},
-                                sd::ops::InterpolateMode::Lanczos,
-                                false,
-                                true);
+
+    const int src_width = static_cast<int>(image.width);
+    const int src_height = static_cast<int>(image.height);
+    const int src_channels = static_cast<int>(image.channels);
+    if (src_width == width && src_height == height) {
+        return resize_image_to_tensor(image, width, height);
+    }
+
+    const auto x_coeffs = qwen_edit_precompute_pillow_lanczos_coeffs(src_width, width);
+    const auto y_coeffs = qwen_edit_precompute_pillow_lanczos_coeffs(src_height, height);
+    std::vector<uint8_t> tmp(static_cast<size_t>(src_height) * static_cast<size_t>(width) * 3);
+
+    for (int y = 0; y < src_height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const auto& coeff = x_coeffs[static_cast<size_t>(x)];
+            int64_t accum[3] = {
+                1LL << 21,
+                1LL << 21,
+                1LL << 21,
+            };
+            for (size_t k = 0; k < coeff.coeffs.size(); ++k) {
+                const int src_x = coeff.start + static_cast<int>(k);
+                const uint8_t* pixel = image.data +
+                                       (static_cast<size_t>(y) * static_cast<size_t>(src_width) +
+                                        static_cast<size_t>(src_x)) *
+                                           static_cast<size_t>(src_channels);
+                for (int c = 0; c < 3; ++c) {
+                    const uint8_t value = c < src_channels ? pixel[c] : pixel[0];
+                    accum[c] += static_cast<int64_t>(value) * static_cast<int64_t>(coeff.coeffs[k]);
+                }
+            }
+
+            uint8_t* out = tmp.data() +
+                           (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 3;
+            out[0] = qwen_edit_pillow_clip8(accum[0]);
+            out[1] = qwen_edit_pillow_clip8(accum[1]);
+            out[2] = qwen_edit_pillow_clip8(accum[2]);
+        }
+    }
+
+    sd::Tensor<float> tensor({width, height, 3, 1});
+    float* dst = tensor.data();
+    for (int y = 0; y < height; ++y) {
+        const auto& coeff = y_coeffs[static_cast<size_t>(y)];
+        for (int x = 0; x < width; ++x) {
+            int64_t accum[3] = {
+                1LL << 21,
+                1LL << 21,
+                1LL << 21,
+            };
+            for (size_t k = 0; k < coeff.coeffs.size(); ++k) {
+                const int src_y = coeff.start + static_cast<int>(k);
+                const uint8_t* pixel = tmp.data() +
+                                       (static_cast<size_t>(src_y) * static_cast<size_t>(width) +
+                                        static_cast<size_t>(x)) *
+                                           3;
+                for (int c = 0; c < 3; ++c) {
+                    accum[c] += static_cast<int64_t>(pixel[c]) * static_cast<int64_t>(coeff.coeffs[k]);
+                }
+            }
+
+            for (int c = 0; c < 3; ++c) {
+                dst[static_cast<int64_t>(x) +
+                    static_cast<int64_t>(width) * static_cast<int64_t>(y) +
+                    static_cast<int64_t>(width) * static_cast<int64_t>(height) * static_cast<int64_t>(c)] =
+                    static_cast<float>(qwen_edit_pillow_clip8(accum[c])) / 255.0f;
+            }
+        }
+    }
+    return tensor;
 }
 
 static float tensor_l2_norm(const sd::Tensor<float>& tensor) {
@@ -329,6 +778,7 @@ bool QwenImageEditPipeline::build_components(const ed_context_params_t& params,
     }
 
     const auto& storage = loader.get_tensor_storage_map();
+    const bool qwen_zero_cond_t = params.qwen_image_zero_cond_t || loader.qwen_image_zero_cond_t();
 
     // Auto-allocate: seed tally with hard-cap budget min(--max-vram, free); finalize after.
     runtime_->reset_auto_allocate_state();
@@ -340,7 +790,7 @@ bool QwenImageEditPipeline::build_components(const ed_context_params_t& params,
     if (runtime_->auto_fit() && runtime_->fit_width() > 0 && runtime_->fit_height() > 0) {
         auto measure_runner = std::make_unique<Qwen::QwenImageRunner>(
             runtime_->backend(), false, storage, "model.diffusion_model", version_,
-            params.qwen_image_zero_cond_t);
+            qwen_zero_cond_t);
         measure_runner->set_flash_attention_enabled(runtime_->flash_attention());
         const int latent_w = runtime_->fit_width() / 8;
         const int latent_h = runtime_->fit_height() / 8;
@@ -374,7 +824,7 @@ bool QwenImageEditPipeline::build_components(const ed_context_params_t& params,
                                                storage,
                                                "model.diffusion_model",
                                                version_,
-                                               params.qwen_image_zero_cond_t));
+                                               qwen_zero_cond_t));
     auto process_group = runtime_->graph_process_group_ref();
     if (process_group != nullptr) {
         diffusion_->set_process_group(process_group);
@@ -581,35 +1031,35 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
     }
 
     const int vae_scale_factor = vae_->get_scale_factor();
-    sd::Tensor<float> input_image_tensor = resize_image_to_tensor_lanczos(*params->init_image, params->width, params->height);
-    if (input_image_tensor.empty()) {
-        if (error != nullptr) {
-            *error = "failed to convert input image to tensor";
-        }
-        return false;
-    }
     const double init_ratio = params->init_image->height > 0
                                   ? static_cast<double>(params->init_image->width) /
                                         static_cast<double>(params->init_image->height)
                                   : 1.0;
-    int condition_w = 384;
-    int condition_h = 384;
-    if (init_ratio > 0.0 && std::isfinite(init_ratio)) {
-        condition_w = static_cast<int>(std::round(std::sqrt(384.0 * 384.0 * init_ratio) / 32.0) * 32.0);
-        condition_h = static_cast<int>(std::round((static_cast<double>(condition_w) / init_ratio) / 32.0) * 32.0);
-        condition_w = std::max(32, condition_w);
-        condition_h = std::max(32, condition_h);
-    }
-    sd::Tensor<float> condition_image_tensor = resize_image_to_tensor_lanczos(*params->init_image,
-                                                                              condition_w,
-                                                                              condition_h);
-    if (condition_image_tensor.empty()) {
+    const QwenEditDimensions edit_image_size = qwen_edit_calculate_dimensions(1024.0 * 1024.0, init_ratio);
+    LOG_INFO("qwen-image-edit input image resized from %ux%u to %dx%d for edit conditioning",
+             params->init_image->width,
+             params->init_image->height,
+             edit_image_size.width,
+             edit_image_size.height);
+
+    sd::Tensor<float> input_image_tensor = resize_image_to_tensor_lanczos(*params->init_image,
+                                                                          edit_image_size.width,
+                                                                          edit_image_size.height);
+    if (input_image_tensor.empty()) {
         if (error != nullptr) {
-            *error = "failed to convert Qwen-Image-Edit condition image to tensor";
+            *error = "failed to convert Qwen-Image-Edit input image to tensor";
         }
         return false;
     }
-    std::vector<sd::Tensor<float>> condition_ref_images = {condition_image_tensor};
+    qwen_edit_log_tensor_stats("preprocess.image_resized_unit", input_image_tensor);
+    if (qwen_edit_debug_align_enabled()) {
+        sd::Tensor<float> vae_image_tensor = input_image_tensor;
+        for (int64_t i = 0; i < vae_image_tensor.numel(); ++i) {
+            vae_image_tensor[i] = vae_image_tensor[i] * 2.0f - 1.0f;
+        }
+        qwen_edit_log_tensor_stats("preprocess.vae_image_tensor", vae_image_tensor);
+    }
+    std::vector<sd::Tensor<float>> condition_ref_images = {input_image_tensor};
 
     ConditionerParams cond_params;
     cond_params.text = params->prompt != nullptr ? params->prompt : "";
@@ -628,6 +1078,7 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
     if (diffusion_bf16_) {
         qwen_edit_round_tensor_to_bf16(condition.c_crossattn);
     }
+    qwen_edit_log_tensor_stats("cond.c_crossattn", condition.c_crossattn);
 
     const float cfg_scale = params->sample.cfg_scale > 0.0f ? params->sample.cfg_scale : 4.0f;
     const bool has_negative_prompt = params->negative_prompt != nullptr;
@@ -652,6 +1103,7 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         if (diffusion_bf16_) {
             qwen_edit_round_tensor_to_bf16(uncond.c_crossattn);
         }
+        qwen_edit_log_tensor_stats("uncond.c_crossattn", uncond.c_crossattn);
     }
 
     const int latent_w = params->width / vae_scale_factor;
@@ -674,10 +1126,13 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         }
         return false;
     }
+    qwen_edit_log_tensor_stats("vae.encoded", encoded);
     sd::Tensor<float> image_latent = vae_->vae_to_diffusion_latents(encoded);
     if (diffusion_bf16_) {
         qwen_edit_round_tensor_to_bf16(image_latent);
     }
+    qwen_edit_log_tensor_stats("vae.image_latent", image_latent);
+    qwen_edit_log_packed_latent_stats("image_latents_packed", image_latent);
     std::vector<sd::Tensor<float>> ref_latents = {image_latent};
 
     const int steps = resolve_steps(params->sample.steps);
@@ -710,6 +1165,8 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
 
     sd::Tensor<float> init_latent = sd::zeros<float>({latent_w, latent_h, 16, 1});
     sd::Tensor<float> noise = sd::Tensor<float>::randn(init_latent.shape(), rng);
+    qwen_edit_log_tensor_stats("noise.init_latent", init_latent);
+    qwen_edit_log_tensor_stats("noise.randn", noise);
     float dynamic_mu = 0.0f;
     std::vector<float> sigmas = has_explicit_flow_shift
                                     ? qwen_edit_discrete_sigmas(steps, params->sample.flow_shift)
@@ -754,6 +1211,7 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
     if (diffusion_bf16_) {
         qwen_edit_round_tensor_to_bf16(x);
     }
+    qwen_edit_log_packed_latent_stats("latents_packed", x);
     cache::CacheRuntime cache_runtime;
     const bool cache_use_cfg_parallel = !uncond.empty() &&
                                         parallel::cfg_parallel_available(runtime_->parallel_context());
@@ -863,6 +1321,18 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
             return hooks;
         };
 
+        if (step == 0 && !condition.c_crossattn.empty()) {
+            qwen_edit_log_transformer_debug_targets(diffusion_.get(),
+                                                    n_threads,
+                                                    x,
+                                                    timesteps,
+                                                    condition.c_crossattn,
+                                                    ref_latents);
+            if (qwen_edit_debug_only_enabled()) {
+                break;
+            }
+        }
+
         if (use_cfg_parallel) {
             const bool local_is_uncond = cfg_rank == 0;
             const SDCondition& local_condition = local_is_uncond ? uncond : condition;
@@ -894,12 +1364,20 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
             sd::Tensor<float> uncond_out = cache_enabled
                 ? cache_runtime.run_branch(cache::CacheBranch::Uncond, uncond_key, make_hooks(uncond))
                 : make_hooks(uncond).full();
+            if (step == 0) {
+                qwen_edit_log_tensor_stats("step0.uncond_model_out", uncond_out);
+                qwen_edit_log_packed_latent_stats("step0.uncond_model_out_packed", uncond_out);
+            }
             if (uncond_out.empty()) {
                 if (error != nullptr) {
                     *error = sd_format("Qwen-Image-Edit unconditional transformer compute failed at step %d", step + 1);
                 }
                 diffusion_->free_compute_buffer();
                 return false;
+            }
+            if (step == 0) {
+                qwen_edit_log_tensor_stats("step0.cond_model_out", model_out);
+                qwen_edit_log_packed_latent_stats("step0.cond_model_out_packed", model_out);
             }
             model_out = true_cfg_rescale(model_out, uncond_out, cfg_scale, patch_size);
         }
@@ -912,6 +1390,10 @@ bool QwenImageEditPipeline::generate_one_image(const ed_image_generation_params_
         }
         if (diffusion_bf16_) {
             qwen_edit_round_tensor_to_bf16(model_out);
+        }
+        if (step == 0) {
+            qwen_edit_log_tensor_stats("step0.model_out", model_out);
+            qwen_edit_log_packed_latent_stats("step0.model_out_packed", model_out);
         }
 
         // SenCache calibration: finite-diff sensitivities on the true-CFG-combined

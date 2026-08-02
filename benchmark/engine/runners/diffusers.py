@@ -131,6 +131,7 @@ print(json.dumps(versions, sort_keys=True))
         generation = dict(workload["generation"])
         generation.update({k: v for k, v in run_options.items() if k in generation})
         prompt = self.prompt_text(workload, run_options)
+        negative_prompt = self.negative_prompt_text(workload, run_options)
         command = [
             self.python_executable(),
             str(self.repo_root / "benchmark" / "scripts" / "run_diffusers_e2e.py"),
@@ -170,6 +171,8 @@ print(json.dumps(versions, sort_keys=True))
                     f"missing Diffusers edit input image for {workload.get('input_image_ref')!r}: {input_path}"
                 )
             command.extend(["--input-image", str(input_path)])
+        if negative_prompt is not None:
+            command.extend(["--negative-prompt", negative_prompt])
         if workload["task"] == "text-to-video":
             command.extend(["--frames", str(generation.get("frames", 1))])
             if generation.get("fps") is not None:
@@ -208,7 +211,8 @@ print(json.dumps(versions, sort_keys=True))
             raise NotImplementedError(f"missing Diffusers model path for {model_ref}: {model_path}")
         generation = workload["generation"]
         prompt = self.prompt_text(workload, run_options)
-        return [
+        negative_prompt = self.negative_prompt_text(workload, run_options)
+        command = [
             self.python_executable(),
             "-m",
             "benchmark.runners.diffusers",
@@ -226,6 +230,8 @@ print(json.dumps(versions, sort_keys=True))
             str(generation["seed"]),
             "--guidance",
             str(generation["guidance"]),
+            "--cfg-scale",
+            str(generation.get("cfg_scale", 1.0)),
             "--dtype",
             str(generation["precision"]),
             "--output",
@@ -235,6 +241,9 @@ print(json.dumps(versions, sort_keys=True))
             "--model-family",
             workload["model_family"],
         ]
+        if negative_prompt is not None:
+            command.extend(["--negative-prompt", negative_prompt])
+        return command
 
 
 def main() -> None:
@@ -246,6 +255,8 @@ def main() -> None:
     parser.add_argument("--steps", type=int, required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--guidance", type=float, required=True)
+    parser.add_argument("--cfg-scale", type=float, default=1.0)
+    parser.add_argument("--negative-prompt", default=None)
     parser.add_argument("--dtype", choices=["bf16", "fp16", "f16", "fp32", "f32"], default="bf16")
     parser.add_argument("--output", default="samples/output.png")
     parser.add_argument("--task", default="text-to-image")
@@ -271,14 +282,19 @@ def main() -> None:
     pipe = pipeline_cls.from_pretrained(args.model, torch_dtype=dtype)
     pipe = pipe.to(device)
     generator = torch.Generator(device=device).manual_seed(args.seed)
-    result = pipe(
-        prompt=args.prompt,
-        width=args.width,
-        height=args.height,
-        num_inference_steps=args.steps,
-        guidance_scale=args.guidance,
-        generator=generator,
-    )
+    call_kwargs = {
+        "prompt": args.prompt,
+        "width": args.width,
+        "height": args.height,
+        "num_inference_steps": args.steps,
+        "guidance_scale": args.guidance,
+        "generator": generator,
+    }
+    if args.model_family in ("Qwen-Image", "Qwen-Image-Edit"):
+        call_kwargs["true_cfg_scale"] = args.cfg_scale
+        if args.negative_prompt is not None or args.cfg_scale > 1:
+            call_kwargs["negative_prompt"] = args.negative_prompt if args.negative_prompt is not None else " "
+    result = pipe(**call_kwargs)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     if hasattr(result, "images"):

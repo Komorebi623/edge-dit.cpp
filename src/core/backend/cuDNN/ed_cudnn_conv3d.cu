@@ -2,6 +2,7 @@
 
 #include "common.cuh"
 
+#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <cudnn.h>
 
@@ -20,6 +21,14 @@ constexpr size_t ED_CUDNN_CONV3D_MAX_WORKSPACE = 1152ull * 1024ull * 1024ull;
 static bool uses_f16_io_cast(ggml_type x_type, ggml_type w_type, ggml_type y_type) {
     return x_type == GGML_TYPE_F32 && w_type == GGML_TYPE_F16 && y_type == GGML_TYPE_F32;
 }
+
+static constexpr int QWEN_PATCH_EMBED_IC = 3;
+static constexpr int QWEN_PATCH_EMBED_T  = 2;
+static constexpr int QWEN_PATCH_EMBED_H  = 14;
+static constexpr int QWEN_PATCH_EMBED_W  = 14;
+static constexpr int QWEN_PATCH_EMBED_OC = 1280;
+static constexpr int QWEN_PATCH_EMBED_K  =
+    QWEN_PATCH_EMBED_IC * QWEN_PATCH_EMBED_T * QWEN_PATCH_EMBED_H * QWEN_PATCH_EMBED_W;
 
 struct ed_cudnn_conv3d_key {
     int device = 0;
@@ -76,6 +85,83 @@ struct ed_cudnn_conv3d_key {
                dilation_z == other.dilation_z;
     }
 };
+
+static bool is_qwen_patch_embed_bf16_key(const ed_cudnn_conv3d_key & key) {
+    return key.x_type == GGML_TYPE_BF16 &&
+           key.w_type == GGML_TYPE_BF16 &&
+           key.y_type == GGML_TYPE_BF16 &&
+           key.ic == QWEN_PATCH_EMBED_IC &&
+           key.id == QWEN_PATCH_EMBED_T &&
+           key.ih == QWEN_PATCH_EMBED_H &&
+           key.iw == QWEN_PATCH_EMBED_W &&
+           key.oc == QWEN_PATCH_EMBED_OC &&
+           key.kd == QWEN_PATCH_EMBED_T &&
+           key.kh == QWEN_PATCH_EMBED_H &&
+           key.kw == QWEN_PATCH_EMBED_W &&
+           key.od == 1 &&
+           key.oh == 1 &&
+           key.ow == 1 &&
+           key.stride_x == QWEN_PATCH_EMBED_W &&
+           key.stride_y == QWEN_PATCH_EMBED_H &&
+           key.stride_z == QWEN_PATCH_EMBED_T &&
+           key.pad_x == 0 &&
+           key.pad_y == 0 &&
+           key.pad_z == 0 &&
+           key.dilation_x == 1 &&
+           key.dilation_y == 1 &&
+           key.dilation_z == 1;
+}
+
+__global__ void qwen_patch_embed_bf16_conv3d_kernel(const __nv_bfloat16 * __restrict__ x,
+                                                    const __nv_bfloat16 * __restrict__ w,
+                                                    __nv_bfloat16 * __restrict__ y,
+                                                    int64_t n_tokens) {
+    const int out = blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t token = blockIdx.y;
+    if (out >= QWEN_PATCH_EMBED_OC || token >= n_tokens) {
+        return;
+    }
+
+    const __nv_bfloat16 * x_token = x + token * QWEN_PATCH_EMBED_K;
+    const __nv_bfloat16 * w_out   = w + out * QWEN_PATCH_EMBED_K;
+    float acc = 0.0f;
+    for (int c = 0; c < QWEN_PATCH_EMBED_IC; ++c) {
+        for (int t = 0; t < QWEN_PATCH_EMBED_T; ++t) {
+            for (int h = 0; h < QWEN_PATCH_EMBED_H; ++h) {
+                for (int ww = 0; ww < QWEN_PATCH_EMBED_W; ++ww) {
+                    const int k = (((c * QWEN_PATCH_EMBED_T + t) * QWEN_PATCH_EMBED_H + h) *
+                                   QWEN_PATCH_EMBED_W + ww);
+                    const float xv = __bfloat162float(x_token[k]);
+                    const float wv = __bfloat162float(w_out[k]);
+                    acc = __fadd_rn(acc, __fmul_rn(xv, wv));
+                }
+            }
+        }
+    }
+    y[out + QWEN_PATCH_EMBED_OC * token] = __float2bfloat16_rn(acc);
+}
+
+static bool qwen_patch_embed_bf16_conv3d_compute(const ed_cudnn_conv3d_key & key,
+                                                 ggml_tensor * dst,
+                                                 cudaStream_t stream) {
+    if (!is_qwen_patch_embed_bf16_key(key) ||
+        dst == nullptr ||
+        dst->src[0] == nullptr ||
+        dst->src[1] == nullptr ||
+        dst->src[2] != nullptr) {
+        return false;
+    }
+
+    const dim3 threads(128);
+    const dim3 blocks((QWEN_PATCH_EMBED_OC + threads.x - 1) / threads.x,
+                      static_cast<unsigned int>(key.n));
+    qwen_patch_embed_bf16_conv3d_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const __nv_bfloat16 *>(dst->src[1]->data),
+        static_cast<const __nv_bfloat16 *>(dst->src[0]->data),
+        static_cast<__nv_bfloat16 *>(dst->data),
+        key.n);
+    return cudaGetLastError() == cudaSuccess;
+}
 
 struct ed_cudnn_conv3d_key_hash {
     size_t operator()(const ed_cudnn_conv3d_key & key) const {
@@ -857,6 +943,17 @@ ed_cudnn_conv3d_result_t ed_cudnn_conv3d_compute(ggml_tensor * dst, ed_cudnn_con
     }
 
     cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+    if (qwen_patch_embed_bf16_conv3d_compute(key, dst, stream)) {
+        if (profile_enabled()) {
+            GGML_LOG_INFO("ED_CUDNN_CONV3D qwen_patch_embed_bf16_direct n=%" PRId64
+                          " oc=%" PRId64 " k=%d\n",
+                          key.n,
+                          key.oc,
+                          QWEN_PATCH_EMBED_K);
+        }
+        return ED_CUDNN_CONV3D_SUCCESS;
+    }
+
     cudaEvent_t profile_start = nullptr;
     cudaEvent_t profile_stop = nullptr;
     const bool do_profile = profile_enabled();

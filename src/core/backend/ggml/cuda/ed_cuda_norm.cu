@@ -2,6 +2,7 @@
 
 #include "backend/ggml/ed_ggml_norm_ext.hpp"
 
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cstring>
@@ -142,6 +143,15 @@ static bool is_contiguous_f16_output(const ggml_tensor* t) {
            t->nb[3] == static_cast<size_t>(t->ne[0]) * static_cast<size_t>(t->ne[1]) * static_cast<size_t>(t->ne[2]) * sizeof(half);
 }
 
+static bool is_contiguous_bf16_output(const ggml_tensor* t) {
+    return t != nullptr &&
+           t->type == GGML_TYPE_BF16 &&
+           t->nb[0] == sizeof(__nv_bfloat16) &&
+           t->nb[1] == static_cast<size_t>(t->ne[0]) * sizeof(__nv_bfloat16) &&
+           t->nb[2] == static_cast<size_t>(t->ne[0]) * static_cast<size_t>(t->ne[1]) * sizeof(__nv_bfloat16) &&
+           t->nb[3] == static_cast<size_t>(t->ne[0]) * static_cast<size_t>(t->ne[1]) * static_cast<size_t>(t->ne[2]) * sizeof(__nv_bfloat16);
+}
+
 static bool is_contiguous_f32_1d(const ggml_tensor* t) {
     return t != nullptr &&
            t->type == GGML_TYPE_F32 &&
@@ -185,6 +195,59 @@ static __global__ void channel_rms_norm_f32_tile_kernel(const float* __restrict_
             const int64_t idx = static_cast<int64_t>(c) * outer + row;
             dst[idx] = x[idx] * scale * weight[c];
         }
+    }
+}
+
+static __device__ __forceinline__ float qwen_vl_warp_down_sum(float v) {
+#pragma unroll
+    for (int offset = WARP_SIZE_ED / 2; offset > 0; offset >>= 1) {
+        v += __shfl_down_sync(0xffffffffu, v, offset, WARP_SIZE_ED);
+    }
+    return v;
+}
+
+static __global__ void qwen_vl_rms_norm_mul_bf16_kernel(const float* __restrict__ x,
+                                                        const float* __restrict__ weight,
+                                                        __nv_bfloat16* __restrict__ dst,
+                                                        int rows,
+                                                        float eps) {
+    constexpr int cols = 1280;
+    const int lane = threadIdx.x;
+    const int row = static_cast<int>(blockIdx.x) * blockDim.y + threadIdx.y;
+    if (row >= rows) {
+        return;
+    }
+
+    const float* x_row = x + static_cast<int64_t>(row) * cols;
+    __nv_bfloat16* y_row = dst + static_cast<int64_t>(row) * cols;
+
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    int idx = lane;
+    while (idx * 4 + 3 < cols) {
+        const int base = idx * 4;
+        const float v0 = x_row[base + 0];
+        const float v1 = x_row[base + 1];
+        const float v2 = x_row[base + 2];
+        const float v3 = x_row[base + 3];
+        acc0 += v0 * v0;
+        acc1 += v1 * v1;
+        acc2 += v2 * v2;
+        acc3 += v3 * v3;
+        idx += WARP_SIZE_ED;
+    }
+
+    float sum = ((acc0 + acc1) + acc2) + acc3;
+    sum = qwen_vl_warp_down_sum(sum);
+    sum = __shfl_sync(0xffffffffu, sum, 0, WARP_SIZE_ED);
+    const float mean = __fdiv_rn(sum, 1280.0f);
+    const float scale = rsqrtf(mean + eps);
+
+    for (int col = lane; col < cols; col += WARP_SIZE_ED) {
+        const __nv_bfloat16 normalized = __float2bfloat16_rn(x_row[col] * scale);
+        y_row[col] = __float2bfloat16_rn(__bfloat162float(normalized) * weight[col]);
     }
 }
 
@@ -397,6 +460,82 @@ bool ed_cuda_rms_norm_mul_f16_custom_compute(ggml_tensor * dst, ed_cuda_norm_str
         x->nb[1] / ts0,
         x->nb[2] / ts0,
         x->nb[3] / ts0,
+        eps);
+    return true;
+}
+
+bool ed_cuda_qwen_vl_rms_norm_mul_bf16_custom_supported(const ggml_tensor * dst) {
+    if (dst == nullptr ||
+        dst->op != GGML_OP_CUSTOM ||
+        dst->src[0] == nullptr ||
+        dst->src[1] == nullptr) {
+        return false;
+    }
+
+    struct ggml_custom_op_params {
+        ggml_custom_op_t fun;
+        int n_tasks;
+        void* userdata;
+    };
+    ggml_custom_op_params op_params{};
+    static_assert(sizeof(op_params) <= GGML_MAX_OP_PARAMS, "custom op params do not fit");
+    memcpy(&op_params, dst->op_params, sizeof(op_params));
+
+    const auto params = edgedit::ggml_ext::qwen_vl_rms_norm_mul_bf16_params_from_userdata(op_params.userdata);
+    if (!edgedit::ggml_ext::qwen_vl_rms_norm_mul_bf16_params_valid(params)) {
+        return false;
+    }
+
+    const ggml_tensor* x = dst->src[0];
+    const ggml_tensor* weight = dst->src[1];
+    if (!edgedit::ggml_ext::qwen_vl_rms_norm_mul_bf16_shape_supported(x, weight)) {
+        return false;
+    }
+    if (!is_contiguous_bf16_output(dst) || !is_contiguous_f32_1d(weight)) {
+        return false;
+    }
+    for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+        if (dst->ne[i] != x->ne[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ed_cuda_qwen_vl_rms_norm_mul_bf16_custom_compute(ggml_tensor * dst, ed_cuda_norm_stream_t stream) {
+    if (!ed_cuda_qwen_vl_rms_norm_mul_bf16_custom_supported(dst)) {
+        return false;
+    }
+
+    const ggml_tensor* x = dst->src[0];
+    const ggml_tensor* weight = dst->src[1];
+    const int ncols = static_cast<int>(x->ne[0]);
+    const int rows = static_cast<int>(x->ne[1] * x->ne[2] * x->ne[3]);
+    if (ncols != 1280 || rows <= 0) {
+        return false;
+    }
+
+    struct ggml_custom_op_params {
+        ggml_custom_op_t fun;
+        int n_tasks;
+        void* userdata;
+    };
+    ggml_custom_op_params op_params{};
+    memcpy(&op_params, dst->op_params, sizeof(op_params));
+    const auto params = edgedit::ggml_ext::qwen_vl_rms_norm_mul_bf16_params_from_userdata(op_params.userdata);
+    const float eps = edgedit::ggml_ext::qwen_vl_rms_norm_mul_bf16_params_eps(params);
+    if (eps < 0.0f) {
+        return false;
+    }
+
+    const dim3 threads(WARP_SIZE_ED, 16, 1);
+    const dim3 blocks((rows + static_cast<int>(threads.y) - 1) / static_cast<int>(threads.y), 1, 1);
+    auto cuda_stream = reinterpret_cast<cudaStream_t>(stream);
+    qwen_vl_rms_norm_mul_bf16_kernel<<<blocks, threads, 0, cuda_stream>>>(
+        static_cast<const float*>(x->data),
+        static_cast<const float*>(weight->data),
+        static_cast<__nv_bfloat16*>(dst->data),
+        rows,
         eps);
     return true;
 }

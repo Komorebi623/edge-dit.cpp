@@ -177,6 +177,7 @@ public:
     bool use_tae() const { return use_tae_; }
     bool tae_preview_only() const { return tae_preview_only_; }
     bool use_pmid() const { return use_pmid_; }
+    bool qwen_image_zero_cond_t() const { return qwen_image_zero_cond_t_; }
 
     String2TensorStorage& get_tensor_storage_map() {
         return tensor_storage_map_;
@@ -303,6 +304,7 @@ private:
     bool tae_preview_only_ = false;
     bool use_pmid_ = false;
     bool skip_t5_ = false;
+    bool qwen_image_zero_cond_t_ = false;
 };
 
 #endif

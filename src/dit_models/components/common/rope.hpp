@@ -280,10 +280,11 @@ namespace Rope {
         int curr_h_offset = 0;
         int curr_w_offset = 0;
         int index         = 1;
+        const bool centered_ref_rope = scale_rope;
         for (ggml_tensor* ref : ref_latents) {
             int h_offset = 0;
             int w_offset = 0;
-            if (!increase_ref_index) {
+            if (!increase_ref_index && !centered_ref_rope) {
                 if (ref->ne[1] + curr_h_offset > ref->ne[0] + curr_w_offset) {
                     w_offset = curr_w_offset;
                 } else {
@@ -300,10 +301,10 @@ namespace Rope {
                                             static_cast<int>(index * ref_index_scale),
                                             h_offset,
                                             w_offset,
-                                            scale_rope);
+                                            centered_ref_rope);
             ids          = concat_ids(ids, ref_ids, bs);
 
-            if (increase_ref_index) {
+            if (increase_ref_index || centered_ref_rope) {
                 index++;
             }
 
@@ -411,6 +412,14 @@ namespace Rope {
         int h_len        = (h + (patch_size / 2)) / patch_size;
         int w_len        = (w + (patch_size / 2)) / patch_size;
         int txt_id_start = std::max(h_len / 2, w_len / 2);
+        for (ggml_tensor* ref : ref_latents) {
+            if (ref == nullptr) {
+                continue;
+            }
+            int ref_h_len = (static_cast<int>(ref->ne[1]) + (patch_size / 2)) / patch_size;
+            int ref_w_len = (static_cast<int>(ref->ne[0]) + (patch_size / 2)) / patch_size;
+            txt_id_start  = std::max(txt_id_start, std::max(ref_h_len / 2, ref_w_len / 2));
+        }
         std::vector<std::vector<float>> txt_ids_repeated(bs * context_len, std::vector<float>(3));
         for (int i = 0; i < bs; ++i) {
             for (int j = 0; j < context_len; ++j) {
@@ -776,7 +785,8 @@ namespace Rope {
                                              ggml_tensor* mask,
                                              float kv_scale        = 1.0f,
                                              bool rope_interleaved = true,
-                                             bool k_rope_f16_for_flash = false) {
+                                             bool k_rope_f16_for_flash = false,
+                                             bool qk_rope_bf16_roundtrip = false) {
         // q,k,v: [N, L, n_head, d_head]
         // pe: [L, d_head/2, 2, 2]
         // return: [N, L, n_head*d_head]
@@ -796,6 +806,10 @@ namespace Rope {
             }
         } else {
             k = apply_rope(ctx->ggml_ctx, k, pe, rope_interleaved, ctx->backend);  // [N*n_head, L, d_head]
+        }
+        if (qk_rope_bf16_roundtrip) {
+            q = ggml_cast(ctx->ggml_ctx, ggml_cast(ctx->ggml_ctx, q, GGML_TYPE_BF16), GGML_TYPE_F32);
+            k = ggml_cast(ctx->ggml_ctx, ggml_cast(ctx->ggml_ctx, k, GGML_TYPE_BF16), GGML_TYPE_F32);
         }
 
         auto x = ggml_ext_attention_ext(ctx->ggml_ctx, ctx->backend, q, k, v, v->ne[1], mask, true, ctx->flash_attn_enabled, kv_scale,

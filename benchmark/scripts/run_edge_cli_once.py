@@ -68,6 +68,7 @@ def main() -> int:
     parser.add_argument("--guidance", type=float, required=True)
     parser.add_argument("--cfg-scale", type=float, default=1.0)
     parser.add_argument("--flow-shift", type=float, default=None)
+    parser.add_argument("--negative-prompt", default=None)
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--backend", default="cuda")
     parser.add_argument("--warmup-runs", type=int, required=True)
@@ -218,6 +219,8 @@ def build_command(args: argparse.Namespace, output: Path) -> list[str]:
         "--output",
         str(output),
     ]
+    if args.negative_prompt is not None:
+        command.extend(["--negative_prompt", args.negative_prompt])
     if args.task == "image-editing":
         if not args.input_image:
             raise SystemExit("--input-image is required for image-editing")
