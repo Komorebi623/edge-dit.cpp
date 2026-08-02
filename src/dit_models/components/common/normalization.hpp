@@ -13,6 +13,8 @@ protected:
     int64_t hidden_size;
     float eps;
     std::string weight_name;
+    bool use_model_weight_type;
+    bool cast_output_to_input_type;
 
     void init_params(
         ggml_context* ctx,
@@ -23,7 +25,9 @@ public:
     RMSNorm(
         int64_t hidden_size,
         float eps = 1e-06f,
-        std::string weight_name = "scale");
+        std::string weight_name = "scale",
+        bool use_model_weight_type = false,
+        bool cast_output_to_input_type = false);
 
     ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override;
     ggml_tensor* forward_f16(GGMLRunnerContext* ctx, ggml_tensor* x);
@@ -34,7 +38,9 @@ public:
     QKNorm(
         int64_t dim,
         float eps = 1e-06f,
-        std::string weight_name = "scale");
+        std::string weight_name = "scale",
+        bool use_model_weight_type = false,
+        bool cast_output_to_input_type = false);
 
     ggml_tensor* query_norm(GGMLRunnerContext* ctx, ggml_tensor* x);
     ggml_tensor* key_norm(GGMLRunnerContext* ctx, ggml_tensor* x);

@@ -7230,6 +7230,8 @@ protected:
     bool force_prec_f32;
     float scale;
     bool scale_quantized_only;
+    bool use_model_bias_type;
+    bool cast_output_to_input_type;
     std::string prefix;
 
     void init_params(ggml_context* ctx, const String2TensorStorage& tensor_storage_map = {}, const std::string prefix = "") override {
@@ -7240,8 +7242,12 @@ protected:
         }
         params["weight"] = ggml_new_tensor_2d(ctx, wtype, in_features, out_features);
         if (bias) {
-            enum ggml_type wtype = GGML_TYPE_F32;
-            params["bias"]       = ggml_new_tensor_1d(ctx, wtype, out_features);
+            enum ggml_type btype = use_model_bias_type ? get_type(prefix + "bias", tensor_storage_map, GGML_TYPE_F32)
+                                                        : GGML_TYPE_F32;
+            if (btype != GGML_TYPE_F32 && btype != GGML_TYPE_F16 && btype != GGML_TYPE_BF16) {
+                btype = GGML_TYPE_F32;
+            }
+            params["bias"]       = ggml_new_tensor_1d(ctx, btype, out_features);
         }
     }
 
@@ -7252,14 +7258,18 @@ public:
            bool force_f32      = false,
            bool force_prec_f32 = false,
            float scale         = 1.f,
-           bool scale_quantized_only = false)
+           bool scale_quantized_only = false,
+           bool use_model_bias_type = false,
+           bool cast_output_to_input_type = false)
         : in_features(in_features),
           out_features(out_features),
           bias(bias),
           force_f32(force_f32),
           force_prec_f32(force_prec_f32),
           scale(scale),
-          scale_quantized_only(scale_quantized_only) {}
+          scale_quantized_only(scale_quantized_only),
+          use_model_bias_type(use_model_bias_type),
+          cast_output_to_input_type(cast_output_to_input_type) {}
 
     void set_scale(float scale_) {
         scale = scale_;
@@ -7276,6 +7286,7 @@ public:
 
     ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
         ggml_tensor* w = params["weight"];
+        const ggml_type output_type = x->type;
         ggml_tensor* b = nullptr;
         if (bias) {
             b = params["bias"];
@@ -7288,7 +7299,13 @@ public:
             forward_params.linear.scale          = effective_scale;
             return ctx->weight_adapter->forward_with_lora(ctx->ggml_ctx, ctx->backend, x, w, b, prefix, forward_params);
         }
-        return ggml_ext_linear(ctx->ggml_ctx, x, w, b, force_prec_f32, effective_scale);
+        x = ggml_ext_linear(ctx->ggml_ctx, x, w, b, force_prec_f32, effective_scale);
+        if (cast_output_to_input_type &&
+            (output_type == GGML_TYPE_F16 || output_type == GGML_TYPE_BF16) &&
+            x->type != output_type) {
+            x = ggml_cast(ctx->ggml_ctx, x, output_type);
+        }
+        return x;
     }
 
     ggml_tensor* forward_output_slice(GGMLRunnerContext* ctx,
@@ -7674,6 +7691,7 @@ protected:
     bool elementwise_affine;
     bool bias;
     std::string prefix;
+    bool cast_output_to_input_type;
 
     void init_params(ggml_context* ctx, const String2TensorStorage& tensor_storage_map = {}, const std::string prefix = "") override {
         this->prefix = prefix;
@@ -7691,15 +7709,22 @@ public:
     LayerNorm(int64_t normalized_shape,
               float eps               = 1e-05f,
               bool elementwise_affine = true,
-              bool bias               = true)
+              bool bias               = true,
+              bool cast_output_to_input_type = false)
         : normalized_shape(normalized_shape),
           eps(eps),
           elementwise_affine(elementwise_affine),
-          bias(bias) {}
+          bias(bias),
+          cast_output_to_input_type(cast_output_to_input_type) {}
 
     ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
         ggml_tensor* w = nullptr;
         ggml_tensor* b = nullptr;
+        const ggml_type output_type = x->type;
+        if (cast_output_to_input_type &&
+            (output_type == GGML_TYPE_F16 || output_type == GGML_TYPE_BF16)) {
+            x = ggml_cast(ctx->ggml_ctx, x, GGML_TYPE_F32);
+        }
 
         if (elementwise_affine) {
             w = params["weight"];
@@ -7713,7 +7738,13 @@ public:
                 }
             }
         }
-        return ggml_ext_layer_norm(ctx->ggml_ctx, x, w, b, eps);
+        x = ggml_ext_layer_norm(ctx->ggml_ctx, x, w, b, eps);
+        if (cast_output_to_input_type &&
+            (output_type == GGML_TYPE_F16 || output_type == GGML_TYPE_BF16) &&
+            x->type != output_type) {
+            x = ggml_cast(ctx->ggml_ctx, x, output_type);
+        }
+        return x;
     }
 };
 
