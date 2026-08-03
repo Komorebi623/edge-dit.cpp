@@ -12,8 +12,9 @@ import sys
 import time
 import re
 
-# Reuse the auto-fit/auto-allocate stderr parser (same engine logs) from the e2e runner.
-from run_edge_e2e import parse_auto_placement
+# Reuse the auto-fit/auto-allocate stderr parser and Qwen prompt defaults from
+# the e2e runner.
+from run_edge_e2e import edge_negative_prompt_default, parse_auto_placement
 
 
 CACHE_SUMMARY_RE = re.compile(
@@ -69,6 +70,7 @@ def main() -> int:
     parser.add_argument("--cfg-scale", type=float, default=1.0)
     parser.add_argument("--flow-shift", type=float, default=None)
     parser.add_argument("--negative-prompt", default=None)
+    parser.add_argument("--model-family", default=None)
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--backend", default="cuda")
     parser.add_argument("--warmup-runs", type=int, required=True)
@@ -99,8 +101,8 @@ def main() -> int:
     parser.add_argument("--cache-profile")
     parser.add_argument("--cache-static-scm", action="store_true")
     parser.add_argument("--cache-dynamic-scm", action="store_true")
-    parser.add_argument("--qwen-image-zero-cond-t", action="store_true")
-    parser.add_argument("--vae-tiling", action="store_true")
+    parser.add_argument("--qwen-image-zero-cond-t", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--vae-tiling", choices=["on", "off", "auto"], default=None)
     parser.add_argument("--vae-tile-size")
     parser.add_argument("--tensor-type-rules")
     parser.add_argument("--offload-to-cpu", action="store_true")
@@ -219,8 +221,14 @@ def build_command(args: argparse.Namespace, output: Path) -> list[str]:
         "--output",
         str(output),
     ]
-    if args.negative_prompt is not None:
-        command.extend(["--negative_prompt", args.negative_prompt])
+    negative_prompt = edge_negative_prompt_default(
+        args.model_family,
+        args.model,
+        args.cfg_scale,
+        args.negative_prompt,
+    )
+    if negative_prompt is not None:
+        command.extend(["--negative_prompt", negative_prompt])
     if args.task == "image-editing":
         if not args.input_image:
             raise SystemExit("--input-image is required for image-editing")
@@ -244,7 +252,7 @@ def build_command(args: argparse.Namespace, output: Path) -> list[str]:
     if args.qwen_image_zero_cond_t:
         command.append("--qwen-image-zero-cond-t")
     if args.vae_tiling:
-        command.append("--vae-tiling")
+        command.extend(["--vae-tiling", args.vae_tiling])
     if args.vae_tile_size is not None:
         command.extend(["--vae-tile-size", str(args.vae_tile_size)])
     if args.tensor_type_rules:

@@ -122,6 +122,8 @@ namespace sd::ggml_graph_cut {
                         const std::string& group,
                         const std::string& output);
 
+    void clear_graph_cut_marks();
+
     void mark_comm_op(ggml_tensor* input,
                       ggml_tensor* output,
                       Segment::CommKind kind,

@@ -44,7 +44,7 @@ OFFLOAD_KNOBS = {
     "none": {},
     # component offload = weights on CPU, staged to GPU per compute (engine renamed the
     # old keep-*-on-cpu flags; these now map to the stage-based --*-offload flags).
-    "te-cpu": {"text_encoder_offload": True},     # text encoder weights offloaded (edge-only)
+    "text-encoder-offload": {"text_encoder_offload": True},     # text encoder weights offloaded (edge-only)
     "vae-offload": {"vae_offload": True},          # VAE weights offloaded (edge-only)
     "dit-offload": {"dit_offload": True},          # DiT weights offloaded (edge-only)
     "full": {"offload_to_cpu": True},              # whole model offloaded
@@ -65,7 +65,7 @@ OFFLOAD_KNOBS = {
 OFFLOAD_SYSTEMS = {
     "none": {"edge-dit", "diffusers", "stable-diffusion-cpp"},
     "full": {"edge-dit", "diffusers", "stable-diffusion-cpp"},
-    "te-cpu": {"edge-dit"},        # per-component offload, edge-only
+    "text-encoder-offload": {"edge-dit"},        # per-component offload, edge-only
     "vae-offload": {"edge-dit"},   # per-component offload, edge-only
     "dit-offload": {"edge-dit"},   # per-component offload, edge-only
     "sequential": {"diffusers"},   # accelerate sequential CPU offload, diffusers-only
@@ -264,11 +264,16 @@ def build_workload(model: dict, task: str, steps, pset_map: dict, pset_file: Pat
         "task": task,
         "model": model["model"],
         "input_image_ref": model.get("input_image_ref"),  # edit tasks; None for T2I/T2V
-        # model_options carries per-model runner hints (e.g. sd.cpp's converted-transformer ref,
-        # which lives under model: in the yaml but runners read from workload["model_options"]).
-        "model_options": ({"stable_diffusion_cpp_transformer_ref":
-                           model["model"]["stable_diffusion_cpp_transformer_ref"]}
-                          if model["model"].get("stable_diffusion_cpp_transformer_ref") else {}),
+        # model_options carries per-model runner hints (e.g. sd.cpp's converted-transformer ref
+        # or official single-file ref), which live under model: in the yaml but runners read
+        # from workload["model_options"]. Forward whichever sd.cpp hints the model declares.
+        "model_options": {k: model["model"][k] for k in (
+            "stable_diffusion_cpp_single_file",
+            "stable_diffusion_cpp_transformer_ref",
+            "stable_diffusion_cpp_wan_dit",
+            "stable_diffusion_cpp_wan_vae",
+            "stable_diffusion_cpp_wan_t5",
+        ) if model["model"].get(k)},
         "prompt_set": str(pset_file),
         "prompt_id": None,  # set per-run below
         "generation": gen,

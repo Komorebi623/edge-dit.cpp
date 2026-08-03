@@ -15,8 +15,8 @@ support commitment.
 | SD3 / SD3.5 | Text-to-image | [`stabilityai/stable-diffusion-3-medium-diffusers`](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) (and SD3.5 siblings) | Diffusers-style directory or component weights | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
 | FLUX.1 | Text-to-image | [`black-forest-labs/FLUX.1-dev`](https://huggingface.co/black-forest-labs/FLUX.1-dev) | Diffusers-style directory, top-level FLUX safetensors, or components | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
 | FLUX.1-Kontext | Image editing / reference-guided generation | [`black-forest-labs/FLUX.1-Kontext-dev`](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | Diffusers-style directory or components | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
-| Qwen-Image | Text-to-image | [`Qwen/Qwen-Image-2512`](https://huggingface.co/Qwen/Qwen-Image-2512) | Diffusers-style directory or components | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
-| Qwen-Image-Edit | Image editing | [`Qwen/Qwen-Image-Edit-2511`](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) | Diffusers-style directory or components | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
+| Qwen-Image | Text-to-image | [`Qwen/Qwen-Image`](https://huggingface.co/Qwen/Qwen-Image) | Diffusers-style directory or components | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
+| Qwen-Image-Edit | Image editing | [`Qwen/Qwen-Image-Edit`](https://huggingface.co/Qwen/Qwen-Image-Edit) | Diffusers-style directory or components | CUDA first, CPU/Vulkan functional, Metal experimental | Public preview |
 | Wan 2.1 | Video generation | [`Wan-AI/Wan2.1-T2V-1.3B-Diffusers`](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers) (and Wan2.1-T2V-14B-Diffusers) | Diffusers-style directory or components | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Public preview, still being optimized |
 
 Backend availability means the runtime can be built for that backend. Model
@@ -126,18 +126,8 @@ Its few-step **Qwen-Image-Edit-Lightning** variant ships as a LoRA adapter, so
 merge it into the base weights first (`scripts/merge_qwen_lora.py`); see
 [Merging LoRA weights](optimization/merging-lora-weights.md).
 
-For Qwen-Image-Edit-2511, use:
-
-```bash
---qwen-image-zero-cond-t
-```
-
-`--qwen-image-zero-cond-t` makes reference-image tokens use the `t = 0`
-timestep condition while the image tokens being generated or edited still use
-the current denoising timestep `t`.
-
-It is an inference compatibility switch introduced for Qwen-Image-Edit-2511.
-For other Qwen-Image-Edit models, ignore this option.
+No extra model-specific CLI switch is required for the documented
+Qwen-Image-Edit checkpoints.
 
 Command example: [Qwen-Image-Edit CLI](cli.md#qwen-image-edit).
 
@@ -204,8 +194,6 @@ profiling behavior.
   runtime behavior.
 - Cache methods and sequence parallelism are workload dependent and may not be
   valid for every model or resolution.
-- Model-specific options such as `--qwen-image-zero-cond-t`
-  should only be used with the model families documented above.
 - Component loading requires a complete, compatible set of text encoders, VAE,
   diffusion transformer, and optional vision components for the selected model.
 

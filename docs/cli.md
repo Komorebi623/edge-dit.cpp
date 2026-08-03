@@ -171,6 +171,7 @@ SD3-family models can skip T5XXL to reduce memory:
   --width 1024 \
   --height 1024 \
   --steps 20 \
+  --cfg-scale 4.0 \
   --seed 0 \
   --output qwen.png
 ```
@@ -190,6 +191,7 @@ SD3-family models can skip T5XXL to reduce memory:
   --width 1024 \
   --height 1024 \
   --steps 20 \
+  --guidance 2.5 \
   --output flux-kontext.png
 ```
 
@@ -206,11 +208,9 @@ SD3-family models can skip T5XXL to reduce memory:
   --width 1024 \
   --height 1024 \
   --steps 20 \
+  --cfg-scale 4.0 \
   --output qwen-edit.png
 ```
-
-Use `--qwen-image-zero-cond-t` for Qwen-Image-Edit-2511. For other
-Qwen-Image-Edit models, ignore this option.
 
 Image editing support depends on the model family and checkpoint format. See
 [Supported models and usage](models.md) for the public preview support matrix.
@@ -229,10 +229,29 @@ Wan text-to-video uses `--video`:
   --height 480 \
   --frames 41 \
   --fps 16 \
-  --steps 20 \
+  --steps 30 \
+  --cfg-scale 5.0 \
+  --flow-shift 3.0 \
+  --output wan.avi
+```
+
+The larger **Wan2.1-T2V-14B** can render 720P (`1280x720`). Note the higher
+resolution uses `--flow-shift 5.0` (vs `3.0` for 480P):
+
+```bash
+./build-cuda/bin/ed-cli \
+  --backend cuda \
+  --video \
+  --model /path/to/Wan2.1-T2V-14B-Diffusers \
+  --prompt "a glass teapot rotating on a wooden table" \
+  --width 1280 \
+  --height 720 \
+  --frames 41 \
+  --fps 16 \
+  --steps 50 \
   --cfg-scale 5.0 \
   --flow-shift 5.0 \
-  --output wan.avi
+  --output wan-14b-720p.avi
 ```
 
 Video flags:
@@ -308,6 +327,13 @@ Supported `--type` values:
 ```text
 f32 f16 bf16 q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k
 ```
+
+> **Qwen-Image models and FP16:** the Qwen-Image family (`qwen-image`,
+> `qwen-image-edit`, and their distilled/lightning variants) is not supported in
+> FP16 — its DiT activations exceed FP16's dynamic range and silently saturate,
+> producing a corrupt (all-white) image. If you pass `--type f16` for a Qwen
+> model, edge-dit automatically switches it to BF16 and logs a warning. Use
+> `bf16` (or a quantized type) explicitly to avoid the warning.
 
 Per-tensor type rules:
 

@@ -85,7 +85,6 @@ def budget_of(run_options: Dict[str, Any]) -> str:
 _QUANTO_PRECISION = {
     ("qfloat8", "qfloat8"): "fp8",
     ("qfloat8", None): "fp8",
-    ("qint8", "qint8"): "w8a8",
     ("qint8", None): "w8",
     ("qint4", "qint4"): "w4a4",
     ("qint4", None): "w4",
@@ -540,7 +539,7 @@ def _baseline_rank(budget: str) -> int:
 
 def find_baseline(quant: RunView, runs: List[RunView]) -> Optional[RunView]:
     """Same system + workload + prompt_id FP16/bf16 baseline. Any FP16/bf16 run that
-    produced an image qualifies regardless of how it ran (offload/te-cpu/full/auto all
+    produced an image qualifies regardless of how it ran (offload/full/auto all
     only move where weights live, not the image), EXCEPT cached runs (cache alters the
     image). Prefers the least VRAM-saving one (un-offloaded first) when several exist."""
     candidates = [

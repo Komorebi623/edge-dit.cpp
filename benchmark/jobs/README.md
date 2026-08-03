@@ -52,8 +52,8 @@ The section name can be `edge-dit` (= `edge-dit.cpp`), `diffusers`, or `stable-d
 | section field | required | default | notes |
 |---|---|---|---|
 | `model` | ✓ | — | that system's model id list, taken from `../models/` (14). A **list sweeps this dimension** (each model × each quant); a single id is one model. An `quant` object can also pin `model` to just one tier (see "Advanced 1") |
-| `quant` | ✓ | — | that system's quantization tier list; an item can be an **id string** or an **object** (see "Advanced 1"). edge/sdcpp accept `fp16`/`q8`/`q4_k`, diffusers accepts `bf16`/`fp8`/`w8a8` (see "Quantization tiers per-system" at the end) |
-| `offload` | | `none` | which components to offload (**weights on CPU, staged to GPU for compute** — no "compute on CPU" mode). Values: `none` / `full` (whole model, all three systems) · `te-cpu` / `vae-offload` / `dit-offload` (per-component, **edge-only**) · `auto-allocate` / `auto-fit` (engine-driven, **edge-only**) · `sequential` (**diffusers-only**, accelerate per-submodule). A tier not supported by a section's system is skipped during expansion. **scalar single tier, a list sweeps this dimension**. ⚠ `te-cpu`/`vae-offload` on a **large TE (e.g. FLUX T5-XXL ~9G) can OOM** when staged to GPU — prefer `full` or set `max_vram` |
+| `quant` | ✓ | — | that system's quantization tier list; an item can be an **id string** or an **object** (see "Advanced 1"). edge/sdcpp accept `fp16`/`q8`/`q4_k`, diffusers accepts `bf16`/`fp8`/`w8` (see "Quantization tiers per-system" at the end) |
+| `offload` | | `none` | which components to offload (**weights on CPU, staged to GPU for compute** — no "compute on CPU" mode). Values: `none` / `full` (whole model, all three systems) · `text-encoder-offload` / `vae-offload` / `dit-offload` (per-component, **edge-only**) · `auto-allocate` / `auto-fit` (engine-driven, **edge-only**) · `sequential` (**diffusers-only**, accelerate per-submodule). A tier not supported by a section's system is skipped during expansion. **scalar single tier, a list sweeps this dimension**. ⚠ `text-encoder-offload` now stages the TE in ~1G segments (TE no longer OOMs), but it leaves the **DiT resident** — on a large model (FLUX ~22.7G, Qwen ~38G, Wan-14B) the run still OOMs on the resident DiT, so use `full` or combine with `dit-offload` for those |
 | `max_vram` | | not set | cap compute-graph VRAM in GB (`max_vram: 20` → `--max-vram`), via graph-cut segmentation; **edge and sd.cpp** both honor it. When offloading without it, the edge engine defaults to `0.85 × free VRAM`. Also settable per-quant object (see "Advanced 1") |
 | `vae_tiling` | | `auto` | `auto` (engine decides by VRAM) / `yes` / `no` |
 | `cache` | | `none` | cache method id; **scalar single tier, a list sweeps this dimension** |
@@ -137,11 +137,11 @@ Corresponding example `example-sweeps.yaml`.
 
 ## cross_system capability filtering (no worry about misconfiguration)
 
-If a section configures a method that system doesn't support (e.g. `quant:[q8]` in a `diffusers:` section, `quant:[fp8]` in an `edge-dit:` section, an `offload` tier the system lacks — `te-cpu`/`vae-offload`/`dit-offload`/`auto-fit`/`auto-allocate` are edge-only, `sequential` is diffusers-only — or a `cache:` item the system lacks), run.py **automatically skips that combination during expansion and prints** a line:
+If a section configures a method that system doesn't support (e.g. `quant:[q8]` in a `diffusers:` section, `quant:[fp8]` in an `edge-dit:` section, an `offload` tier the system lacks — `text-encoder-offload`/`vae-offload`/`dit-offload`/`auto-fit`/`auto-allocate` are edge-only, `sequential` is diffusers-only — or a `cache:` item the system lacks), run.py **automatically skips that combination during expansion and prints** a line:
 
 ```
 [run.py] skip → diffusers: quant 'q8' not supported (cross_system), skipped
-[run.py] skip → diffusers: offload 'te-cpu' not supported (cross_system), skipped
+[run.py] skip → diffusers: offload 'text-encoder-offload' not supported (cross_system), skipped
 ```
 
 Neither errors out nor wastes time running to failure. Which method is supported by which systems is in [`../CAPABILITIES.md`](../CAPABILITIES.md).
@@ -152,7 +152,7 @@ Neither errors out nor wastes time running to failure. Which method is supported
 |---|---|---|
 | `edge-dit` | `fp16` / `q8` (q8_0) / `q4_k` | weight-only, via `precision` |
 | `stable-diffusion.cpp` | `fp16` / `q8` (q8_0) / `q4_k` | weight-only, via `precision` |
-| `diffusers` | `bf16` (baseline) / `fp8` / `w8a8` | Optimum-Quanto, via `quant_weights` |
+| `diffusers` | `bf16` (baseline) / `fp8` / `w8` | Optimum-Quanto, via `quant_weights`. `fp8`=qfloat8 weight-only (flux/qwen); `w8`=qint8 weight-only (SD3/SD3.5-turbo, since qfloat8 is too coarse for 2B MMDiT). See CAPABILITIES.md |
 
 To compare quantization across systems: write each section's own tiers (and its own `model` list), and one job runs it all in one command (see `example-cross-system` below). Quantization loss is only meaningful within the same system vs its own baseline (fp16 for edge/sdcpp, bf16 for diffusers), not comparable across systems; CLIP/aesthetic/IR absolute quality can be compared side by side.
 
