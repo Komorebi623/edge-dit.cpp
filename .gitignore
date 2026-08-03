@@ -1,6 +1,7 @@
 # build outputs
 /build-*/
 /cmake-build-*/
+/builds-archive/
 
 # binaries and libraries
 *.o
