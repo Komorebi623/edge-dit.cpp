@@ -55,12 +55,12 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 def image_dir_and_prefix(system: str, task: str) -> Tuple[Optional[str], str, List[str]]:
     """Return (subdir_under_samples, filename_prefix, extensions)."""
     is_video = task == "text-to-video"
-    is_t2i = task == "text-to-image"
     if system == "edge-dit.cpp":
-        if is_t2i:
-            return "edge/imgs", "img_", ["png"]
-        # edit / video go through ed-cli single-run -> samples/edge-cli, measured_
-        return "edge-cli", "measured_", (["avi"] if is_video else ["png"])
+        # all tasks go through ed-sample -> samples/edge/imgs.
+        # t2i/edit write img_NNN.png; video writes vid_NNN.avi.
+        if is_video:
+            return "edge/imgs", "vid_", ["avi"]
+        return "edge/imgs", "img_", ["png"]
     if system == "diffusers":
         return "diffusers", "output_", (["avi"] if is_video else ["png"])
     if system == "stable-diffusion.cpp":
@@ -83,8 +83,6 @@ def budget_of(run_options: Dict[str, Any]) -> str:
 # are grouped/baselined correctly (a missing map would mislabel every quantized
 # diffusers run as bf16 and wrongly treat it as the FP16 baseline).
 _QUANTO_PRECISION = {
-    ("qfloat8", "qfloat8"): "fp8",
-    ("qfloat8", None): "fp8",
     ("qint8", None): "w8",
     ("qint4", "qint4"): "w4a4",
     ("qint4", None): "w4",
