@@ -94,7 +94,9 @@ Key properties:
   and its benefit is largest for models stored at full precision.
 
 The optimization preserves the model architecture. Only the numerical
-representation of eligible weights changes.
+representation of eligible weights changes. A few tensors are additionally
+protected by a precision floor — quantized, but never below a per-tensor
+minimum — see [Section 5](#5-precision-preserved-tensors).
 
 ---
 
@@ -157,6 +159,25 @@ representable type rather than producing an invalid tensor.
 The intent is to concentrate low-bit representation on the large, quantization-
 tolerant weight matrices while protecting the comparatively small layers where
 low precision has a disproportionate effect on output quality.
+
+### Quantization floors
+
+A related mechanism raises the *floor* of a tensor's precision rather than
+preserving it outright: when the requested global type is more aggressive than
+the floor (compared by bits-per-weight), the tensor is quantized to the floor
+type instead. This still quantizes the tensor, just not below the level where
+its error becomes visible in the output.
+
+The Qwen-Image modulation projections `img_mod.1` / `txt_mod.1` are floored at
+`q8_0`. So under `--type q4_k` these projections load as `q8_0` while the rest
+of the DiT is `q4_k` — the on-load weight-type report will show a small `q8_0`
+count (120 tensors: 60 blocks × img/txt) alongside the `q4_k` bulk. When the
+`zero_cond_t` edit path is active these projections feed a per-token select
+`mod_0 + index*(mod_1 - mod_0)`, and the subtraction amplifies k-quant error
+enough to break edit instruction-following at `q4_k`; the `q8_0` floor restores
+it. The projections are tiny (`dim × 6·dim`), so the extra footprint is
+negligible. Floors only ever *raise* precision: `f16`/`bf16`/`q8_0` global runs
+and explicit `--tensor-type-rules` targeting these tensors are left untouched.
 
 ---
 

@@ -248,8 +248,13 @@ ed-cli --backend cuda --type q8_0 --model /path/to/models/qwen-image \
 
 Same LoRA-merge requirement, plus `--image`. As with Qwen-Image Lightning, the
 adapter is the 4-step release, so keep the `4steps` marker on the merged output
-directory (or pass `--steps 4`). Add `--qwen-image-zero-cond-t` **only** for
-Qwen-Image-Edit-2511:
+directory (or pass `--steps 4`). This distilled edit checkpoint needs
+`--qwen-image-zero-cond-t`: without it the edit is only partially applied (e.g.
+a "brushed metal" instruction leaves the object glass). This flag enables the
+`zero_cond_t` modulation path; the plain non-distilled `Qwen/Qwen-Image-Edit`
+checkpoint does **not** use it and should be run without the flag (its own
+`transformer/config.json` sets `zero_cond_t` when a checkpoint requires it, e.g.
+Qwen-Image-Edit-2511, and the runtime enables it automatically in that case).
 
 ```bash
 ed-cli --backend cuda --type q8_0 --model /path/to/models/qwen-image-edit --qwen-image-zero-cond-t \

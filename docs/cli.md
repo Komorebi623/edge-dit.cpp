@@ -215,6 +215,14 @@ SD3-family models can skip T5XXL to reduce memory:
 Image editing support depends on the model family and checkpoint format. See
 [Supported models and usage](models.md) for the public preview support matrix.
 
+The `--qwen-image-zero-cond-t` flag toggles the `zero_cond_t` modulation path.
+Leave it **off** for the plain `Qwen-Image-Edit` checkpoint above. It is only
+needed when a checkpoint expects that path: checkpoints that ship
+`"zero_cond_t": true` in `transformer/config.json` (e.g. Qwen-Image-Edit-2511)
+enable it automatically, and the distilled **Qwen-Image-Edit-Lightning** merge
+requires passing the flag explicitly (see
+[Few-step distilled models](optimization/few-step-distilled-models.md#qwen-image-edit-lightning-4-steps-image-editing--merge-lora-first)).
+
 ## Video Generation
 
 Wan text-to-video uses `--video`:
