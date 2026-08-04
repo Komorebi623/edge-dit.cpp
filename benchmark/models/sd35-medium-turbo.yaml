@@ -12,7 +12,10 @@ prompt_set: ../prompts/text-to-image-v1.jsonl
 generation:
   width: 1024
   height: 1024
-  steps: 8                             # SD3.5-medium-turbo: 8-step
-  guidance: 3.5
-  cfg_scale: 1.0                        # turbo single forward pass
+  steps: 8                             # HF card: num_inference_steps=8 (was 4: too few, collapses structure)
+  guidance: 3.5                        # NO EFFECT on SD3 (sd3 pipeline ignores distilled guidance); kept only
+                                       # because the runner requires the key. SD3's real knob is cfg_scale below.
+  cfg_scale: 1.5                       # HF card guidance_scale=1.5 == SD3 true CFG == cfg_scale. cfg 1.0 collapses
+                                       # geometry; 1.5 verified good on 2 prompts, CUDA==Vulkan.
+  flow_shift: 3.0                      # SD3 flow-scheduler default (base sd3-medium uses 3.0; turbo omitted it)
   scheduler: model-default

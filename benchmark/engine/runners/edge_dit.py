@@ -66,6 +66,11 @@ class EdgeDitRunner(BenchmarkRunner):
         sample_override = run_options.get("edge_sample_ref") or run_options.get("edge_sample_binary_ref")
         if sample_override:
             return self.resolve_path(str(sample_override))
+        if self.edge_backend(run_options) == "vulkan":
+            vk_ref = self.system_config.get("vulkan_sample_binary", {}).get("path_ref")
+            vk_binary = self.resolve_path(vk_ref) if vk_ref else None
+            if vk_binary is not None:
+                return vk_binary
         sample_ref = self.system_config.get("sample_binary", {}).get("path_ref")
         sample_binary = self.resolve_path(sample_ref)
         if sample_binary is not None:
@@ -80,7 +85,32 @@ class EdgeDitRunner(BenchmarkRunner):
         binary_override = run_options.get("edge_cli_ref") or run_options.get("edge_binary_ref")
         if binary_override:
             return self.resolve_path(str(binary_override))
+        if self.edge_backend(run_options) == "vulkan":
+            vk_ref = self.system_config.get("vulkan_binary", {}).get("path_ref")
+            vk_binary = self.resolve_path(vk_ref) if vk_ref else None
+            if vk_binary is not None:
+                return vk_binary
         return self.resolve_path(self.system_config.get("binary", {}).get("path_ref"))
+
+    def edge_backend(self, run_options: dict[str, Any] | None = None) -> str:
+        run_options = run_options or {}
+        backend = run_options.get("backend") or self.system_config.get("backend") or "cuda"
+        return str(backend)
+
+    def extra_env(self, gpu_count: int) -> dict[str, str]:
+        # Vulkan does not honor CUDA_VISIBLE_DEVICES; execution_env() sets that
+        # (and we mirror it here so device N maps to physical GPU N). Isolate the
+        # Vulkan device with GGML_VK_VISIBLE_DEVICES so a vulkan run stays on the
+        # GPU the job locked, not GPU 0.
+        env: dict[str, str] = {}
+        if self.edge_backend() == "vulkan":
+            visible = os.environ.get("BENCHMARK_CUDA_VISIBLE_DEVICES")
+            if visible:
+                devices = [d.strip() for d in visible.split(",") if d.strip()]
+                env["GGML_VK_VISIBLE_DEVICES"] = ",".join(devices[:gpu_count])
+            else:
+                env["GGML_VK_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(gpu_count))
+        return env
 
     def build_execution_command(
         self,
@@ -148,7 +178,7 @@ class EdgeDitRunner(BenchmarkRunner):
             "--dtype",
             str(generation.get("precision", "auto")),
             "--backend",
-            "cuda",
+            self.edge_backend(run_options),
             "--warmup-runs",
             str(warmup_runs),
             "--measured-runs",

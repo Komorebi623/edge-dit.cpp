@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 CMAKE_BIN=${CMAKE_BIN:-cmake}
 BUILD_DIR=${BUILD_DIR:-build-vulkan}
 BUILD_TYPE=${BUILD_TYPE:-Release}
+ED_BENCHMARK_MARKERS=${ED_BENCHMARK_MARKERS:-ON}
 
 # ---------------------------------------------------------------------------
 # ggml-vulkan needs three things at build time:
@@ -87,6 +88,7 @@ env PATH="${BUILD_PATH}" "${CMAKE_BIN}" -S . -B "${BUILD_DIR}" \
   "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}" \
   -DED_BUILD_EXAMPLES=ON \
   -DED_GGML_VULKAN=ON \
+  "-DED_BENCHMARK_MARKERS=${ED_BENCHMARK_MARKERS}" \
   "${CMAKE_EXTRA_ARGS[@]}"
 
 env PATH="${BUILD_PATH}" "${CMAKE_BIN}" --build "${BUILD_DIR}" -j

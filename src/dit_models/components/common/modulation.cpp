@@ -22,7 +22,13 @@ ggml_tensor* modulate(ggml_context* ctx,
         return fused;
     }
 #endif
-    x = ggml_add(ctx, x, ggml_mul(ctx, x, scale));
+    // x + x*scale + shift == x*(1+scale) + shift. The (1+scale) is a scale_bias
+    // on the small broadcast tensor [dim,1,N], turning two full-size elementwise
+    // ops (mul + add) plus a second add into one full-size mul + one add. On
+    // Vulkan (no fused-modulation custom op) this drops one big elementwise pass
+    // per modulate; on CPU/CUDA it is one fewer op and numerically identical.
+    ggml_tensor* scale_plus_one = ggml_scale_bias(ctx, scale, 1.0f, 1.0f);
+    x = ggml_mul(ctx, x, scale_plus_one);
     x = ggml_add(ctx, x, shift);
     return x;
 }
@@ -34,7 +40,9 @@ ggml_tensor* modulate(ggml_context* ctx,
     if (!skip_reshape) {
         scale = ggml_reshape_3d(ctx, scale, scale->ne[0], 1, scale->ne[1]);
     }
-    x = ggml_add(ctx, x, ggml_mul(ctx, x, scale));
+    // x + x*scale == x*(1+scale): one full-size mul instead of mul + add
+    // (the 1+scale scale_bias runs on the small broadcast tensor).
+    x = ggml_mul(ctx, x, ggml_scale_bias(ctx, scale, 1.0f, 1.0f));
     return x;
 }
 

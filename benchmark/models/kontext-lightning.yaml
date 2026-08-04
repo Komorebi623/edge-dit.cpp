@@ -5,7 +5,7 @@ model_name: FLUX.1-Kontext Lightning
 task: image-editing
 distilled: true                        # distilled, few steps
 model:
-  public_id: black-forest-labs/FLUX.1-Kontext-dev   # Kontext-Lightning distilled, based on Kontext-dev
+  public_id: camenduru/FLUX.1_Kontext-Lightning   # Kontext-Lightning distilled (based on Kontext-dev); see docs/models.md
   local_path_ref: kontext_lightning_dir  # site -> distilled/kontext-lightning
   format: diffusers-transformer-only    # transformer subdir only (needs rest of flux-kontext base components)
   base_model_ref: flux_kontext_dir      # base provides text_encoder/vae/scheduler

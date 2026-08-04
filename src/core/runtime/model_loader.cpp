@@ -1518,6 +1518,22 @@ void ModelLoader::set_wtype_override(ggml_type wtype, std::string tensor_type_ru
                 break;
             }
         }
+        // Qwen-Image modulation projections (img_mod.1 / txt_mod.1): floor at q8_0.
+        // On edit checkpoints (zero_cond_t) these feed a per-token where-select
+        // mod_0 + index*(mod_1-mod_0); the subtraction amplifies k-quant error and
+        // breaks edit instruction-following at q4_k (verified: q4 leaves the teapot
+        // body glass, q8_0 restores full brushed metal, esp. few-step lightning).
+        // Compare bits-per-weight (type_size is per-block bytes and misleads: q4_K
+        // has a 256-elem block so its type_size 144 > q8_0's 34). Only lift a more
+        // aggressive quant; leave f16/bf16/q8_0 and explicit --tensor-type-rules alone.
+        if ((contains(item.first, "img_mod.1.") || contains(item.first, "txt_mod.1.")) &&
+            dst_type != GGML_TYPE_COUNT && ggml_is_quantized(dst_type)) {
+            const double dst_bpw = 8.0 * ggml_type_size(dst_type) / ggml_blck_size(dst_type);
+            const double q8_bpw  = 8.0 * ggml_type_size(GGML_TYPE_Q8_0) / ggml_blck_size(GGML_TYPE_Q8_0);
+            if (dst_bpw < q8_bpw) {
+                dst_type = GGML_TYPE_Q8_0;
+            }
+        }
         if (dst_type != GGML_TYPE_COUNT && tensor_should_be_converted(item.second, dst_type)) {
             item.second.expected_type = dst_type;
             ++converted;

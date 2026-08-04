@@ -215,6 +215,14 @@ SD3-family models can skip T5XXL to reduce memory:
 Image editing support depends on the model family and checkpoint format. See
 [Supported models and usage](models.md) for the public preview support matrix.
 
+The `--qwen-image-zero-cond-t` flag toggles the `zero_cond_t` modulation path.
+Leave it **off** for the plain `Qwen-Image-Edit` checkpoint above. It is only
+needed when a checkpoint expects that path: checkpoints that ship
+`"zero_cond_t": true` in `transformer/config.json` (e.g. Qwen-Image-Edit-2511)
+enable it automatically, and the distilled **Qwen-Image-Edit-Lightning** merge
+requires passing the flag explicitly (see
+[Few-step distilled models](optimization/few-step-distilled-models.md#qwen-image-edit-lightning-4-steps-image-editing--merge-lora-first)).
+
 ## Video Generation
 
 Wan text-to-video uses `--video`:
@@ -273,8 +281,10 @@ Step-distilled checkpoints (FLUX.1-schnell, SD3.5-medium-turbo,
 Qwen-Image-Lightning, Kontext Lightning, Wan distill, …) generate in 4-8 steps.
 Pass `--steps -1` (or omit `--steps`) to let the runtime detect the distilled
 model and choose the few-step default; an explicit `--steps N` always overrides.
-Distilled models are guidance-distilled, so leave `--cfg-scale` at its default
-`1.0` (single forward) rather than raising it.
+Most distilled models are guidance-distilled, so leave `--cfg-scale` at its
+default `1.0` (single forward) rather than raising it — **except** where the
+model card says otherwise (SD3.5-medium-turbo wants `--cfg-scale 1.5`; at `1.0`
+its geometry collapses).
 
 Two loading shapes, depending on how the variant is published:
 
@@ -283,7 +293,7 @@ Two loading shapes, depending on how the variant is published:
 ./build-cuda/bin/ed-cli \
   --backend cuda --type q8_0 \
   --model /path/to/sd3.5-medium-turbo \
-  --steps -1 --cfg-scale 1.0 \
+  --steps -1 --cfg-scale 1.5 \
   --auto-fit --max-vram 8 --vae-tiling auto \
   --prompt "a glass teapot on a wooden table" \
   --output turbo.png

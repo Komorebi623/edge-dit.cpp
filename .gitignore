@@ -1,6 +1,7 @@
 # build outputs
 /build-*/
 /cmake-build-*/
+/builds-archive/
 
 # binaries and libraries
 *.o
@@ -57,7 +58,13 @@ outputs/
 !benchmark/assets/*.png
 
 # local development scratch dirs (experiment outputs, reports, ad-hoc scripts)
-conv3d_fix_results/
+/_scratch/
+
+# local benchmark run outputs (raw per-run artifacts: images, logs, per-run json).
+# Curated summary reports (reports/4090-benchmark-*, reports/v0.1.0-alpha,
+# vulkan-full-comparison.md) stay tracked; only local vk-*/cuda-* run dirs are ignored.
+/benchmark/reports/vk-*/
+/benchmark/reports/cuda-*/
 
 # imatrix calibration outputs (large, not for git)
 imatrix-out/
