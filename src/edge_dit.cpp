@@ -336,6 +336,11 @@ void ed_free_video(ed_video_t* video) {
     std::free(video->frames);
     video->frames = nullptr;
     video->frame_count = 0;
+    std::free(video->audio);
+    video->audio = nullptr;
+    video->audio_sample_count = 0;
+    video->audio_channels = 0;
+    video->audio_sample_rate = 0;
 }
 
 const char * ed_get_last_error(const ed_context_t * ctx) {

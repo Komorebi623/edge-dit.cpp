@@ -122,6 +122,10 @@ typedef struct ed_image_batch_t {
 typedef struct ed_video_t {
     ed_image_t * frames;
     int frame_count;
+    float * audio;
+    int audio_sample_count;
+    int audio_channels;
+    int audio_sample_rate;
 } ed_video_t;
 
 typedef struct ed_lora_t {
@@ -152,6 +156,7 @@ typedef struct ed_context_params_t {
     const char * llm_path;
     const char * llm_vision_path;
     const char * vae_path;
+    const char * audio_vae_path;
     const char * taesd_path;
     const char * control_net_path;
 

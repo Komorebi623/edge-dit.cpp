@@ -265,9 +265,10 @@ namespace LLM {
         int head_dim              = 128;
         bool qkv_bias             = true;
         bool qk_norm              = false;
-        int64_t vocab_size        = 152064;
-        float rms_norm_eps        = 1e-06f;
-        LLMVisionParams vision;
+    int64_t vocab_size        = 152064;
+    float rms_norm_eps        = 1e-06f;
+    bool final_norm           = true;
+    LLMVisionParams vision;
     };
 
     struct LLMImageEmbedInfo {
@@ -1240,19 +1241,23 @@ namespace LLM {
     protected:
         int64_t num_layers;
         bool diffusers_text_dtype;
+        bool final_norm;
 
     public:
         TextModel(const LLMParams& params)
             : num_layers(params.num_layers),
               diffusers_text_dtype(params.arch == LLMArch::QWEN2_5_VL &&
-                                   qwen_align_diffusers_text_dtype_enabled()) {
+                                   qwen_align_diffusers_text_dtype_enabled()),
+              final_norm(params.final_norm) {
             const bool cast_rms_output_to_input_type = params.arch == LLMArch::QWEN2_5_VL;
             blocks["embed_tokens"] = std::shared_ptr<GGMLBlock>(new Embedding(params.vocab_size, params.hidden_size));
             for (int i = 0; i < num_layers; i++) {
                 blocks["layers." + std::to_string(i)] = std::shared_ptr<GGMLBlock>(new TransformerBlock(params));
             }
-            blocks["norm"] = std::shared_ptr<GGMLBlock>(
-                new RMSNorm(params.hidden_size, params.rms_norm_eps, false, cast_rms_output_to_input_type));
+            if (final_norm) {
+                blocks["norm"] = std::shared_ptr<GGMLBlock>(
+                    new RMSNorm(params.hidden_size, params.rms_norm_eps, false, cast_rms_output_to_input_type));
+            }
         }
 
         ggml_tensor* forward(GGMLRunnerContext* ctx,
@@ -1266,7 +1271,9 @@ namespace LLM {
             // return: [N, n_token, hidden_size]
 
             auto embed_tokens = std::dynamic_pointer_cast<Embedding>(blocks["embed_tokens"]);
-            auto norm         = std::dynamic_pointer_cast<RMSNorm>(blocks["norm"]);
+            auto norm         = final_norm
+                                    ? std::dynamic_pointer_cast<RMSNorm>(blocks["norm"])
+                                    : nullptr;
 
             auto x = embed_tokens->forward(ctx, input_ids);
             if (diffusers_text_dtype && x->type != GGML_TYPE_BF16) {
@@ -1366,7 +1373,7 @@ namespace LLM {
                 for (int i = 1; i < intermediate_outputs.size(); i++) {
                     x = ggml_concat(ctx->ggml_ctx, x, intermediate_outputs[i], 0);
                 }
-            } else {
+            } else if (norm != nullptr) {
                 x = norm->forward(ctx, x);
                 if (debug_target == "final_norm") {
                     return x;
@@ -1458,7 +1465,7 @@ namespace LLM {
                 params.rms_norm_eps = 1e-5f;
             } else if (arch == LLMArch::QWEN3) {
                 params.head_dim     = 128;
-                params.num_heads    = 32;
+                params.num_heads    = 64;
                 params.num_kv_heads = 8;
                 params.qkv_bias     = false;
                 params.qk_norm      = true;
@@ -1500,6 +1507,10 @@ namespace LLM {
             }
             if (arch == LLMArch::QWEN3 && params.num_layers == 28) {  // Qwen3 2B
                 params.num_heads = 16;
+            }
+            if (arch == LLMArch::QWEN3 && params.num_layers == 50 && params.hidden_size == 5120) {
+                params.num_heads = 64;
+                params.final_norm = false;
             }
             LOG_DEBUG("llm: num_layers = %" PRId64 ", vocab_size = %" PRId64 ", hidden_size = %" PRId64 ", intermediate_size = %" PRId64,
                       params.num_layers,
@@ -1673,7 +1684,7 @@ namespace LLM {
                                  std::set<int> out_layers,
                                  const std::vector<LLMImageEmbedInfo>& image_embed_infos = {},
                                  const std::string& debug_target = "") {
-            ggml_cgraph* gf        = ggml_new_graph(compute_ctx);
+            ggml_cgraph* gf        = new_graph_custom(LLM_GRAPH_SIZE);
             ggml_tensor* input_ids = make_input(input_ids_tensor);
             std::vector<std::pair<int, ggml_tensor*>> image_embeds;
             image_embeds.reserve(image_embeds_tensor.size());

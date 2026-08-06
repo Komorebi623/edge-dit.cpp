@@ -19,6 +19,18 @@
 
 using sd::DiffusionCacheResult;
 
+enum class MiniMaxH3ReferenceKind : int32_t {
+    IMAGE,
+    VIDEO,
+    AUDIO,
+    VIDEO_AUDIO,
+};
+
+struct MiniMaxH3ReferenceBlock {
+    MiniMaxH3ReferenceKind kind = MiniMaxH3ReferenceKind::IMAGE;
+    int32_t video_index         = -1;
+    int32_t audio_index         = -1;
+};
 
 struct DiffusionParams {
     const sd::Tensor<float>* x                        = nullptr;
@@ -37,6 +49,13 @@ struct DiffusionParams {
     const sd::Tensor<float>* vace_context             = nullptr;
     float vace_strength                               = 1.f;
     const std::vector<int>* skip_layers               = nullptr;
+    const sd::Tensor<int32_t>* minimax_text_token_tags = nullptr;
+    const sd::Tensor<int32_t>* minimax_keyframe_indices = nullptr;
+    const std::vector<sd::Tensor<float>>* minimax_reference_audio_latents = nullptr;
+    const std::vector<MiniMaxH3ReferenceBlock>* minimax_reference_blocks = nullptr;
+    int minimax_audio_length = 0;
+    float minimax_video_sigma_shift = 12.f;
+    float minimax_audio_sigma_shift = 3.f;
 };
 
 template <typename T>

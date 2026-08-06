@@ -31,20 +31,23 @@ static void print_usage(const char* prog) {
         "Usage:\n"
         "  %s --model <model-or-diffusers-dir> --prompt <text> [options]\n"
         "  %s --diffusion-model <path> --vae <path> --clip_l <path> [--clip_g <path>] (--t5xxl <path> | --no-t5) --prompt <text> [options]\n"
+        "  %s -M vid_gen --diffusion-model <path> --vae <path> [--audio-vae <path>] --llm <path> --prompt <text> [options]\n"
         "Options:\n"
-        "  --video                   Generate video frames instead of an image\n"
+        "  --video, -M vid_gen       Generate video frames instead of an image\n"
         "  --video-format <fmt>      Video format: auto, avi, mp4, mov, mkv, webm. Default: auto\n"
         "  -i, --image <path>        Input/reference image for image-edit models\n"
         "  --diffusion-model <path>  Standalone DiT transformer weights\n"
         "  --vae <path>              Standalone VAE weights\n"
+        "  --audio-vae <path>        Standalone audio VAE weights (MiniMax-H3)\n"
         "  --clip_l <path>           CLIP-L text encoder weights\n"
         "  --clip_g <path>           CLIP-G text encoder weights\n"
         "  --t5xxl <path>            T5XXL text encoder weights\n"
+        "  --llm <path>              LLM text encoder weights (MiniMax-H3/Qwen)\n"
         "  --negative-prompt <text>  Negative prompt text, default: empty\n"
         "  -o, --output <path>       Output image/video path, default: output.png\n"
         "  -W, --width <int>         Image width, default: 1024\n"
         "  -H, --height <int>        Image height, default: 1024\n"
-        "  --frames <int>            Video frame count, default: 1\n"
+        "  --frames, --video-frames <int>  Video frame count, default: 1\n"
         "  --fps <int>               Video fps, default: 16\n"
         "  --steps <int>             Sampling steps, default: 20\n"
         "  -s, --seed <int64>        Seed, default: -1\n"
@@ -116,6 +119,7 @@ static void print_usage(const char* prog) {
         "  --profile-graph-cuts-all-ranks\n"
         "                            Print graph-cut profile from every parallel rank\n"
         "  --help              Show this help\n",
+        prog,
         prog,
         prog
     );
@@ -442,10 +446,9 @@ static bool save_mjpg_avi(const char* path, const ed_video_t& video, int fps, in
         AviIndexEntry entry{};
         std::memcpy(entry.fourcc, "00dc", 4);
         entry.flags = 0x10;
-        // idx1 offsets are relative to the start of the 'movi' chunk data (i.e. the
-        // byte after the "movi" FourCC), not absolute file offsets. movi_size_pos
-        // points at the LIST size field; +8 skips that size field and the "movi" tag.
-        entry.offset = static_cast<uint32_t>(avi.size() - (movi_size_pos + 8));
+        // idx1 offsets are relative to the "movi" FourCC. movi_size_pos points at
+        // the LIST size field, so the first media chunk starts four bytes later.
+        entry.offset = static_cast<uint32_t>(avi.size() - (movi_size_pos + 4));
         entry.size = static_cast<uint32_t>(jpg.size());
 
         write_fourcc(avi, "00dc");
@@ -556,6 +559,81 @@ static bool save_video(const char* path, const ed_video_t& video, int fps) {
     return false;
 }
 
+static bool save_wav(const char* path, const ed_video_t& video) {
+    if (path == nullptr || video.audio == nullptr || video.audio_sample_count <= 0 ||
+        video.audio_channels <= 0 || video.audio_sample_rate <= 0) {
+        return false;
+    }
+    const uint32_t channels = static_cast<uint32_t>(video.audio_channels);
+    const uint32_t sample_rate = static_cast<uint32_t>(video.audio_sample_rate);
+    const uint32_t sample_count = static_cast<uint32_t>(video.audio_sample_count);
+    const uint32_t data_size = sample_count * channels * sizeof(int16_t);
+    FILE* file = std::fopen(path, "wb");
+    if (file == nullptr) {
+        return false;
+    }
+    auto put_u16 = [&](uint16_t value) { return std::fwrite(&value, sizeof(value), 1, file) == 1; };
+    auto put_u32 = [&](uint32_t value) { return std::fwrite(&value, sizeof(value), 1, file) == 1; };
+    const bool header_ok = std::fwrite("RIFF", 1, 4, file) == 4 && put_u32(36 + data_size) &&
+                           std::fwrite("WAVEfmt ", 1, 8, file) == 8 && put_u32(16) && put_u16(1) &&
+                           put_u16(static_cast<uint16_t>(channels)) && put_u32(sample_rate) &&
+                           put_u32(sample_rate * channels * sizeof(int16_t)) &&
+                           put_u16(static_cast<uint16_t>(channels * sizeof(int16_t))) && put_u16(16) &&
+                           std::fwrite("data", 1, 4, file) == 4 && put_u32(data_size);
+    bool samples_ok = header_ok;
+    for (uint32_t sample = 0; samples_ok && sample < sample_count; ++sample) {
+        for (uint32_t channel = 0; channel < channels; ++channel) {
+            const float value = std::clamp(video.audio[sample * channels + channel], -1.0f, 1.0f);
+            const int16_t pcm = static_cast<int16_t>(std::lround(value * 32767.0f));
+            samples_ok = std::fwrite(&pcm, sizeof(pcm), 1, file) == 1;
+            if (!samples_ok) break;
+        }
+    }
+    return std::fclose(file) == 0 && samples_ok;
+}
+
+static bool save_video_with_audio(const char* path, const ed_video_t& video, int fps, bool* audio_muxed) {
+    if (audio_muxed != nullptr) {
+        *audio_muxed = false;
+    }
+    if (video.audio == nullptr || video.audio_sample_count <= 0) {
+        return save_video(path, video, fps);
+    }
+    const fs::path output(path);
+    const fs::path video_tmp = output.string() + ".video.tmp.avi";
+    const fs::path wav_path = output.string() + ".wav";
+    if (!save_video(video_tmp.c_str(), video, fps) || !save_wav(wav_path.c_str(), video)) {
+        std::error_code error;
+        fs::remove(video_tmp, error);
+        return false;
+    }
+    const std::string ext = path_extension(path);
+    const char* audio_codec = ext == ".avi" ? "pcm_s16le" : (ext == ".webm" ? "libopus" : "aac");
+    const std::string command = shell_quote(find_ffmpeg_binary().c_str()) +
+                                " -hide_banner -loglevel error -y -i " + shell_quote(video_tmp.c_str()) +
+                                " -i " + shell_quote(wav_path.c_str()) +
+                                " -c:v copy -c:a " + audio_codec + " " + shell_quote(path);
+    const int status = std::system(command.c_str());
+    std::error_code error;
+    if (status != 0) {
+        fs::remove(output, error);
+        fs::rename(video_tmp, output, error);
+        if (error) {
+            std::fprintf(stderr, "ffmpeg failed while muxing audio, status=%d; video remains at %s and WAV at %s\n",
+                         status, video_tmp.c_str(), wav_path.c_str());
+            return false;
+        }
+        std::fprintf(stderr, "ffmpeg failed while muxing audio, status=%d; saved AVI and WAV sidecar at %s\n",
+                     status, wav_path.c_str());
+        return true;
+    }
+    fs::remove(video_tmp, error);
+    if (audio_muxed != nullptr) {
+        *audio_muxed = true;
+    }
+    return true;
+}
+
 int main(int argc, char** argv) {
 
     for (int i = 1; i < argc; ++i) {
@@ -607,9 +685,12 @@ int main(int argc, char** argv) {
     ctx_params.model_path = args.model_path;
     ctx_params.diffusion_model_path = args.diffusion_model_path;
     ctx_params.vae_path = args.vae_path;
+    ctx_params.audio_vae_path = args.audio_vae_path;
     ctx_params.clip_l_path = args.clip_l_path;
     ctx_params.clip_g_path = args.clip_g_path;
     ctx_params.t5xxl_path = args.t5xxl_path;
+    ctx_params.llm_path = args.llm_path;
+    ctx_params.llm_vision_path = args.llm_vision_path;
     ctx_params.cfg_parallel_size = args.cfg_parallel_size;
     ctx_params.tp_parallel_size = args.tp_parallel_size;
     ctx_params.sp_parallel_size = args.sp_parallel_size;
@@ -719,7 +800,8 @@ int main(int argc, char** argv) {
 
         const std::string output_path = video_output_path(args.output_path, args.video_format);
         auto ed_wall_save0 = ed_wall_clock::now();
-        bool ed_save_ok = save_video(output_path.c_str(), output, args.fps);
+        bool audio_muxed = false;
+        bool ed_save_ok = save_video_with_audio(output_path.c_str(), output, args.fps, &audio_muxed);
         ed_wall_save = ed_wall_ms(ed_wall_save0, ed_wall_clock::now());
         if (!ed_save_ok) {
             std::fprintf(stderr, "failed to save output video: %s\n", output_path.c_str());
@@ -728,7 +810,11 @@ int main(int argc, char** argv) {
             return 5;
         }
 
-        std::printf("saved video to %s\n", output_path.c_str());
+        if (output.audio != nullptr && output.audio_sample_count > 0 && !audio_muxed) {
+            std::printf("saved video to %s with WAV sidecar %s.wav\n", output_path.c_str(), output_path.c_str());
+        } else {
+            std::printf("saved video%s to %s\n", audio_muxed ? " with audio" : "", output_path.c_str());
+        }
 
         ed_free_video(&output);
     } else {
