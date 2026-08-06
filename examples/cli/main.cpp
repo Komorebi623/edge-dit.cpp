@@ -756,6 +756,8 @@ int main(int argc, char** argv) {
     if (args.video) {
         ed_video_generation_params_t gen_params;
         ed_video_generation_params_init(&gen_params);
+        ed_image_t init_image = {};
+        ed_image_t end_image = {};
 
         gen_params.prompt = args.prompt;
         gen_params.negative_prompt = args.negative_prompt;
@@ -771,6 +773,21 @@ int main(int argc, char** argv) {
         gen_params.sample.distilled_guidance = args.guidance;
         gen_params.sample.flow_shift = args.flow_shift;
         apply_cache_args(args, &gen_params.sample);
+        if (args.image_path != nullptr && std::strlen(args.image_path) > 0) {
+            if (!load_image(args.image_path, &init_image)) {
+                ed_free_context(ctx);
+                return 6;
+            }
+            gen_params.init_image = &init_image;
+        }
+        if (args.end_image_path != nullptr && std::strlen(args.end_image_path) > 0) {
+            if (!load_image(args.end_image_path, &end_image)) {
+                ed_free_image(&init_image);
+                ed_free_context(ctx);
+                return 6;
+            }
+            gen_params.end_image = &end_image;
+        }
 
         ed_video_t output;
         auto ed_wall_gen0 = ed_wall_clock::now();
@@ -782,6 +799,8 @@ int main(int argc, char** argv) {
             if (err != nullptr && std::strlen(err) > 0) {
                 std::fprintf(stderr, "last error: %s\n", err);
             }
+            ed_free_image(&init_image);
+            ed_free_image(&end_image);
             ed_free_context(ctx);
             return 3;
         }
@@ -817,6 +836,8 @@ int main(int argc, char** argv) {
         }
 
         ed_free_video(&output);
+        ed_free_image(&init_image);
+        ed_free_image(&end_image);
     } else {
         ed_image_generation_params_t gen_params;
         ed_image_generation_params_init(&gen_params);

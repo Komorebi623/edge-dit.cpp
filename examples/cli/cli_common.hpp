@@ -463,6 +463,7 @@ struct FluxCliArgs {
     const char* prompt = nullptr;
     const char* negative_prompt = nullptr;
     const char* image_path = nullptr;
+    const char* end_image_path = nullptr;
     const char* output_path = "output.png";
     const char* video_format = nullptr;
     const char* backend = nullptr;
@@ -593,8 +594,10 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
                    std::strcmp(key, "--init_img") == 0 || std::strcmp(key, "-i") == 0) {
             args->image_path = require_value(key);
             if (!args->image_path) return false;
-        } else if (std::strcmp(key, "--end-img") == 0 || std::strcmp(key, "--end_img") == 0 ||
-                   std::strcmp(key, "--ref-image") == 0 || std::strcmp(key, "--ref_image") == 0 ||
+        } else if (std::strcmp(key, "--end-img") == 0 || std::strcmp(key, "--end_img") == 0) {
+            args->end_image_path = require_value(key);
+            if (!args->end_image_path) return false;
+        } else if (std::strcmp(key, "--ref-image") == 0 || std::strcmp(key, "--ref_image") == 0 ||
                    std::strcmp(key, "--ref-video") == 0 || std::strcmp(key, "--ref_video") == 0 ||
                    std::strcmp(key, "--ref-audio") == 0 || std::strcmp(key, "--ref_audio") == 0 ||
                    std::strcmp(key, "-r") == 0) {
