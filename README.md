@@ -226,7 +226,9 @@ and command-line usage, see:
 Thank you to everyone who has contributed to edge-dit.cpp.
 
 <a href="https://github.com/THU-MIG/edge-dit.cpp/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=THU-MIG/edge-dit.cpp" alt="edge-dit.cpp contributors">
+  <img
+    src="https://contrib.rocks/image?repo=THU-MIG/edge-dit.cpp&amp;v=2"
+    alt="edge-dit.cpp contributors">
 </a>
 
 For contribution guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md) and
