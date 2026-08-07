@@ -2,18 +2,25 @@
   <img src="assets/logo.png" alt="edge-dit.cpp logo" width="100%">
 </p>
 
-<h1>edge-dit.cpp</h1>
+<h1 align="center">edge-dit.cpp</h1>
 
 <p align="center">
-  <strong>A lightweight native C/C++ runtime for Diffusion Transformer inference
-  on resource-constrained devices and local deployment environments.</strong>
+  <strong>A lightweight C/C++ inference engine for efficient Diffusion Transformer (DiT)
+  inference on local and resource-constrained devices.</strong>
 </p>
 
 [![Status](https://img.shields.io/badge/status-alpha-orange)](#latest-news)
 [![Backend](https://img.shields.io/badge/backend-CUDA--first-blue)](#backend-support)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](#license)
 
-edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for local, edge, and resource-constrained deployment. Built on ggml, it provides a unified runtime for image generation, image editing, and video generation, with explicit control over model loading, memory usage, graph execution, and backend selection.
+**edge-dit.cpp** is an open-source, DiT-first C/C++ inference engine for efficient
+**Diffusion Transformer (DiT)** inference. Built on **ggml**, it provides a unified
+runtime for image generation, image editing, and video generation across local,
+edge, and resource-constrained deployment environments.
+
+It supports major DiT model families including **FLUX.1, Stable Diffusion 3/3.5,
+Qwen-Image, and Wan**, with explicit control over model loading, memory usage,
+graph execution, quantization, device placement, and backend selection.
 
 ## Features
 
