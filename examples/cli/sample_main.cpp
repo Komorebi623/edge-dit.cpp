@@ -57,7 +57,8 @@ void print_usage(const char* prog) {
         "  %s --model <diffusers-dir> --prompt_file <txt> --output_dir <dir> [options]\n\n"
         "Required:\n"
         "  --model <path>            Diffusers model directory (or component flags:\n"
-        "                            --diffusion-model/--vae/--clip_l/[--clip_g]/(--t5xxl|--no-t5))\n"
+        "                            --diffusion-model/--vae/--clip_l/[--clip_g]/(--t5xxl|--no-t5),\n"
+        "                            or MiniMax-H3 --diffusion-model/--vae/[--audio-vae]/--llm)\n"
         "  --prompt_file <path>      Text file, one prompt per line\n"
         "  --output_dir <path>       Output run directory (created)\n\n"
         "Sampling:\n"
@@ -71,8 +72,8 @@ void print_usage(const char* prog) {
         "  --flow_shift <float>      Flow scheduler shift. Default model default\n"
         "  --negative_prompt <text>  Negative prompt (used when cfg_scale != 1). Default empty\n"
         "  --image <path>            Input/reference image for image-editing models\n"
-        "  --video                   Generate video frames (calls ed_generate_video; writes .avi)\n"
-        "  --frames <int>            Video frame count (with --video). Default 1\n"
+        "  --video, -M vid_gen       Generate video frames (calls ed_generate_video; writes .avi)\n"
+        "  --frames, --video-frames <int>  Video frame count (with --video). Default 1\n"
         "  --fps <int>               Video fps (with --video). Default 16\n"
         "  --start_index <int>       First prompt index (inclusive). Default 0\n"
         "  --end_index <int>         Last prompt index (exclusive). Default all\n"
@@ -529,9 +530,12 @@ int main(int argc, char** argv) {
     ctx_params.model_path = args.model_path;
     ctx_params.diffusion_model_path = args.diffusion_model_path;
     ctx_params.vae_path = args.vae_path;
+    ctx_params.audio_vae_path = args.audio_vae_path;
     ctx_params.clip_l_path = args.clip_l_path;
     ctx_params.clip_g_path = args.clip_g_path;
     ctx_params.t5xxl_path = args.t5xxl_path;
+    ctx_params.llm_path = args.llm_path;
+    ctx_params.llm_vision_path = args.llm_vision_path;
     ctx_params.cfg_parallel_size = args.cfg_parallel_size;
     ctx_params.tp_parallel_size = args.tp_parallel_size;
     ctx_params.sp_parallel_size = args.sp_parallel_size;

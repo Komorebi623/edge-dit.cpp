@@ -195,6 +195,7 @@ const char* ed_version_name(SDVersion version) {
         case VERSION_WAN2_2_TI2V: return "wan2.2-ti2v";
         case VERSION_QWEN_IMAGE: return "qwen-image";
         case VERSION_QWEN_IMAGE_EDIT: return "qwen-image-edit";
+        case VERSION_MINIMAX_H3: return "minimax-h3";
         case VERSION_ANIMA: return "anima";
         case VERSION_FLUX2: return "flux2";
         case VERSION_FLUX2_KLEIN: return "flux2-klein";
@@ -831,6 +832,17 @@ bool ModelLoader::load_model_files(const ed_context_params_t& params,
         loaded_any = true;
     }
 
+    if (non_empty(params.audio_vae_path)) {
+        if (!load_optional_file(params.audio_vae_path,
+                                "audio_vae.",
+                                "audio vae",
+                                true,
+                                error)) {
+            return false;
+        }
+        loaded_any = true;
+    }
+
     if (non_empty(params.taesd_path)) {
         const bool ok = load_optional_file(params.taesd_path,
                                            "tae.",
@@ -1359,6 +1371,10 @@ SDVersion ModelLoader::get_ld_version() {
         if (contains(name, "model.diffusion_model.transformer_blocks.0.img_mod.1.weight")) {
             return VERSION_QWEN_IMAGE;
         }
+        if (contains(name, "model.diffusion_model.video_patch_proj.weight") &&
+            tensor_storage_map_.find("model.diffusion_model.audio_patch_proj.weight") != tensor_storage_map_.end()) {
+            return VERSION_MINIMAX_H3;
+        }
         // Wan video DiT: blocks carry a cross_attn sub-module (text conditioning)
         // that no other supported architecture uses, and a 3-D patch_embedding.
         // Diffusers loading recognizes Wan via config.json's "Wan" class, but a
@@ -1867,6 +1883,9 @@ bool ModelLoader::load_tensors(std::map<std::string, ggml_tensor*>& tensors,
     }
 
     for (const auto& item : tensors) {
+        if (starts_with(item.first, "__ed_")) {
+            continue;
+        }
         if (tensor_names_in_file.find(item.first) == tensor_names_in_file.end()) {
             LOG_ERROR("tensor '%s' not in model file", item.first.c_str());
             return false;

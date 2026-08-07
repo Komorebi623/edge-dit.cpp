@@ -135,6 +135,10 @@ Command example: [Qwen-Image-Edit CLI](cli.md#qwen-image-edit).
 
 Wan video generation uses `--video`, `--frames`, and `--fps`.
 
+MiniMax-H3 video + audio generation supports text, first-frame, first+last-frame,
+and Ref2VA conditioning through standalone component loading. See
+[MiniMax-H3 usage](minimax-h3.md).
+
 Supported output formats are `auto`, `avi`, `mp4`, `mov`, `mkv`, and `webm`.
 The CLI uses `ED_FFMPEG` when set and can also find imageio-ffmpeg binaries in
 an active Python environment.

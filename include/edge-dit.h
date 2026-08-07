@@ -114,6 +114,20 @@ typedef struct ed_image_t {
     uint8_t * data;
 } ed_image_t;
 
+typedef struct ed_audio_t {
+    uint32_t sample_rate;
+    uint32_t channels;
+    uint64_t sample_count;
+    const float * data;
+} ed_audio_t;
+
+typedef struct ed_ref_video_t {
+    const ed_image_t * frames;
+    int frame_count;
+    int fps;
+    ed_audio_t audio;
+} ed_ref_video_t;
+
 typedef struct ed_image_batch_t {
     ed_image_t * images;
     int count;
@@ -122,6 +136,10 @@ typedef struct ed_image_batch_t {
 typedef struct ed_video_t {
     ed_image_t * frames;
     int frame_count;
+    float * audio;
+    int audio_sample_count;
+    int audio_channels;
+    int audio_sample_rate;
 } ed_video_t;
 
 typedef struct ed_lora_t {
@@ -152,6 +170,7 @@ typedef struct ed_context_params_t {
     const char * llm_path;
     const char * llm_vision_path;
     const char * vae_path;
+    const char * audio_vae_path;
     const char * taesd_path;
     const char * control_net_path;
 
@@ -254,6 +273,13 @@ typedef struct ed_video_generation_params_t {
 
     const ed_image_t * init_image;
     const ed_image_t * end_image;
+
+    const ed_image_t * ref_images;
+    int ref_image_count;
+    const ed_ref_video_t * ref_videos;
+    int ref_video_count;
+    const ed_audio_t * ref_audios;
+    int ref_audio_count;
 
     const ed_image_t * control_frames;
     int control_frame_count;

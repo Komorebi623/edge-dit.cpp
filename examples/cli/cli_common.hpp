@@ -454,12 +454,20 @@ struct FluxCliArgs {
     const char* model_path = nullptr;
     const char* diffusion_model_path = nullptr;
     const char* vae_path = nullptr;
+    const char* audio_vae_path = nullptr;
     const char* clip_l_path = nullptr;
     const char* clip_g_path = nullptr;
     const char* t5xxl_path = nullptr;
+    const char* llm_path = nullptr;
+    const char* llm_vision_path = nullptr;
     const char* prompt = nullptr;
     const char* negative_prompt = nullptr;
     const char* image_path = nullptr;
+    const char* end_image_path = nullptr;
+    std::vector<std::string> ref_image_paths;
+    std::vector<std::string> ref_video_paths;
+    std::vector<std::string> ref_video_audio_paths;
+    std::vector<std::string> ref_audio_paths;
     const char* output_path = "output.png";
     const char* video_format = nullptr;
     const char* backend = nullptr;
@@ -550,6 +558,12 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
 
         if (std::strcmp(key, "--video") == 0) {
             args->video = true;
+        } else if (std::strcmp(key, "-M") == 0 || std::strcmp(key, "--mode") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            if (std::strcmp(v, "vid_gen") == 0) {
+                args->video = true;
+            }
         } else if (std::strcmp(key, "--video-format") == 0) {
             args->video_format = require_value(key);
         } else if (std::strcmp(key, "--model") == 0 || std::strcmp(key, "--model_path") == 0) {
@@ -558,12 +572,18 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->diffusion_model_path = require_value(key);
         } else if (std::strcmp(key, "--vae") == 0) {
             args->vae_path = require_value(key);
+        } else if (std::strcmp(key, "--audio-vae") == 0 || std::strcmp(key, "--audio_vae") == 0) {
+            args->audio_vae_path = require_value(key);
         } else if (std::strcmp(key, "--clip_l") == 0) {
             args->clip_l_path = require_value(key);
         } else if (std::strcmp(key, "--clip_g") == 0) {
             args->clip_g_path = require_value(key);
         } else if (std::strcmp(key, "--t5xxl") == 0) {
             args->t5xxl_path = require_value(key);
+        } else if (std::strcmp(key, "--llm") == 0) {
+            args->llm_path = require_value(key);
+        } else if (std::strcmp(key, "--llm_vision") == 0 || std::strcmp(key, "--llm-vision") == 0) {
+            args->llm_vision_path = require_value(key);
         } else if (std::strcmp(key, "--prompt") == 0 || std::strcmp(key, "-p") == 0) {
             args->prompt = require_value(key);
         } else if (std::strcmp(key, "--prompt_file") == 0 || std::strcmp(key, "--prompt-file") == 0) {
@@ -574,9 +594,30 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
                    std::strcmp(key, "--negative_prompt") == 0) {
             args->negative_prompt = require_value(key);
             if (!args->negative_prompt) return false;
-        } else if (std::strcmp(key, "--image") == 0 || std::strcmp(key, "-i") == 0) {
+        } else if (std::strcmp(key, "--image") == 0 || std::strcmp(key, "--init-img") == 0 ||
+                   std::strcmp(key, "--init_img") == 0 || std::strcmp(key, "-i") == 0) {
             args->image_path = require_value(key);
             if (!args->image_path) return false;
+        } else if (std::strcmp(key, "--end-img") == 0 || std::strcmp(key, "--end_img") == 0) {
+            args->end_image_path = require_value(key);
+            if (!args->end_image_path) return false;
+        } else if (std::strcmp(key, "--ref-image") == 0 || std::strcmp(key, "--ref_image") == 0 ||
+                   std::strcmp(key, "-r") == 0) {
+            const char* path = require_value(key);
+            if (!path) return false;
+            args->ref_image_paths.emplace_back(path);
+        } else if (std::strcmp(key, "--ref-video") == 0 || std::strcmp(key, "--ref_video") == 0) {
+            const char* path = require_value(key);
+            if (!path) return false;
+            args->ref_video_paths.emplace_back(path);
+        } else if (std::strcmp(key, "--ref-video-audio") == 0 || std::strcmp(key, "--ref_video_audio") == 0) {
+            const char* path = require_value(key);
+            if (!path) return false;
+            args->ref_video_audio_paths.emplace_back(path);
+        } else if (std::strcmp(key, "--ref-audio") == 0 || std::strcmp(key, "--ref_audio") == 0) {
+            const char* path = require_value(key);
+            if (!path) return false;
+            args->ref_audio_paths.emplace_back(path);
         } else if (std::strcmp(key, "--output") == 0 || std::strcmp(key, "-o") == 0) {
             args->output_path = require_value(key);
         } else if (std::strcmp(key, "--width") == 0 || std::strcmp(key, "-W") == 0) {
@@ -587,7 +628,8 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             const char* v = require_value(key);
             if (!v) return false;
             args->height = parse_int_value(v, args->height);
-        } else if (std::strcmp(key, "--frames") == 0) {
+        } else if (std::strcmp(key, "--frames") == 0 || std::strcmp(key, "--video-frames") == 0 ||
+                   std::strcmp(key, "--video_frames") == 0) {
             const char* v = require_value(key);
             if (!v) return false;
             args->frames = parse_int_value(v, args->frames);
@@ -777,11 +819,18 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             if (!v) return false;
             args->max_vram = parse_float_value(v, 0.0f);
         } else if (std::strcmp(key, "--flash-attention") == 0 ||
-                   std::strcmp(key, "--flash-attn") == 0) {
+                   std::strcmp(key, "--flash-attn") == 0 ||
+                   std::strcmp(key, "--diffusion-fa") == 0 ||
+                   std::strcmp(key, "--diffusion_fa") == 0) {
             args->flash_attention = true;
         } else if (std::strcmp(key, "--no-flash-attention") == 0 ||
                    std::strcmp(key, "--no-flash-attn") == 0) {
             args->flash_attention = false;
+        } else if (std::strcmp(key, "--rng") == 0) {
+            const char* ignored_rng = require_value(key);
+            if (!ignored_rng) return false;
+        } else if (std::strcmp(key, "-v") == 0 || std::strcmp(key, "--verbose") == 0) {
+            // Accepted for sd.cpp CLI compatibility; edge-dit logging is controlled externally.
         } else if (std::strcmp(key, "--cfg-parallel-size") == 0 ||
                    std::strcmp(key, "--cfg-size") == 0) {
             const char* v = require_value(key);
@@ -820,9 +869,13 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         args->vae_path != nullptr && std::strlen(args->vae_path) > 0 &&
         args->clip_l_path != nullptr && std::strlen(args->clip_l_path) > 0 &&
         (args->no_t5 || (args->t5xxl_path != nullptr && std::strlen(args->t5xxl_path) > 0));
+    const bool has_minimax_h3_components =
+        args->diffusion_model_path != nullptr && std::strlen(args->diffusion_model_path) > 0 &&
+        args->vae_path != nullptr && std::strlen(args->vae_path) > 0 &&
+        args->llm_path != nullptr && std::strlen(args->llm_path) > 0;
 
-    if (!has_full_model && !has_components) {
-        std::fprintf(stderr, "--model or the full --diffusion-model/--vae/--clip_l/(--t5xxl or --no-t5) set is required\n");
+    if (!has_full_model && !has_components && !has_minimax_h3_components) {
+        std::fprintf(stderr, "--model, --diffusion-model/--vae/--clip_l/(--t5xxl or --no-t5), or --diffusion-model/--vae/--llm is required\n");
         return false;
     }
 
@@ -847,6 +900,11 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
 
     if (args->fps <= 0) {
         std::fprintf(stderr, "fps must be positive\n");
+        return false;
+    }
+
+    if (args->ref_video_audio_paths.size() > args->ref_video_paths.size()) {
+        std::fprintf(stderr, "each --ref-video-audio needs a corresponding --ref-video\n");
         return false;
     }
 

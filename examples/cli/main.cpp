@@ -14,8 +14,62 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+#include <fstream>
 
 namespace fs = std::filesystem;
+
+inline bool load_image(const char* path, ed_image_t* image);
+
+static uint16_t read_le16(const uint8_t* data) { return static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8); }
+static uint32_t read_le32(const uint8_t* data) { return static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) | (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 24); }
+
+static bool load_wav(const std::string& path, std::vector<float>* samples, ed_audio_t* audio) {
+    std::ifstream file(path, std::ios::binary);
+    uint8_t header[12];
+    if (!file.read(reinterpret_cast<char*>(header), sizeof(header)) || std::memcmp(header, "RIFF", 4) != 0 || std::memcmp(header + 8, "WAVE", 4) != 0) return false;
+    uint16_t format = 0, channels = 0, bits = 0; uint32_t rate = 0, data_size = 0; std::streampos data_pos = -1;
+    while (file.good()) { uint8_t chunk[8]; if (!file.read(reinterpret_cast<char*>(chunk), 8)) break; uint32_t size = read_le32(chunk + 4); auto pos = file.tellg();
+        if (std::memcmp(chunk, "fmt ", 4) == 0) { std::vector<uint8_t> value(size); if (!file.read(reinterpret_cast<char*>(value.data()), size) || size < 16) return false; format = read_le16(value.data()); channels = read_le16(value.data() + 2); rate = read_le32(value.data() + 4); bits = read_le16(value.data() + 14); if (format == 0xfffe && size >= 40) format = read_le16(value.data() + 24); }
+        else if (std::memcmp(chunk, "data", 4) == 0) { data_pos = pos; data_size = size; file.seekg(size, std::ios::cur); }
+        else file.seekg(size, std::ios::cur); if (size & 1) file.seekg(1, std::ios::cur);
+    }
+    if (data_pos == std::streampos(-1) || channels == 0 || rate == 0 ||
+        !((format == 1 && (bits == 8 || bits == 16 || bits == 24 || bits == 32)) ||
+          (format == 3 && (bits == 32 || bits == 64)))) return false;
+    const size_t bytes_per = bits / 8, count = data_size / bytes_per; samples->resize(count); file.clear(); file.seekg(data_pos);
+    std::vector<uint8_t> bytes(data_size); if (!file.read(reinterpret_cast<char*>(bytes.data()), data_size)) return false;
+    for (size_t index = 0; index < count; ++index) {
+        const uint8_t* sample = bytes.data() + index * bytes_per;
+        if (format == 3 && bits == 32) {
+            float value;
+            std::memcpy(&value, sample, sizeof(value));
+            (*samples)[index] = std::clamp(value, -1.f, 1.f);
+        } else if (format == 3) {
+            double value;
+            std::memcpy(&value, sample, sizeof(value));
+            (*samples)[index] = std::clamp(static_cast<float>(value), -1.f, 1.f);
+        } else if (bits == 8) {
+            (*samples)[index] = (static_cast<float>(sample[0]) - 128.f) / 128.f;
+        } else if (bits == 16) {
+            (*samples)[index] = static_cast<float>(static_cast<int16_t>(read_le16(sample))) / 32768.f;
+        } else if (bits == 24) {
+            int32_t value = static_cast<int32_t>(sample[0]) |
+                            (static_cast<int32_t>(sample[1]) << 8) |
+                            (static_cast<int32_t>(sample[2]) << 16);
+            if (value & 0x00800000) value |= ~0x00ffffff;
+            (*samples)[index] = static_cast<float>(value) / 8388608.f;
+        } else {
+            (*samples)[index] = static_cast<float>(static_cast<int32_t>(read_le32(sample))) / 2147483648.f;
+        }
+    }
+    *audio = {rate, channels, count / channels, samples->data()}; return true;
+}
+
+static bool load_images_from_dir(const std::string& directory, std::vector<ed_image_t>* frames) {
+    if (!fs::is_directory(directory)) return false; std::vector<fs::path> paths;
+    for (const auto& entry : fs::directory_iterator(directory)) if (entry.is_regular_file()) { auto ext = entry.path().extension().string(); std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower); if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".webp") paths.push_back(entry.path()); }
+    std::sort(paths.begin(), paths.end()); frames->resize(paths.size()); for (size_t index = 0; index < paths.size(); ++index) if (!load_image(paths[index].c_str(), &(*frames)[index])) return false; return !frames->empty();
+}
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "ggml/examples/stb_image.h"
@@ -31,20 +85,23 @@ static void print_usage(const char* prog) {
         "Usage:\n"
         "  %s --model <model-or-diffusers-dir> --prompt <text> [options]\n"
         "  %s --diffusion-model <path> --vae <path> --clip_l <path> [--clip_g <path>] (--t5xxl <path> | --no-t5) --prompt <text> [options]\n"
+        "  %s -M vid_gen --diffusion-model <path> --vae <path> [--audio-vae <path>] --llm <path> --prompt <text> [options]\n"
         "Options:\n"
-        "  --video                   Generate video frames instead of an image\n"
+        "  --video, -M vid_gen       Generate video frames instead of an image\n"
         "  --video-format <fmt>      Video format: auto, avi, mp4, mov, mkv, webm. Default: auto\n"
         "  -i, --image <path>        Input/reference image for image-edit models\n"
         "  --diffusion-model <path>  Standalone DiT transformer weights\n"
         "  --vae <path>              Standalone VAE weights\n"
+        "  --audio-vae <path>        Standalone audio VAE weights (MiniMax-H3)\n"
         "  --clip_l <path>           CLIP-L text encoder weights\n"
         "  --clip_g <path>           CLIP-G text encoder weights\n"
         "  --t5xxl <path>            T5XXL text encoder weights\n"
+        "  --llm <path>              LLM text encoder weights (MiniMax-H3/Qwen)\n"
         "  --negative-prompt <text>  Negative prompt text, default: empty\n"
         "  -o, --output <path>       Output image/video path, default: output.png\n"
         "  -W, --width <int>         Image width, default: 1024\n"
         "  -H, --height <int>        Image height, default: 1024\n"
-        "  --frames <int>            Video frame count, default: 1\n"
+        "  --frames, --video-frames <int>  Video frame count, default: 1\n"
         "  --fps <int>               Video fps, default: 16\n"
         "  --steps <int>             Sampling steps, default: 20\n"
         "  -s, --seed <int64>        Seed, default: -1\n"
@@ -116,6 +173,7 @@ static void print_usage(const char* prog) {
         "  --profile-graph-cuts-all-ranks\n"
         "                            Print graph-cut profile from every parallel rank\n"
         "  --help              Show this help\n",
+        prog,
         prog,
         prog
     );
@@ -442,10 +500,9 @@ static bool save_mjpg_avi(const char* path, const ed_video_t& video, int fps, in
         AviIndexEntry entry{};
         std::memcpy(entry.fourcc, "00dc", 4);
         entry.flags = 0x10;
-        // idx1 offsets are relative to the start of the 'movi' chunk data (i.e. the
-        // byte after the "movi" FourCC), not absolute file offsets. movi_size_pos
-        // points at the LIST size field; +8 skips that size field and the "movi" tag.
-        entry.offset = static_cast<uint32_t>(avi.size() - (movi_size_pos + 8));
+        // idx1 offsets are relative to the "movi" FourCC. movi_size_pos points at
+        // the LIST size field, so the first media chunk starts four bytes later.
+        entry.offset = static_cast<uint32_t>(avi.size() - (movi_size_pos + 4));
         entry.size = static_cast<uint32_t>(jpg.size());
 
         write_fourcc(avi, "00dc");
@@ -556,6 +613,81 @@ static bool save_video(const char* path, const ed_video_t& video, int fps) {
     return false;
 }
 
+static bool save_wav(const char* path, const ed_video_t& video) {
+    if (path == nullptr || video.audio == nullptr || video.audio_sample_count <= 0 ||
+        video.audio_channels <= 0 || video.audio_sample_rate <= 0) {
+        return false;
+    }
+    const uint32_t channels = static_cast<uint32_t>(video.audio_channels);
+    const uint32_t sample_rate = static_cast<uint32_t>(video.audio_sample_rate);
+    const uint32_t sample_count = static_cast<uint32_t>(video.audio_sample_count);
+    const uint32_t data_size = sample_count * channels * sizeof(int16_t);
+    FILE* file = std::fopen(path, "wb");
+    if (file == nullptr) {
+        return false;
+    }
+    auto put_u16 = [&](uint16_t value) { return std::fwrite(&value, sizeof(value), 1, file) == 1; };
+    auto put_u32 = [&](uint32_t value) { return std::fwrite(&value, sizeof(value), 1, file) == 1; };
+    const bool header_ok = std::fwrite("RIFF", 1, 4, file) == 4 && put_u32(36 + data_size) &&
+                           std::fwrite("WAVEfmt ", 1, 8, file) == 8 && put_u32(16) && put_u16(1) &&
+                           put_u16(static_cast<uint16_t>(channels)) && put_u32(sample_rate) &&
+                           put_u32(sample_rate * channels * sizeof(int16_t)) &&
+                           put_u16(static_cast<uint16_t>(channels * sizeof(int16_t))) && put_u16(16) &&
+                           std::fwrite("data", 1, 4, file) == 4 && put_u32(data_size);
+    bool samples_ok = header_ok;
+    for (uint32_t sample = 0; samples_ok && sample < sample_count; ++sample) {
+        for (uint32_t channel = 0; channel < channels; ++channel) {
+            const float value = std::clamp(video.audio[sample * channels + channel], -1.0f, 1.0f);
+            const int16_t pcm = static_cast<int16_t>(std::lround(value * 32767.0f));
+            samples_ok = std::fwrite(&pcm, sizeof(pcm), 1, file) == 1;
+            if (!samples_ok) break;
+        }
+    }
+    return std::fclose(file) == 0 && samples_ok;
+}
+
+static bool save_video_with_audio(const char* path, const ed_video_t& video, int fps, bool* audio_muxed) {
+    if (audio_muxed != nullptr) {
+        *audio_muxed = false;
+    }
+    if (video.audio == nullptr || video.audio_sample_count <= 0) {
+        return save_video(path, video, fps);
+    }
+    const fs::path output(path);
+    const std::string ext = path_extension(path);
+    const fs::path video_tmp = output.string() + ".video.tmp" + (ext == ".avi" ? ".avi" : ext);
+    const fs::path wav_path = output.string() + ".wav";
+    if (!save_video(video_tmp.c_str(), video, fps) || !save_wav(wav_path.c_str(), video)) {
+        std::error_code error;
+        fs::remove(video_tmp, error);
+        return false;
+    }
+    const char* audio_codec = ext == ".avi" ? "pcm_s16le" : (ext == ".webm" ? "libopus" : "aac");
+    const std::string command = shell_quote(find_ffmpeg_binary().c_str()) +
+                                " -hide_banner -loglevel error -y -i " + shell_quote(video_tmp.c_str()) +
+                                " -i " + shell_quote(wav_path.c_str()) +
+                                " -c:v copy -c:a " + audio_codec + " " + shell_quote(path);
+    const int status = std::system(command.c_str());
+    std::error_code error;
+    if (status != 0) {
+        fs::remove(output, error);
+        fs::rename(video_tmp, output, error);
+        if (error) {
+            std::fprintf(stderr, "ffmpeg failed while muxing audio, status=%d; video remains at %s and WAV at %s\n",
+                         status, video_tmp.c_str(), wav_path.c_str());
+            return false;
+        }
+        std::fprintf(stderr, "ffmpeg failed while muxing audio, status=%d; saved AVI and WAV sidecar at %s\n",
+                     status, wav_path.c_str());
+        return true;
+    }
+    fs::remove(video_tmp, error);
+    if (audio_muxed != nullptr) {
+        *audio_muxed = true;
+    }
+    return true;
+}
+
 int main(int argc, char** argv) {
 
     for (int i = 1; i < argc; ++i) {
@@ -607,9 +739,12 @@ int main(int argc, char** argv) {
     ctx_params.model_path = args.model_path;
     ctx_params.diffusion_model_path = args.diffusion_model_path;
     ctx_params.vae_path = args.vae_path;
+    ctx_params.audio_vae_path = args.audio_vae_path;
     ctx_params.clip_l_path = args.clip_l_path;
     ctx_params.clip_g_path = args.clip_g_path;
     ctx_params.t5xxl_path = args.t5xxl_path;
+    ctx_params.llm_path = args.llm_path;
+    ctx_params.llm_vision_path = args.llm_vision_path;
     ctx_params.cfg_parallel_size = args.cfg_parallel_size;
     ctx_params.tp_parallel_size = args.tp_parallel_size;
     ctx_params.sp_parallel_size = args.sp_parallel_size;
@@ -675,6 +810,21 @@ int main(int argc, char** argv) {
     if (args.video) {
         ed_video_generation_params_t gen_params;
         ed_video_generation_params_init(&gen_params);
+        ed_image_t init_image = {};
+        ed_image_t end_image = {};
+        std::vector<ed_image_t> ref_images(args.ref_image_paths.size());
+        std::vector<std::vector<ed_image_t>> ref_video_frames(args.ref_video_paths.size());
+        std::vector<std::vector<float>> ref_video_audio_samples(args.ref_video_paths.size());
+        std::vector<ed_ref_video_t> ref_videos(args.ref_video_paths.size());
+        std::vector<std::vector<float>> ref_audio_samples(args.ref_audio_paths.size());
+        std::vector<ed_audio_t> ref_audios(args.ref_audio_paths.size());
+        auto free_video_references = [&]() {
+            for (auto& frames : ref_video_frames) {
+                for (ed_image_t& frame : frames) {
+                    ed_free_image(&frame);
+                }
+            }
+        };
 
         gen_params.prompt = args.prompt;
         gen_params.negative_prompt = args.negative_prompt;
@@ -690,6 +840,59 @@ int main(int argc, char** argv) {
         gen_params.sample.distilled_guidance = args.guidance;
         gen_params.sample.flow_shift = args.flow_shift;
         apply_cache_args(args, &gen_params.sample);
+        if (args.image_path != nullptr && std::strlen(args.image_path) > 0) {
+            if (!load_image(args.image_path, &init_image)) {
+                ed_free_context(ctx);
+                return 6;
+            }
+            gen_params.init_image = &init_image;
+        }
+        if (args.end_image_path != nullptr && std::strlen(args.end_image_path) > 0) {
+            if (!load_image(args.end_image_path, &end_image)) {
+                ed_free_image(&init_image);
+                ed_free_context(ctx);
+                return 6;
+            }
+            gen_params.end_image = &end_image;
+        }
+        for (size_t index = 0; index < args.ref_image_paths.size(); ++index) {
+            if (!load_image(args.ref_image_paths[index].c_str(), &ref_images[index])) {
+                for (ed_image_t& image : ref_images) ed_free_image(&image);
+                ed_free_image(&init_image);
+                ed_free_image(&end_image);
+                ed_free_context(ctx);
+                return 6;
+            }
+        }
+        if (!ref_images.empty()) {
+            gen_params.ref_images = ref_images.data();
+            gen_params.ref_image_count = static_cast<int>(ref_images.size());
+        }
+        for (size_t index = 0; index < args.ref_audio_paths.size(); ++index) {
+            if (!load_wav(args.ref_audio_paths[index], &ref_audio_samples[index], &ref_audios[index])) {
+                std::fprintf(stderr, "failed to load reference WAV '%s'\n", args.ref_audio_paths[index].c_str());
+                for (ed_image_t& image : ref_images) ed_free_image(&image);
+                free_video_references();
+                ed_free_image(&init_image); ed_free_image(&end_image); ed_free_context(ctx); return 6;
+            }
+        }
+        if (!ref_audios.empty()) { gen_params.ref_audios = ref_audios.data(); gen_params.ref_audio_count = static_cast<int>(ref_audios.size()); }
+        for (size_t index = 0; index < args.ref_video_paths.size(); ++index) {
+            if (!load_images_from_dir(args.ref_video_paths[index], &ref_video_frames[index])) {
+                std::fprintf(stderr, "failed to load reference video frames from '%s'\n", args.ref_video_paths[index].c_str());
+                for (ed_image_t& image : ref_images) ed_free_image(&image);
+                free_video_references();
+                ed_free_image(&init_image); ed_free_image(&end_image); ed_free_context(ctx); return 6;
+            }
+            ref_videos[index].frames = ref_video_frames[index].data(); ref_videos[index].frame_count = static_cast<int>(ref_video_frames[index].size()); ref_videos[index].fps = 24;
+            if (index < args.ref_video_audio_paths.size() && !load_wav(args.ref_video_audio_paths[index], &ref_video_audio_samples[index], &ref_videos[index].audio)) {
+                std::fprintf(stderr, "failed to load reference video WAV '%s'\n", args.ref_video_audio_paths[index].c_str());
+                for (ed_image_t& image : ref_images) ed_free_image(&image);
+                free_video_references();
+                ed_free_image(&init_image); ed_free_image(&end_image); ed_free_context(ctx); return 6;
+            }
+        }
+        if (!ref_videos.empty()) { gen_params.ref_videos = ref_videos.data(); gen_params.ref_video_count = static_cast<int>(ref_videos.size()); }
 
         ed_video_t output;
         auto ed_wall_gen0 = ed_wall_clock::now();
@@ -701,36 +904,61 @@ int main(int argc, char** argv) {
             if (err != nullptr && std::strlen(err) > 0) {
                 std::fprintf(stderr, "last error: %s\n", err);
             }
+            ed_free_image(&init_image);
+            ed_free_image(&end_image);
+            for (ed_image_t& image : ref_images) ed_free_image(&image);
+            free_video_references();
             ed_free_context(ctx);
             return 3;
         }
 
         if (!ed_context_parallel_is_root(ctx)) {
             ed_free_video(&output);
+            free_video_references();
+            for (ed_image_t& image : ref_images) ed_free_image(&image);
+            ed_free_image(&init_image);
+            ed_free_image(&end_image);
             ed_free_context(ctx);
             return 0;
         }
 
         if (output.frame_count <= 0 || output.frames == nullptr) {
             std::fprintf(stderr, "generation succeeded but video output is empty\n");
+            free_video_references();
+            for (ed_image_t& image : ref_images) ed_free_image(&image);
+            ed_free_image(&init_image);
+            ed_free_image(&end_image);
             ed_free_context(ctx);
             return 4;
         }
 
         const std::string output_path = video_output_path(args.output_path, args.video_format);
         auto ed_wall_save0 = ed_wall_clock::now();
-        bool ed_save_ok = save_video(output_path.c_str(), output, args.fps);
+        bool audio_muxed = false;
+        bool ed_save_ok = save_video_with_audio(output_path.c_str(), output, args.fps, &audio_muxed);
         ed_wall_save = ed_wall_ms(ed_wall_save0, ed_wall_clock::now());
         if (!ed_save_ok) {
             std::fprintf(stderr, "failed to save output video: %s\n", output_path.c_str());
             ed_free_video(&output);
+            free_video_references();
+            for (ed_image_t& image : ref_images) ed_free_image(&image);
+            ed_free_image(&init_image);
+            ed_free_image(&end_image);
             ed_free_context(ctx);
             return 5;
         }
 
-        std::printf("saved video to %s\n", output_path.c_str());
+        if (output.audio != nullptr && output.audio_sample_count > 0 && !audio_muxed) {
+            std::printf("saved video to %s with WAV sidecar %s.wav\n", output_path.c_str(), output_path.c_str());
+        } else {
+            std::printf("saved video%s to %s\n", audio_muxed ? " with audio" : "", output_path.c_str());
+        }
 
         ed_free_video(&output);
+        ed_free_image(&init_image);
+        ed_free_image(&end_image);
+        for (ed_image_t& image : ref_images) ed_free_image(&image);
+        free_video_references();
     } else {
         ed_image_generation_params_t gen_params;
         ed_image_generation_params_init(&gen_params);

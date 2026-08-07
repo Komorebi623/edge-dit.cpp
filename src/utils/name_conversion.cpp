@@ -177,6 +177,45 @@ std::string convert_cond_stage_model_name(std::string name, std::string prefix) 
     return name;
 }
 
+std::string convert_qwen3_vl_vision_name(std::string name) {
+    static const std::vector<std::pair<std::string, std::string>> qwen3_vl_deepstack_name_map{
+        {"v.deepstack_merger_list.", "deepstack_merger_list."},
+        {"v.deepstack.5.", "deepstack_merger_list.0."},
+        {"v.deepstack.8.", "deepstack_merger_list.0."},
+        {"v.deepstack.11.", "deepstack_merger_list.1."},
+        {"v.deepstack.16.", "deepstack_merger_list.1."},
+        {"v.deepstack.17.", "deepstack_merger_list.2."},
+        {"v.deepstack.24.", "deepstack_merger_list.2."},
+        {"fc1.", "linear_fc1."},
+        {"fc2.", "linear_fc2."},
+        {"ffn_up.", "linear_fc1."},
+        {"ffn_down.", "linear_fc2."},
+        {"ffn_norm.", "norm."},
+    };
+    static const std::vector<std::pair<std::string, std::string>> qwen3_vl_vision_name_map{
+        {"mm.0.", "merger.linear_fc1."},
+        {"mm.2.", "merger.linear_fc2."},
+        {"v.post_ln.", "merger.norm."},
+        {"v.position_embd.weight", "pos_embed.weight"},
+        {"v.patch_embd.weight.1", "patch_embed.proj.1.weight"},
+        {"v.patch_embd.weight", "patch_embed.proj.0.weight"},
+        {"v.patch_embd.bias", "patch_embed.bias"},
+        {"v.blk.", "blocks."},
+        {"attn_qkv.", "attn.qkv."},
+        {"attn_out.", "attn.proj."},
+        {"ffn_up.", "mlp.linear_fc1."},
+        {"ffn_down.", "mlp.linear_fc2."},
+        {"ln1.", "norm1."},
+        {"ln2.", "norm2."},
+    };
+    if (contains(name, "v.deepstack_merger_list.") || contains(name, "v.deepstack.")) {
+        replace_with_name_map(name, qwen3_vl_deepstack_name_map);
+        return name;
+    }
+    replace_with_name_map(name, qwen3_vl_vision_name_map);
+    return name;
+}
+
 // ref: https://github.com/huggingface/diffusers/blob/main/scripts/convert_diffusers_to_original_stable_diffusion.py
 std::string convert_diffusers_unet_to_original_sd1(std::string name) {
     // (stable-diffusion, HF Diffusers)
@@ -878,6 +917,9 @@ std::string convert_diffusers_qwen_image_vae_to_wan(std::string name) {
 }
 
 std::string convert_first_stage_model_name(std::string name, std::string prefix, SDVersion version) {
+    if (ed_version_is_minimax_h3(version)) {
+        return name;
+    }
     if (ed_version_is_qwen_image(version) || ed_version_is_qwen_image_edit(version) || ed_version_is_wan(version)) {
         return convert_diffusers_qwen_image_vae_to_wan(name);
     }
@@ -1200,6 +1242,16 @@ std::string convert_tensor_name(std::string name, SDVersion version) {
     }
 
     replace_with_prefix_map(name, prefix_map);
+
+    if (ed_version_is_minimax_h3(version)) {
+        const std::string hf_vision_prefix = "text_encoders.llm.model.visual.";
+        if (starts_with(name, hf_vision_prefix)) {
+            name = "text_encoders.llm.visual." + name.substr(hf_vision_prefix.size());
+        }
+        if (starts_with(name, "text_encoders.llm.visual.")) {
+            name = convert_qwen3_vl_vision_name(std::move(name));
+        }
+    }
 
     // diffusion model
     {

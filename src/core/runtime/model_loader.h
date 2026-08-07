@@ -40,6 +40,7 @@ enum SDVersion {
     VERSION_WAN2_2_TI2V,
     VERSION_QWEN_IMAGE,
     VERSION_QWEN_IMAGE_EDIT,
+    VERSION_MINIMAX_H3,
     VERSION_ANIMA,
     VERSION_FLUX2,
     VERSION_FLUX2_KLEIN,
@@ -102,6 +103,10 @@ static inline bool ed_version_is_qwen_image_edit(SDVersion version) {
     return version == VERSION_QWEN_IMAGE_EDIT;
 }
 
+static inline bool ed_version_is_minimax_h3(SDVersion version) {
+    return version == VERSION_MINIMAX_H3;
+}
+
 static inline bool ed_version_is_anima(SDVersion version) {
     return version == VERSION_ANIMA;
 }
@@ -128,6 +133,7 @@ static inline bool ed_version_is_dit(SDVersion version) {
     return ed_version_is_flux(version) || ed_version_is_flux2(version) ||
            ed_version_is_sd3(version) || ed_version_is_wan(version) ||
            ed_version_is_qwen_image(version) || ed_version_is_qwen_image_edit(version) ||
+           ed_version_is_minimax_h3(version) ||
            ed_version_is_anima(version) ||
            ed_version_is_z_image(version) || ed_version_is_ernie_image(version);
 }
