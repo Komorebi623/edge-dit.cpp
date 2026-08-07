@@ -1082,3 +1082,29 @@ Artifacts:
 - `outputs/minimax-h3/parallel-video-postprocess-full-124f20s-2026-08-08/quality/video-psnr-summary.log`
 - `outputs/minimax-h3/parallel-video-postprocess-full-124f20s-2026-08-08/quality/serial.f32le`
 - `outputs/minimax-h3/parallel-video-postprocess-full-124f20s-2026-08-08/quality/parallel.f32le`
+
+### 2026-08-08 opt-in H3 temporal VAE-part collection
+
+H3 video decoding processes long videos in overlapping five-latent-token chunks. The historical code appended every decoded chunk with `sd::ops::concat`, which reallocates and recopies all already-collected full-resolution frames on every append. A guarded alternative accumulates the unchanged per-chunk tensors and performs one final temporal allocation/copy:
+
+```bash
+ED_MINIMAX_H3_COLLECT_TEMPORAL_PARTS=1 ed-cli ...
+```
+
+The default stays on the original append behavior. The alternative retains the same VAE chunks, overlap blend loop, first/last segment handling, and final frame crop; it only changes host tensor ownership and copies. It composes with the independent parallel output conversion switch, which was enabled in both full-task variants.
+
+The full 124-frame fixed-seed FL2VA validation compared it against the accepted parallel-output baseline:
+
+| Variant | Generation | DiT | Video VAE | Video conversion | Video quality | Audio quality |
+|---|---:|---:|---:|---:|---|---|
+| Original temporal appends | `75.420s` | `62.173s` | `10.813s` | `0.119s` | baseline | baseline |
+| Collected temporal parts | `74.875s` | `62.131s` | `10.324s` | `0.121s` | PSNR `inf` | PCM exact |
+
+The measured VAE-stage difference is `0.489s`; because VAE GPU timing has modest cold-run variation, treat this as a low-risk reduction in host copying rather than a guaranteed GPU compute gain. All 124 decoded frames compare at infinite PSNR and all `331,776` audio samples are byte-identical. The change does not affect GPU memory requirements or model arithmetic.
+
+Artifacts:
+
+- `outputs/minimax-h3/collect-temporal-parts-full-124f20s-2026-08-08/collect/final.mp4`
+- `outputs/minimax-h3/collect-temporal-parts-full-124f20s-2026-08-08/quality/video-psnr-summary.log`
+- `outputs/minimax-h3/collect-temporal-parts-full-124f20s-2026-08-08/quality/reference.f32le`
+- `outputs/minimax-h3/collect-temporal-parts-full-124f20s-2026-08-08/quality/collect.f32le`

@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -17,6 +19,11 @@
 namespace MiniMaxH3VAE {
 
     constexpr int H3_VIDEO_VAE_GRAPH_SIZE = 262144;
+
+    static bool h3_env_flag_enabled(const char* name) {
+        const char* value = std::getenv(name);
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }
 
     struct CausalConv3d : public Conv3d {
         std::tuple<int, int, int> temporal_padding;
@@ -600,6 +607,29 @@ namespace MiniMaxH3VAE {
             return output;
         }
 
+        static sd::Tensor<float> concatenate_temporal_parts(const std::vector<sd::Tensor<float>>& parts) {
+            GGML_ASSERT(!parts.empty());
+            std::vector<int64_t> shape = parts.front().shape();
+            int64_t total_frames       = 0;
+            for (const auto& part : parts) {
+                GGML_ASSERT(part.dim() == static_cast<int64_t>(shape.size()));
+                for (size_t dim = 0; dim < shape.size(); ++dim) {
+                    if (dim != 2) {
+                        GGML_ASSERT(part.shape()[dim] == shape[dim]);
+                    }
+                }
+                total_frames += part.shape()[2];
+            }
+            shape[2] = total_frames;
+            sd::Tensor<float> result(shape);
+            int64_t offset = 0;
+            for (const auto& part : parts) {
+                sd::ops::slice_assign(&result, 2, offset, offset + part.shape()[2], part);
+                offset += part.shape()[2];
+            }
+            return result;
+        }
+
         sd::Tensor<float> encode(int n_threads,
                                  const sd::Tensor<float>& x,
                                  ed_tiling_params_t tiling_params,
@@ -686,7 +716,12 @@ namespace MiniMaxH3VAE {
                 input = repeat_last_frame(input, pad_tokens);
             }
 
+            const bool collect_temporal_parts = h3_env_flag_enabled("ED_MINIMAX_H3_COLLECT_TEMPORAL_PARTS");
             sd::Tensor<float> result;
+            std::vector<sd::Tensor<float>> temporal_parts;
+            if (collect_temporal_parts) {
+                temporal_parts.reserve(static_cast<size_t>(num_chunks + 1));
+            }
             sd::Tensor<float> overlap;
             for (int64_t i = 0; i < num_chunks; ++i) {
                 int64_t start = i * tokens_per_chunk;
@@ -713,8 +748,12 @@ namespace MiniMaxH3VAE {
                     first   = blend_temporal(overlap, first, frame_overlap);
                     overlap = {};
                 }
-                result = result.empty() ? std::move(first)
-                                        : sd::ops::concat(result, first, 2);
+                if (collect_temporal_parts) {
+                    temporal_parts.push_back(std::move(first));
+                } else {
+                    result = result.empty() ? std::move(first)
+                                            : sd::ops::concat(result, first, 2);
+                }
 
                 if (decoded.shape()[2] > frames_per_chunk + frame_pre_padding) {
                     overlap = sd::ops::slice(decoded,
@@ -723,9 +762,17 @@ namespace MiniMaxH3VAE {
                                              decoded.shape()[2]);
                 }
                 if (i == num_chunks - 1 && !overlap.empty()) {
-                    result  = sd::ops::concat(result, overlap, 2);
+                    if (collect_temporal_parts) {
+                        temporal_parts.push_back(std::move(overlap));
+                    } else {
+                        result = sd::ops::concat(result, overlap, 2);
+                    }
                     overlap = {};
                 }
+            }
+
+            if (collect_temporal_parts) {
+                result = concatenate_temporal_parts(temporal_parts);
             }
 
             int64_t expected_frames = input.shape()[2] <= 1 ? 1 : ((x.shape()[2] - 2) / 5) * 17 + 5;
