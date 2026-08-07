@@ -666,3 +666,66 @@ Quality sanity check:
 - Sampled frame stddevs: `54.66`, `56.61`, `55.93`, `57.80`, `52.85`
 
 Conclusion: the full 20-step run is not black and visually sane on the contact sheet. The FC2 f32 cuBLAS fix keeps the long-sequence FC2 speed path usable for this probe. A broader quality comparison against MMQ baseline and Diffusers is still needed before treating this as final release-quality parity.
+
+### 2026-08-07 committed state and Diffusers gap
+
+Committed locally after the FC2 f32-fix validation:
+
+- Main repository commit: `a761c7c Optimize MiniMax H3 CUDA inference`
+- GGML submodule commit: `b9882160 Optimize H3 Q4_K CUDA routing`
+
+Current closest same-task timing comparison on the 124-frame FL2VA benchmark (`864x480`, `steps=20`, actual 19 DiT/transformer forwards, `cfg=1`, seed `42`):
+
+| Framework/path | Transformer/DiT time | Calls | Per-call | Notes |
+|---|---:|---:|---:|---|
+| Diffusers TorchAO int4 resident | `56.724s` | `19` | `2.985s` | `outputs/minimax-h3/diffusers-fl2va-480p124-int4-resident-profile3-gpu0/final.json` |
+| edge.cpp Q4_K cuBLAS + FC2 f32-fix | `62.367s` | `19` | `3.282s` | `outputs/minimax-h3/quality-speed-q4k-fc2-f32fix-124f20s-2026-08-07/run.log` |
+
+Current gap: edge DiT is `5.643s` slower over 19 calls, or about `9.95%` slower than Diffusers transformer time. Per model call the gap is about `0.297s`.
+
+Important apples-to-apples caveat: the runs match the high-level task, resolution, frames, steps, seed, and one-forward CFG-distilled setting. They still do not have identical quantization kernels/layouts: edge uses GGUF `Q4_K_M` with selective cuBLAS fallback and FC2 f32 compute; Diffusers uses TorchAO/fbgemm int4 resident packed TensorCore layout. Therefore the remaining gap is best interpreted as backend/kernel/layout overhead, not model semantics alone.
+
+Current short op-profile after FC2 f32-fix (`56` frames, `5` steps, 4 DiT calls):
+
+- Artifact: `outputs/minimax-h3/perf-op-profile-q4k-fc2-f32fix-56f5s-2026-08-07/run.log`
+- Diffusion time: `6.666s` for 4 calls.
+- Main DiT graphs show GEMM still dominant: around `990-1003ms` GEMM per graph group, followed by attention (`155-362ms`), elementwise (`~152ms`), and layout (`~122ms`) on the main transformer graphs.
+- Full decode graph remains a separate non-DiT cost and should not be mixed into DiT-vs-Diffusers transformer comparisons.
+
+Next optimization candidates from this profile:
+
+1. Reduce remaining H3 DiT elementwise/layout overhead without changing math order: view/materialization cleanup and possibly fusing strictly layout-only paths.
+2. Inspect remaining GEMM internals, especially repeated activation conversion (`src1_to_f16`) and fp16 destination conversion (`dst_to_f32`) in cuBLAS fallback. TorchAO's advantage is still its resident packed layout avoiding repeated GGUF dequant/activation conversion in hot paths.
+3. Avoid globally forcing f32 compute except for FC2 long-sequence shape; the quality fix is intentionally shape-scoped.
+
+### 2026-08-07 FC1 fp16-only experiment
+
+A new split switch was added for diagnosis:
+
+- `ED_MINIMAX_H3_FC1_FP16_CUBLAS=1` enables fp16 Tensor Core cuBLAS for H3 MLP `fc1` only.
+- `ED_MINIMAX_H3_FC2_FP16_CUBLAS=1` enables the analogous path for `fc2` only.
+- `ED_MINIMAX_H3_MLP_FP16_CUBLAS=1` still enables both and remains experimental.
+
+56-frame, 5-step FL2VA probe with `GGML_CUDA_SM90_Q4K_CUBLAS=1`:
+
+| Variant | Diffusion | Output | Artifact |
+|---|---:|---|---|
+| Baseline FC1 f32 path | `6.853s` | non-black | `outputs/minimax-h3/perf-quality-fc1-fp16-only-56f5s-2026-08-07/baseline/final.mp4` |
+| `ED_MINIMAX_H3_FC1_FP16_CUBLAS=1` | `6.693s` | non-black but diverges | `outputs/minimax-h3/perf-quality-fc1-fp16-only-56f5s-2026-08-07/fc1_fp16/final.mp4` |
+
+Frame PSNR baseline-vs-FC1-fp16 over 56 frames: min `25.034dB`, average `33.162dB`, max `44.824dB`.
+
+Conclusion: FC1 fp16-only is not suitable as a default quality-preserving optimization. It saves only about `2.3%` diffusion time on this probe while causing visible numerical divergence. Keep it opt-in only.
+
+### 2026-08-07 FC1 fp16 with f32 compute experiment
+
+To test whether FC1 quality loss came only from fp16 accumulation/output, FC1 was rerun with `ED_MINIMAX_H3_FC1_FP16_CUBLAS=1` plus global `GGML_CUDA_FORCE_CUBLAS_COMPUTE_32F=1` on the same 56-frame, 5-step FL2VA probe.
+
+| Variant | Diffusion | Artifact |
+|---|---:|---|
+| Baseline FC1 f32 path | `6.821s` | `outputs/minimax-h3/perf-quality-fc1-fp16-f32compute-56f5s-2026-08-07/baseline/final.mp4` |
+| FC1 fp16 inputs + f32 cuBLAS compute | `6.356s` | `outputs/minimax-h3/perf-quality-fc1-fp16-f32compute-56f5s-2026-08-07/fc1_f32compute/final.mp4` |
+
+Frame PSNR baseline-vs-FC1-fp16-f32compute over 56 frames: min `24.403dB`, average `31.772dB`, max `44.441dB`.
+
+Conclusion: FC1 divergence is not fixed by f32 accumulation alone. The lossy part is dequantizing the `Q4_K` FC1 weights and/or activations into fp16 for Tensor Core GEMM. FC1 fp16 should remain diagnostic-only; keep the quality-safe FC1 path on f32 SGEMM unless a resident int4 kernel/layout is implemented.

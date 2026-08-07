@@ -161,8 +161,10 @@ namespace MiniMaxH3 {
             auto fc1 = std::dynamic_pointer_cast<Linear>(blocks["fc1"]);
             auto fc2 = std::dynamic_pointer_cast<Linear>(blocks["fc2"]);
             const bool use_mlp_tensor_cores = h3_env_flag_enabled("ED_MINIMAX_H3_MLP_FP16_CUBLAS");
-            fc1->set_force_prec_f32(!use_mlp_tensor_cores);
-            fc2->set_force_prec_f32(!use_mlp_tensor_cores);
+            const bool use_fc1_tensor_cores = use_mlp_tensor_cores || h3_env_flag_enabled("ED_MINIMAX_H3_FC1_FP16_CUBLAS");
+            const bool use_fc2_tensor_cores = use_mlp_tensor_cores || h3_env_flag_enabled("ED_MINIMAX_H3_FC2_FP16_CUBLAS");
+            fc1->set_force_prec_f32(!use_fc1_tensor_cores);
+            fc2->set_force_prec_f32(!use_fc2_tensor_cores);
             if (h3_env_flag_enabled("ED_MINIMAX_H3_DISABLE_SWIGLU_FUSION")) {
                 auto uv = ggml_ext_chunk(ctx->ggml_ctx, fc1->forward(ctx, x), 2, 0);
                 return fc2->forward(ctx, ggml_mul(ctx->ggml_ctx,
