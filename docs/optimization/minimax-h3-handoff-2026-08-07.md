@@ -1108,3 +1108,36 @@ Artifacts:
 - `outputs/minimax-h3/collect-temporal-parts-full-124f20s-2026-08-08/quality/video-psnr-summary.log`
 - `outputs/minimax-h3/collect-temporal-parts-full-124f20s-2026-08-08/quality/reference.f32le`
 - `outputs/minimax-h3/collect-temporal-parts-full-124f20s-2026-08-08/quality/collect.f32le`
+
+### 2026-08-08 rejected H3 VAE batching and decoder-layout experiments
+
+After the accepted output-copy and temporal-part collection work, a fresh GPU phase profile was taken on the fixed FL2VA task (`864x480`, 56 frames, 5 requested steps / 4 DiT calls, cfg `1`, seed `42`, first/last `assets/minimax-h3-ref2va/video-frames/001.png` and `056.png`). The accepted runtime options were `GGML_CUDA_SM90_Q4K_CUBLAS=1`, `ED_CUDNN_CONV_TRANSPOSE_1D=1`, `ED_MINIMAX_H3_FAST_VIDEO_POSTPROCESS=1`, `ED_MINIMAX_H3_FAST_VIDEO_POSTPROCESS_THREADS=8`, and `ED_MINIMAX_H3_COLLECT_TEMPORAL_PARTS=1`.
+
+The profile confirms that text encoding is not a useful target for this cfg-1 workload (`~100ms` versus Diffusers' roughly `0.6s`), and audio output copying is negligible (`2-3ms`). The short run spent about `4.3-4.7s` in video VAE decode and `~0.58s` in audio VAE decode. A CUDA op profile of the repeated decoder tiles found that each warm tile spends roughly `31ms` in layout conversions, `17.5ms` in Flash Attention, `3.8ms` in normalization, and `6.6ms` in other elementwise work. The encoder graph is instead dominated by `IM2COL_3D` / GEMM. Therefore future VAE work should focus on the decoder's required attention layout or a quality-equivalent 3D convolution path, rather than audio/video host copies.
+
+Four runtime-guarded experiments were evaluated and all source changes were reverted because they either violated the quality gate or did not improve the full task:
+
+| Experiment | Runtime switch | Short result | Full result / disposition |
+|---|---|---|---|
+| Batch stereo BigVGAN streams | `ED_MINIMAX_H3_AUDIO_BATCH_STREAMS=1` | Audio PSNR `21.13dB`, correlation `0.9789` | Rejected for audio divergence. |
+| Batch temporal GroupNorm over time | `ED_MINIMAX_H3_BATCH_TEMPORAL_GROUP_NORM=1` | Video min PSNR `35.66dB`; audio PSNR `17.86dB` | Rejected: changing the CUDA reduction batch changes diffusion output. |
+| Balanced temporal GroupNorm concat tree | `ED_MINIMAX_H3_BALANCED_TEMPORAL_GROUP_NORM_CONCAT=1` | Video/audio exact, but video VAE `4.315s -> 4.820s` | Rejected: no speed benefit. |
+| `pad_reflect_1d` for CausalConv3D width reflection | `ED_MINIMAX_H3_USE_PAD_REFLECT_1D=1` | Video/audio exact, but video VAE `4.315s -> 4.408s` | Rejected: no speed benefit. |
+
+A fifth quality-safe experiment exposed the largest decoder-layout conversion: decoder FFN `w1` chunks materialize two `8192 x 1797` F32 halves on every one of 36 blocks. `ED_MINIMAX_H3_DECODER_FFN_VIEW_CHUNKS=1` kept those chunks as strided views. The 56-frame run was bit-exact and appeared faster (`4.548s -> 4.168s` video VAE), but the required full 124-frame / 20-step validation was slower:
+
+| Variant | Total | DiT (19 calls) | Video VAE | Video | Audio |
+|---|---:|---:|---:|---|---|
+| Baseline | `75.197s` | `62.214s` | `10.486s` | baseline | baseline |
+| FFN view chunks | `76.718s` | `62.385s` | `11.811s` | all `124` decoded frames exact | `331,776` PCM samples exact |
+
+The view-chunk source change was also reverted. The likely reason is that later SiLU/multiply/linear kernels pay a non-contiguous-stride cost larger than the removed explicit copies. Do not re-enable or reimplement it without testing the full 124-frame task.
+
+Retained local artifacts (Git-ignored):
+
+- `outputs/minimax-h3/profile-video-vae-ops-56f5s-2026-08-08/run.log`
+- `outputs/minimax-h3/audio-batch-streams-56f5s-2026-08-08/`
+- `outputs/minimax-h3/batch-temporal-group-norm-56f5s-2026-08-08/`
+- `outputs/minimax-h3/balanced-temporal-group-norm-concat-56f5s-2026-08-08/`
+- `outputs/minimax-h3/pad-reflect-1d-56f5s-2026-08-08/`
+- `outputs/minimax-h3/decoder-ffn-view-chunks-full-124f20s-2026-08-08/`
