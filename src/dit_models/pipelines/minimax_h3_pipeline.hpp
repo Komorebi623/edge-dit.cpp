@@ -17,6 +17,9 @@ struct MiniMaxH3VideoVAERunner;
 namespace MiniMaxH3Audio {
 struct AudioVAERunner;
 }
+namespace edgedit {
+struct MiniMaxH3Profile;
+}
 
 namespace edgedit {
 
@@ -72,13 +75,16 @@ private:
                             int max_video_frames,
                             sd::Tensor<float>* context,
                             sd::Tensor<int32_t>* token_tags,
+                            MiniMaxH3Profile* profile,
                             std::string* error);
     ed_status_t decode_video_latent(const sd::Tensor<float>& latent,
                                     int requested_frames,
                                     ed_video_t* out,
+                                    MiniMaxH3Profile* profile,
                                     std::string* error);
     bool decode_audio_latent(const sd::Tensor<float>& latent,
                              ed_video_t* out,
+                             MiniMaxH3Profile* profile,
                              std::string* error);
 };
 

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <set>
 #include <string>
 #include <tuple>
@@ -19,6 +20,11 @@ namespace MiniMaxH3 {
     constexpr int H3_GRAPH_SIZE          = 131072;
     constexpr float FRAME_RESCALE        = 5.f / 3.f;
     constexpr float VISUAL_COND_TIMESTEP = 0.999f;
+
+    static bool h3_env_flag_enabled(const char* name) {
+        const char* value = std::getenv(name);
+        return value != nullptr && value[0] != '\0' && std::atoi(value) != 0;
+    }
 
     struct Config {
         int64_t hidden_size              = 5376;
@@ -154,10 +160,16 @@ namespace MiniMaxH3 {
         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override {
             auto fc1 = std::dynamic_pointer_cast<Linear>(blocks["fc1"]);
             auto fc2 = std::dynamic_pointer_cast<Linear>(blocks["fc2"]);
-            auto uv  = ggml_ext_chunk(ctx->ggml_ctx, fc1->forward(ctx, x), 2, 0);
-            return fc2->forward(ctx, ggml_mul(ctx->ggml_ctx,
-                                              ggml_silu(ctx->ggml_ctx, uv[0]),
-                                              uv[1]));
+            const bool use_mlp_tensor_cores = h3_env_flag_enabled("ED_MINIMAX_H3_MLP_FP16_CUBLAS");
+            fc1->set_force_prec_f32(!use_mlp_tensor_cores);
+            fc2->set_force_prec_f32(!use_mlp_tensor_cores);
+            if (h3_env_flag_enabled("ED_MINIMAX_H3_DISABLE_SWIGLU_FUSION")) {
+                auto uv = ggml_ext_chunk(ctx->ggml_ctx, fc1->forward(ctx, x), 2, 0);
+                return fc2->forward(ctx, ggml_mul(ctx->ggml_ctx,
+                                                  ggml_silu(ctx->ggml_ctx, uv[0]),
+                                                  uv[1]));
+            }
+            return fc2->forward(ctx, ggml_swiglu(ctx->ggml_ctx, fc1->forward(ctx, x)));
         }
     };
 
@@ -171,15 +183,40 @@ namespace MiniMaxH3 {
                                            ggml_tensor* pe) {
         int64_t rot_dim = pe->ne[2] * 2;
         GGML_ASSERT(rot_dim <= x->ne[0]);
+        const bool use_slice_views = !h3_env_flag_enabled("ED_MINIMAX_H3_DISABLE_ROPE_SLICE_VIEW");
         auto rotated = Rope::apply_rope(ctx,
-                                        ggml_ext_slice(ctx, x, 0, 0, rot_dim),
+                                        ggml_ext_slice(ctx, x, 0, 0, rot_dim, !use_slice_views),
                                         pe,
                                         false);
         if (rot_dim == x->ne[0]) {
             return rotated;
         }
-        auto tail = attention_layout(ctx, ggml_ext_slice(ctx, x, 0, rot_dim, x->ne[0]));
+        auto tail = attention_layout(ctx, ggml_ext_slice(ctx, x, 0, rot_dim, x->ne[0], !use_slice_views));
         return ggml_concat(ctx, rotated, tail, 0);
+    }
+
+    static std::vector<ggml_tensor*> h3_qkv_views(ggml_context* ctx,
+                                                  ggml_tensor* qkv,
+                                                  int64_t head_dim,
+                                                  int64_t heads,
+                                                  int64_t sequence,
+                                                  int64_t batch) {
+        const int64_t inner = head_dim * heads;
+        std::vector<ggml_tensor*> views;
+        views.reserve(3);
+        for (int i = 0; i < 3; ++i) {
+            views.push_back(ggml_view_4d(ctx,
+                                         qkv,
+                                         head_dim,
+                                         heads,
+                                         sequence,
+                                         batch,
+                                         head_dim * qkv->nb[0],
+                                         qkv->nb[1],
+                                         qkv->nb[2],
+                                         static_cast<size_t>(i) * inner * qkv->nb[0]));
+        }
+        return views;
     }
 
     struct Attention : public GGMLBlock {
@@ -208,10 +245,19 @@ namespace MiniMaxH3 {
 
             int64_t sequence = x->ne[1];
             int64_t batch    = x->ne[2] * x->ne[3];
-            auto qkv         = ggml_ext_chunk(ctx->ggml_ctx, qkv_proj->forward(ctx, x), 3, 0);
-            auto q           = ggml_reshape_4d(ctx->ggml_ctx, qkv[0], head_dim, heads, sequence, batch);
-            auto k           = ggml_reshape_4d(ctx->ggml_ctx, qkv[1], head_dim, heads, sequence, batch);
-            auto v           = ggml_reshape_4d(ctx->ggml_ctx, qkv[2], head_dim, heads, sequence, batch);
+            auto qkv_out     = qkv_proj->forward(ctx, x);
+            std::vector<ggml_tensor*> qkv;
+            if (h3_env_flag_enabled("ED_MINIMAX_H3_DISABLE_QKV_VIEW")) {
+                qkv = ggml_ext_chunk(ctx->ggml_ctx, qkv_out, 3, 0);
+                qkv[0] = ggml_reshape_4d(ctx->ggml_ctx, qkv[0], head_dim, heads, sequence, batch);
+                qkv[1] = ggml_reshape_4d(ctx->ggml_ctx, qkv[1], head_dim, heads, sequence, batch);
+                qkv[2] = ggml_reshape_4d(ctx->ggml_ctx, qkv[2], head_dim, heads, sequence, batch);
+            } else {
+                qkv = h3_qkv_views(ctx->ggml_ctx, qkv_out, head_dim, heads, sequence, batch);
+            }
+            auto q           = qkv[0];
+            auto k           = qkv[1];
+            auto v           = qkv[2];
             q                = q_norm->forward(ctx, q);
             k                = k_norm->forward(ctx, k);
             if (pe != nullptr) {
@@ -338,8 +384,9 @@ namespace MiniMaxH3 {
                                                 projection,
                                                 hidden_size * expand,
                                                 timestep_rows * modalities);
-        auto selected         = ggml_ext_slice(ctx, reshaped, 1, row, row + 1);
-        return ggml_ext_chunk(ctx, selected, expand, 0);
+        const bool use_views  = !h3_env_flag_enabled("ED_MINIMAX_H3_DISABLE_SEGMENT_VIEW");
+        auto selected         = ggml_ext_slice(ctx, reshaped, 1, row, row + 1, !use_views);
+        return ggml_ext_chunk(ctx, selected, expand, 0, !use_views);
     }
 
     static ggml_tensor* modulate_segments(ggml_context* ctx,
@@ -359,7 +406,8 @@ namespace MiniMaxH3 {
                                        expand,
                                        modalities,
                                        segment.modulation_row);
-            auto part = ggml_ext_slice(ctx, x, 1, segment.start, segment.end);
+            const bool use_views = !h3_env_flag_enabled("ED_MINIMAX_H3_DISABLE_SEGMENT_VIEW");
+            auto part = ggml_ext_slice(ctx, x, 1, segment.start, segment.end, !use_views);
             part      = ggml_add(ctx,
                                  ggml_add(ctx, part, ggml_mul(ctx, part, mods[scale_index])),
                                  mods[shift_index]);
@@ -378,8 +426,9 @@ namespace MiniMaxH3 {
         ggml_tensor* out = nullptr;
         for (const auto& segment : segments) {
             auto mods = modulation_row(ctx, projection, hidden_size, 6, 3, segment.modulation_row);
-            auto base = ggml_ext_slice(ctx, x, 1, segment.start, segment.end);
-            auto add  = ggml_ext_slice(ctx, update, 1, segment.start, segment.end);
+            const bool use_views = !h3_env_flag_enabled("ED_MINIMAX_H3_DISABLE_SEGMENT_VIEW");
+            auto base = ggml_ext_slice(ctx, x, 1, segment.start, segment.end, !use_views);
+            auto add  = ggml_ext_slice(ctx, update, 1, segment.start, segment.end, !use_views);
             auto part = ggml_add(ctx, base, ggml_mul(ctx, add, mods[gate_index]));
             out       = out == nullptr ? part : ggml_concat(ctx, out, part, 1);
         }
