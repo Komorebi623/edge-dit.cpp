@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="edge-dit.cpp is a lightweight C/C++ inference engine for efficient Diffusion Transformer inference on local and resource-constrained devices."
+    />
+    <meta name="theme-color" content="#f4f7fb" />
+    <meta property="og:title" content="edge-dit.cpp" />
+    <meta
+      property="og:description"
+      content="A lightweight C/C++ inference engine for efficient Diffusion Transformer inference."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://thu-mig.github.io/edge-dit.cpp/" />
+    <meta property="og:image" content="assets/logo.png" />
+    <meta property="og:image:alt" content="edge-dit.cpp logo" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <title>edge-dit.cpp</title>
+    <link rel="canonical" href="https://thu-mig.github.io/edge-dit.cpp/" />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <div class="page-shell topbar-inner">
+        <a class="brand" href="#top" aria-label="edge-dit.cpp home">
+          <img src="assets/logo.png" alt="edge-dit.cpp logo" width="1408" height="390" />
+        </a>
+        <nav class="topnav" aria-label="Primary">
+          <a href="#snapshot">Snapshot</a>
+          <a href="#news">News</a>
+          <a href="#models">Models</a>
+          <a href="#performance">Performance</a>
+          <a href="#docs">Docs</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero section-band" id="top">
+        <div class="page-shell hero-grid">
+          <div class="hero-copy">
+            <p class="eyebrow">Native DiT runtime</p>
+            <h1>edge-dit.cpp</h1>
+            <p class="lede">
+              A lightweight C/C++ inference engine for efficient Diffusion Transformer
+              inference on local and resource-constrained devices.
+            </p>
+
+            <div class="cta-row" aria-label="Project links">
+              <a class="button button-primary" href="https://github.com/THU-MIG/edge-dit.cpp" target="_blank" rel="noreferrer">
+                GitHub Repository <span aria-hidden="true">↗</span>
+              </a>
+              <a class="button" href="https://github.com/THU-MIG/edge-dit.cpp/blob/main/docs/build.md" target="_blank" rel="noreferrer">
+                Build Guide <span aria-hidden="true">↗</span>
+              </a>
+              <a class="button" href="https://github.com/THU-MIG/edge-dit.cpp/blob/main/docs/performance-4090.md" target="_blank" rel="noreferrer">
+                4090 Benchmarks <span aria-hidden="true">↗</span>
+              </a>
+            </div>
+
+            <dl class="stats" aria-label="Project highlights">
+              <div class="stat">
+                <dt>Runtime</dt>
+                <dd>C / C++ on ggml</dd>
+              </div>
+              <div class="stat">
+                <dt>Backends</dt>
+                <dd>CUDA, CPU, Vulkan, Metal</dd>
+              </div>
+              <div class="stat">
+                <dt>Workloads</dt>
+                <dd>Image, edit, video</dd>
+              </div>
+              <div class="stat">
+                <dt>Status</dt>
+                <dd>v0.1.0-alpha preview</dd>
+              </div>
+            </dl>
+          </div>
+
+          <aside class="hero-visual" aria-label="Project artwork">
+            <div class="panel panel-visual">
+              <img src="assets/logo.png" alt="edge-dit.cpp wordmark and logo" width="1408" height="390" />
+            </div>
+            <div class="pill-row" aria-label="Supported model families">
+              <span class="pill">FLUX.1</span>
+              <span class="pill">FLUX.1-Kontext</span>
+              <span class="pill">SD3 / SD3.5</span>
+              <span class="pill">Qwen-Image</span>
+              <span class="pill">Qwen-Image-Edit</span>
+              <span class="pill">Wan 2.1</span>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="section-band" id="news">
+        <div class="page-shell">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Latest news</p>
+              <h2>What changed most recently</h2>
+            </div>
+            <p>
+              These notes mirror the current <code>README.md</code> timeline and
+              help the homepage feel alive instead of frozen in time.
+            </p>
+          </div>
+
+          <div class="timeline">
+            <article class="timeline-item">
+              <time datetime="2026-08-05">2026-08-05</time>
+              <p>RTX 4090 benchmark completed across text-to-image, editing, and video.</p>
+            </article>
+            <article class="timeline-item">
+              <time datetime="2026-07-30">2026-07-30</time>
+              <p>Per-component offload landed with unified semantics for the offload path.</p>
+            </article>
+            <article class="timeline-item">
+              <time datetime="2026-07-29">2026-07-29</time>
+              <p><code>--auto-fit</code> added for automatic quantization and placement under a VRAM cap.</p>
+            </article>
+            <article class="timeline-item">
+              <time datetime="2026-07-27">2026-07-27</time>
+              <p>Few-step distilled auto-detection and optional SageAttention support were added.</p>
+            </article>
+            <article class="timeline-item">
+              <time datetime="2026-07-23">2026-07-23</time>
+              <p><code>ed-convert</code> brought offline GGUF quantization with activation-calibrated imatrix.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section-band" id="snapshot">
+        <div class="page-shell">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Project snapshot</p>
+              <h2>What the runtime looks like in practice</h2>
+            </div>
+            <p>
+              The console screenshot shows the local web UI that rides on top of the same
+              core engine, server, and job flow the rest of the project uses.
+            </p>
+          </div>
+
+          <div class="snapshot-grid">
+            <figure class="panel screenshot">
+              <img
+                src="assets/python-server-console-overview.png"
+                alt="Python Server Console overview showing the local web-based control surface"
+                width="1853"
+                height="2414"
+                loading="lazy"
+                decoding="async"
+              />
+              <figcaption>
+                Python Server Console, one of the public surfaces built on the shared runtime.
+              </figcaption>
+            </figure>
+
+            <div class="panel notes-panel">
+              <h3>Why the project feels coherent</h3>
+              <ul>
+                <li>One core engine powers the C API, CLI, native server, Python bindings, and Python server console.</li>
+                <li>Model loading, memory placement, quantization, and device selection are explicit rather than hidden.</li>
+                <li>Few-step distilled checkpoints are detected automatically and get a shorter default schedule.</li>
+                <li>Image generation, image editing, and video generation share the same native foundation.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section-band" id="capabilities">
+        <div class="page-shell">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Capabilities</p>
+              <h2>Core strengths at a glance</h2>
+            </div>
+            <p>
+              The page is intentionally compact. The point is to show the project clearly,
+              not to bury it under decorative layers.
+            </p>
+          </div>
+
+          <div class="feature-grid">
+            <article class="feature">
+              <h3>Native runtime</h3>
+              <p>Pure C/C++ inference on ggml with no Python or PyTorch required at runtime.</p>
+            </article>
+            <article class="feature">
+              <h3>Memory control</h3>
+              <p><code>--auto-fit</code>, layered offload, per-component offload, and VAE tiling help the engine fit tight VRAM budgets.</p>
+            </article>
+            <article class="feature">
+              <h3>Backend spread</h3>
+              <p>CUDA is the first-class path, with CPU, Vulkan, and Metal support for other setups.</p>
+            </article>
+            <article class="feature">
+              <h3>Unified surfaces</h3>
+              <p>The same model stack can be reached through the C API, CLI, native server, Python bindings, and Python server.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section-band" id="interfaces">
+        <div class="page-shell">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Interfaces</p>
+              <h2>Public entry points</h2>
+            </div>
+            <p>
+              These are the integration surfaces that matter when you want to script, embed,
+              or expose the runtime through a local service.
+            </p>
+          </div>
+
+          <div class="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th>Surface</th>
+                  <th>Entry point</th>
+                  <th>What it gives you</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>CLI</td>
+                  <td><code>ed-cli</code>, <code>ed-sample</code></td>
+                  <td>Direct command-line generation and inspection.</td>
+                </tr>
+                <tr>
+                  <td>C API</td>
+                  <td><code>include/edge-dit.h</code></td>
+                  <td>Embed the engine in native C or C++ applications.</td>
+                </tr>
+                <tr>
+                  <td>Native server</td>
+                  <td><code>ed-server</code></td>
+                  <td>A small HTTP wrapper around the core runtime.</td>
+                </tr>
+                <tr>
+                  <td>Python bindings</td>
+                  <td><code>edge_dit</code></td>
+                  <td>Drive the engine from Python with the same model stack.</td>
+                </tr>
+                <tr>
+                  <td>Python server console</td>
+                  <td>React UI + runtime manager</td>
+                  <td>Browser-based local control for jobs, logs, and result viewing.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="section-band" id="models">
+        <div class="page-shell">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Model scope</p>
+              <h2>Supported families</h2>
+            </div>
+            <p>
+              The homepage keeps the list short and readable, while the repository docs
+              carry the exact checkpoints, formats, and model-specific caveats.
+            </p>
+          </div>
+
+          <div class="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th>Family</th>
+                  <th>Task</th>
+                  <th>Current status</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>SD3 / SD3.5</td>
+                  <td>Text-to-image</td>
+                  <td>Supported</td>
+                </tr>
+                <tr>
+                  <td>FLUX.1</td>
+                  <td>Text-to-image</td>
+                  <td>Supported</td>
+                </tr>
+                <tr>
+                  <td>FLUX.1-Kontext</td>
+                  <td>Image editing / reference-guided generation</td>
+                  <td>Supported</td>
+                </tr>
+                <tr>
+                  <td>Qwen-Image</td>
+                  <td>Text-to-image</td>
+                  <td>Supported</td>
+                </tr>
+                <tr>
+                  <td>Qwen-Image-Edit</td>
+                  <td>Image editing</td>
+                  <td>Supported</td>
+                </tr>
+                <tr>
+                  <td>Wan 2.1</td>
+                  <td>Video generation</td>
+                  <td>Supported, still being optimized on Vulkan</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="section-band" id="performance">
+        <div class="page-shell">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Performance</p>
+              <h2>Published benchmark snapshots</h2>
+            </div>
+            <p>
+              The numbers below are the most visible cross-system snapshots from the current
+              benchmark notes in the repository.
+            </p>
+          </div>
+
+          <div class="performance-grid">
+            <article class="panel">
+              <h3>RTX 4090 snapshot</h3>
+              <p class="panel-subtitle">
+                <time datetime="2026-08-05">2026-08-05</time> and published in
+                <a href="https://github.com/THU-MIG/edge-dit.cpp/blob/main/docs/performance-4090.md" target="_blank" rel="noreferrer">
+                  performance-4090.md
+                </a>
+              </p>
+              <div class="table-shell compact">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Model</th>
+                      <th>edge-dit.cpp result</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>FLUX.1-dev</td>
+                      <td>10,569 ms sampling, 19,112 MiB peak VRAM</td>
+                    </tr>
+                    <tr>
+                      <td>SD3 Medium</td>
+                      <td>3,434 ms sampling, 9,147 MiB peak VRAM</td>
+                    </tr>
+                    <tr>
+                      <td>FLUX.1-Kontext</td>
+                      <td>24,534 ms sampling, 20,111 MiB peak VRAM</td>
+                    </tr>
+                    <tr>
+                      <td>Wan2.1-T2V-1.3B</td>
+                      <td>53,964 ms sampling, 12,176 MiB peak VRAM</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </article>
+
+            <article class="panel">
+              <h3>H200 snapshot</h3>
+              <p class="panel-subtitle">
+                Measured on <time datetime="2026-07-13">2026-07-13</time> and published in
+                <a href="https://github.com/THU-MIG/edge-dit.cpp/blob/main/docs/performance-H200.md" target="_blank" rel="noreferrer">
+                  performance-H200.md
+                </a>
+              </p>
+              <div class="table-shell compact">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Model</th>
+                      <th>edge-dit.cpp result</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>FLUX.1-dev</td>
+                      <td>6.645 s load, 10.784 s median</td>
+                    </tr>
+                    <tr>
+                      <td>Stable Diffusion 3 Medium</td>
+                      <td>5.840 s load, 4.003 s median</td>
+                    </tr>
+                    <tr>
+                      <td>Qwen-Image</td>
+                      <td>11.621 s load, 10.697 s median</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section-band" id="docs">
+        <div class="page-shell">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Documentation</p>
+              <h2>Jump into the repo without hunting around</h2>
+            </div>
+            <p>
+              These links mirror the parts of the repository people usually want first:
+              build instructions, model scope, CLI usage, API details, and benchmark notes.
+            </p>
+          </div>
+
+          <div class="link-grid">
+            <a class="link-card" href="https://github.com/THU-MIG/edge-dit.cpp/blob/main/docs/build.md" target="_blank" rel="noreferrer">
+              <strong>Build</strong>
+              <span>Setup, backends, dependency notes, and common build failures.</span>
+              <span class="link-arrow" aria-hidden="true">↗</span>
+            </a>
+            <a class="link-card" href="https://github.com/THU-MIG/edge-dit.cpp/blob/main/docs/models.md" target="_blank" rel="noreferrer">
+              <strong>Models</strong>
+              <span>Supported families, formats, distilled variants, and limitations.</span>
+              <span class="link-arrow" aria-hidden="true">↗</span>
+            </a>
+            <a class="link-card" href="https://github.com/THU-MIG/edge-dit.cpp/blob/main/docs/cli.md" target="_blank" rel="noreferrer">
+              <strong>CLI</strong>
+              <span>Command-line examples for text-to-image, editing, and video.</span>
+              <span class="link-arrow" aria-hidden="true">↗</span>
+            </a>
+            <a class="link-card" href="https://github.com/THU-MIG/edge-dit.cpp/blob/main/docs/api.md" target="_blank" rel="noreferrer">
+              <strong>API</strong>
+              <span>C API, native server, Python bindings, and Python server surfaces.</span>
+              <span class="link-arrow" aria-hidden="true">↗</span>
+            </a>
+            <a class="link-card" href="https://github.com/THU-MIG/edge-dit.cpp/blob/main/docs/performance-4090.md" target="_blank" rel="noreferrer">
+              <strong>Benchmarks</strong>
+              <span>4090 and H200 performance notes with speed and VRAM tables.</span>
+              <span class="link-arrow" aria-hidden="true">↗</span>
+            </a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="page-shell footer-inner">
+        <p>
+          Built from the current <code>main</code> branch materials in the
+          <a href="https://github.com/THU-MIG/edge-dit.cpp" target="_blank" rel="noreferrer">
+            edge-dit.cpp repository
+          </a>.
+        </p>
+        <p>Static, local-first, and ready for GitHub Pages when you want it.</p>
+      </div>
+    </footer>
+  </body>
+</html>

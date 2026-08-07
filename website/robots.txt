@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://thu-mig.github.io/edge-dit.cpp/sitemap.xml
