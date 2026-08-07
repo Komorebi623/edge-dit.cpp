@@ -968,3 +968,32 @@ The experiment improves Edge DiT by `1.601s` (`2.57%`) versus the quality-safe b
 - `outputs/minimax-h3/diffusers-fl2va-480p124-int4-resident-profile4-gpu1-2026-08-08/final.json`
 
 Conclusion remains unchanged: the switch is a diagnostic only and must not become the default Q4_K route. It quantifies the maximum gain available from switching the remaining FC2 projections to dequantize-plus-TF32 SGEMM, leaving an exact Q4_K packed kernel as the only route to close the remaining quality-safe gap.
+
+### 2026-08-08 cuDNN audio VAE transposed-convolution path
+
+The MiniMax-H3 audio VAE's BigVGAN decoder uses seven repeated F32 `ConvTranspose1D` upsampling layers per audio stream. The previous CUDA implementation used one output element per thread and iterated over the input sequence and channels directly. This made audio decode a major end-to-end cost despite the DiT being relatively close to Diffusers.
+
+A guarded cuDNN backward-data-convolution route now maps the supported 1D transposed convolution form to NCHW 2D (`H=1`) and keeps the original CUDA kernel as the fallback. It only accepts contiguous F32 tensors with one group, zero padding, dilation one, and stride greater than one—the exact form used by H3's BigVGAN decoder.
+
+- Build integration: enabled whenever the existing `ED_ENABLE_CUDNN_SDPA` build option is enabled.
+- Runtime switch: `ED_CUDNN_CONV_TRANSPOSE_1D=1`.
+- Default: disabled; unset or `0` always uses the original CUDA kernel.
+- No new third-party dependency: uses the already-linked cuDNN runtime.
+
+Full fixed-seed FL2VA validation used `864x480`, `124` frames, `24fps`, `20` requested steps (`19` DiT forwards), `cfg=1`, seed `42`, VAE tiling off, `--diffusion-fa`, and the first/last images `assets/minimax-h3-ref2va/video-frames/001.png` and `056.png`. Prompt:
+
+```text
+Create a smooth cinematic transition between the supplied first and last frame, preserving the subject, lighting, and composition with natural coherent motion and synchronized ambient audio.
+```
+
+| Variant | Generation | Wall total | Video comparison | Audio comparison |
+|---|---:|---:|---|---|
+| Original CUDA transposed convolution | `85.974s` | `94.626s` | baseline | baseline |
+| cuDNN path (`ED_CUDNN_CONV_TRANSPOSE_1D=1`) | `78.063s` | `86.443s` | PSNR `inf` (pixel-identical decoded frames) | same `331,776` samples; PSNR `48.109dB`, correlation `0.999796` |
+
+This saves `7.911s` generation time (`9.20%`) without changing the generated video frames. The retained artifacts are:
+
+- `outputs/minimax-h3/audio-convt1d-baseline-124f20s-2026-08-08/final.mp4`
+- `outputs/minimax-h3/audio-convt1d-cudnn-124f20s-2026-08-08/final.mp4`
+- `outputs/minimax-h3/audio-convt1d-cudnn-124f20s-2026-08-08/quality/audio-comparison.json`
+- `outputs/minimax-h3/audio-convt1d-cudnn-124f20s-2026-08-08/quality/video-psnr-summary.log`

@@ -75,6 +75,11 @@ def main() -> None:
     parser.add_argument("--no-stream-offload", action="store_true")
     parser.add_argument("--resident", action="store_true", help="keep quantized components resident on the CUDA device")
     parser.add_argument("--profile-transformer", action="store_true", help="synchronize and time every transformer forward")
+    parser.add_argument(
+        "--profile-components",
+        action="store_true",
+        help="synchronize and time text encoder and VAE encode/decode calls without changing inference results",
+    )
     arguments = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -169,10 +174,49 @@ def main() -> None:
         pipeline.transformer.register_forward_pre_hook(profile_forward_pre_hook, with_kwargs=True)
         pipeline.transformer.register_forward_hook(profile_forward_hook, with_kwargs=True)
 
+    component_profile = {
+        "text_encoder": {"calls": 0, "seconds": 0.0},
+        "video_vae_encode": {"calls": 0, "seconds": 0.0},
+        "video_vae_decode": {"calls": 0, "seconds": 0.0},
+        "audio_vae_encode": {"calls": 0, "seconds": 0.0},
+        "audio_vae_decode": {"calls": 0, "seconds": 0.0},
+    }
+
+    def profile_method(component_name, method):
+        def wrapped(*args, **kwargs):
+            torch.cuda.synchronize(device)
+            started_at = time.perf_counter()
+            result = method(*args, **kwargs)
+            torch.cuda.synchronize(device)
+            component_profile[component_name]["calls"] += 1
+            component_profile[component_name]["seconds"] += time.perf_counter() - started_at
+            return result
+
+        return wrapped
+
+    if arguments.profile_components:
+        def text_encoder_profile_pre_hook(module, args, kwargs):
+            torch.cuda.synchronize(device)
+            component_profile["text_encoder"]["started_at"] = time.perf_counter()
+
+        def text_encoder_profile_hook(module, args, kwargs, output):
+            torch.cuda.synchronize(device)
+            started_at = component_profile["text_encoder"].pop("started_at")
+            component_profile["text_encoder"]["calls"] += 1
+            component_profile["text_encoder"]["seconds"] += time.perf_counter() - started_at
+
+        pipeline.text_encoder.model.register_forward_pre_hook(text_encoder_profile_pre_hook, with_kwargs=True)
+        pipeline.text_encoder.model.register_forward_hook(text_encoder_profile_hook, with_kwargs=True)
+        pipeline.vae.encode = profile_method("video_vae_encode", pipeline.vae.encode)
+        pipeline.vae.decode = profile_method("video_vae_decode", pipeline.vae.decode)
+        pipeline.audio_vae.encode = profile_method("audio_vae_encode", pipeline.audio_vae.encode)
+        pipeline.audio_vae.decode = profile_method("audio_vae_decode", pipeline.audio_vae.decode)
+
     first_image = load_image(str(arguments.image))
     last_image = load_image(str(arguments.last_image))
     generator = torch.Generator(device="cpu").manual_seed(arguments.seed)
 
+    torch.cuda.reset_peak_memory_stats(device)
     sync_time()
     generated = pipeline(
         prompt=arguments.prompt,
@@ -231,6 +275,11 @@ def main() -> None:
             "end_to_end": finished - started,
         },
         "transformer_forward_calls": transformer_profile["calls"],
+        "component_profile": component_profile if arguments.profile_components else None,
+        "memory_bytes": {
+            "max_allocated_during_generate": torch.cuda.max_memory_allocated(device),
+            "max_reserved_during_generate": torch.cuda.max_memory_reserved(device),
+        },
     }
     result_path = arguments.output.with_suffix(".json")
     result_path.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n")
