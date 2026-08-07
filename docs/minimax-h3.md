@@ -61,6 +61,9 @@ MiniMax-H3 is a 24 fps audio-video model. The usual full-resolution setting is:
 The frame count must satisfy `17k + 5` (for example `5`, `22`, `39`, `56`). The
 examples below use 56 frames and 20 steps.
 
+`ed-cli` writes MiniMax-H3 output at 24 fps even if another `--fps` value is
+provided, matching sd.cpp and preserving the model's audio-video timing.
+
 Use `--video-format mp4` for H.264/AAC MP4 output when `ffmpeg` is available.
 Without `--audio-vae`, the model can still generate video, but no generated audio
 is decoded or muxed.

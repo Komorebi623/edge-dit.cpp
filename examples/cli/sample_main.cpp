@@ -578,6 +578,12 @@ int main(int argc, char** argv) {
     }
     const double load_seconds = std::chrono::duration<double>(load_t1 - load_t0).count();
     const bool is_root = ed_context_parallel_is_root(ctx);
+    int output_fps = args.fps;
+    const char* pipeline_name = ed_context_pipeline_name(ctx);
+    if (args.video && pipeline_name != nullptr && std::strcmp(pipeline_name, "minimax-h3") == 0 && output_fps != 24) {
+        std::fprintf(stderr, "MiniMax-H3 uses 24 fps; overriding requested fps %d\n", output_fps);
+        output_fps = 24;
+    }
 
     if (is_root) {
         std::printf("=== ed-sample ===\n");
@@ -723,7 +729,7 @@ int main(int argc, char** argv) {
                 }
                 std::snprintf(fname, sizeof(fname), "vid_%06d.avi", idx);
                 save_ok = save_mjpg_avi((out_path / fname).string().c_str(),
-                                        video_output, args.fps, 95);
+                                        video_output, output_fps, 95);
             } else {
                 if (output.count <= 0 || output.images == nullptr) {
                     std::fprintf(stderr, "empty output for prompt %d\n", idx);

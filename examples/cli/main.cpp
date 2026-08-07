@@ -808,6 +808,12 @@ int main(int argc, char** argv) {
     }
 
     if (args.video) {
+        int output_fps = args.fps;
+        const char* pipeline_name = ed_context_pipeline_name(ctx);
+        if (pipeline_name != nullptr && std::strcmp(pipeline_name, "minimax-h3") == 0 && output_fps != 24) {
+            std::fprintf(stderr, "MiniMax-H3 uses 24 fps; overriding requested fps %d\n", output_fps);
+            output_fps = 24;
+        }
         ed_video_generation_params_t gen_params;
         ed_video_generation_params_init(&gen_params);
         ed_image_t init_image = {};
@@ -935,7 +941,7 @@ int main(int argc, char** argv) {
         const std::string output_path = video_output_path(args.output_path, args.video_format);
         auto ed_wall_save0 = ed_wall_clock::now();
         bool audio_muxed = false;
-        bool ed_save_ok = save_video_with_audio(output_path.c_str(), output, args.fps, &audio_muxed);
+        bool ed_save_ok = save_video_with_audio(output_path.c_str(), output, output_fps, &audio_muxed);
         ed_wall_save = ed_wall_ms(ed_wall_save0, ed_wall_clock::now());
         if (!ed_save_ok) {
             std::fprintf(stderr, "failed to save output video: %s\n", output_path.c_str());
