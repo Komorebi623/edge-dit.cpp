@@ -744,3 +744,227 @@ A local H3 partial-RoPE experiment added `ED_MINIMAX_H3_ROPE_TAIL_VIEW=1`, which
 Frame PSNR baseline-vs-tail-view over 56 frames: min `31.263dB`, average `36.053dB`, max `45.292dB`.
 
 Conclusion: the layout optimization does remove the targeted tail materialization, but the end-to-end diffusion improvement is small on this probe and the output is not pixel-equivalent. Keep `ED_MINIMAX_H3_ROPE_TAIL_VIEW=1` opt-in only; it is not enabled by default.
+
+### 2026-08-07 SageAttention CUDA dispatch validation
+
+The first SageAttention comparison was not a valid CUDA-kernel measurement: the build cache had `ED_ENABLE_CUDA_SAGE_ATTN=OFF`, so `ED_SAGE_ATTN=1` only changed graph construction and the CUDA backend fell through to the normal attention path. The CUDA build was reconfigured with `-DED_ENABLE_CUDA_SAGE_ATTN=ON`, then rerun with the same one-GPU FL2VA probe (`864x480`, `56` frames, `5` steps, `cfg=1`, seed `42`, VAE tiling off, and `GGML_CUDA_SM90_Q4K_CUBLAS=1`).
+
+| Variant | DiT diffusion | Result | Artifact |
+|---|---:|---|---|
+| Normal attention | `6.829s` | baseline | `outputs/minimax-h3/sage-real-kernel-baseline-56f5s-2026-08-07/final.mp4` |
+| `ED_SAGE_ATTN=1` | `6.811s` | real fused CUDA dispatch, rejected | `outputs/minimax-h3/sage-real-kernel-56f5s-2026-08-07/final.mp4` |
+
+The Sage log contains `1080` `dispatch: running fused INT8-QK+F16-PV kernel` lines, proving that the custom CUDA kernel ran. Its target shape was `d_head=64`, `L_q=L_k=1797`, and `HN=32`; this is a VAE attention shape, not the H3 DiT self-attention shape. The measured DiT difference is only `18ms` over four calls (within normal run variation), while the generated-video comparison gives min/average/max PSNR `24.906/31.876/44.398dB`. Sampled optimized-frame mean/std values remain non-black (`114.95/54.04` through `166.02/52.02`), but the numerical divergence is too large for a default quality-safe optimization.
+
+Conclusion: keep `ED_SAGE_ATTN` runtime-disabled by default. Do not treat SageAttention as a MiniMax-H3 DiT optimization unless it is redesigned for the DiT's `d=128`, `h=56`, `seq=7919` attention shape and passes the same quality gate. Contact sheet and machine-readable quality result: `outputs/minimax-h3/sage-real-kernel-56f5s-2026-08-07/contact_sheet.jpg` and `outputs/minimax-h3/sage-real-kernel-56f5s-2026-08-07/quality.txt`.
+
+### 2026-08-07 cuDNN SDPA H3 dispatch confirmation
+
+With `ED_PROFILE_CUDNN_SDPA=1`, a short one-call H3 probe confirms that the existing cuDNN SDPA backend already handles the DiT's long self-attention:
+
+```text
+b=1, h=56, sq=7919, sk=7919, d=128, scale=11.3137, dst_type=f32
+```
+
+At 16 accumulated calls the profile reported `46.847ms` execution, `1.698ms` Q conversion, and `2.286ms` output conversion, or roughly `2.93ms` execution per attention call. The much more numerous `d=64`, `sq=1797`, padded `sk=2048` VAE attention calls are intentionally rejected by the current padding-mask gate. Artifact: `outputs/minimax-h3/cudnn-sdpa-dispatch-probe-56f2s-2026-08-07/run.log`.
+
+Conclusion: H3 DiT already uses cuDNN SDPA; attention is not the remaining dominant gap to Diffusers. Further H3 work should prioritize Q4_K FC1 kernel/layout efficiency and only pursue attention changes after a profile shows a material regression there.
+
+### 2026-08-07 TF32 status and FC1 bottleneck check
+
+The dominant quality-safe FC1 route is still `Q4_K -> FP32` dequantization followed by FP32 `cublasSgemm` (`m=28672`, `n=7919`, `k=5376`). Its 56-frame operator profile gives about `5.83ms` per FC1 projection; dequantization is only about `0.37ms` per projection. Caching dequantized FP32 FC1 weights would consume substantial persistent VRAM while having an upper-bound benefit of only about 6% of FC1 time (and roughly 1% of whole DiT time), so it is not the next worthwhile change.
+
+An isolated one-call GPU diagnostic compared the default cuBLAS configuration with `NVIDIA_TF32_OVERRIDE=0`:
+
+| Variant | DiT diffusion | Interpretation |
+|---|---:|---|
+| Default | `2.391s` | Hopper TF32 Tensor Core path active |
+| TF32 explicitly disabled | `4.300s` | FP32 CUDA-core fallback, `~80%` slower |
+
+The CUDA backend sets `CUBLAS_TF32_TENSOR_OP_MATH` when it creates the cuBLAS handle, so the current quality-safe FC1 SGEMM is already using Tensor Cores. A cuBLASLt rewrite would need cached descriptors/algorithms and a demonstrated advantage over this already-TF32-accelerated route before it is worth adding another runtime switch.
+
+### 2026-08-07 cuBLASLt FC1 algorithm scan
+
+A standalone H200 GPU microbenchmark measured the exact FC1 SGEMM shape (`m=28672`, `n=7919`, `k=5376`, FP32 inputs/output, TF32 compute) without changing repository code. Current `cublasSgemm` measured `5.299ms`. A `128MiB`-workspace cuBLASLt scan returned eight algorithms; the fastest measured `5.294ms`, while the others ranged from `5.383ms` to `6.625ms`.
+
+Conclusion: there is no material cuBLASLt algorithm advantage for the current quality-safe FP32/TF32 FC1 path on H200. Do not add a descriptor cache or a runtime switch for this equivalent path. The remaining meaningful route to close the roughly 10% Diffusers gap is a resident packed int4 kernel/layout compatible with `Q4_K`, avoiding the FP32 SGEMM path itself; this is a larger backend project and must be separately quality-gated.
+
+### 2026-08-07 Torch int4 packed-kernel feasibility check
+
+The CUDA environment includes TorchAO/fbgemm SM90 int4 support. Its `aten._weight_int4pack_mm` accepts group size `32`, so the group granularity can in principle represent the GGUF Q4_K block's 32-value scale/min pairs. A real H3 FC1 shape probe (`M=7919`, `K=5376`, `N=28672`) completed successfully with BF16 activations and group size `32`, but measured `83.97ms` per matrix multiplication.
+
+That is far slower than edge.cpp's current quality-safe Q4_K-to-FP32 TF32 SGEMM path (`~5.8ms` FC1 projection). The generic Aten packed kernel therefore is not the kernel/layout used by the faster Diffusers H3 benchmark, or is not intended for this extreme H3 matrix aspect ratio. It must not be integrated into edge.cpp.
+
+The installed TorchAO CUTLASS int4 interfaces exposed in this environment are rowwise-scaled `s8s4/s4s4` paths rather than a direct reusable C++ library API for GGUF's asymmetric Q4_K blocks. A future high-value path needs either the exact TorchAO weight-only kernel/layout used by the Diffusers run or a purpose-built Hopper kernel; it cannot be obtained by calling the generic Aten int4-pack op.
+
+### 2026-08-07 TorchAO v2 rowwise kernel follow-up
+
+The preceding generic `aten._weight_int4pack_mm` result is not the operator used by the current Diffusers MiniMax-H3 TorchAO run. `Int4WeightOnlyConfig(group_size=128)` dispatches `fbgemm::bf16i4bf16_rowwise`, a CUTLASS SM90 Hopper Tensor Core kernel. A direct H200 probe at the exact H3 FC1 shape (`M=7919`, `K=5376`, `N=28672`) measured the following steady-state forward times:
+
+| Group size | Scale/zero dtype | Result | Minimum time |
+|---:|---|---|---:|
+| `32` | BF16 | CUTLASS `can_implement` rejects it | n/a |
+| `32` | FP32 | CUTLASS `can_implement` rejects it | n/a |
+| `64` | BF16 | supported | `3.396ms` |
+| `64` | FP32 | supported | `4.352ms` |
+| `128` | BF16 | supported | `3.756ms` |
+| `128` | FP32 | supported | `4.341ms` |
+
+This corrects the earlier interpretation: the official TorchAO path is genuinely much faster than the current Edge quality-safe FC1 (`Q4_K -> FP32 -> TF32 SGEMM`, approximately `5.3-5.8ms` per FC1), and it is the right performance comparison. It is not directly reusable for the existing GGUF weights. Q4_K has eight independent 32-value groups in every 256-value block, with exact decode `q * (d * scale) - (dmin * min)`. Since fbgemm stores signed INT4, its exact rowwise representation requires `group_size=32`, `q_signed=q-8`, `scale=d*scale`, and `zero_point=8*scale-dmin*min`; the stock Hopper kernel rejects that group size even when its scale/zero inputs remain FP32.
+
+Therefore the remaining roughly 10% end-to-end DiT gap is now attributable to a concrete format/kernel incompatibility, not to attention, cuBLAS algorithm selection, or a missed Tensor Core setting. A quality-safe improvement requires a dedicated SM90 mixed-dtype Q4_K kernel (or a modified CUTLASS/fbgemm mainloop that supports exact 32-value groups) plus resident packed Q4_K weights. Re-quantizing 32-value groups into the supported 64/128 format would change weights and is not an acceptable default optimization without a separate full-generation quality evaluation.
+
+### 2026-08-08 SM90 32-group source-level feasibility follow-up
+
+The `group_size=32` rejection is now traced to a specific fbgemm/CUTLASS mainloop restriction, not an undocumented Hopper limitation. In the installed `bf16i4bf16_rowwise` source, `TileShapeK` is `64` for BF16 mixed input. CUTLASS checks `group_size == K || group_size % TileShapeK == 0`; consequently stock `64/128` groups pass while exact Q4_K `32` groups fail.
+
+A throwaway, out-of-tree prototype changed only `TileShapeK` from `64` to `32`. It was compiled for `sm_90a` after first confirming that a plain `sm_90` target cannot issue Hopper GMMA instructions. The valid-target compilation then failed in the CUTLASS mixed-input mainloop with the deliberate assertion `K_BLOCK_MAX >= 4`. This is expected: a 32-value threadblock K tile contains only two BF16 GMMA K-blocks (`16` elements each), while the pipelined mainloop requires at least four for its prefetch/commit schedule.
+
+More importantly, the existing mainloop assumes only one scale/zero row per threadblock K tile. It calculates `reload_factor = ceil(group_size / TileShapeK)`, TMA-loads one scale/zero row for each tile, and `copy_tensors_MK` copies that metadata only when `k_block == 0`. Simply removing the divisibility assertion would therefore silently apply one 32-value Q4_K scale/min to the other 32 values in a 64-value tile; the source explicitly warns that relaxing the related scale-layout assertion without changing transaction accounting can hang.
+
+The correct implementation scope is now concrete:
+
+1. Preserve a practical K tile (`64` or preferably `128`) for Hopper GMMA occupancy.
+2. Extend the mixed-input scale shared-memory layout, TMA transaction bytes, and producer reload logic to load two/four scale-plus-zero rows per K tile.
+3. Select the correct 32-value row inside `dequantize_A_kblock` for each GMMA K-block, while retaining FP32 Q4_K-derived scale/zero values where numerical equivalence requires it.
+4. Add a resident Q4_K-to-rowwise packed-weight cache, including Q4_K's interleaved nibble reorder, so this conversion is not performed per DiT call.
+
+This is a real kernel/mainloop extension rather than a safe one-line fbgemm configuration change. No repository inference code was changed by the prototype. The prototype source/build output lives only under container `/tmp/q4k_g32_proto`; its failed build and the earlier `sm_90` invalid execution are diagnostic only and must not be used as performance or quality data.
+
+### 2026-08-08 Hopper W4A8 group-32 feasibility result
+
+CUTLASS has an upstream mixed-input W4A8 route that is materially closer to GGML MMQ than the Diffusers BF16×W4 route. The official CUTLASS `v3.5.0` Hopper mixed-dtype example was built out of tree for `sm_90a`, then changed exactly as documented by CUTLASS maintainers in issue `#1332`: INT8 activation, INT4 weight, `TileShapeK=32`, and INT32 accumulation/output. It passed the example reference check both on a small shape and on the exact H3 FC1 shape with `group_size=32`:
+
+| Shape (`M x N x K`) | Group size | Result | Average time |
+|---|---:|---|---:|
+| `128 x 512 x 1024` | `32` | passed | `0.0173ms` |
+| `7919 x 28672 x 5376` | `32` | passed | `3.388ms` |
+
+This is important evidence that H200 Hopper hardware and CUTLASS's W4A8 GMMA path can efficiently execute a 32-value group. The stock BF16×W4 fbgemm dispatch rejects 32 only because its BF16 tile-K is 64; its 32-tile experiment is not evidence against the W4A8 route.
+
+It still cannot be substituted for GGML Q4_K MMQ unchanged. The mixed-input collective accepts scale/zero metadata for only the narrow INT4 operand. GGML MMQ has two independently quantized operands for Q4_K projections:
+
+```text
+weight[g, n, k]     = q4[g, n, k] * weight_scale[n, k_group]
+                    - weight_min[n, k_group]
+activation[m, k]    = q8[m, k] * activation_scale[m, k_group]
+```
+
+The product needs both per-output-channel Q4_K scale/min and per-token Q8_1 scale. The existing W4A8 collective can apply the former before INT8 MMA, but has no second activation-side 32-value scale input. Pre-multiplying them is impossible because the required scale product varies across both `m` and `n`; ignoring the activation scale would change the model result. Therefore this benchmark proves a promising kernel foundation and performance target, not a quality-safe drop-in replacement.
+
+The next exact route is a dual-quantized W4A8 Hopper kernel: retain CUTLASS's group-32 W4A8 GMMA pipeline, add an activation `Q8_1` scale stream and accumulate the Q4_K min correction using the activation block sum (which GGML already stores). This directly mirrors GGML's Q4_K×Q8_1 algebra and avoids BF16 re-quantization. It needs an independent CUDA prototype plus numerical comparison against the existing MMQ output before any edge.cpp integration.
+
+### 2026-08-08 W4A8 group-32 semantic caveat
+
+The W4A8 `3.388ms` result is a hardware-throughput feasibility result only, not yet a numerically compatible Q4_K implementation. Reading the v3.5 collective shows that its scale/zero path upcasts narrow INT4 values to the scale type, applies `q * scale + zero`, **then converts the result to the MMA type**. In the maintained W4A8 configuration the MMA type is INT8, so group-scale values are rounded into INT8 before GMMA. Its reference path uses the same conversion and therefore correctly validates that specific integer GEMM, but does not validate the floating-point Q4_K decode used by Edge.
+
+For Q4_K, `d * scale_group` and `dmin * min_group` are FP16-derived floating values and the existing GGML MMQ accumulates their contribution in floating point. Feeding them through the stock W4A8 converter would change the decoded weight before the dot product. This is not acceptable for a default generation path, even though the raw `group=32` GMMA timing is attractive.
+
+The exact custom-kernel requirement is consequently narrower and stricter: use the W4A8 GMMA instruction only for the integer dot product, retain Q4_K and Q8_1 scales/min/sums in FP16/FP32 registers, and apply
+
+```text
+output += activation_scale * (weight_scale * dot_int8_int4 - weight_min * sum_int8)
+```
+
+in floating point for every 32-value group. That is closer to GGML's existing `vec_dot_q8_1_q8_1_mma` algebra than to stock CUTLASS's scale-and-convert collective. No quality claim or speed projection from the stock W4A8 scale path should be used until this exact post-MMA scaling prototype is measured.
+
+### 2026-08-08 actual H3 Q4_K repacking error check
+
+A read-only mmap sample of the actual `blocks.0.mlp.fc1.weight` H3 GGUF tensor (`256 x 5376` values) was decoded with the same Q4_K scale/min and nibble rules as GGML. It was then independently affine-requantized into ordinary unsigned int4 groups. This evaluates the *additional* distortion after the existing Q4_K quantization, not the original BF16-model quantization error.
+
+| Repacked affine group size | Additional weight RMSE | Maximum absolute error | Weight SNR |
+|---:|---:|---:|---:|
+| `32` | `0.00554` | `0.04049` | `27.60dB` |
+| `64` | `0.01098` | `0.04496` | `21.66dB` |
+| `128` | `0.01330` | `0.05068` | `19.99dB` |
+
+The actual sampled Q4_K decoded weights have RMS `0.13290` and range `[-1.0334, 0.9273]`. Even a fresh 32-value ordinary affine representation is not lossless because Q4_K's stored 6-bit superblock scale/min construction is different; the 64/128 representations accepted by stock fbgemm add materially more error.
+
+Conclusion: converting current H3 Q4_K weights into a TorchAO/fbgemm-compatible 64/128-group format is not a responsible default performance optimization. It can only be considered as an explicitly experimental, full-video quality-gated alternative. The quality-safe route remains an exact Q4_K×Q8_1 Hopper kernel with FP16/FP32 post-MMA scale/min handling.
+
+### 2026-08-08 signed-int4 mapping correction and TF32×INT4 check
+
+The fbgemm/CUTLASS `int4b_t` storage was probed directly. It is signed two's-complement INT4: nibble `0..7` decodes to `0..7`, while `8..15` decodes to `-8..-1`. Its affine operation is `signed_q * scale + zero_point` (the zero-point is added, not subtracted).
+
+The exact static Q4_K weight mapping is therefore:
+
+```text
+q_signed   = q4_unsigned - 8
+scale       = d * scale_group
+zero_point  = 8 * scale - dmin * min_group
+weight      = q_signed * scale + zero_point
+```
+
+A GPU probe using the supported fbgemm group-64 path confirmed this mapping; against a BF16-activation FP32 reference, the remaining output RMSE was `0.00858` and is attributable to fbgemm's BF16 output storage, rather than an affine-mapping error. The prior text that stated `zero=dmin*min` was incomplete because it omitted this signed-nibble offset; it is superseded by the formula above.
+
+A second out-of-tree prototype replaced fbgemm's BF16 activation/output types with F32 to look for a fused `TF32×INT4` analogue of the current quality-safe `Q4_K -> F32 -> cublasSgemm` path. It failed at CUTLASS mixed-input layout instantiation before launch. Searching SM90 GMMA definitions shows native integer S8/U8×S8/U8 operations and FP16/BF16/TF32 homogeneous operations, but no Hopper TF32×INT4 GMMA operation. This is a hardware instruction-set boundary rather than a missed cuBLAS setting.
+
+Consequences:
+
+- Stock BF16×INT4 fused kernels can represent Q4_K weights after signed-nibble packing, but necessarily convert the activation/weight computation to BF16 and produce BF16 output; this must remain opt-in until full video quality validation.
+- The current F32/TF32 cuBLAS route remains the quality-safe implementation because Hopper has no direct TF32×INT4 MMA to fuse exact F32 Q4_K decoding into that GEMM.
+- An exact fast path must instead retain the existing Q8_1 integer activation representation and implement Q4_K/Q8_1 scale/min/sum correction around Hopper integer GMMA, as described in the dual-quantized route.
+
+### 2026-08-08 TorchAO W4A8 and Marlin reuse audit
+
+Two additional TorchAO CUDA paths were audited to avoid overlooking an existing dual-scale implementation:
+
+1. `rowwise_scaled_linear_cutlass_s8s4` has an INT32 accumulator and a CUTLASS epilogue visitor that multiplies a per-token FP32 input scale and per-output-channel FP32 weight scale. Its public schema is `input_scale[M]`, `weight_scale[N]`. It has no K-group scale/min dimension, so it cannot express Q4_K's `weight_scale[K_group,N]` or `weight_min[K_group,N]`. The installed `torchao==0.15.0` wheel also omitted its CUDA implementation; its source is useful only as an epilogue-visitor reference.
+
+2. `marlin_qqq_gemm` accepts `s_tok[M]`, `s_ch[N]`, and `s_group[K/group,N]`, which initially appears closer. Its actual checks accept only `group_size=128`; its group dequantization is symmetric INT4 (`q-8`) with a scale only, no per-group zero/min. It uses Ampere-style `mma.m16n8k16` INT8 Tensor Core instructions, not Hopper GMMA. Like the CUTLASS W4A8 group-scale path, it folds the group scale into an integer operand before MMA, so it cannot preserve Q4_K's FP scale/min arithmetic. It is not a quality-safe reuse target.
+
+The exact Q4_K×Q8_1 path therefore has no available stock TorchAO/fbgemm/Marlin operator. It requires a dedicated kernel that uses S8×S8 GMMA to obtain a separate INT32 partial for each 32-value group, then applies the FP correction `activation_scale * (weight_scale * dot - weight_min * sum_q8)` before adding to the FP output accumulator. This is the remaining kernel-design task, not a dispatcher or layout flag.
+
+### 2026-08-08 mid-sequence FC2 TF32 routing experiment
+
+The existing SM90 Q4_K cuBLAS route already uses FP32 decode plus TF32 Tensor Cores for the H3 mid-sequence QKV and FC1 projections. The `n=7919` FC2 projections were intentionally left on exact GGML MMQ because the prior long-sequence FC2 route was quality-sensitive. A new **default-off** diagnostic switch was added:
+
+```text
+GGML_CUDA_SM90_Q4K_CUBLAS_MID_FC2=1
+```
+
+It routes only these two H3 Q4_K shapes through the existing FP32/TF32 cuBLAS path:
+
+```text
+m=5376, n=7919, k=14336
+m=5376, n=7919, k=7168
+```
+
+On the fixed-seed FL2VA probe (`864x480`, 56 frames, 5 steps, cfg=1, four DiT calls), the FC2 matmul timings and end-to-end DiT time improved materially:
+
+| Metric | Current quality-safe route | Mid-FC2 experiment |
+|---|---:|---:|
+| FC2 `k=14336` | MMQ `6.65ms` | FP32/TF32 cuBLAS `3.11ms` |
+| FC2 `k=7168` | MMQ `3.33ms` | FP32/TF32 cuBLAS `1.59ms` |
+| Four-call DiT diffusion | `6.666s` | `5.844s` |
+
+The experimental video is non-black and structurally coherent, but it does **not** satisfy the default quality gate. Decoded fixed-seed frames against the current MMQ-FC2 baseline had mean PSNR `32.70dB`, minimum `25.19dB` (first/middle/last: `44.74/33.72/40.37dB`). The contact comparison is `outputs/minimax-h3/exp-mid-fc2-f32-tf32-56f5s-2026-08-08/contact_sheet_compare.jpg`.
+
+Conclusion: retain the switch solely as a performance diagnostic. Diffusion amplifies the numerical difference between MMQ's exact Q4_K×Q8_1 accumulation and Q4_K-to-FP32 TF32 SGEMM even though both outputs look plausible. Do not enable it by default; the exact integer-GMMA Q4_K route remains the quality-preserving performance path.
+
+### 2026-08-08 mid-sequence FC2 full-task validation
+
+The mid-sequence FC2 experiment was validated on the full FL2VA comparison task, not only the 56-frame smoke task: `864x480`, `124` frames, `20` requested steps / `19` actual forwards, `cfg=1`, seed `42`, VAE tiling off, identical prompt and first/last frames.
+
+The matching Diffusers run was recovered from the **local** source tree shipped alongside the model, rather than downloading source code:
+
+```text
+PYTHONPATH=/models/MiniMax-H3-Diffusers/code/diffusers-main/src
+diffusers source revision: 53e5b00
+```
+
+This is the H3-capable `diffusers 0.40.0.dev0` source. The container-global PyPI package is `diffusers==0.39.0`, which does not contain `MiniMaxH3Transformer3DModel`; no model weight download is required to restore the benchmark environment.
+
+| Path | DiT / transformer time | Calls | Per-call | End-to-end / generation metric |
+|---|---:|---:|---:|---:|
+| Edge Q4_K quality-safe baseline | `62.367s` | `19` | `3.282s` | `85.129s` generation |
+| Edge Q4_K mid-FC2 TF32 experiment | `60.766s` | `19` | `3.198s` | `87.663s` generation |
+| Diffusers TorchAO int4 resident | `55.680s` | `19` | `2.930s` | `61.646s` generate CUDA / `102.121s` process end-to-end |
+
+The experiment improves Edge DiT by `1.601s` (`2.57%`) versus the quality-safe baseline, but remains `5.086s` (`9.14%`) slower than the restored Diffusers resident transformer benchmark. Its full-task decoded-frame comparison against the Edge MMQ-FC2 baseline measured mean PSNR `42.38dB`, minimum `40.69dB`; frames are visually coherent but not numerically equivalent. Artifacts:
+
+- `outputs/minimax-h3/exp-mid-fc2-f32-tf32-124f20s-2026-08-08/final.mp4`
+- `outputs/minimax-h3/exp-mid-fc2-f32-tf32-124f20s-2026-08-08/contact_sheet_compare.jpg`
+- `outputs/minimax-h3/diffusers-fl2va-480p124-int4-resident-profile4-gpu1-2026-08-08/final.json`
+
+Conclusion remains unchanged: the switch is a diagnostic only and must not become the default Q4_K route. It quantifies the maximum gain available from switching the remaining FC2 projections to dequantize-plus-TF32 SGEMM, leaving an exact Q4_K packed kernel as the only route to close the remaining quality-safe gap.
