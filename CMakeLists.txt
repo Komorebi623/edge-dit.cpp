@@ -29,6 +29,7 @@ option(ED_ENABLE_CUDNN_SDPA "Enable experimental cuDNN SDPA backend for CUDA fla
 option(ED_ENABLE_CUDA_NORM "Enable edge CUDA norm fast paths for ggml CUDA backend" ON)
 option(ED_ENABLE_CUDA_ROPE "Enable edge CUDA RoPE fast paths for ggml CUDA backend" ON)
 option(ED_ENABLE_CUDA_MODULATION "Enable edge CUDA fused modulation fast paths for ggml CUDA backend" ON)
+option(ED_ENABLE_CUDA_GRAPHS "Compile CUDA Graph support for opt-in edge inference" ON)
 option(ED_ENABLE_CUDA_SAGE_ATTN "Enable SageAttention2-style INT8-QK + F16-PV fused attention for ggml CUDA backend" OFF)
 option(ED_ENABLE_PARALLEL "Enable edge-dit lightweight parallel runtime" OFF)
 option(ED_ENABLE_NCCL "Enable NCCL communication backend" OFF)
@@ -254,6 +255,9 @@ if(ED_ENABLE_CUDA_MODULATION AND ED_GGML_CUDA)
 endif()
 
 if(ED_GGML_CUDA)
+    if(ED_ENABLE_CUDA_GRAPHS)
+        set(GGML_CUDA_GRAPHS ON CACHE BOOL "ggml: use CUDA graphs" FORCE)
+    endif()
     find_package(CUDAToolkit REQUIRED)
     target_sources(ggml-cuda
         PRIVATE

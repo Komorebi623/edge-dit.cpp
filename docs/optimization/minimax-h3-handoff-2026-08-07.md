@@ -997,3 +997,28 @@ This saves `7.911s` generation time (`9.20%`) without changing the generated vid
 - `outputs/minimax-h3/audio-convt1d-cudnn-124f20s-2026-08-08/final.mp4`
 - `outputs/minimax-h3/audio-convt1d-cudnn-124f20s-2026-08-08/quality/audio-comparison.json`
 - `outputs/minimax-h3/audio-convt1d-cudnn-124f20s-2026-08-08/quality/video-psnr-summary.log`
+
+### 2026-08-08 opt-in CUDA Graph capture
+
+The CUDA build previously compiled without CUDA Graph support, so repeated H3 video-VAE tile graphs (each `2491` graph nodes) were directly launched for every tile. CUDA Graph support is now compiled by default when `ED_ENABLE_CUDA_GRAPHS=ON`, but remains runtime-disabled unless explicitly requested:
+
+```bash
+ED_CUDA_GRAPHS=1 ed-cli ...
+```
+
+`GGML_CUDA_DISABLE_GRAPHS` remains an emergency override. The runtime gate is global because the backend captures compatible graph executions, not a model-specific arithmetic path. It does not alter weights, operators, numerical precision, or sampling.
+
+A full FL2VA comparison used the same configuration as the cuDNN audio-VAE validation: `864x480`, 124 frames, 24fps, 20 requested steps / 19 DiT forwards, cfg `1`, seed `42`, VAE tiling on, `--diffusion-fa`, and `ED_CUDNN_CONV_TRANSPOSE_1D=1` in both variants.
+
+| Variant | Generation | Wall total | Video | Audio |
+|---|---:|---:|---|---|
+| CUDA Graph runtime disabled | `78.063s` | `86.443s` | baseline | baseline |
+| `ED_CUDA_GRAPHS=1` | `77.881s` | `86.504s` | PSNR `inf` | exact waveform (PSNR `inf`) |
+
+The path is numerically exact on this task, but the end-to-end win is only `0.182s` (`0.23%`). It is retained as an independent opt-in scheduling control rather than enabled by default. The repeated VAE tile graph did capture and replay successfully; the limited end-to-end result means the primary remaining gap is compute, not launch overhead.
+
+Artifacts:
+
+- `outputs/minimax-h3/cuda-graphs-124f20s-2026-08-08/final.mp4`
+- `outputs/minimax-h3/cuda-graphs-124f20s-2026-08-08/quality/video-psnr-summary.log`
+- `outputs/minimax-h3/cuda-graphs-124f20s-2026-08-08/quality/audio-comparison.json`
