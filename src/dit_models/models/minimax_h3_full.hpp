@@ -193,7 +193,19 @@ namespace MiniMaxH3 {
         if (rot_dim == x->ne[0]) {
             return rotated;
         }
-        auto tail = attention_layout(ctx, ggml_ext_slice(ctx, x, 0, rot_dim, x->ne[0], !use_slice_views));
+        ggml_tensor* tail = nullptr;
+        if (h3_env_flag_enabled("ED_MINIMAX_H3_ROPE_TAIL_VIEW") && x->ne[3] == 1) {
+            tail = ggml_view_3d(ctx,
+                                x,
+                                x->ne[0] - rot_dim,
+                                x->ne[2],
+                                x->ne[1],
+                                x->nb[2],
+                                x->nb[1],
+                                static_cast<size_t>(rot_dim) * x->nb[0]);
+        } else {
+            tail = attention_layout(ctx, ggml_ext_slice(ctx, x, 0, rot_dim, x->ne[0], !use_slice_views));
+        }
         return ggml_concat(ctx, rotated, tail, 0);
     }
 

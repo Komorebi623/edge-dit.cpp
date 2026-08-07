@@ -729,3 +729,18 @@ To test whether FC1 quality loss came only from fp16 accumulation/output, FC1 wa
 Frame PSNR baseline-vs-FC1-fp16-f32compute over 56 frames: min `24.403dB`, average `31.772dB`, max `44.441dB`.
 
 Conclusion: FC1 divergence is not fixed by f32 accumulation alone. The lossy part is dequantizing the `Q4_K` FC1 weights and/or activations into fp16 for Tensor Core GEMM. FC1 fp16 should remain diagnostic-only; keep the quality-safe FC1 path on f32 SGEMM unless a resident int4 kernel/layout is implemented.
+
+### 2026-08-07 RoPE tail-view experiment
+
+A local H3 partial-RoPE experiment added `ED_MINIMAX_H3_ROPE_TAIL_VIEW=1`, which keeps the unrotated tail dimensions as a stride view instead of materializing the `[32, seq, heads]` tail before concatenating it with the rotated prefix.
+
+56-frame, 5-step FL2VA probe with `GGML_CUDA_SM90_Q4K_CUBLAS=1`:
+
+| Variant | Diffusion | Main graph tail-cont cost | Artifact |
+|---|---:|---:|---|
+| Baseline | `6.748s` | `62.469ms` over 4 DiT calls | `outputs/minimax-h3/perf-quality-rope-tail-view-56f5s-2026-08-07/baseline/final.mp4` |
+| `ED_MINIMAX_H3_ROPE_TAIL_VIEW=1` | `6.666s` | eliminated from top nodes | `outputs/minimax-h3/perf-quality-rope-tail-view-56f5s-2026-08-07/tail_view/final.mp4` |
+
+Frame PSNR baseline-vs-tail-view over 56 frames: min `31.263dB`, average `36.053dB`, max `45.292dB`.
+
+Conclusion: the layout optimization does remove the targeted tail materialization, but the end-to-end diffusion improvement is small on this probe and the output is not pixel-equivalent. Keep `ED_MINIMAX_H3_ROPE_TAIL_VIEW=1` opt-in only; it is not enabled by default.
