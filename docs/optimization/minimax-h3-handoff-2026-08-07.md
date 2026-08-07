@@ -1141,3 +1141,7 @@ Retained local artifacts (Git-ignored):
 - `outputs/minimax-h3/balanced-temporal-group-norm-concat-56f5s-2026-08-08/`
 - `outputs/minimax-h3/pad-reflect-1d-56f5s-2026-08-08/`
 - `outputs/minimax-h3/decoder-ffn-view-chunks-full-124f20s-2026-08-08/`
+
+### 2026-08-08 rejected H3 decoder QKV view attempt
+
+The decoder-tile CUDA profile showed `108` Q/K/V chunk materializations per tile (`64x32x1797` F32), about `4.8ms` per warm tile. A default-off `ED_MINIMAX_H3_DECODER_QKV_VIEW_CHUNKS=1` prototype was built to retain the three chunks as views. It cannot pass graph construction: `DecoderAttention` immediately reshapes each chunk from the packed QKV layout, and `ggml_reshape_4d` requires contiguous storage. The run aborts before output generation at that reshape. The source change was reverted; this is a structural layout requirement of the current Flash Attention input representation, not removable materialization.
