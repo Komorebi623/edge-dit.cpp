@@ -1022,3 +1022,36 @@ Artifacts:
 - `outputs/minimax-h3/cuda-graphs-124f20s-2026-08-08/final.mp4`
 - `outputs/minimax-h3/cuda-graphs-124f20s-2026-08-08/quality/video-psnr-summary.log`
 - `outputs/minimax-h3/cuda-graphs-124f20s-2026-08-08/quality/audio-comparison.json`
+
+### 2026-08-08 opt-in H3 video output postprocess fast path
+
+MiniMax-H3 video decode returns a contiguous host `Tensor<float>` in `[width, height, frames, channels, batch]` storage order. The original final conversion loop used `Tensor::index(...)` for every output channel, constructing and bounds-checking an index vector per value. This is outside the VAE math but was a measurable end-to-end CPU postprocess cost at 480p.
+
+The guarded fast path reads the equivalent contiguous offset directly while retaining the existing float clamp and `round(... * 255)` conversion. It is disabled by default:
+
+```bash
+ED_MINIMAX_H3_FAST_VIDEO_POSTPROCESS=1 ed-cli ...
+```
+
+For debugging the direct offset can be checked against every original `Tensor::index(...)` lookup during a run:
+
+```bash
+ED_MINIMAX_H3_FAST_VIDEO_POSTPROCESS=1 \
+ED_MINIMAX_H3_VERIFY_FAST_VIDEO_POSTPROCESS=1 ed-cli ...
+```
+
+The verification run completed without an assertion, establishing that the two paths read identical source floats. The full FL2VA validation used the same fixed task as the current performance baseline: `864x480`, `124` frames, `24fps`, `20` requested steps (`19` DiT forwards), cfg `1`, seed `42`, first/last frames `001.png`/`056.png`, `--diffusion-fa`, `GGML_CUDA_SM90_Q4K_CUBLAS=1`, and `ED_CUDNN_CONV_TRANSPOSE_1D=1`.
+
+| Variant | Generation | DiT | Video VAE | Video conversion | Video quality | Audio quality |
+|---|---:|---:|---:|---:|---|---|
+| Original conversion | `77.629s` | `62.454s` | `10.886s` | `1.960s` | baseline | baseline |
+| Fast conversion | `78.417s` | `62.307s` | `12.683s` | `1.048s` | PSNR `inf` | PCM exact, PSNR `inf` |
+
+The VAE phase has normal run-to-run variation (the second run was about `1.8s` slower in VAE compute), so the isolated conversion measurement is the relevant result: `0.912s` saved for this full task (`46.5%` of conversion time). The decoded 124-frame videos are pixel-identical, and decoded audio contains `331,776` identical samples. This does not affect GPU memory or model arithmetic.
+
+Artifacts are intentionally local and ignored by Git:
+
+- `outputs/minimax-h3/fast-video-postprocess-full-124f20s-2026-08-08/baseline/final.mp4`
+- `outputs/minimax-h3/fast-video-postprocess-full-124f20s-2026-08-08/fast/final.mp4`
+- `outputs/minimax-h3/fast-video-postprocess-full-124f20s-2026-08-08/quality/video-psnr-summary.log`
+- `outputs/minimax-h3/fast-video-postprocess-full-124f20s-2026-08-08/quality/audio-comparison.json`

@@ -111,6 +111,16 @@ bool h3_profile_enabled() {
     return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
 }
 
+bool h3_fast_video_postprocess_enabled() {
+    const char* value = std::getenv("ED_MINIMAX_H3_FAST_VIDEO_POSTPROCESS");
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+bool h3_verify_fast_video_postprocess_enabled() {
+    const char* value = std::getenv("ED_MINIMAX_H3_VERIFY_FAST_VIDEO_POSTPROCESS");
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
 void h3_trace_tensor(const char* name, const sd::Tensor<float>& tensor) {
     if (!h3_trace_enabled()) {
         return;
@@ -607,6 +617,9 @@ ed_status_t MiniMaxH3Pipeline::decode_video_latent(const sd::Tensor<float>& late
     const size_t channels = static_cast<size_t>(video.shape()[3]);
     const size_t pixels = width * height;
     const int64_t postprocess_begin = profile != nullptr ? ggml_time_ms() : 0;
+    const bool fast_postprocess = h3_fast_video_postprocess_enabled();
+    const bool verify_fast_postprocess = fast_postprocess && h3_verify_fast_video_postprocess_enabled();
+    const float* video_data     = video.data();
     for (int frame = 0; frame < frames_count; ++frame) {
         frames[frame].width = static_cast<int>(width);
         frames[frame].height = static_cast<int>(height);
@@ -618,14 +631,25 @@ ed_status_t MiniMaxH3Pipeline::decode_video_latent(const sd::Tensor<float>& late
             set_minimax_error(error, "failed to allocate MiniMax-H3 frame pixels");
             return ED_STATUS_OUT_OF_MEMORY;
         }
-        for (size_t pixel = 0; pixel < pixels; ++pixel) {
-            for (size_t channel = 0; channel < channels; ++channel) {
-                frames[frame].data[pixel * channels + channel] =
-                    h3_to_u8(video.index(pixel % width,
-                                         pixel / width,
-                                         std::min(frame, decoded_frames - 1),
-                                         channel,
-                                         0));
+        const int source_frame = std::min(frame, decoded_frames - 1);
+        if (fast_postprocess) {
+            for (size_t pixel = 0; pixel < pixels; ++pixel) {
+                const size_t x = pixel % width;
+                const size_t y = pixel / width;
+                for (size_t channel = 0; channel < channels; ++channel) {
+                    const size_t offset = x + width * (y + height * (source_frame + decoded_frames * channel));
+                    if (verify_fast_postprocess) {
+                        GGML_ASSERT(video_data[offset] == video.index(x, y, source_frame, channel, 0));
+                    }
+                    frames[frame].data[pixel * channels + channel] = h3_to_u8(video_data[offset]);
+                }
+            }
+        } else {
+            for (size_t pixel = 0; pixel < pixels; ++pixel) {
+                for (size_t channel = 0; channel < channels; ++channel) {
+                    frames[frame].data[pixel * channels + channel] =
+                        h3_to_u8(video.index(pixel % width, pixel / width, source_frame, channel, 0));
+                }
             }
         }
     }
