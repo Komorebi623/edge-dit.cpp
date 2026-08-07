@@ -408,6 +408,125 @@ namespace Ops {
                               1.f);
         }
     };
+struct AudioSnake1D : public UnaryBlock {
+    int64_t channels;
+    explicit AudioSnake1D(int64_t value) : channels(value) {}
+    void init_params(ggml_context* ctx, const String2TensorStorage& storage = {}, const std::string prefix = "") override {
+        ED_UNUSED(storage); ED_UNUSED(prefix);
+        params["alpha"] = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, channels, 1);
+    }
+    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override {
+        auto alpha = params["alpha"];
+        auto oscillation = ggml_sin(ctx->ggml_ctx, ggml_mul(ctx->ggml_ctx, x, alpha));
+        oscillation = ggml_mul(ctx->ggml_ctx, oscillation, oscillation);
+        auto eps = ggml_ext_scale(ctx->ggml_ctx, ggml_ext_ones(ctx->ggml_ctx, 1, 1, 1, 1), 1e-9f);
+        return ggml_add(ctx->ggml_ctx, x, ggml_div(ctx->ggml_ctx, oscillation, ggml_add(ctx->ggml_ctx, alpha, eps)));
+    }
+};
+
+struct AudioEncoderResidualUnit : public GGMLBlock {
+    AudioEncoderResidualUnit(int64_t channels, int dilation) {
+        blocks["block.0"] = std::make_shared<AudioSnake1D>(channels);
+        blocks["block.1"] = std::make_shared<Ops::Conv1D>(channels, channels, 7, 1, 3 * dilation, dilation);
+        blocks["block.2"] = std::make_shared<AudioSnake1D>(channels);
+        blocks["block.3"] = std::make_shared<Ops::Conv1D>(channels, channels, 1);
+    }
+    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+        auto act1 = std::dynamic_pointer_cast<AudioSnake1D>(blocks["block.0"]);
+        auto conv1 = std::dynamic_pointer_cast<Ops::Conv1D>(blocks["block.1"]);
+        auto act2 = std::dynamic_pointer_cast<AudioSnake1D>(blocks["block.2"]);
+        auto conv2 = std::dynamic_pointer_cast<Ops::Conv1D>(blocks["block.3"]);
+        auto h = conv2->forward(ctx, act2->forward(ctx, conv1->forward(ctx, act1->forward(ctx, x))));
+        if (x->ne[0] != h->ne[0]) {
+            const int64_t pad = (x->ne[0] - h->ne[0]) / 2;
+            x = ggml_ext_slice(ctx->ggml_ctx, x, 0, pad, x->ne[0] - pad);
+        }
+        return ggml_add(ctx->ggml_ctx, x, h);
+    }
+};
+
+struct AudioEncoderBlock : public GGMLBlock {
+    AudioEncoderBlock(int64_t out_channels, int stride) {
+        const int64_t in_channels = out_channels / 2;
+        blocks["block.0"] = std::make_shared<AudioEncoderResidualUnit>(in_channels, 1);
+        blocks["block.1"] = std::make_shared<AudioEncoderResidualUnit>(in_channels, 3);
+        blocks["block.2"] = std::make_shared<AudioEncoderResidualUnit>(in_channels, 9);
+        blocks["block.3"] = std::make_shared<AudioSnake1D>(in_channels);
+        blocks["block.4"] = std::make_shared<Ops::Conv1D>(in_channels, out_channels, 2 * stride, stride, static_cast<int>(std::ceil(stride / 2.f)));
+    }
+    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+        for (int index = 0; index < 3; ++index) x = std::dynamic_pointer_cast<AudioEncoderResidualUnit>(blocks["block." + std::to_string(index)])->forward(ctx, x);
+        return std::dynamic_pointer_cast<Ops::Conv1D>(blocks["block.4"])->forward(ctx, std::dynamic_pointer_cast<AudioSnake1D>(blocks["block.3"])->forward(ctx, x));
+    }
+};
+
+struct AudioEncoder : public GGMLBlock {
+    static constexpr std::array<int, 5> strides = {2, 4, 4, 5, 5};
+    AudioEncoder() {
+        int64_t channels = 64;
+        blocks["block.0"] = std::make_shared<Ops::Conv1D>(1, channels, 7, 1, 3);
+        for (size_t index = 0; index < strides.size(); ++index) { channels *= 2; blocks["block." + std::to_string(index + 1)] = std::make_shared<AudioEncoderBlock>(channels, strides[index]); }
+        blocks["block.6"] = std::make_shared<AudioSnake1D>(channels);
+        blocks["block.7"] = std::make_shared<Ops::Conv1D>(channels, 2048, 3, 1, 1);
+    }
+    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+        x = std::dynamic_pointer_cast<Ops::Conv1D>(blocks["block.0"])->forward(ctx, x);
+        for (size_t index = 0; index < strides.size(); ++index) x = std::dynamic_pointer_cast<AudioEncoderBlock>(blocks["block." + std::to_string(index + 1)])->forward(ctx, x);
+        return std::dynamic_pointer_cast<Ops::Conv1D>(blocks["block.7"])->forward(ctx, std::dynamic_pointer_cast<AudioSnake1D>(blocks["block.6"])->forward(ctx, x));
+    }
+};
+
+struct AudioGeGLUMLP : public GGMLBlock {
+    AudioGeGLUMLP(int64_t hidden_size, int64_t intermediate_size) {
+        blocks["norm"] = std::make_shared<LayerNorm>(hidden_size);
+        blocks["w0"] = std::make_shared<Linear>(hidden_size, intermediate_size, true);
+        blocks["w1"] = std::make_shared<Linear>(hidden_size, intermediate_size, true);
+        blocks["w2"] = std::make_shared<Linear>(intermediate_size, hidden_size, true);
+    }
+    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+        x = std::dynamic_pointer_cast<LayerNorm>(blocks["norm"])->forward(ctx, x);
+        auto gate = ggml_ext_gelu(ctx->ggml_ctx, std::dynamic_pointer_cast<Linear>(blocks["w0"])->forward(ctx, x), true);
+        return std::dynamic_pointer_cast<Linear>(blocks["w2"])->forward(ctx, ggml_mul(ctx->ggml_ctx, gate, std::dynamic_pointer_cast<Linear>(blocks["w1"])->forward(ctx, x)));
+    }
+};
+
+struct AudioCausalAttention : public GGMLBlock {
+    static constexpr int64_t in_channels = 2048, out_channels = 32, num_head = 8, head_dim = in_channels / num_head;
+    AudioCausalAttention() { blocks["qkv"] = std::make_shared<Linear>(in_channels, in_channels * 3, false); blocks["proj"] = std::make_shared<Linear>(out_channels, out_channels, true); }
+    void init_params(ggml_context* ctx, const String2TensorStorage& storage = {}, const std::string prefix = "") override {
+        GGMLBlock::init_params(ctx, storage, prefix); params["q_bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels); params["v_bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels);
+    }
+    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+        auto qkv = ggml_ext_chunk(ctx->ggml_ctx, std::dynamic_pointer_cast<Linear>(blocks["qkv"])->forward(ctx, x), 3, 0);
+        auto shape_bias = [&](ggml_tensor* value) { return ggml_reshape_4d(ctx->ggml_ctx, value, value->ne[0], 1, 1, 1); };
+        auto q = ggml_add(ctx->ggml_ctx, qkv[0], shape_bias(params["q_bias"]));
+        auto v = ggml_add(ctx->ggml_ctx, qkv[2], shape_bias(params["v_bias"]));
+        const int64_t sequence = x->ne[1];
+        auto mask = ggml_diag_mask_inf(ctx->ggml_ctx, ggml_ext_zeros(ctx->ggml_ctx, sequence, sequence, 1, 1), 0);
+        auto out = ggml_ext_attention_ext(ctx->ggml_ctx, ctx->backend, q, qkv[1], v, num_head, mask, false, ctx->flash_attn_enabled);
+        const int64_t batch = out->ne[2] * out->ne[3];
+        out = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, ggml_reshape_4d(ctx->ggml_ctx, out, head_dim, num_head, sequence, batch), 1, 0, 2, 3));
+        out = ggml_mean(ctx->ggml_ctx, out);
+        out = ggml_reshape_3d(ctx->ggml_ctx, out, head_dim, sequence, batch);
+        out = ggml_mean(ctx->ggml_ctx, ggml_reshape_4d(ctx->ggml_ctx, out, head_dim / out_channels, out_channels, sequence, batch));
+        out = ggml_reshape_3d(ctx->ggml_ctx, out, out_channels, sequence, batch);
+        return std::dynamic_pointer_cast<Linear>(blocks["proj"])->forward(ctx, out);
+    }
+};
+
+struct AudioAttentionProjection : public GGMLBlock {
+    AudioAttentionProjection() {
+        blocks["norm1"] = std::make_shared<LayerNorm>(2048); blocks["attn"] = std::make_shared<AudioCausalAttention>(); blocks["proj"] = std::make_shared<Linear>(2048, 32, true);
+        blocks["norm3"] = std::make_shared<LayerNorm>(2048); blocks["norm2"] = std::make_shared<LayerNorm>(32); blocks["mlp"] = std::make_shared<AudioGeGLUMLP>(32, 64);
+    }
+    ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+        auto h = ggml_add(ctx->ggml_ctx,
+                          std::dynamic_pointer_cast<Linear>(blocks["proj"])->forward(ctx, std::dynamic_pointer_cast<LayerNorm>(blocks["norm3"])->forward(ctx, x)),
+                          std::dynamic_pointer_cast<AudioCausalAttention>(blocks["attn"])->forward(ctx, std::dynamic_pointer_cast<LayerNorm>(blocks["norm1"])->forward(ctx, x)));
+        return ggml_add(ctx->ggml_ctx, h, std::dynamic_pointer_cast<AudioGeGLUMLP>(blocks["mlp"])->forward(ctx, std::dynamic_pointer_cast<LayerNorm>(blocks["norm2"])->forward(ctx, h)));
+    }
+};
+
 struct AudioDecoder : public GGMLBlock {
     static constexpr int kLatentChannels = 32;
     AudioDecoder() {
@@ -437,8 +556,54 @@ struct AudioDecoder : public GGMLBlock {
         return ggml_reshape_4d(ctx->ggml_ctx, waveform, waveform->ne[0], streams, 1, 1);
     }
 };
+struct AudioVAE : public GGMLBlock {
+    static constexpr int kLatentChannels = 32;
+    AudioVAE() {
+        blocks["encoder"] = std::make_shared<AudioEncoder>();
+        blocks["pre_block"] = std::make_shared<AudioAttentionProjection>();
+        blocks["mean_proj"] = std::make_shared<Ops::Conv1D>(kLatentChannels, kLatentChannels, 1);
+        blocks["logs_proj"] = std::make_shared<Ops::Conv1D>(kLatentChannels, kLatentChannels, 1);
+        blocks["dec_in_proj"] = std::make_shared<Ops::Conv1D>(kLatentChannels, 2048, 1);
+        blocks["decoder"] = std::make_shared<BigVGAN>();
+    }
+    void init_params(ggml_context* ctx, const String2TensorStorage& storage = {}, const std::string prefix = "") override {
+        GGMLBlock::init_params(ctx, storage, prefix);
+        params["latents_mean"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, kLatentChannels);
+        params["latents_std"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, kLatentChannels);
+    }
+    ggml_tensor* encode(GGMLRunnerContext* ctx, ggml_tensor* waveform) {
+        GGML_ASSERT(waveform->ne[1] == 2);
+        waveform = ggml_reshape_3d(ctx->ggml_ctx, waveform, waveform->ne[0], 1, waveform->ne[1]);
+        auto x = std::dynamic_pointer_cast<AudioEncoder>(blocks["encoder"])->forward(ctx, waveform);
+        x = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 1, 0, 2, 3));
+        x = std::dynamic_pointer_cast<AudioAttentionProjection>(blocks["pre_block"])->forward(ctx, x);
+        x = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 1, 0, 2, 3));
+        auto z = std::dynamic_pointer_cast<Ops::Conv1D>(blocks["mean_proj"])->forward(ctx, x);
+        auto mean = ggml_reshape_4d(ctx->ggml_ctx, params["latents_mean"], 1, kLatentChannels, 1, 1);
+        auto std = ggml_reshape_4d(ctx->ggml_ctx, params["latents_std"], 1, kLatentChannels, 1, 1);
+        return ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, ggml_div(ctx->ggml_ctx, ggml_sub(ctx->ggml_ctx, z, mean), std), 0, 2, 1, 3));
+    }
+    ggml_tensor* decode(GGMLRunnerContext* ctx, ggml_tensor* latent) {
+        GGML_ASSERT(latent->ne[1] == 2 && latent->ne[2] == kLatentChannels);
+        latent = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, latent, 0, 2, 1, 3));
+        auto mean = ggml_reshape_4d(ctx->ggml_ctx, params["latents_mean"], 1, kLatentChannels, 1, 1);
+        auto std = ggml_reshape_4d(ctx->ggml_ctx, params["latents_std"], 1, kLatentChannels, 1, 1);
+        latent = ggml_add(ctx->ggml_ctx, ggml_mul(ctx->ggml_ctx, latent, std), mean);
+        auto decoder_input = std::dynamic_pointer_cast<Ops::Conv1D>(blocks["dec_in_proj"]);
+        auto decoder = std::dynamic_pointer_cast<BigVGAN>(blocks["decoder"]);
+        const int64_t streams = latent->ne[2] * latent->ne[3];
+        latent = ggml_reshape_3d(ctx->ggml_ctx, latent, latent->ne[0], latent->ne[1], streams);
+        ggml_tensor* waveform = nullptr;
+        for (int64_t stream = 0; stream < streams; ++stream) {
+            auto value = decoder->forward(ctx, decoder_input->forward(ctx, ggml_ext_slice(ctx->ggml_ctx, latent, 2, stream, stream + 1)));
+            waveform = waveform == nullptr ? value : ggml_concat(ctx->ggml_ctx, waveform, value, 2);
+        }
+        return ggml_reshape_4d(ctx->ggml_ctx, waveform, waveform->ne[0], streams, 1, 1);
+    }
+};
+
 struct AudioVAERunner : public GGMLRunner {
-    AudioDecoder model;
+    AudioVAE model;
     AudioVAERunner(ggml_backend_t backend, bool offload, const String2TensorStorage& storage, const std::string& prefix = "audio_vae")
         : GGMLRunner(backend, offload) { model.init(params_ctx, storage, prefix); }
     std::string get_desc() override { return "minimax_h3_audio_vae"; }
@@ -447,6 +612,11 @@ struct AudioVAERunner : public GGMLRunner {
         auto get_graph = [&]() { auto input = make_input(latent); auto runner_ctx = get_context(); auto graph = new_graph_custom(655360); ggml_build_forward_expand(graph, model.decode(&runner_ctx, input)); return graph; };
         return restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), 4);
     }
+    sd::Tensor<float> encode(int n_threads, const sd::Tensor<float>& waveform) {
+        auto get_graph = [&]() { auto input = make_input(waveform); auto runner_ctx = get_context(); auto graph = new_graph_custom(655360); ggml_build_forward_expand(graph, model.encode(&runner_ctx, input)); return graph; };
+        return restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), 4);
+    }
+    int input_sample_rate() const { return 32000; }
 };
 }  // namespace MiniMaxH3Audio
 #endif

@@ -64,6 +64,12 @@ private:
     ggml_tensor* sentinel_tensor_ = nullptr;
 
     bool build_text_context(const char* prompt,
+                            const ed_image_t* ref_images,
+                            int ref_image_count,
+                            const ed_ref_video_t* ref_videos,
+                            int ref_video_count,
+                            int ref_audio_count,
+                            int max_video_frames,
                             sd::Tensor<float>* context,
                             sd::Tensor<int32_t>* token_tags,
                             std::string* error);

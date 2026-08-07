@@ -464,6 +464,10 @@ struct FluxCliArgs {
     const char* negative_prompt = nullptr;
     const char* image_path = nullptr;
     const char* end_image_path = nullptr;
+    std::vector<std::string> ref_image_paths;
+    std::vector<std::string> ref_video_paths;
+    std::vector<std::string> ref_video_audio_paths;
+    std::vector<std::string> ref_audio_paths;
     const char* output_path = "output.png";
     const char* video_format = nullptr;
     const char* backend = nullptr;
@@ -598,11 +602,22 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->end_image_path = require_value(key);
             if (!args->end_image_path) return false;
         } else if (std::strcmp(key, "--ref-image") == 0 || std::strcmp(key, "--ref_image") == 0 ||
-                   std::strcmp(key, "--ref-video") == 0 || std::strcmp(key, "--ref_video") == 0 ||
-                   std::strcmp(key, "--ref-audio") == 0 || std::strcmp(key, "--ref_audio") == 0 ||
                    std::strcmp(key, "-r") == 0) {
-            const char* ignored_path = require_value(key);
-            if (!ignored_path) return false;
+            const char* path = require_value(key);
+            if (!path) return false;
+            args->ref_image_paths.emplace_back(path);
+        } else if (std::strcmp(key, "--ref-video") == 0 || std::strcmp(key, "--ref_video") == 0) {
+            const char* path = require_value(key);
+            if (!path) return false;
+            args->ref_video_paths.emplace_back(path);
+        } else if (std::strcmp(key, "--ref-video-audio") == 0 || std::strcmp(key, "--ref_video_audio") == 0) {
+            const char* path = require_value(key);
+            if (!path) return false;
+            args->ref_video_audio_paths.emplace_back(path);
+        } else if (std::strcmp(key, "--ref-audio") == 0 || std::strcmp(key, "--ref_audio") == 0) {
+            const char* path = require_value(key);
+            if (!path) return false;
+            args->ref_audio_paths.emplace_back(path);
         } else if (std::strcmp(key, "--output") == 0 || std::strcmp(key, "-o") == 0) {
             args->output_path = require_value(key);
         } else if (std::strcmp(key, "--width") == 0 || std::strcmp(key, "-W") == 0) {
@@ -885,6 +900,11 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
 
     if (args->fps <= 0) {
         std::fprintf(stderr, "fps must be positive\n");
+        return false;
+    }
+
+    if (args->ref_video_audio_paths.size() > args->ref_video_paths.size()) {
+        std::fprintf(stderr, "each --ref-video-audio needs a corresponding --ref-video\n");
         return false;
     }
 
