@@ -9,6 +9,8 @@
 #include <iomanip>
 #include <set>
 #include <sstream>
+#include <thread>
+#include <vector>
 
 #include "dit_models/diffusion_model.hpp"
 #include "dit_models/components/autoencoders/minimax_h3_vae.hpp"
@@ -119,6 +121,18 @@ bool h3_fast_video_postprocess_enabled() {
 bool h3_verify_fast_video_postprocess_enabled() {
     const char* value = std::getenv("ED_MINIMAX_H3_VERIFY_FAST_VIDEO_POSTPROCESS");
     return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+int h3_fast_video_postprocess_threads() {
+    const char* value = std::getenv("ED_MINIMAX_H3_FAST_VIDEO_POSTPROCESS_THREADS");
+    if (value == nullptr || value[0] == '\0') {
+        return 0;
+    }
+    char* end = nullptr;
+    const long requested = std::strtol(value, &end, 10);
+    return end != value && requested > 1 && requested <= std::numeric_limits<int>::max()
+               ? static_cast<int>(requested)
+               : 0;
 }
 
 void h3_trace_tensor(const char* name, const sd::Tensor<float>& tensor) {
@@ -631,6 +645,8 @@ ed_status_t MiniMaxH3Pipeline::decode_video_latent(const sd::Tensor<float>& late
             set_minimax_error(error, "failed to allocate MiniMax-H3 frame pixels");
             return ED_STATUS_OUT_OF_MEMORY;
         }
+    }
+    auto convert_frame = [&](int frame) {
         const int source_frame = std::min(frame, decoded_frames - 1);
         if (fast_postprocess) {
             for (size_t pixel = 0; pixel < pixels; ++pixel) {
@@ -651,6 +667,26 @@ ed_status_t MiniMaxH3Pipeline::decode_video_latent(const sd::Tensor<float>& late
                         h3_to_u8(video.index(pixel % width, pixel / width, source_frame, channel, 0));
                 }
             }
+        }
+    };
+    const int requested_threads = fast_postprocess ? h3_fast_video_postprocess_threads() : 0;
+    const int conversion_threads = std::min(frames_count, requested_threads);
+    if (conversion_threads > 1) {
+        std::vector<std::thread> workers;
+        workers.reserve(static_cast<size_t>(conversion_threads));
+        for (int worker = 0; worker < conversion_threads; ++worker) {
+            workers.emplace_back([&, worker]() {
+                for (int frame = worker; frame < frames_count; frame += conversion_threads) {
+                    convert_frame(frame);
+                }
+            });
+        }
+        for (std::thread& worker : workers) {
+            worker.join();
+        }
+    } else {
+        for (int frame = 0; frame < frames_count; ++frame) {
+            convert_frame(frame);
         }
     }
     out->frames = frames;

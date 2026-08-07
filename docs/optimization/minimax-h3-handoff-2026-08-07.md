@@ -1055,3 +1055,30 @@ Artifacts are intentionally local and ignored by Git:
 - `outputs/minimax-h3/fast-video-postprocess-full-124f20s-2026-08-08/fast/final.mp4`
 - `outputs/minimax-h3/fast-video-postprocess-full-124f20s-2026-08-08/quality/video-psnr-summary.log`
 - `outputs/minimax-h3/fast-video-postprocess-full-124f20s-2026-08-08/quality/audio-comparison.json`
+
+### 2026-08-08 opt-in parallel H3 video output conversion
+
+The direct H3 output conversion path above can now parallelize independent decoded frames. It is only activated after the direct-offset path is explicitly enabled, and is otherwise absent from the normal execution path:
+
+```bash
+ED_MINIMAX_H3_FAST_VIDEO_POSTPROCESS=1 \
+ED_MINIMAX_H3_FAST_VIDEO_POSTPROCESS_THREADS=8 ed-cli ...
+```
+
+The thread count is bounded by the number of output frames; unset, invalid, or `1` leaves the single-threaded direct-offset path in use. Worker threads only read the decoded host float tensor and write their own `ed_image_t` frame allocation, so it neither changes model arithmetic nor allocates GPU memory.
+
+The full fixed-seed FL2VA validation used the same `864x480`, 124-frame, 20-step/cfg-1 task and runtime options as the direct-offset validation. The comparison uses the single-thread direct-offset run as the reference:
+
+| Variant | Generation | DiT | Video VAE | Video conversion | Video quality | Audio quality |
+|---|---:|---:|---:|---:|---|---|
+| Single-thread direct conversion | `78.417s` | `62.307s` | `12.683s` | `1.048s` | baseline | baseline |
+| Parallel direct conversion (`8` threads) | `75.420s` | `62.173s` | `10.813s` | `0.119s` | PSNR `inf` | PCM exact |
+
+The conversion phase improves by `0.929s` (`88.6%`) compared to the already optimized single-thread path and by `1.841s` compared to the original indexed path. The complete run was additionally faster by `2.997s`, though only the conversion saving should be attributed to this change because video-VAE timing varies modestly between cold model loads. Decoded video has infinite PSNR for all 124 frames and the `331,776` decoded audio samples match byte-for-byte.
+
+Artifacts:
+
+- `outputs/minimax-h3/parallel-video-postprocess-full-124f20s-2026-08-08/parallel/final.mp4`
+- `outputs/minimax-h3/parallel-video-postprocess-full-124f20s-2026-08-08/quality/video-psnr-summary.log`
+- `outputs/minimax-h3/parallel-video-postprocess-full-124f20s-2026-08-08/quality/serial.f32le`
+- `outputs/minimax-h3/parallel-video-postprocess-full-124f20s-2026-08-08/quality/parallel.f32le`
