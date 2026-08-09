@@ -203,6 +203,11 @@ static bool cudnn_sdpa_wan_sp_cross_attn_enabled() {
     return enabled;
 }
 
+static bool cudnn_sdpa_short_f16_self_attn_enabled() {
+    static const bool enabled = env_flag_enabled_or_default("ED_CUDNN_SDPA_SHORT_F16_SELF_ATTN", false);
+    return enabled;
+}
+
 static double now_ms() {
     using clock = std::chrono::steady_clock;
     return std::chrono::duration<double, std::milli>(clock::now().time_since_epoch()).count();
@@ -614,6 +619,12 @@ static bool should_use_cudnn_sdpa(const ed_cudnn_sdpa_key & key) {
     const bool supported_self_sequence = key.sq >= MIN_CUDNN_SDPA_FAST_SEQ &&
                                          ((key.sq == key.sk && !key.padding_mask) ||
                                           (key.padding_mask && key.sk_actual == key.sq && key.sk >= key.sq));
+    const bool supported_short_f16_self_sequence =
+        cudnn_sdpa_short_f16_self_attn_enabled() &&
+        key.io_type == GGML_TYPE_F16 &&
+        key.sq >= 1024 &&
+        ((key.sq == key.sk && !key.padding_mask) ||
+         (key.padding_mask && key.sk_actual == key.sq && key.sk >= key.sq));
     const bool supported_small_bf16_self_sequence =
         key.io_type == GGML_TYPE_BF16 &&
         !key.padding_mask &&
@@ -627,7 +638,10 @@ static bool should_use_cudnn_sdpa(const ed_cudnn_sdpa_key & key) {
         key.sk > 0 &&
         key.sk <= 1024 &&
         key.sk_actual == key.sk;
-    const bool supported_sequence = supported_self_sequence || supported_small_bf16_self_sequence || supported_cross_sequence;
+    const bool supported_sequence = supported_self_sequence ||
+                                    supported_short_f16_self_sequence ||
+                                    supported_small_bf16_self_sequence ||
+                                    supported_cross_sequence;
     const bool use_cudnn = supported_head_dim && supported_sequence;
 
     if (!use_cudnn && profile_enabled()) {

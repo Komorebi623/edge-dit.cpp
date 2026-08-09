@@ -25,6 +25,30 @@ namespace MiniMaxH3VAE {
         return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
     }
 
+    struct ScopedEnvFlag {
+        std::string name;
+        std::string old_value;
+        bool had_value = false;
+
+        ScopedEnvFlag(const char* key, const char* value)
+            : name(key) {
+            const char* current = std::getenv(key);
+            if (current != nullptr) {
+                had_value = true;
+                old_value = current;
+            }
+            setenv(name.c_str(), value, 1);
+        }
+
+        ~ScopedEnvFlag() {
+            if (had_value) {
+                setenv(name.c_str(), old_value.c_str(), 1);
+            } else {
+                unsetenv(name.c_str());
+            }
+        }
+    };
+
     struct CausalConv3d : public Conv3d {
         std::tuple<int, int, int> temporal_padding;
 
@@ -322,7 +346,11 @@ namespace MiniMaxH3VAE {
         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
             auto w1   = std::dynamic_pointer_cast<Linear>(blocks["w1"]);
             auto w2   = std::dynamic_pointer_cast<Linear>(blocks["w2"]);
-            auto gate = ggml_ext_chunk(ctx->ggml_ctx, w1->forward(ctx, x), 2, 0);
+            auto projected = w1->forward(ctx, x);
+            if (h3_env_flag_enabled("ED_MINIMAX_H3_VAE_FUSED_SWIGLU")) {
+                return w2->forward(ctx, ggml_swiglu(ctx->ggml_ctx, projected));
+            }
+            auto gate = ggml_ext_chunk(ctx->ggml_ctx, projected, 2, 0);
             return w2->forward(ctx,
                                ggml_mul(ctx->ggml_ctx,
                                         ggml_silu(ctx->ggml_ctx, gate[0]),
@@ -466,13 +494,17 @@ namespace MiniMaxH3VAE {
         ggml_tensor* encode(GGMLRunnerContext* ctx,
                             ggml_tensor* pixels,
                             ggml_tensor* pixel_mean,
-                            ggml_tensor* pixel_std) {
+                            ggml_tensor* pixel_std,
+                            bool return_moments = false) {
             pixels       = ggml_div(ctx->ggml_ctx,
                                     ggml_sub(ctx->ggml_ctx, pixels, pixel_mean),
                                     pixel_std);
             auto encoder = std::dynamic_pointer_cast<Encoder>(blocks["encoder"]);
             auto quant   = std::dynamic_pointer_cast<Conv3d>(blocks["quant_conv"]);
             auto moments = quant->forward(ctx, encoder->forward(ctx, pixels));
+            if (return_moments) {
+                return moments;
+            }
             return ggml_ext_slice(ctx->ggml_ctx, moments, 3, 0, 24);
         }
 
@@ -564,9 +596,23 @@ namespace MiniMaxH3VAE {
         }
 
         static ed_tiling_params_t h3_tiling(ed_tiling_params_t params) {
+            const char* disable_forced_tiling = std::getenv("ED_MINIMAX_H3_DISABLE_FORCED_VAE_TILING");
+            if (disable_forced_tiling != nullptr && disable_forced_tiling[0] != '\0' && disable_forced_tiling[0] != '0') {
+                params.enabled = false;
+                return params;
+            }
+            auto tile_size_from_env = [](const char* name, int fallback) {
+                const char* value = std::getenv(name);
+                if (value == nullptr || value[0] == '\0') {
+                    return fallback;
+                }
+                char* end = nullptr;
+                const long parsed = std::strtol(value, &end, 10);
+                return end != value && parsed >= 4 && parsed <= 256 ? static_cast<int>(parsed) : fallback;
+            };
             params.enabled        = true;
-            params.tile_size_x    = 16;
-            params.tile_size_y    = 16;
+            params.tile_size_x    = tile_size_from_env("ED_MINIMAX_H3_VAE_TILE_SIZE_X", 16);
+            params.tile_size_y    = tile_size_from_env("ED_MINIMAX_H3_VAE_TILE_SIZE_Y", 16);
             params.rel_size_x     = 0.0f;
             params.rel_size_y     = 0.0f;
             params.target_overlap = 0.25f;
@@ -584,21 +630,62 @@ namespace MiniMaxH3VAE {
         }
 
         static sd::Tensor<float> blend_temporal(const sd::Tensor<float>& previous,
-                                                const sd::Tensor<float>& current,
+                                                sd::Tensor<float> current,
                                                 int64_t extent) {
-            auto output            = current;
-            extent                 = std::min({extent, previous.shape()[2], current.shape()[2]});
+            auto output            = std::move(current);
+            extent                 = std::min({extent, previous.shape()[2], output.shape()[2]});
             int64_t previous_start = previous.shape()[2] - extent;
-            for (int64_t b = 0; b < current.shape()[4]; ++b) {
-                for (int64_t c = 0; c < current.shape()[3]; ++c) {
+            if (h3_env_flag_enabled("ED_MINIMAX_H3_FAST_TEMPORAL_BLEND")) {
+                const int64_t frame_size = output.shape()[0] * output.shape()[1];
+                const int64_t frames_per_outer = output.shape()[2];
+                const int64_t previous_frames_per_outer = previous.shape()[2];
+                const int64_t outer_count = output.shape()[3] * output.shape()[4];
+                float* output_data = output.values().data();
+                const float* previous_data = previous.values().data();
+                sd_parallel_for(0, outer_count * extent, 8, [&](int64_t index) {
+                    const int64_t t = index % extent;
+                    const int64_t outer = index / extent;
+                    const float wb = static_cast<float>(t) / extent;
+                    const float wa = 1.f - wb;
+                    float* output_frame = output_data + frame_size * (t + frames_per_outer * outer);
+                    const float* previous_frame = previous_data +
+                        frame_size * (previous_start + t + previous_frames_per_outer * outer);
+                    for (int64_t pixel = 0; pixel < frame_size; ++pixel) {
+                        output_frame[pixel] = previous_frame[pixel] * wa + output_frame[pixel] * wb;
+                    }
+                });
+                return output;
+            }
+            if (h3_env_flag_enabled("ED_MINIMAX_H3_PARALLEL_TEMPORAL_COPY")) {
+                const int64_t channels = output.shape()[3];
+                const int64_t batches = output.shape()[4];
+                sd_parallel_for(0, batches * channels * extent, 8, [&](int64_t index) {
+                    const int64_t t = index % extent;
+                    const int64_t channel_batch = index / extent;
+                    const int64_t c = channel_batch % channels;
+                    const int64_t b = channel_batch / channels;
+                    const float wb = static_cast<float>(t) / extent;
+                    const float wa = 1.f - wb;
+                    for (int64_t h = 0; h < output.shape()[1]; ++h) {
+                        for (int64_t w = 0; w < output.shape()[0]; ++w) {
+                            output.index(w, h, t, c, b) =
+                                previous.index(w, h, previous_start + t, c, b) * wa +
+                                output.index(w, h, t, c, b) * wb;
+                        }
+                    }
+                });
+                return output;
+            }
+            for (int64_t b = 0; b < output.shape()[4]; ++b) {
+                for (int64_t c = 0; c < output.shape()[3]; ++c) {
                     for (int64_t t = 0; t < extent; ++t) {
                         float wb = static_cast<float>(t) / extent;
                         float wa = 1.f - wb;
-                        for (int64_t h = 0; h < current.shape()[1]; ++h) {
-                            for (int64_t w = 0; w < current.shape()[0]; ++w) {
+                        for (int64_t h = 0; h < output.shape()[1]; ++h) {
+                            for (int64_t w = 0; w < output.shape()[0]; ++w) {
                                 output.index(w, h, t, c, b) =
                                     previous.index(w, h, previous_start + t, c, b) * wa +
-                                    current.index(w, h, t, c, b) * wb;
+                                    output.index(w, h, t, c, b) * wb;
                             }
                         }
                     }
@@ -622,6 +709,24 @@ namespace MiniMaxH3VAE {
             }
             shape[2] = total_frames;
             sd::Tensor<float> result(shape);
+            if (h3_env_flag_enabled("ED_MINIMAX_H3_PARALLEL_TEMPORAL_COPY")) {
+                const int64_t frame_size = shape[0] * shape[1];
+                const int64_t outer_count = shape[3] * shape[4];
+                sd_parallel_for(0, outer_count, 8, [&](int64_t outer) {
+                    int64_t temporal_offset = 0;
+                    for (const auto& part : parts) {
+                        const int64_t part_frames = part.shape()[2];
+                        const int64_t part_size = frame_size * part_frames;
+                        const int64_t source_offset = outer * part_size;
+                        const int64_t destination_offset = frame_size * (temporal_offset + total_frames * outer);
+                        std::copy_n(part.values().data() + source_offset,
+                                    part_size,
+                                    result.values().data() + destination_offset);
+                        temporal_offset += part_frames;
+                    }
+                });
+                return result;
+            }
             int64_t offset = 0;
             for (const auto& part : parts) {
                 sd::ops::slice_assign(&result, 2, offset, offset + part.shape()[2], part);
@@ -659,6 +764,38 @@ namespace MiniMaxH3VAE {
             for (int64_t start = 0; start < input.shape()[2]; start += 17) {
                 auto chunk   = sd::ops::slice(input, 2, start, start + 17);
                 auto encoded = VAE::encode(n_threads, chunk, tiling, circular_x, circular_y);
+                if (encoded.empty()) {
+                    return {};
+                }
+                result = result.empty() ? std::move(encoded)
+                                        : sd::ops::concat(result, encoded, 2);
+            }
+            if (result.shape()[2] > 3) {
+                result = sd::ops::slice(result, 2, 0, result.shape()[2] - 3);
+            }
+            return result;
+        }
+
+        sd::Tensor<float> encode_moments(int n_threads,
+                                         const sd::Tensor<float>& x,
+                                         ed_tiling_params_t tiling_params) {
+            ScopedEnvFlag flag("ED_MINIMAX_H3_VAE_RETURN_MOMENTS", "1");
+            auto input = ensure_video_shape(x);
+            auto tiling = h3_tiling(tiling_params);
+            if (input.shape()[2] == 1) {
+                return VAE::encode(n_threads, input, tiling, false, false);
+            }
+            int64_t pad = (-input.shape()[2]) % 17;
+            if (pad < 0) {
+                pad += 17;
+            }
+            if (pad > 0) {
+                input = repeat_last_frame(input, pad);
+            }
+            sd::Tensor<float> result;
+            for (int64_t start = 0; start < input.shape()[2]; start += 17) {
+                auto chunk   = sd::ops::slice(input, 2, start, start + 17);
+                auto encoded = VAE::encode(n_threads, chunk, tiling, false, false);
                 if (encoded.empty()) {
                     return {};
                 }
@@ -717,17 +854,30 @@ namespace MiniMaxH3VAE {
             }
 
             const bool collect_temporal_parts = h3_env_flag_enabled("ED_MINIMAX_H3_COLLECT_TEMPORAL_PARTS");
+            const bool fused_temporal_assembly =
+                h3_env_flag_enabled("ED_MINIMAX_H3_FUSED_TEMPORAL_ASSEMBLY");
             sd::Tensor<float> result;
             std::vector<sd::Tensor<float>> temporal_parts;
-            if (collect_temporal_parts) {
+            if (collect_temporal_parts && !fused_temporal_assembly) {
                 temporal_parts.reserve(static_cast<size_t>(num_chunks + 1));
             }
             sd::Tensor<float> overlap;
+            sd::Tensor<float> previous_overlap;
+            int64_t assembled_frames = 0;
+            const bool profile_temporal = h3_env_flag_enabled("ED_PROFILE_MINIMAX_H3_VAE_TEMPORAL");
+            int64_t chunk_slice_us = 0;
+            int64_t decode_us = 0;
+            int64_t output_slice_us = 0;
+            int64_t blend_us = 0;
+            int64_t collect_us = 0;
             for (int64_t i = 0; i < num_chunks; ++i) {
                 int64_t start = i * tokens_per_chunk;
                 int64_t end   = std::min(start + tokens_per_chunk + token_overlap,
                                          input.shape()[2]);
+                const int64_t chunk_slice_begin = profile_temporal ? ggml_time_us() : 0;
                 auto chunk    = sd::ops::slice(input, 2, start, end);
+                const int64_t decode_begin = profile_temporal ? ggml_time_us() : 0;
+                if (profile_temporal) chunk_slice_us += decode_begin - chunk_slice_begin;
                 auto decoded  = VAE::decode(n_threads,
                                             chunk,
                                             tiling,
@@ -735,8 +885,81 @@ namespace MiniMaxH3VAE {
                                             circular_x,
                                             circular_y,
                                             silent);
+                const int64_t output_slice_begin = profile_temporal ? ggml_time_us() : 0;
+                if (profile_temporal) decode_us += output_slice_begin - decode_begin;
                 if (decoded.empty()) {
                     return {};
+                }
+
+                if (fused_temporal_assembly) {
+                    const int64_t first_begin = std::min<int64_t>(frame_pre_padding, decoded.shape()[2]);
+                    const int64_t first_end = std::min<int64_t>(frames_per_chunk, decoded.shape()[2]);
+                    const int64_t first_frames = std::max<int64_t>(0, first_end - first_begin);
+                    if (result.empty()) {
+                        std::vector<int64_t> shape = decoded.shape();
+                        shape[2] = std::max<int64_t>(1, ((x.shape()[2] - 2) / 5) * 17 + 5);
+                        result = sd::Tensor<float>(std::move(shape));
+                    }
+                    const int64_t frame_size = decoded.shape()[0] * decoded.shape()[1];
+                    const int64_t outer_count = decoded.shape()[3] * decoded.shape()[4];
+                    const int64_t decoded_frames = decoded.shape()[2];
+                    const int64_t result_frames = result.shape()[2];
+                    const int64_t blend_frames = previous_overlap.empty()
+                                                     ? 0
+                                                     : std::min<int64_t>(frame_overlap, first_frames);
+                    sd_parallel_for(0, outer_count, 8, [&](int64_t outer) {
+                        const float* source = decoded.values().data() +
+                                              frame_size * (first_begin + decoded_frames * outer);
+                        float* destination = result.values().data() +
+                                             frame_size * (assembled_frames + result_frames * outer);
+                        if (blend_frames > 0) {
+                            const int64_t previous_frames = previous_overlap.shape()[2];
+                            const float* previous = previous_overlap.values().data() +
+                                                    frame_size * (previous_frames * outer);
+                            for (int64_t t = 0; t < blend_frames; ++t) {
+                                const float wb = static_cast<float>(t) / blend_frames;
+                                const float wa = 1.f - wb;
+                                for (int64_t pixel = 0; pixel < frame_size; ++pixel) {
+                                    destination[t * frame_size + pixel] =
+                                        previous[t * frame_size + pixel] * wa +
+                                        source[t * frame_size + pixel] * wb;
+                                }
+                            }
+                        }
+                        const int64_t copy_frames = first_frames - blend_frames;
+                        if (copy_frames > 0) {
+                            std::copy_n(source + blend_frames * frame_size,
+                                        copy_frames * frame_size,
+                                        destination + blend_frames * frame_size);
+                        }
+                    });
+                    assembled_frames += first_frames;
+
+                    if (i == num_chunks - 1 && decoded_frames > frames_per_chunk + frame_pre_padding) {
+                        const int64_t tail_begin = frames_per_chunk + frame_pre_padding;
+                        const int64_t tail_frames = std::min<int64_t>(
+                            decoded_frames - tail_begin, result.shape()[2] - assembled_frames);
+                        sd_parallel_for(0, outer_count, 8, [&](int64_t outer) {
+                            const float* source = decoded.values().data() +
+                                                  frame_size * (tail_begin + decoded_frames * outer);
+                            float* destination = result.values().data() +
+                                                 frame_size * (assembled_frames + result_frames * outer);
+                            std::copy_n(source, tail_frames * frame_size, destination);
+                        });
+                        assembled_frames += tail_frames;
+                    }
+                    if (decoded_frames > frames_per_chunk + frame_pre_padding) {
+                        previous_overlap = sd::ops::slice(decoded,
+                                                          2,
+                                                          frames_per_chunk + frame_pre_padding,
+                                                          decoded_frames);
+                    } else {
+                        previous_overlap = {};
+                    }
+                    if (profile_temporal) {
+                        collect_us += ggml_time_us() - output_slice_begin;
+                    }
+                    continue;
                 }
 
                 int64_t first_end = std::min<int64_t>(frames_per_chunk, decoded.shape()[2]);
@@ -744,10 +967,16 @@ namespace MiniMaxH3VAE {
                                                    2,
                                                    std::min<int64_t>(frame_pre_padding, first_end),
                                                    first_end);
+                const int64_t blend_begin = profile_temporal ? ggml_time_us() : 0;
+                if (profile_temporal) output_slice_us += blend_begin - output_slice_begin;
                 if (!overlap.empty()) {
-                    first   = blend_temporal(overlap, first, frame_overlap);
+                    first   = h3_env_flag_enabled("ED_MINIMAX_H3_MOVE_TEMPORAL_BLEND")
+                                  ? blend_temporal(overlap, std::move(first), frame_overlap)
+                                  : blend_temporal(overlap, first, frame_overlap);
                     overlap = {};
                 }
+                const int64_t collect_begin = profile_temporal ? ggml_time_us() : 0;
+                if (profile_temporal) blend_us += collect_begin - blend_begin;
                 if (collect_temporal_parts) {
                     temporal_parts.push_back(std::move(first));
                 } else {
@@ -769,16 +998,30 @@ namespace MiniMaxH3VAE {
                     }
                     overlap = {};
                 }
+                if (profile_temporal) collect_us += ggml_time_us() - collect_begin;
             }
 
-            if (collect_temporal_parts) {
+            const int64_t final_collect_begin = profile_temporal ? ggml_time_us() : 0;
+            if (collect_temporal_parts && !fused_temporal_assembly) {
                 result = concatenate_temporal_parts(temporal_parts);
             }
+            if (profile_temporal) collect_us += ggml_time_us() - final_collect_begin;
 
             int64_t expected_frames = input.shape()[2] <= 1 ? 1 : ((x.shape()[2] - 2) / 5) * 17 + 5;
             expected_frames         = std::max<int64_t>(1, expected_frames);
+            const int64_t trim_begin = profile_temporal ? ggml_time_us() : 0;
             if (result.shape()[2] > expected_frames) {
                 result = sd::ops::slice(result, 2, 0, expected_frames);
+            }
+            if (profile_temporal) {
+                LOG_INFO("ED_MINIMAX_H3_VAE_TEMPORAL_PROFILE chunks=%lld chunk-slice_ms=%.3f decode_ms=%.3f output-slice_ms=%.3f blend_ms=%.3f collect_ms=%.3f trim_ms=%.3f",
+                         static_cast<long long>(num_chunks),
+                         chunk_slice_us / 1000.0,
+                         decode_us / 1000.0,
+                         output_slice_us / 1000.0,
+                         blend_us / 1000.0,
+                         collect_us / 1000.0,
+                         (ggml_time_us() - trim_begin) / 1000.0);
             }
             return result;
         }
@@ -832,12 +1075,25 @@ namespace MiniMaxH3VAE {
                     auto pe = make_input(rope_cache);
                     out     = model.decode(&runner_ctx, value, pe, mean, std);
                 } else {
-                    out = model.encode(&runner_ctx, value, mean, std);
+                    out = model.encode(&runner_ctx,
+                                       value,
+                                       mean,
+                                       std,
+                                       h3_env_flag_enabled("ED_MINIMAX_H3_VAE_RETURN_MOMENTS"));
                 }
                 auto graph = new_graph_custom(H3_VIDEO_VAE_GRAPH_SIZE);
                 ggml_build_forward_expand(graph, out);
                 return graph;
             };
+            if (h3_env_flag_enabled("ED_MINIMAX_H3_VAE_TILE_GRAPH_REUSE")) {
+                std::vector<const sd::Tensor<float>*> ordered_inputs = {&input, &pixel_mean, &pixel_std};
+                if (decode_graph) {
+                    ordered_inputs.push_back(&rope_cache);
+                }
+                if (auto out = GGMLRunner::compute_reuse<float>(get_graph, ordered_inputs, n_threads, false)) {
+                    return restore_trailing_singleton_dims(std::move(*out), 5);
+                }
+            }
             return restore_trailing_singleton_dims(
                 GGMLRunner::compute<float>(get_graph, n_threads, false),
                 5);

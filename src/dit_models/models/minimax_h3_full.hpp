@@ -12,6 +12,7 @@
 
 #include "backend/ggml/ggml_graph_cut.h"
 #include "dit_models/components/common/common_dit.hpp"
+#include "backend/ggml/ed_ggml_modulation_ext.hpp"
 #include "backend/ggml/ggml_extend.hpp"
 #include "dit_models/components/common/rope.hpp"
 
@@ -89,7 +90,14 @@ namespace MiniMaxH3 {
                 config.attention_head_dim = weight->ne[0];
             }
             if (const auto* weight = find("blocks.0.attn.qkv_proj.weight")) {
-                config.num_attention_heads = weight->ne[1] / (3 * config.attention_head_dim);
+                int64_t qkv_out_dim = weight->ne[1];
+                if (const auto* k_weight = find("blocks.0.attn.qkv_proj.weight.1")) {
+                    qkv_out_dim += k_weight->ne[1];
+                }
+                if (const auto* v_weight = find("blocks.0.attn.qkv_proj.weight.2")) {
+                    qkv_out_dim += v_weight->ne[1];
+                }
+                config.num_attention_heads = qkv_out_dim / (3 * config.attention_head_dim);
             }
             if (const auto* weight = find("blocks.0.mlp.fc1.weight")) {
                 config.ffn_hidden_size = weight->ne[1] / 2;
@@ -161,7 +169,9 @@ namespace MiniMaxH3 {
             auto fc1 = std::dynamic_pointer_cast<Linear>(blocks["fc1"]);
             auto fc2 = std::dynamic_pointer_cast<Linear>(blocks["fc2"]);
             const bool use_mlp_tensor_cores = h3_env_flag_enabled("ED_MINIMAX_H3_MLP_FP16_CUBLAS");
-            const bool use_fc1_tensor_cores = use_mlp_tensor_cores || h3_env_flag_enabled("ED_MINIMAX_H3_FC1_FP16_CUBLAS");
+            const bool use_fc1_tensor_cores = use_mlp_tensor_cores ||
+                                              h3_env_flag_enabled("ED_MINIMAX_H3_FC1_FP16_CUBLAS") ||
+                                              h3_env_flag_enabled("ED_MINIMAX_H3_FC1_F32_OUTPUT");
             const bool use_fc2_tensor_cores = use_mlp_tensor_cores || h3_env_flag_enabled("ED_MINIMAX_H3_FC2_FP16_CUBLAS");
             fc1->set_force_prec_f32(!use_fc1_tensor_cores);
             fc2->set_force_prec_f32(!use_fc2_tensor_cores);
@@ -422,9 +432,20 @@ namespace MiniMaxH3 {
                                        segment.modulation_row);
             const bool use_views = !h3_env_flag_enabled("ED_MINIMAX_H3_DISABLE_SEGMENT_VIEW");
             auto part = ggml_ext_slice(ctx, x, 1, segment.start, segment.end, !use_views);
-            part      = ggml_add(ctx,
-                                 ggml_add(ctx, part, ggml_mul(ctx, part, mods[scale_index])),
-                                 mods[shift_index]);
+            if (h3_env_flag_enabled("ED_MINIMAX_H3_FUSED_SEGMENT_MODULATION") ||
+                h3_env_flag_enabled("ED_MINIMAX_H3_FUSED_SEGMENT_MODULATE")) {
+                if (auto fused = edgedit::ggml_ext::fused_modulate_custom(ctx, part, mods[shift_index], mods[scale_index])) {
+                    part = fused;
+                } else {
+                    part = ggml_add(ctx,
+                                    ggml_add(ctx, part, ggml_mul(ctx, part, mods[scale_index])),
+                                    mods[shift_index]);
+                }
+            } else {
+                part = ggml_add(ctx,
+                                ggml_add(ctx, part, ggml_mul(ctx, part, mods[scale_index])),
+                                mods[shift_index]);
+            }
             out       = out == nullptr ? part : ggml_concat(ctx, out, part, 1);
         }
         return out;
@@ -443,7 +464,14 @@ namespace MiniMaxH3 {
             const bool use_views = !h3_env_flag_enabled("ED_MINIMAX_H3_DISABLE_SEGMENT_VIEW");
             auto base = ggml_ext_slice(ctx, x, 1, segment.start, segment.end, !use_views);
             auto add  = ggml_ext_slice(ctx, update, 1, segment.start, segment.end, !use_views);
-            auto part = ggml_add(ctx, base, ggml_mul(ctx, add, mods[gate_index]));
+            ggml_tensor* part = nullptr;
+            if (h3_env_flag_enabled("ED_MINIMAX_H3_FUSED_SEGMENT_MODULATION") ||
+                h3_env_flag_enabled("ED_MINIMAX_H3_FUSED_SEGMENT_RESIDUAL_GATE")) {
+                part = edgedit::ggml_ext::fused_residual_gate_custom(ctx, base, add, mods[gate_index]);
+            }
+            if (part == nullptr) {
+                part = ggml_add(ctx, base, ggml_mul(ctx, add, mods[gate_index]));
+            }
             out       = out == nullptr ? part : ggml_concat(ctx, out, part, 1);
         }
         return out;
@@ -659,7 +687,7 @@ namespace MiniMaxH3 {
                                                       const std::vector<SequenceSegment>& sequence_segments,
                                                       const TokenModulationSpan& video_segment,
                                                       const TokenModulationSpan& audio_segment,
-                                                      float audio_slope) {
+                                                      ggml_tensor* audio_slope) {
             auto video_proj = std::dynamic_pointer_cast<Linear>(blocks["video_patch_proj"]);
             auto audio_proj = std::dynamic_pointer_cast<Linear>(blocks["audio_patch_proj"]);
 
@@ -779,7 +807,7 @@ namespace MiniMaxH3 {
                                                audio->ne[2]);
             audio_out        = ggml_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, audio_out, 1, 2, 0, 3));
             video_out        = ggml_ext_scale(ctx->ggml_ctx, video_out, -1.f);
-            audio_out        = ggml_ext_scale(ctx->ggml_ctx, audio_out, -audio_slope);
+            audio_out        = ggml_mul(ctx->ggml_ctx, audio_out, ggml_neg(ctx->ggml_ctx, audio_slope));
             return {video_out, audio_out};
         }
     };
@@ -1022,6 +1050,7 @@ namespace MiniMaxH3 {
         sd::Tensor<float> audio_input_cache;
         sd::Tensor<float> position_input_cache;
         sd::Tensor<float> timestep_feature_input_cache;
+        sd::Tensor<float> audio_slope_input_cache;
         sd::Tensor<int32_t> curve_index_input_cache;
         sd::Tensor<int32_t> curve_upper_index_input_cache;
         sd::Tensor<float> curve_fraction_input_cache;
@@ -1179,6 +1208,10 @@ namespace MiniMaxH3 {
             }
 
             auto runner_ctx = get_context();
+            audio_slope_input_cache = sd::Tensor<float>(
+                {1},
+                {time_shift_slope(sigma_v, video_shift, audio_shift)});
+            auto audio_slope_tensor = make_input(audio_slope_input_cache);
             auto output     = model.forward(&runner_ctx,
                                             video,
                                             audio,
@@ -1194,7 +1227,7 @@ namespace MiniMaxH3 {
                                             layout.sequence_segments,
                                             layout.video_segment,
                                             layout.audio_segment,
-                                            time_shift_slope(sigma_v, video_shift, audio_shift));
+                                            audio_slope_tensor);
             auto merged     = merge_av_latents(compute_ctx, output.first, output.second);
             auto graph      = new_graph_custom(H3_GRAPH_SIZE);
             ggml_build_forward_expand(graph, merged);
@@ -1227,6 +1260,77 @@ namespace MiniMaxH3 {
                                    params.minimax_video_sigma_shift,
                                    params.minimax_audio_sigma_shift);
             };
+            if (h3_env_flag_enabled("ED_MINIMAX_H3_REUSE_GRAPH")) {
+                auto split_for_reuse = split_av_latents(*params.x, params.minimax_audio_length);
+                video_input_cache = std::move(split_for_reuse.first);
+                audio_input_cache = std::move(split_for_reuse.second);
+                const float sigma_v = std::clamp((*params.timesteps)[0] / 1000.f, 1e-6f, 1.f);
+                const float t_v     = 1.f - sigma_v;
+                const float t_a     = 1.f - time_shift_sigma(sigma_v,
+                                                              params.minimax_video_sigma_shift,
+                                                              params.minimax_audio_sigma_shift);
+                auto layout_for_reuse = build_layout(params.context->shape()[1],
+                                                     video_input_cache.shape()[2],
+                                                     video_input_cache.shape()[1],
+                                                     video_input_cache.shape()[0],
+                                                     params.minimax_audio_length,
+                                                     conditions,
+                                                     audio_conditions,
+                                                     params.minimax_keyframe_indices == nullptr ? empty_int : *params.minimax_keyframe_indices,
+                                                     reference_blocks,
+                                                     params.minimax_text_token_tags == nullptr ? empty_int : *params.minimax_text_token_tags,
+                                                     t_v,
+                                                     t_a);
+                position_input_cache = sd::Tensor<float>(
+                    {3, static_cast<int64_t>(layout_for_reuse.positions.size() / 3)},
+                    layout_for_reuse.positions);
+                if (config.uses_adaln_curves()) {
+                    std::vector<float> fractions(layout_for_reuse.timesteps.size());
+                    for (size_t i = 0; i < layout_for_reuse.timesteps.size(); ++i) {
+                        float position = std::clamp(layout_for_reuse.timesteps[i], 0.f, 1.f) * (config.adaln_curve_grid - 1);
+                        int index      = std::min(static_cast<int>(std::floor(position)),
+                                                  static_cast<int>(config.adaln_curve_grid - 2));
+                        fractions[i]   = position - index;
+                    }
+                    curve_fraction_input_cache = sd::Tensor<float>(
+                        {1, static_cast<int64_t>(fractions.size())},
+                        fractions);
+                } else {
+                    timestep_feature_input_cache = sd::Tensor<float>(
+                        {config.timestep_input_dim, static_cast<int64_t>(layout_for_reuse.timesteps.size())},
+                        timestep_embedding(layout_for_reuse.timesteps,
+                                           static_cast<int>(config.timestep_input_dim),
+                                           10000,
+                                           true,
+                                           1.f));
+                }
+                audio_slope_input_cache = sd::Tensor<float>(
+                    {1},
+                    {time_shift_slope(sigma_v,
+                                      params.minimax_video_sigma_shift,
+                                      params.minimax_audio_sigma_shift)});
+                std::vector<const sd::Tensor<float>*> ordered_inputs;
+                ordered_inputs.reserve(8 + conditions.size() + audio_conditions.size());
+                ordered_inputs.push_back(&video_input_cache);
+                ordered_inputs.push_back(&audio_input_cache);
+                ordered_inputs.push_back(params.context);
+                for (const auto& condition : conditions) {
+                    ordered_inputs.push_back(&condition);
+                }
+                for (const auto& condition : audio_conditions) {
+                    ordered_inputs.push_back(&condition);
+                }
+                ordered_inputs.push_back(&position_input_cache);
+                if (config.uses_adaln_curves()) {
+                    ordered_inputs.push_back(&curve_fraction_input_cache);
+                } else {
+                    ordered_inputs.push_back(&timestep_feature_input_cache);
+                }
+                ordered_inputs.push_back(&audio_slope_input_cache);
+                if (auto out = GGMLRunner::compute_reuse<float>(get_graph, ordered_inputs, n_threads, false)) {
+                    return restore_trailing_singleton_dims(std::move(*out), params.x->dim());
+                }
+            }
             return restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph,
                                                                               n_threads,
                                                                               false,

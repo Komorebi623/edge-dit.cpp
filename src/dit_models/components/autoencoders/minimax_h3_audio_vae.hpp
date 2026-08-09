@@ -70,8 +70,16 @@ namespace Ops {
                                          int stride,
                                          int padding) {
         auto ctx = runner_ctx->ggml_ctx;
-        GGML_ASSERT(x->ne[3] == 1);
+        GGML_ASSERT(x->ne[2] == 1 && x->ne[3] == 1);
         auto tiled = tile_depthwise_filter_1d(runner_ctx, filter, x->ne[1]);
+        const char* direct = std::getenv("ED_MINIMAX_H3_AUDIO_DIRECT_DEPTHWISE");
+        if (direct != nullptr && direct[0] != '\0' && direct[0] != '0' &&
+            sd_backend_is(runner_ctx->backend, "CUDA") && tiled->type == GGML_TYPE_F32 && x->type == GGML_TYPE_F32) {
+            auto kernel = ggml_reshape_4d(ctx, tiled, tiled->ne[0], 1, 1, x->ne[1]);
+            auto input = ggml_reshape_4d(ctx, x, x->ne[0], 1, x->ne[1], 1);
+            auto out = ggml_conv_2d_dw_direct(ctx, kernel, input, stride, 1, padding, 0, 1, 1);
+            return ggml_reshape_4d(ctx, out, out->ne[0], out->ne[2], 1, 1);
+        }
         auto out   = ggml_conv_1d_dw(ctx, tiled, x, stride, padding, 1);
         return ggml_reshape_4d(ctx, out, out->ne[0], out->ne[1], 1, 1);
     }
@@ -95,7 +103,7 @@ namespace Ops {
                                                    ggml_tensor* x,
                                                    ggml_tensor* filter,
                                                    int stride) {
-        GGML_ASSERT(x->ne[2] == 1 && x->ne[3] == 1);
+        GGML_ASSERT(x->ne[3] == 1);
         GGML_ASSERT(filter->ne[1] == 1);
         GGML_ASSERT(filter->ne[2] == 1 && filter->ne[3] == 1);
 
@@ -116,7 +124,25 @@ namespace Ops {
         x_flat = ggml_reshape_3d(ctx, x_flat, time * stride, 1, channels);
 
         auto reversed_filter = reverse_1d_filter(ctx, filter);
-        auto out             = ggml_conv_1d(ctx, reversed_filter, x_flat, 1, static_cast<int>(kernel_size - 1), 1);
+        ggml_tensor* out = nullptr;
+        const char* direct = std::getenv("ED_MINIMAX_H3_AUDIO_DIRECT_DEPTHWISE");
+        if (direct != nullptr && direct[0] != '\0' && direct[0] != '0' &&
+            reversed_filter->type == GGML_TYPE_F32 && x_flat->type == GGML_TYPE_F32) {
+            auto kernel = ggml_reshape_4d(ctx, reversed_filter, kernel_size, 1, 1, 1);
+            auto input = ggml_reshape_4d(ctx, x_flat, time * stride, 1, 1, channels);
+            out = ggml_conv_2d_dw_direct(ctx,
+                                         kernel,
+                                         input,
+                                         1,
+                                         1,
+                                         static_cast<int>(kernel_size - 1),
+                                         0,
+                                         1,
+                                         1);
+            out = ggml_reshape_3d(ctx, out, out->ne[0], 1, channels);
+        } else {
+            out = ggml_conv_1d(ctx, reversed_filter, x_flat, 1, static_cast<int>(kernel_size - 1), 1);
+        }
         if (out->ne[0] > out_time) {
             out = ggml_ext_slice(ctx, out, 0, 0, out_time);
         }
@@ -267,6 +293,10 @@ namespace Ops {
                          const String2TensorStorage& tensor_storage_map = {},
                          const std::string prefix                       = "") override {
             ggml_type down_type                 = audio_conv_weight_type(get_type(prefix + "downsample.lowpass.filter", tensor_storage_map, GGML_TYPE_F16));
+            const char* direct_depthwise = std::getenv("ED_MINIMAX_H3_AUDIO_DIRECT_DEPTHWISE");
+            if (direct_depthwise != nullptr && direct_depthwise[0] != '\0' && direct_depthwise[0] != '0') {
+                down_type = GGML_TYPE_F32;
+            }
             params["downsample.lowpass.filter"] = ggml_new_tensor_3d(ctx, down_type, down_kernel_size, 1, 1);
             params["upsample.filter"]           = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, up_kernel_size, 1, 1);
         }

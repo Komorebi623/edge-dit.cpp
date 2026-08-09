@@ -22,6 +22,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -835,6 +836,54 @@ __STATIC_INLINE__ int64_t sd_tensor_plane_size(const sd::Tensor<float>& tensor) 
     return tensor.shape()[0] * tensor.shape()[1];
 }
 
+template <typename Fn>
+__STATIC_INLINE__ void sd_parallel_for(int64_t begin, int64_t end, int threads, Fn&& fn) {
+    if (threads <= 1 || end - begin <= 1) {
+        for (int64_t index = begin; index < end; ++index) {
+            fn(index);
+        }
+        return;
+    }
+    threads = std::min<int64_t>(threads, end - begin);
+    std::vector<std::thread> workers;
+    workers.reserve(static_cast<size_t>(threads));
+    for (int thread_index = 0; thread_index < threads; ++thread_index) {
+        const int64_t start = begin + (end - begin) * thread_index / threads;
+        const int64_t stop  = begin + (end - begin) * (thread_index + 1) / threads;
+        workers.emplace_back([&, start, stop]() {
+            for (int64_t index = start; index < stop; ++index) {
+                fn(index);
+            }
+        });
+    }
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+}
+
+__STATIC_INLINE__ int sd_vae_parallel_tile_copy_threads() {
+    static const int threads = []() {
+        const char* enabled = std::getenv("ED_VAE_PARALLEL_TILE_COPY");
+        if (enabled == nullptr || enabled[0] == '\0' || std::strcmp(enabled, "0") == 0) {
+            return 1;
+        }
+        const char* value = std::getenv("ED_VAE_PARALLEL_TILE_COPY_THREADS");
+        if (value != nullptr && value[0] != '\0') {
+            return std::max(1, std::atoi(value));
+        }
+        return 8;
+    }();
+    return threads;
+}
+
+__STATIC_INLINE__ bool sd_vae_plane_parallel_tile_copy_enabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("ED_VAE_PLANE_PARALLEL_TILE_COPY");
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
 __STATIC_INLINE__ sd::Tensor<float> sd_tensor_split_2d(const sd::Tensor<float>& input, int width, int height, int x, int y) {
     GGML_ASSERT(input.dim() >= 4);
     std::vector<int64_t> output_shape = input.shape();
@@ -846,28 +895,43 @@ __STATIC_INLINE__ sd::Tensor<float> sd_tensor_split_2d(const sd::Tensor<float>& 
     int64_t input_plane  = sd_tensor_plane_size(input);
     int64_t output_plane = sd_tensor_plane_size(output);
     int64_t plane_count  = input.numel() / input_plane;
-    for (int iy = 0; iy < height; iy++) {
-        for (int ix = 0; ix < width; ix++) {
-            int64_t src_xy = (ix + x) % input_width + input_width * ((iy + y) % input_height);
-            int64_t dst_xy = ix + width * iy;
-            for (int64_t plane = 0; plane < plane_count; ++plane) {
-                output[plane * output_plane + dst_xy] = input[plane * input_plane + src_xy];
+    const int threads = sd_vae_parallel_tile_copy_threads();
+    if (threads > 1 && sd_vae_plane_parallel_tile_copy_enabled()) {
+        sd_parallel_for(0, plane_count, threads, [&](int64_t plane) {
+            const int64_t src_plane_offset = plane * input_plane;
+            const int64_t dst_plane_offset = plane * output_plane;
+            for (int iy = 0; iy < height; ++iy) {
+                for (int ix = 0; ix < width; ++ix) {
+                    const int64_t src_xy = (ix + x) % input_width + input_width * ((iy + y) % input_height);
+                    const int64_t dst_xy = ix + width * iy;
+                    output[dst_plane_offset + dst_xy] = input[src_plane_offset + src_xy];
+                }
             }
-        }
+        });
+        return output;
     }
+    sd_parallel_for(0, static_cast<int64_t>(width) * height, threads, [&](int64_t xy) {
+        const int iy = static_cast<int>(xy / width);
+        const int ix = static_cast<int>(xy - static_cast<int64_t>(iy) * width);
+        int64_t src_xy = (ix + x) % input_width + input_width * ((iy + y) % input_height);
+        int64_t dst_xy = ix + width * iy;
+        for (int64_t plane = 0; plane < plane_count; ++plane) {
+            output[plane * output_plane + dst_xy] = input[plane * input_plane + src_xy];
+        }
+    });
     return output;
 }
 
-__STATIC_INLINE__ void sd_tensor_merge_2d(const sd::Tensor<float>& input,
-                                          sd::Tensor<float>* output,
-                                          int x,
-                                          int y,
-                                          int overlap_x,
-                                          int overlap_y,
-                                          bool circular_x,
-                                          bool circular_y,
-                                          int x_skip = 0,
-                                          int y_skip = 0) {
+__STATIC_INLINE__ void sd_tensor_merge_2d_serial(const sd::Tensor<float>& input,
+                                                 sd::Tensor<float>* output,
+                                                 int x,
+                                                 int y,
+                                                 int overlap_x,
+                                                 int overlap_y,
+                                                 bool circular_x,
+                                                 bool circular_y,
+                                                 int x_skip,
+                                                 int y_skip) {
     GGML_ASSERT(output != nullptr);
     int64_t width        = input.shape()[0];
     int64_t height       = input.shape()[1];
@@ -876,12 +940,10 @@ __STATIC_INLINE__ void sd_tensor_merge_2d(const sd::Tensor<float>& input,
     int64_t input_plane  = sd_tensor_plane_size(input);
     int64_t output_plane = sd_tensor_plane_size(*output);
     int64_t plane_count  = input.numel() / input_plane;
-    GGML_ASSERT(output->numel() / output_plane == plane_count);
 
-    // unclamped -> expects x in the range [0-1]
-    auto smootherstep_f32 = [](const float x) -> float {
-        GGML_ASSERT(x >= 0.f && x <= 1.f);
-        return x * x * x * (x * (6.0f * x - 15.0f) + 10.0f);
+    auto smootherstep_f32 = [](const float v) -> float {
+        GGML_ASSERT(v >= 0.f && v <= 1.f);
+        return v * v * v * (v * (6.0f * v - 15.0f) + 10.0f);
     };
 
     for (int iy = y_skip; iy < height; iy++) {
@@ -908,6 +970,122 @@ __STATIC_INLINE__ void sd_tensor_merge_2d(const sd::Tensor<float>& input,
             }
         }
     }
+}
+
+__STATIC_INLINE__ void sd_tensor_merge_2d(const sd::Tensor<float>& input,
+                                          sd::Tensor<float>* output,
+                                          int x,
+                                          int y,
+                                          int overlap_x,
+                                          int overlap_y,
+                                          bool circular_x,
+                                          bool circular_y,
+                                          int x_skip = 0,
+                                          int y_skip = 0) {
+    GGML_ASSERT(output != nullptr);
+    int64_t width        = input.shape()[0];
+    int64_t height       = input.shape()[1];
+    int64_t img_width    = output->shape()[0];
+    int64_t img_height   = output->shape()[1];
+    int64_t input_plane  = sd_tensor_plane_size(input);
+    int64_t output_plane = sd_tensor_plane_size(*output);
+    int64_t plane_count  = input.numel() / input_plane;
+    GGML_ASSERT(output->numel() / output_plane == plane_count);
+
+    const int threads = sd_vae_parallel_tile_copy_threads();
+    if (threads <= 1) {
+        sd_tensor_merge_2d_serial(input, output, x, y, overlap_x, overlap_y, circular_x, circular_y, x_skip, y_skip);
+        return;
+    }
+
+    if (sd_vae_plane_parallel_tile_copy_enabled()) {
+        auto smootherstep_f32 = [](const float value) -> float {
+            GGML_ASSERT(value >= 0.f && value <= 1.f);
+            return value * value * value * (value * (6.0f * value - 15.0f) + 10.0f);
+        };
+        std::vector<int64_t> destination_x(static_cast<size_t>(width));
+        std::vector<int64_t> destination_y(static_cast<size_t>(height));
+        std::vector<float> weight_x(static_cast<size_t>(width), 1.f);
+        std::vector<float> weight_y(static_cast<size_t>(height), 1.f);
+        for (int ix = x_skip; ix < width; ++ix) {
+            destination_x[static_cast<size_t>(ix)] = (x + ix) % img_width;
+            if (overlap_x > 0 || overlap_y > 0) {
+                const float x_f_0 = (circular_x || (overlap_x > 0 && x > 0))
+                                        ? (ix - x_skip) / float(overlap_x)
+                                        : 1.f;
+                const float x_f_1 = (circular_x || (overlap_x > 0 && x < (img_width - width)))
+                                        ? (width - ix) / float(overlap_x)
+                                        : 1.f;
+                weight_x[static_cast<size_t>(ix)] = smootherstep_f32(std::min(std::min(x_f_0, x_f_1), 1.f));
+            }
+        }
+        for (int iy = y_skip; iy < height; ++iy) {
+            destination_y[static_cast<size_t>(iy)] = (y + iy) % img_height;
+            if (overlap_x > 0 || overlap_y > 0) {
+                const float y_f_0 = (circular_y || (overlap_y > 0 && y > 0))
+                                        ? (iy - y_skip) / float(overlap_y)
+                                        : 1.f;
+                const float y_f_1 = (circular_y || (overlap_y > 0 && y < (img_height - height)))
+                                        ? (height - iy) / float(overlap_y)
+                                        : 1.f;
+                weight_y[static_cast<size_t>(iy)] = smootherstep_f32(std::min(std::min(y_f_0, y_f_1), 1.f));
+            }
+        }
+        sd_parallel_for(0, plane_count, threads, [&](int64_t plane) {
+            const int64_t src_plane_offset = plane * input_plane;
+            const int64_t dst_plane_offset = plane * output_plane;
+            for (int iy = y_skip; iy < height; ++iy) {
+                for (int ix = x_skip; ix < width; ++ix) {
+                    const int64_t src_xy = ix + width * iy;
+                    const int64_t ox = destination_x[static_cast<size_t>(ix)];
+                    const int64_t oy = destination_y[static_cast<size_t>(iy)];
+                    const int64_t dst_xy = ox + img_width * oy;
+                    const float new_value = input[src_plane_offset + src_xy];
+                    if (overlap_x > 0 || overlap_y > 0) {
+                        const float old_value = (*output)[dst_plane_offset + dst_xy];
+                        (*output)[dst_plane_offset + dst_xy] =
+                            old_value + new_value * weight_y[static_cast<size_t>(iy)] * weight_x[static_cast<size_t>(ix)];
+                    } else {
+                        (*output)[dst_plane_offset + dst_xy] = new_value;
+                    }
+                }
+            }
+        });
+        return;
+    }
+
+    // unclamped -> expects x in the range [0-1]
+    auto smootherstep_f32 = [](const float x) -> float {
+        GGML_ASSERT(x >= 0.f && x <= 1.f);
+        return x * x * x * (x * (6.0f * x - 15.0f) + 10.0f);
+    };
+
+    const int64_t active_width  = width - x_skip;
+    const int64_t active_height = height - y_skip;
+    sd_parallel_for(0, active_width * active_height, threads, [&](int64_t active_xy) {
+        const int iy = y_skip + static_cast<int>(active_xy / active_width);
+        const int ix = x_skip + static_cast<int>(active_xy - static_cast<int64_t>(iy - y_skip) * active_width);
+        int64_t src_xy = ix + width * iy;
+        int64_t ox     = (x + ix) % img_width;
+        int64_t oy     = (y + iy) % img_height;
+        int64_t dst_xy = ox + img_width * oy;
+        for (int64_t plane = 0; plane < plane_count; ++plane) {
+            float new_value = input[plane * input_plane + src_xy];
+            if (overlap_x > 0 || overlap_y > 0) {
+                float old_value   = (*output)[plane * output_plane + dst_xy];
+                const float x_f_0 = (circular_x || (overlap_x > 0 && x > 0)) ? (ix - x_skip) / float(overlap_x) : 1.f;
+                const float x_f_1 = (circular_x || (overlap_x > 0 && x < (img_width - width))) ? (width - ix) / float(overlap_x) : 1.f;
+                const float y_f_0 = (circular_y || (overlap_y > 0 && y > 0)) ? (iy - y_skip) / float(overlap_y) : 1.f;
+                const float y_f_1 = (circular_y || (overlap_y > 0 && y < (img_height - height))) ? (height - iy) / float(overlap_y) : 1.f;
+                const float x_f   = std::min(std::min(x_f_0, x_f_1), 1.f);
+                const float y_f   = std::min(std::min(y_f_0, y_f_1), 1.f);
+                (*output)[plane * output_plane + dst_xy] =
+                    old_value + new_value * smootherstep_f32(y_f) * smootherstep_f32(x_f);
+            } else {
+                (*output)[plane * output_plane + dst_xy] = new_value;
+            }
+        }
+    });
 }
 
 template <typename Fn>
@@ -970,6 +1148,11 @@ __STATIC_INLINE__ sd::Tensor<float> process_tiles_2d(const sd::Tensor<float>& in
     bool last_y     = false;
     bool last_x     = false;
     float last_time = 0.0f;
+    const bool profile_tiles = std::getenv("ED_PROFILE_VAE_TILES") != nullptr;
+    int64_t split_us = 0;
+    int64_t process_us = 0;
+    int64_t allocate_us = 0;
+    int64_t merge_us = 0;
     if (!silent) {
         LOG_DEBUG("num tiles : %d, %d ", num_tiles_x, num_tiles_y);
         LOG_DEBUG("optimal overlap : %f, %f (targeting %f)", tile_overlap_factor_x, tile_overlap_factor_y, tile_overlap_factor);
@@ -1008,8 +1191,13 @@ __STATIC_INLINE__ sd::Tensor<float> process_tiles_2d(const sd::Tensor<float>& in
             int overlap_y_out = decode ? tile_overlap_y * scale : tile_overlap_y;
 
             int64_t t1       = ggml_time_ms();
+            const int64_t split_begin = profile_tiles ? ggml_time_us() : 0;
             auto input_tile  = sd_tensor_split_2d(input, input_tile_size_x, input_tile_size_y, x_in, y_in);
+            const int64_t process_begin = profile_tiles ? ggml_time_us() : 0;
+            if (profile_tiles) split_us += process_begin - split_begin;
             auto output_tile = on_processing(input_tile);
+            const int64_t allocate_begin = profile_tiles ? ggml_time_us() : 0;
+            if (profile_tiles) process_us += allocate_begin - process_begin;
             if (output_tile.empty()) {
                 return {};
             }
@@ -1020,7 +1208,10 @@ __STATIC_INLINE__ sd::Tensor<float> process_tiles_2d(const sd::Tensor<float>& in
                 output_shape[1]                   = output_height;
                 output                            = sd::Tensor<float>::zeros(std::move(output_shape));
             }
+            const int64_t merge_begin = profile_tiles ? ggml_time_us() : 0;
+            if (profile_tiles) allocate_us += merge_begin - allocate_begin;
             sd_tensor_merge_2d(output_tile, &output, x_out, y_out, overlap_x_out, overlap_y_out, circular_x, circular_y, dx, dy);
+            if (profile_tiles) merge_us += ggml_time_us() - merge_begin;
 
             if (!silent) {
                 int64_t t2 = ggml_time_ms();
@@ -1036,6 +1227,14 @@ __STATIC_INLINE__ sd::Tensor<float> process_tiles_2d(const sd::Tensor<float>& in
     }
     if (output.empty()) {
         return {};
+    }
+    if (profile_tiles) {
+        LOG_INFO("ED_VAE_TILE_PROFILE tiles=%d split_ms=%.3f process_ms=%.3f allocate_ms=%.3f merge_ms=%.3f",
+                 num_tiles,
+                 split_us / 1000.0,
+                 process_us / 1000.0,
+                 allocate_us / 1000.0,
+                 merge_us / 1000.0);
     }
     return output;
 }
@@ -1111,7 +1310,8 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_linear(ggml_context* ctx,
                                                ggml_tensor* w,
                                                ggml_tensor* b,
                                                bool force_prec_f32 = false,
-                                               float scale         = 1.f) {
+                                               float scale         = 1.f,
+                                               const char* matmul_name = nullptr) {
     if (scale != 1.f) {
         x = ggml_ext_scale(ctx, x, scale);
     }
@@ -1121,12 +1321,18 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_linear(ggml_context* ctx,
         int64_t ne3 = x->ne[3];
         x           = ggml_reshape_2d(ctx, x, x->ne[0], x->ne[1] * x->ne[2] * x->ne[3]);
         x           = ggml_mul_mat(ctx, w, x);
+        if (matmul_name != nullptr && matmul_name[0] != '\0') {
+            ggml_set_name(x, matmul_name);
+        }
         if (force_prec_f32) {
             ggml_mul_mat_set_prec(x, GGML_PREC_F32);
         }
         x = ggml_reshape_4d(ctx, x, x->ne[0], x->ne[1] / ne2 / ne3, ne2, ne3);
     } else {
         x = ggml_mul_mat(ctx, w, x);
+        if (matmul_name != nullptr && matmul_name[0] != '\0') {
+            ggml_set_name(x, matmul_name);
+        }
         if (force_prec_f32) {
             ggml_mul_mat_set_prec(x, GGML_PREC_F32);
         }
@@ -7414,7 +7620,8 @@ public:
             forward_params.linear.scale          = effective_scale;
             return ctx->weight_adapter->forward_with_lora(ctx->ggml_ctx, ctx->backend, x, w, b, prefix, forward_params);
         }
-        x = ggml_ext_linear(ctx->ggml_ctx, x, w, b, force_prec_f32, effective_scale);
+        const std::string matmul_name = prefix + "weight";
+        x = ggml_ext_linear(ctx->ggml_ctx, x, w, b, force_prec_f32, effective_scale, matmul_name.c_str());
         if (cast_output_to_input_type &&
             (output_type == GGML_TYPE_F16 || output_type == GGML_TYPE_BF16) &&
             x->type != output_type) {

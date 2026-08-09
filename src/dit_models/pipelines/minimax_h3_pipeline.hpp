@@ -67,6 +67,10 @@ private:
     ggml_tensor* sentinel_tensor_ = nullptr;
 
     bool build_text_context(const char* prompt,
+                            const ed_image_t* init_image,
+                            const ed_image_t* end_image,
+                            int canvas_width,
+                            int canvas_height,
                             const ed_image_t* ref_images,
                             int ref_image_count,
                             const ed_ref_video_t* ref_videos,
