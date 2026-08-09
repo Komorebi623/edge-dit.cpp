@@ -655,6 +655,75 @@ std::string convert_diffusers_dit_to_original_flux(std::string name) {
     return name;
 }
 
+std::string convert_diffusers_dit_to_original_minimax_h3(std::string name) {
+    constexpr int num_layers         = 50;
+    constexpr int num_refiner_layers = 2;
+    static std::unordered_map<std::string, std::string> minimax_h3_name_map;
+
+    if (minimax_h3_name_map.empty()) {
+        minimax_h3_name_map["proj_in.weight"]       = "video_patch_proj.weight";
+        minimax_h3_name_map["proj_in.bias"]         = "video_patch_proj.bias";
+        minimax_h3_name_map["audio_proj_in.weight"] = "audio_patch_proj.weight";
+        minimax_h3_name_map["audio_proj_in.bias"]   = "audio_patch_proj.bias";
+
+        minimax_h3_name_map["context_embedder.weight"] = "condition_proj.weight";
+        minimax_h3_name_map["context_embedder.bias"]   = "condition_proj.bias";
+
+        minimax_h3_name_map["time_embedder.linear_1.weight"] = "time_embedder.proj_in.weight";
+        minimax_h3_name_map["time_embedder.linear_1.bias"]   = "time_embedder.proj_in.bias";
+        minimax_h3_name_map["time_embedder.linear_2.weight"] = "time_embedder.proj_out.weight";
+        minimax_h3_name_map["time_embedder.linear_2.bias"]   = "time_embedder.proj_out.bias";
+
+        auto add_block = [](std::unordered_map<std::string, std::string>& map,
+                            const std::string& src_prefix,
+                            const std::string& dst_prefix) {
+            map[src_prefix + "norm1.weight"] = dst_prefix + "norm1.weight";
+            map[src_prefix + "norm2.weight"] = dst_prefix + "norm2.weight";
+
+            map[src_prefix + "attn.to_q.weight"] = dst_prefix + "attn.qkv_proj.weight";
+            map[src_prefix + "attn.to_q.bias"]   = dst_prefix + "attn.qkv_proj.bias";
+            map[src_prefix + "attn.to_k.weight"] = dst_prefix + "attn.qkv_proj.weight.1";
+            map[src_prefix + "attn.to_k.bias"]   = dst_prefix + "attn.qkv_proj.bias.1";
+            map[src_prefix + "attn.to_v.weight"] = dst_prefix + "attn.qkv_proj.weight.2";
+            map[src_prefix + "attn.to_v.bias"]   = dst_prefix + "attn.qkv_proj.bias.2";
+
+            map[src_prefix + "attn.norm_q.weight"]     = dst_prefix + "attn.q_norm.weight";
+            map[src_prefix + "attn.norm_k.weight"]     = dst_prefix + "attn.k_norm.weight";
+            map[src_prefix + "attn.to_out.0.weight"]   = dst_prefix + "attn.out_proj.weight";
+            map[src_prefix + "attn.to_out.0.bias"]     = dst_prefix + "attn.out_proj.bias";
+            map[src_prefix + "ff.net.0.proj.weight"]   = dst_prefix + "mlp.fc1.weight";
+            map[src_prefix + "ff.net.0.proj.bias"]     = dst_prefix + "mlp.fc1.bias";
+            map[src_prefix + "ff.net.2.weight"]        = dst_prefix + "mlp.fc2.weight";
+            map[src_prefix + "ff.net.2.bias"]          = dst_prefix + "mlp.fc2.bias";
+            map[src_prefix + "adaln_proj.linear.weight"] = dst_prefix + "adaln_proj.linear.weight";
+            map[src_prefix + "adaln_proj.linear.bias"]   = dst_prefix + "adaln_proj.linear.bias";
+        };
+
+        for (int i = 0; i < num_layers; ++i) {
+            add_block(minimax_h3_name_map,
+                      "transformer_blocks." + std::to_string(i) + ".",
+                      "blocks." + std::to_string(i) + ".");
+        }
+        for (int i = 0; i < num_refiner_layers; ++i) {
+            add_block(minimax_h3_name_map,
+                      "token_refiner.refiner_blocks." + std::to_string(i) + ".",
+                      "token_refiner.blocks." + std::to_string(i) + ".");
+        }
+
+        minimax_h3_name_map["token_refiner.final_norm.weight"] = "token_refiner.final_norm.weight";
+        minimax_h3_name_map["norm_out.norm.weight"]            = "final_layer.norm.weight";
+        minimax_h3_name_map["norm_out.linear.weight"]          = "final_layer.adaln_proj.linear.weight";
+        minimax_h3_name_map["norm_out.linear.bias"]            = "final_layer.adaln_proj.linear.bias";
+        minimax_h3_name_map["proj_out.weight"]                 = "final_layer.video_out.weight";
+        minimax_h3_name_map["proj_out.bias"]                   = "final_layer.video_out.bias";
+        minimax_h3_name_map["audio_proj_out.weight"]           = "final_layer.audio_out.weight";
+        minimax_h3_name_map["audio_proj_out.bias"]             = "final_layer.audio_out.bias";
+    }
+
+    replace_with_prefix_map(name, minimax_h3_name_map);
+    return name;
+}
+
 std::string convert_diffusers_dit_to_original_lumina2(std::string name) {
     int num_layers         = 30;
     int num_refiner_layers = 2;
@@ -744,6 +813,8 @@ std::string convert_diffusion_model_name(std::string name, std::string prefix, S
         name = convert_diffusers_dit_to_original_lumina2(name);
     } else if (ed_version_is_anima(version)) {
         name = convert_other_dit_to_original_anima(name);
+    } else if (ed_version_is_minimax_h3(version)) {
+        name = convert_diffusers_dit_to_original_minimax_h3(name);
     }
     return name;
 }

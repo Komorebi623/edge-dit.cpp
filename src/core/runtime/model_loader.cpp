@@ -368,6 +368,9 @@ static SDVersion infer_transformer_file_version(const std::string& file_path) {
         if (contains(klass, "Wan")) {
             return VERSION_WAN2;
         }
+        if (contains(klass, "MiniMaxH3") || contains(klass, "MiniMax-H3")) {
+            return VERSION_MINIMAX_H3;
+        }
     }
 
     return VERSION_COUNT;
@@ -440,6 +443,9 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
             const std::string klass = index["_class_name"].get<std::string>();
             if (contains(klass, "Wan")) {
                 return VERSION_WAN2;
+            }
+            if (contains(klass, "MiniMaxH3") || contains(klass, "MiniMax-H3")) {
+                return VERSION_MINIMAX_H3;
             }
             if (contains(klass, "QwenImageEdit") || contains(klass, "Qwen Image Edit")) {
                 return VERSION_QWEN_IMAGE_EDIT;
@@ -1884,6 +1890,16 @@ bool ModelLoader::load_tensors(std::map<std::string, ggml_tensor*>& tensors,
 
     for (const auto& item : tensors) {
         if (starts_with(item.first, "__ed_")) {
+            continue;
+        }
+        bool ignored = false;
+        for (const std::string& ignore_tensor : ignore_tensors) {
+            if (starts_with(item.first, ignore_tensor)) {
+                ignored = true;
+                break;
+            }
+        }
+        if (ignored) {
             continue;
         }
         if (tensor_names_in_file.find(item.first) == tensor_names_in_file.end()) {
