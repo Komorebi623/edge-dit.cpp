@@ -540,3 +540,221 @@ Artifacts:
 - Latest output video: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/edge-final-vae-audio-optimized-full/final.mp4`
 - Previous visual review frame sheet: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/edge-clean-qkv-fc1-fast-vae-fused-assembly-plane-merge-full/review/comparison.jpg`
 - VAE CONT node profile: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/profile-2026-08-09/vae-swiglu-node-top400/run.log`
+
+## 2026-08-09 Follow-up VAE experiments
+
+Follow-up VAE work focused on preserving quality first. The same short
+`864x480`, 124-frame, 3-step probe was used to iterate quickly, with all DiT
+and prompt settings unchanged. No diffusion parameter, resolution, frame count,
+or scheduler changes were used.
+
+Retained as default-off safety candidates:
+
+- `ED_MINIMAX_H3_VAE_FAST_TEMPORAL_GROUP_NORM=1` now uses an equivalent
+  `permute -> GroupNorm -> permute back` path when the effective batch is one.
+  It avoids the earlier incorrect reshape that mixed temporal and channel
+  dimensions. The corrected path is bit-exact in the MP4 A/B probe (`PSNR=inf`),
+  but the speed win is small: video VAE `5.041s -> 5.002s` in the short run.
+- `ED_MINIMAX_H3_VAE_REUSE_ROPE_CACHE=1` caches the host RoPE table for repeated
+  same-shape VAE decode tiles. It is low risk because the tensor contents are
+  unchanged for identical width/height/frame shapes. The short probe showed a
+  small video VAE change (`5.027s -> 4.988s`); encoded MP4 PSNR was about
+  `49.08dB`, so keep it explicit/default-off until a raw-frame or full-run
+  validation is performed.
+
+Rejected experiments:
+
+- The first attempted `FAST_TEMPORAL_GROUP_NORM` reshape was unsafe. It was
+  faster, but it grouped channels incorrectly across temporal frames, producing
+  visible drift and only `36.06dB` average MP4 PSNR. This implementation was
+  replaced by the bit-exact permute version above.
+- Increasing forced VAE tile size improved speed but damaged visual quality.
+  `32x30` latent tiles reduced short-run video VAE to `4.074s` versus the
+  `16x16` baseline `4.825s`, but fixed-frame review showed obvious fine block
+  and seam artifacts. `16x30` and `18x30` reduced the number of vertical tiles
+  but still introduced visible texture/block changes. These should not be used
+  as quality-preserving acceleration knobs.
+- VAE QKV view slicing remained rejected from the previous experiment: it looked
+  fast but produced severe output drift, so it was not reintroduced.
+
+Current conclusion: the remaining quality-safe VAE gap is mostly inside the
+per-tile GPU compute graph, not CPU tile splitting/merging. `ED_PROFILE_RUNNER`
+shows each steady `16x16` VAE tile decode is about `60ms`, with roughly `54ms`
+in GPU compute and near-zero host copy/allocation. The main actionable path is
+therefore exact kernel/layout work inside the MiniMax-H3 VAE decoder graph
+(`CONT`, Q/K/V materialization, RoPE packing, attention/norm), not larger tile
+sizes or other quality-changing tiling shortcuts.
+
+Follow-up artifacts:
+
+- Bit-exact temporal GN A/B: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/vae-fast-temporal-gn-permute-review/psnr.log`
+- Unsafe GN A/B review: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/vae-fast-temporal-gn-ab-review/ab.jpg`
+- Tile-size quality review: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/vae-tile-size-review/tile32_ab.jpg`
+- Tile-XY quality review: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/vae-tile-xy-review/ab.jpg`
+- Runner profile log: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/vae-runner-profile-3step/run.log`
+
+## 2026-08-09 VAE call-chain profiling update
+
+A new VAE named-node CUDA profile was added for MiniMax-H3 decoder blocks. The
+instrumentation is gated by `ED_MINIMAX_H3_VAE_NAME_NODES=1` and names decoder
+attention QKV projection/split, Q/K RMSNorm, partial RoPE packing, attention,
+feed-forward SwiGLU, and block residual outputs. The profile confirms that the
+remaining video VAE gap is not CPU tile merge/split: the steady 70 tile-decode
+CUDA graphs spend most time inside decoder attention layout and padding.
+
+Short `864x480`, 124-frame, 3-step profile highlights:
+
+| Path | Video VAE decode | Profiled video graphs | Main operator buckets |
+|---|---:|---:|---|
+| Current optimized Edge | `6.213s` under profiler | `2.519s` CUDA op time | `LAYOUT 1.377s`, `ELEMENTWISE 0.361s`, `FLASH_ATTN 0.348s`, `NORM 0.266s` |
+| Diffusers TorchAO INT4 profile | component trace only | `3.400s` CUDA kernels in PyTorch trace | `linear/GEMM` dominates, then layout/copy and attention |
+
+The Edge profile is profiler-inflated, but the call-chain ranking is clear. In
+warm video VAE graphs, `LAYOUT` averages about `19.7ms` per tile graph, while
+FlashAttention averages about `4.0ms`. The largest single named removable item
+was the three materialized Q/K/V chunks from the decoder `to_qkv` projection:
+`vae.b*.attn.qkv (view) (cont)` summed to `335.7ms` across the 70 profiled tile
+graphs. The rest of the layout time is distributed across FlashAttention's
+current 256-KV padding path (`PAD/CPY/CONCAT`) and smaller output projection
+layout copies.
+
+A default-off exact candidate was added:
+
+- `ED_MINIMAX_H3_VAE_FUSED_QKV_SPLIT=1` replaces the three `ggml_ext_chunk(...,
+  cont=true)` materializations in MiniMax-H3 VAE decoder attention with one CUDA
+  custom `ed_fused_attention_qkv_split_pack_f32` pack and three views. It changes
+  only data movement, not math.
+
+Validation on the same short A/B:
+
+| Path | Video VAE | Decode video-vae | MP4 PSNR vs control |
+|---|---:|---:|---:|
+| Control | temporal decode `4.759s` | `5.171s` | reference |
+| Fused QKV split | temporal decode `4.743s` | `5.051s` | `inf` |
+
+The fused split removes the named QKV `CONT` cost (`335.7ms -> 0` in the node
+profile), but replaces it with `212.1ms` of custom pack work and exposes no
+large end-to-end win yet (`~0.12s` in this short A/B, within some run variance).
+Keep it default-off until a full-run and second-content visual validation show a
+stable benefit.
+
+The next likely quality-safe target is avoiding or reducing the FlashAttention
+KV padding/materialization for H3 VAE's short sequence (`L=1797`, `d=64`). The
+existing cuDNN unpadded path is normally preferred for `L>=4096`; it also has an
+`ED_CUDNN_SDPA_SHORT_F16_SELF_ATTN=1` gate for shorter self-attention, but H3 VAE
+currently feeds the ggml attention path with F32 Q and F16 K/V packing semantics,
+so it does not hit that F16 short-sequence cuDNN route as-is. H3 VAE therefore
+falls back to ggml FlashAttention with KV padding to 2048. That accounts for much
+of the remaining layout bucket and explains why simply optimizing CPU tile merge
+no longer moves the needle.
+
+Artifacts:
+
+- Edge named profile: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/vae-rope-detail-node-profile-3step/run.log`
+- Fused QKV split A/B: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/vae-fused-qkv-split-ab-3step/psnr.log`
+- Fused QKV split profile: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/vae-fused-qkv-split-node-profile-3step/run.log`
+- Diffusers VAE trace: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/diffusers-video-vae-profile-3step/video_vae_decode.trace.json.gz`
+
+## 2026-08-09 VAE short-sequence cuDNN SDPA experiment
+
+The FlashAttention padding hypothesis was validated with an explicit experiment.
+`ggml_ext_prefer_cudnn_sdpa_unpadded()` was extended so that
+`ED_CUDNN_SDPA_SHORT_F16_SELF_ATTN=1` also suppresses KV-256 padding for
+self-attention with `L>=1024` and `d=64/128`. With this change, MiniMax-H3 VAE
+attention uses cuDNN SDPA directly at `sq=sk=1797`, instead of padding `sk` to
+`2048` and falling back to the ggml FlashAttention padded path.
+
+Short `864x480`, 124-frame, 3-step A/B without CUDA op profiler:
+
+| Path | Temporal VAE decode | Reported video-vae | Generation | Notes |
+|---|---:|---:|---:|---|
+| Control padded FlashAttention | `5.705s` | `6.311s` | `24.875s` | baseline same binary |
+| Short cuDNN unpadded | `4.173s` | `4.472s` | `23.010s` | `ED_CUDNN_SDPA_SHORT_F16_SELF_ATTN=1` |
+| Short cuDNN + fused QKV split | `4.141s` | `4.439s` | `22.940s` | plus `ED_MINIMAX_H3_VAE_FUSED_QKV_SPLIT=1` |
+
+This is a meaningful VAE win: short cuDNN saves about `1.84s` reported video VAE
+on the short run, and the QKV split pack adds only a small additional `~33ms`.
+The comparison is not bit-exact. Control versus short cuDNN MP4 PSNR was
+`42.29dB`; short cuDNN versus short cuDNN + QKV split was `49.01dB`. Fixed-frame
+visual review did not show obvious new blocking or seam artifacts on this sample,
+but because the attention implementation changes numerical order, this should
+remain an explicit quality-validated path until full and second-content checks
+complete.
+
+CUDA-op profile confirmed the targeted bottleneck moved as expected:
+
+| Path | Profiled video graph op time | Layout | PAD | CPY | CONCAT | Attention |
+|---|---:|---:|---:|---:|---:|---:|
+| Padded FlashAttention | `2.519s` | `1.377s` | `0.227s` | `0.182s` | `0.170s` | `0.348s` |
+| Short cuDNN unpadded | `1.890s` | `0.816s` | `0.000s` | `0.057s` | `0.075s` | `0.319s` |
+
+The main remaining named layout hotspot after short cuDNN is still the decoder
+QKV chunk materialization (`vae.b*.attn.qkv (view) (cont)`), about `335.5ms` in
+the profile. The fused QKV split candidate removes that hotspot, but its current
+custom pack kernel gives only modest net speedup. A better follow-up would fuse
+Q/K/V split with the subsequent Q/K norm or attention input packing, rather than
+only replacing three CONT copies with one standalone custom copy.
+
+Artifacts:
+
+- Short cuDNN A/B logs: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/vae-short-unpad-combo-ab-3step`
+- Fixed-frame review: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/vae-short-unpad-combo-ab-3step/review/control-vs-short-vs-short-qkv.jpg`
+- Short cuDNN node profile: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/vae-cudnn-short-unpad-node-profile-3step/run.log`
+
+### Full-run validation for short cuDNN SDPA
+
+A full 20-step run was repeated with the same final optimized Edge environment
+as `edge-final-vae-audio-optimized-full`, plus the short-sequence cuDNN SDPA
+change. The earlier full rerun that omitted fast video/audio postprocess envs is
+not used for comparison because it inflated `video-copy` and `audio-vae`.
+
+Aligned full-run result:
+
+| Path | Generation | DiT | Video VAE | Video copy | Audio VAE | Script wall |
+|---|---:|---:|---:|---:|---:|---:|
+| Previous optimized Edge | `60.889s` | `53.842s` | `5.181s` | `0.102s` | `0.161s` | `70.030s` |
+| Short cuDNN SDPA Edge | `60.082s` | `53.860s` | `4.419s` | `0.114s` | `0.153s` | `69.057s` |
+
+The full run confirms a stable video VAE improvement of `0.762s` (`14.7%`) and
+a generation improvement of `0.807s` (`1.3%`) on the 5-second benchmark. The run
+kept the same resolution, frame count, steps, seed, model files, and forced H3
+16x16 latent VAE tiling.
+
+Quality notes:
+
+- Full MP4 PSNR versus the previous optimized Edge output was `49.18dB`, so the
+  path is not bit-exact but remains visually close.
+- Fixed-frame review showed no new obvious micro-block, tile seam, or motion
+  instability on this sample.
+- Because cuDNN and ggml FlashAttention use different numerical order, keep the
+  path quality-gated until the pending second-content robustness clip is checked.
+
+Full-run artifacts:
+
+- Full log: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/edge-short-cudnn-final-env-full-2026-08-09/run.log`
+- Full video: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/edge-short-cudnn-final-env-full-2026-08-09/final.mp4`
+- Full PSNR: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/edge-short-cudnn-final-env-full-2026-08-09/review/psnr-vs-previous.log`
+- Frame review: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/edge-short-cudnn-final-env-full-2026-08-09/review/previous-vs-short-cudnn.jpg`
+
+### Rejected QKV+RMS split fusion experiment
+
+After short cuDNN SDPA removed the FlashAttention padding overhead, the next
+largest named cost was QKV materialization plus Q/K RMSNorm. A more aggressive
+prototype, `ED_MINIMAX_H3_VAE_FUSED_QKV_RMS_SPLIT=1`, fused QKV split and Q/K
+RMSNorm into one custom CUDA op, skipping the following ggml `RMS_NORM` nodes.
+
+The prototype is rejected for now. It ran, but the short A/B versus the short
+cuDNN control produced only `36.06dB` MP4 PSNR and visible drift risk, indicating
+that the fused norm is not numerically equivalent enough to retain. The likely
+cause is different RMSNorm accumulation/precision/order versus ggml's existing
+CUDA RMSNorm implementation. Do not enable this path without rewriting it to
+match the backend norm semantics and revalidating.
+
+The safer default-off `ED_MINIMAX_H3_VAE_FUSED_QKV_SPLIT=1` remains available as
+a copy-only candidate. It is much closer (`49.01dB` versus short cuDNN in the
+short A/B) but only gives a small speed improvement, so the preferred retained
+VAE acceleration remains short cuDNN SDPA.
+
+Artifact:
+
+- Rejected QKV+RMS A/B: `outputs/minimax-h3/person-selfie-three-frameworks-5s-2026-08-09/vae-qkv-rms-split-ab-3step`

@@ -25,6 +25,13 @@ namespace MiniMaxH3VAE {
         return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
     }
 
+    static ggml_tensor* h3_profile_name(ggml_tensor* tensor, const std::string& name) {
+        if (tensor != nullptr && h3_env_flag_enabled("ED_MINIMAX_H3_VAE_NAME_NODES")) {
+            ggml_set_name(tensor, name.c_str());
+        }
+        return tensor;
+    }
+
     struct ScopedEnvFlag {
         std::string name;
         std::string old_value;
@@ -104,6 +111,16 @@ namespace MiniMaxH3VAE {
             : GroupNorm(32, channels, 1e-6f, true) {}
 
         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+            if (h3_env_flag_enabled("ED_MINIMAX_H3_VAE_FAST_TEMPORAL_GROUP_NORM")) {
+                GGML_ASSERT(x->ne[3] % num_channels == 0);
+                const int64_t temporal_size = x->ne[2];
+                const int64_t batch_size    = x->ne[3] / num_channels;
+                if (batch_size == 1 && temporal_size > 1) {
+                    x = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 0, 1, 3, 2));
+                    x = GroupNorm::forward(ctx, x);
+                    return ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 0, 1, 3, 2));
+                }
+            }
             ggml_tensor* result = nullptr;
             for (int64_t t = 0; t < x->ne[2]; ++t) {
                 auto frame = ggml_ext_slice(ctx->ggml_ctx, x, 2, t, t + 1);
@@ -260,18 +277,25 @@ namespace MiniMaxH3VAE {
 
     static ggml_tensor* apply_partial_rope(ggml_context* ctx,
                                            ggml_tensor* x,
-                                           ggml_tensor* pe) {
+                                           ggml_tensor* pe,
+                                           const std::string& profile_prefix = "vae.attn.rope") {
         int64_t rot_dim = pe->ne[2] * 2;
+        auto rot_src     = h3_profile_name(ggml_ext_slice(ctx, x, 0, 0, rot_dim),
+                                           profile_prefix + ".rot_slice");
         auto rotated    = Rope::apply_rope(ctx,
-                                           ggml_ext_slice(ctx, x, 0, 0, rot_dim),
+                                           rot_src,
                                            pe,
                                            false);
+        h3_profile_name(rotated, profile_prefix + ".rotated");
         if (rot_dim == x->ne[0]) {
             return rotated;
         }
+        auto tail_src = h3_profile_name(ggml_ext_slice(ctx, x, 0, rot_dim, x->ne[0]),
+                                        profile_prefix + ".tail_slice");
         auto tail = attention_layout(ctx,
-                                     ggml_ext_slice(ctx, x, 0, rot_dim, x->ne[0]));
-        return ggml_concat(ctx, rotated, tail, 0);
+                                     tail_src);
+        h3_profile_name(tail, profile_prefix + ".tail_layout");
+        return h3_profile_name(ggml_concat(ctx, rotated, tail, 0), profile_prefix + ".concat");
     }
 
     struct DecoderAttention : public GGMLBlock {
@@ -286,10 +310,12 @@ namespace MiniMaxH3VAE {
 
         ggml_tensor* forward(GGMLRunnerContext* ctx,
                              ggml_tensor* x,
-                             ggml_tensor* pe) {
+                             ggml_tensor* pe,
+                             const std::string& profile_prefix = "vae.attn") {
             auto to_qkv         = std::dynamic_pointer_cast<Linear>(blocks["to_qkv"]);
             auto to_out         = std::dynamic_pointer_cast<Linear>(blocks["to_out"]);
             auto qkv_projection = to_qkv->forward(ctx, x);
+            h3_profile_name(qkv_projection, profile_prefix + ".qkv_proj");
             int64_t sequence    = x->ne[1];
             int64_t batch_size  = x->ne[2] * x->ne[3];
             qkv_projection      = ggml_reshape_4d(ctx->ggml_ctx,
@@ -298,29 +324,59 @@ namespace MiniMaxH3VAE {
                                                   num_head,
                                                   sequence,
                                                   batch_size);
-            auto qkv            = ggml_ext_chunk(ctx->ggml_ctx, qkv_projection, 3, 0);
+            h3_profile_name(qkv_projection, profile_prefix + ".qkv");
+            auto packed_qkv     = edgedit::ggml_ext::attention_qkv_split_pack_custom_f32(ctx->ggml_ctx, qkv_projection);
+            if (packed_qkv != nullptr && !ggml_backend_supports_op(ctx->backend, packed_qkv)) {
+                packed_qkv = nullptr;
+            }
+            h3_profile_name(packed_qkv, profile_prefix + ".qkv_split_pack");
+            std::vector<ggml_tensor*> qkv;
+            if (packed_qkv != nullptr) {
+                qkv.reserve(3);
+                for (int plane = 0; plane < 3; ++plane) {
+                    qkv.push_back(ggml_view_4d(ctx->ggml_ctx,
+                                               packed_qkv,
+                                               head_dim,
+                                               num_head,
+                                               sequence,
+                                               batch_size,
+                                               packed_qkv->nb[1],
+                                               packed_qkv->nb[2],
+                                               packed_qkv->nb[3],
+                                               plane * batch_size * packed_qkv->nb[3]));
+                }
+            } else {
+                qkv = ggml_ext_chunk(ctx->ggml_ctx, qkv_projection, 3, 0);
+            }
             auto q              = ggml_reshape_4d(ctx->ggml_ctx,
                                                   qkv[0],
                                                   head_dim,
                                                   num_head,
                                                   sequence,
                                                   batch_size);
+            h3_profile_name(q, profile_prefix + ".q");
             auto k              = ggml_reshape_4d(ctx->ggml_ctx,
                                                   qkv[1],
                                                   head_dim,
                                                   num_head,
                                                   sequence,
                                                   batch_size);
+            h3_profile_name(k, profile_prefix + ".k");
             auto v              = ggml_reshape_4d(ctx->ggml_ctx,
                                                   qkv[2],
                                                   head_dim,
                                                   num_head,
                                                   sequence,
                                                   batch_size);
+            h3_profile_name(v, profile_prefix + ".v");
             q                   = ggml_rms_norm(ctx->ggml_ctx, q, 1e-5f);
+            h3_profile_name(q, profile_prefix + ".q_norm");
             k                   = ggml_rms_norm(ctx->ggml_ctx, k, 1e-5f);
-            q                   = apply_partial_rope(ctx->ggml_ctx, q, pe);
-            k                   = apply_partial_rope(ctx->ggml_ctx, k, pe);
+            h3_profile_name(k, profile_prefix + ".k_norm");
+            q                   = apply_partial_rope(ctx->ggml_ctx, q, pe, profile_prefix + ".q_rope_pack");
+            h3_profile_name(q, profile_prefix + ".q_rope");
+            k                   = apply_partial_rope(ctx->ggml_ctx, k, pe, profile_prefix + ".k_rope_pack");
+            h3_profile_name(k, profile_prefix + ".k_rope");
             auto out            = ggml_ext_attention_ext(ctx->ggml_ctx,
                                                          ctx->backend,
                                                          q,
@@ -330,7 +386,8 @@ namespace MiniMaxH3VAE {
                                                          nullptr,
                                                          true,
                                                          ctx->flash_attn_enabled);
-            return to_out->forward(ctx, out);
+            h3_profile_name(out, profile_prefix + ".attn");
+            return h3_profile_name(to_out->forward(ctx, out), profile_prefix + ".out");
         }
     };
 
@@ -343,18 +400,24 @@ namespace MiniMaxH3VAE {
             blocks["w2"] = std::make_shared<Linear>(kInnerDim, dim, true);
         }
 
-        ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
+        ggml_tensor* forward(GGMLRunnerContext* ctx,
+                             ggml_tensor* x,
+                             const std::string& profile_prefix = "vae.ff") {
             auto w1   = std::dynamic_pointer_cast<Linear>(blocks["w1"]);
             auto w2   = std::dynamic_pointer_cast<Linear>(blocks["w2"]);
             auto projected = w1->forward(ctx, x);
+            h3_profile_name(projected, profile_prefix + ".w1");
             if (h3_env_flag_enabled("ED_MINIMAX_H3_VAE_FUSED_SWIGLU")) {
-                return w2->forward(ctx, ggml_swiglu(ctx->ggml_ctx, projected));
+                auto activated = ggml_swiglu(ctx->ggml_ctx, projected);
+                h3_profile_name(activated, profile_prefix + ".swiglu");
+                return h3_profile_name(w2->forward(ctx, activated), profile_prefix + ".out");
             }
             auto gate = ggml_ext_chunk(ctx->ggml_ctx, projected, 2, 0);
-            return w2->forward(ctx,
-                               ggml_mul(ctx->ggml_ctx,
-                                        ggml_silu(ctx->ggml_ctx, gate[0]),
-                                        gate[1]));
+            auto activated = ggml_mul(ctx->ggml_ctx,
+                                      ggml_silu(ctx->ggml_ctx, gate[0]),
+                                      gate[1]);
+            h3_profile_name(activated, profile_prefix + ".swiglu_legacy");
+            return h3_profile_name(w2->forward(ctx, activated), profile_prefix + ".out");
         }
     };
 
@@ -379,21 +442,29 @@ namespace MiniMaxH3VAE {
 
         ggml_tensor* forward(GGMLRunnerContext* ctx,
                              ggml_tensor* x,
-                             ggml_tensor* pe) {
+                             ggml_tensor* pe,
+                             const std::string& profile_prefix = "vae.block") {
             auto norm1 = std::dynamic_pointer_cast<RMSNorm>(blocks["norm1"]);
             auto attn  = std::dynamic_pointer_cast<DecoderAttention>(blocks["attn"]);
             auto norm2 = std::dynamic_pointer_cast<RMSNorm>(blocks["norm2"]);
             auto ff    = std::dynamic_pointer_cast<DecoderFeedForward>(blocks["ff"]);
+            auto norm1_out = norm1->forward(ctx, x);
+            h3_profile_name(norm1_out, profile_prefix + ".norm1");
+            auto attn_out = attn->forward(ctx, norm1_out, pe, profile_prefix + ".attn");
+            auto attn_scaled = ggml_mul(ctx->ggml_ctx, attn_out, params["scale1"]);
+            h3_profile_name(attn_scaled, profile_prefix + ".attn_scaled");
             x          = ggml_add(ctx->ggml_ctx,
                                   x,
-                                  ggml_mul(ctx->ggml_ctx,
-                                           attn->forward(ctx, norm1->forward(ctx, x), pe),
-                                           params["scale1"]));
+                                  attn_scaled);
+            h3_profile_name(x, profile_prefix + ".attn_residual");
+            auto norm2_out = norm2->forward(ctx, x);
+            h3_profile_name(norm2_out, profile_prefix + ".norm2");
+            auto ff_out = ff->forward(ctx, norm2_out, profile_prefix + ".ff");
+            auto ff_scaled = ggml_mul(ctx->ggml_ctx, ff_out, params["scale2"]);
+            h3_profile_name(ff_scaled, profile_prefix + ".ff_scaled");
             return ggml_add(ctx->ggml_ctx,
                             x,
-                            ggml_mul(ctx->ggml_ctx,
-                                     ff->forward(ctx, norm2->forward(ctx, x)),
-                                     params["scale2"]));
+                            ff_scaled);
         }
     };
 
@@ -457,7 +528,8 @@ namespace MiniMaxH3VAE {
             for (int i = 0; i < num_layers; ++i) {
                 auto block = std::dynamic_pointer_cast<DecoderBlock>(
                     blocks["transformer_blocks." + std::to_string(i)]);
-                h = block->forward(ctx, h, pe);
+                h = block->forward(ctx, h, pe, "vae.b" + std::to_string(i));
+                h3_profile_name(h, "vae.b" + std::to_string(i) + ".out");
                 sd::ggml_graph_cut::mark_graph_cut(h,
                                                    "minimax_h3_vae.decoder.blocks." + std::to_string(i),
                                                    "hidden_states");
@@ -530,6 +602,9 @@ namespace MiniMaxH3VAE {
         sd::Tensor<float> latents_mean;
         sd::Tensor<float> latents_std;
         sd::Tensor<float> rope_cache;
+        int64_t rope_cache_width  = 0;
+        int64_t rope_cache_height = 0;
+        int64_t rope_cache_frames = 0;
 
         MiniMaxH3VideoVAERunner(ggml_backend_t backend,
                                 bool offload_params_to_cpu,
@@ -1061,9 +1136,19 @@ namespace MiniMaxH3VAE {
                                    bool decode_graph) override {
             auto input = ensure_video_shape(z);
             if (decode_graph) {
-                rope_cache = build_rope(input.shape()[0],
-                                        input.shape()[1],
-                                        input.shape()[2]);
+                const bool reuse_rope = h3_env_flag_enabled("ED_MINIMAX_H3_VAE_REUSE_ROPE_CACHE");
+                if (!reuse_rope ||
+                    rope_cache.empty() ||
+                    rope_cache_width != input.shape()[0] ||
+                    rope_cache_height != input.shape()[1] ||
+                    rope_cache_frames != input.shape()[2]) {
+                    rope_cache        = build_rope(input.shape()[0],
+                                                   input.shape()[1],
+                                                   input.shape()[2]);
+                    rope_cache_width  = input.shape()[0];
+                    rope_cache_height = input.shape()[1];
+                    rope_cache_frames = input.shape()[2];
+                }
             }
             auto get_graph = [&]() -> ggml_cgraph* {
                 auto value       = make_input(input);

@@ -1709,7 +1709,12 @@ __STATIC_INLINE__ bool ggml_ext_prefer_cudnn_sdpa_unpadded(ggml_backend_t backen
     }
 
     const bool supported_head_dim = d_head == 64 || d_head == 128;
-    return supported_head_dim && L_q == L_k && L_q >= 4096;
+    const bool supported_long_self_attn = L_q == L_k && L_q >= 4096;
+    const bool supported_short_f16_self_attn =
+        ggml_ext_env_flag_enabled("ED_CUDNN_SDPA_SHORT_F16_SELF_ATTN") &&
+        L_q == L_k &&
+        L_q >= 1024;
+    return supported_head_dim && (supported_long_self_attn || supported_short_f16_self_attn);
 #else
     ED_UNUSED(backend);
     ED_UNUSED(L_q);
