@@ -58,11 +58,45 @@ def make_quant_config(bits: int):
     raise ValueError(f"unsupported quantization bits: {bits}")
 
 
+def export_operator_profile(profiler, output_prefix: Path, captured_call: int) -> dict:
+    output_prefix.parent.mkdir(parents=True, exist_ok=True)
+    trace_path = output_prefix.with_suffix(".trace.json.gz")
+    summary_path = output_prefix.with_suffix(".json")
+    table_path = output_prefix.with_suffix(".txt")
+    profiler.export_chrome_trace(str(trace_path))
+    key_averages = profiler.key_averages(group_by_input_shape=True)
+    rows = []
+    for event in key_averages:
+        rows.append(
+            {
+                "key": event.key,
+                "input_shapes": event.input_shapes,
+                "count": event.count,
+                "self_cpu_time_total_us": event.self_cpu_time_total,
+                "cpu_time_total_us": event.cpu_time_total,
+                "self_cuda_time_total_us": event.self_device_time_total,
+                "cuda_time_total_us": event.device_time_total,
+                "cpu_memory_usage_bytes": event.cpu_memory_usage,
+                "cuda_memory_usage_bytes": event.device_memory_usage,
+            }
+        )
+    rows.sort(key=lambda row: row["self_cuda_time_total_us"], reverse=True)
+    summary_path.write_text(json.dumps(rows, indent=2))
+    table_path.write_text(key_averages.table(sort_by="self_cuda_time_total", row_limit=300, max_name_column_width=100))
+    return {
+        "captured_call": captured_call,
+        "summary": str(summary_path),
+        "table": str(table_path),
+        "trace": str(trace_path),
+        "self_cuda_time_total_us": sum(row["self_cuda_time_total_us"] for row in rows),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--image", type=Path, required=True)
-    parser.add_argument("--last-image", type=Path, required=True)
+    parser.add_argument("--last-image", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--seed", type=int, default=42)
@@ -75,6 +109,27 @@ def main() -> None:
     parser.add_argument("--no-stream-offload", action="store_true")
     parser.add_argument("--resident", action="store_true", help="keep quantized components resident on the CUDA device")
     parser.add_argument("--profile-transformer", action="store_true", help="synchronize and time every transformer forward")
+    parser.add_argument(
+        "--profile-operators-call",
+        type=int,
+        default=0,
+        help="capture a PyTorch CPU/CUDA operator profile for this 1-based transformer forward call",
+    )
+    parser.add_argument(
+        "--profile-operators-output",
+        type=Path,
+        help="write operator key averages as JSON and a Chrome trace using this path prefix",
+    )
+    parser.add_argument(
+        "--profile-component-operators",
+        choices=("video_vae_encode", "video_vae_decode", "audio_vae_encode", "audio_vae_decode"),
+        help="capture a PyTorch CPU/CUDA operator profile for one component method call",
+    )
+    parser.add_argument(
+        "--profile-component-operators-output",
+        type=Path,
+        help="write component operator profile files using this path prefix",
+    )
     parser.add_argument(
         "--profile-components",
         action="store_true",
@@ -174,6 +229,38 @@ def main() -> None:
         pipeline.transformer.register_forward_pre_hook(profile_forward_pre_hook, with_kwargs=True)
         pipeline.transformer.register_forward_hook(profile_forward_hook, with_kwargs=True)
 
+    operator_profile = {"calls": 0, "profiler": None, "captured_call": None}
+    if arguments.profile_operators_call:
+        if arguments.profile_operators_call < 1:
+            raise ValueError("--profile-operators-call must be a positive 1-based call index")
+        if arguments.profile_operators_output is None:
+            raise ValueError("--profile-operators-output is required with --profile-operators-call")
+
+        def operator_profile_pre_hook(module, args, kwargs):
+            operator_profile["calls"] += 1
+            if operator_profile["calls"] != arguments.profile_operators_call:
+                return
+            torch.cuda.synchronize(device)
+            profiler = torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=False,
+            )
+            profiler.__enter__()
+            operator_profile["profiler"] = profiler
+            operator_profile["captured_call"] = operator_profile["calls"]
+
+        def operator_profile_hook(module, args, kwargs, output):
+            profiler = operator_profile["profiler"]
+            if profiler is None:
+                return
+            torch.cuda.synchronize(device)
+            profiler.__exit__(None, None, None)
+
+        pipeline.transformer.register_forward_pre_hook(operator_profile_pre_hook, with_kwargs=True)
+        pipeline.transformer.register_forward_hook(operator_profile_hook, with_kwargs=True)
+
     component_profile = {
         "text_encoder": {"calls": 0, "seconds": 0.0},
         "video_vae_encode": {"calls": 0, "seconds": 0.0},
@@ -181,20 +268,37 @@ def main() -> None:
         "audio_vae_encode": {"calls": 0, "seconds": 0.0},
         "audio_vae_decode": {"calls": 0, "seconds": 0.0},
     }
+    component_operator_profile = {"profiler": None, "component": None}
 
     def profile_method(component_name, method):
         def wrapped(*args, **kwargs):
             torch.cuda.synchronize(device)
             started_at = time.perf_counter()
+            profiler = None
+            if arguments.profile_component_operators == component_name:
+                profiler = torch.profiler.profile(
+                    activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                    record_shapes=True,
+                    profile_memory=True,
+                    with_stack=False,
+                )
+                profiler.__enter__()
             result = method(*args, **kwargs)
             torch.cuda.synchronize(device)
+            if profiler is not None:
+                profiler.__exit__(None, None, None)
+                component_operator_profile["profiler"] = profiler
+                component_operator_profile["component"] = component_name
             component_profile[component_name]["calls"] += 1
             component_profile[component_name]["seconds"] += time.perf_counter() - started_at
             return result
 
         return wrapped
 
-    if arguments.profile_components:
+    if arguments.profile_component_operators and arguments.profile_component_operators_output is None:
+        raise ValueError("--profile-component-operators-output is required with --profile-component-operators")
+
+    if arguments.profile_components or arguments.profile_component_operators:
         def text_encoder_profile_pre_hook(module, args, kwargs):
             torch.cuda.synchronize(device)
             component_profile["text_encoder"]["started_at"] = time.perf_counter()
@@ -213,7 +317,7 @@ def main() -> None:
         pipeline.audio_vae.decode = profile_method("audio_vae_decode", pipeline.audio_vae.decode)
 
     first_image = load_image(str(arguments.image))
-    last_image = load_image(str(arguments.last_image))
+    last_image = load_image(str(arguments.last_image)) if arguments.last_image is not None else None
     generator = torch.Generator(device="cpu").manual_seed(arguments.seed)
 
     torch.cuda.reset_peak_memory_stats(device)
@@ -231,6 +335,20 @@ def main() -> None:
     )
     generated_at = sync_time()
 
+    operator_profile_summary = None
+    profiler = operator_profile["profiler"]
+    if profiler is not None:
+        operator_profile_summary = export_operator_profile(
+            profiler, arguments.profile_operators_output, operator_profile["captured_call"]
+        )
+
+    component_operator_profile_summary = None
+    if component_operator_profile["profiler"] is not None:
+        component_operator_profile_summary = export_operator_profile(
+            component_operator_profile["profiler"], arguments.profile_component_operators_output, 1
+        )
+        component_operator_profile_summary["component"] = component_operator_profile["component"]
+
     encode_video(
         generated["videos"][0],
         fps=24,
@@ -242,7 +360,7 @@ def main() -> None:
 
     results = {
         "framework": "diffusers-main",
-        "workflow": "fl2va",
+        "workflow": "fl2va" if arguments.last_image is not None else "i2va",
         "model": str(arguments.model),
         "device": arguments.device,
         "dtype": "bfloat16",
@@ -275,6 +393,8 @@ def main() -> None:
             "end_to_end": finished - started,
         },
         "transformer_forward_calls": transformer_profile["calls"],
+        "operator_profile": operator_profile_summary,
+        "component_operator_profile": component_operator_profile_summary,
         "component_profile": component_profile if arguments.profile_components else None,
         "memory_bytes": {
             "max_allocated_during_generate": torch.cuda.max_memory_allocated(device),
