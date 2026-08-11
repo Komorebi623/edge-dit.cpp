@@ -908,6 +908,11 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         return false;
     }
 
+    if (!args->ref_audio_paths.empty() && args->ref_image_paths.empty() && args->ref_video_paths.empty()) {
+        std::fprintf(stderr, "MiniMax-H3 Ref2VA --ref-audio must be paired with at least one --ref-image or --ref-video\n");
+        return false;
+    }
+
     const std::string video_format = normalized_video_format(args->video_format);
     if (video_format != "auto" &&
         video_format != "avi" &&

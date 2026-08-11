@@ -864,7 +864,7 @@ __STATIC_INLINE__ void sd_parallel_for(int64_t begin, int64_t end, int threads, 
 __STATIC_INLINE__ int sd_vae_parallel_tile_copy_threads() {
     static const int threads = []() {
         const char* enabled = std::getenv("ED_VAE_PARALLEL_TILE_COPY");
-        if (enabled == nullptr || enabled[0] == '\0' || std::strcmp(enabled, "0") == 0) {
+        if (enabled != nullptr && enabled[0] != '\0' && std::strcmp(enabled, "0") == 0) {
             return 1;
         }
         const char* value = std::getenv("ED_VAE_PARALLEL_TILE_COPY_THREADS");
@@ -879,7 +879,7 @@ __STATIC_INLINE__ int sd_vae_parallel_tile_copy_threads() {
 __STATIC_INLINE__ bool sd_vae_plane_parallel_tile_copy_enabled() {
     static const bool enabled = []() {
         const char* value = std::getenv("ED_VAE_PLANE_PARALLEL_TILE_COPY");
-        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+        return value == nullptr || value[0] == '\0' || std::strcmp(value, "0") != 0;
     }();
     return enabled;
 }
@@ -1695,6 +1695,18 @@ __STATIC_INLINE__ bool ggml_ext_env_flag_enabled(const char* name) {
            std::strcmp(value, "OFF") != 0;
 }
 
+__STATIC_INLINE__ bool ggml_ext_env_flag_enabled_or_default(const char* name, bool default_enabled) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return default_enabled;
+    }
+    return std::strcmp(value, "0") != 0 &&
+           std::strcmp(value, "false") != 0 &&
+           std::strcmp(value, "FALSE") != 0 &&
+           std::strcmp(value, "off") != 0 &&
+           std::strcmp(value, "OFF") != 0;
+}
+
 __STATIC_INLINE__ bool ggml_ext_prefer_cudnn_sdpa_unpadded(ggml_backend_t backend,
                                                           int64_t L_q,
                                                           int64_t L_k,
@@ -1711,7 +1723,7 @@ __STATIC_INLINE__ bool ggml_ext_prefer_cudnn_sdpa_unpadded(ggml_backend_t backen
     const bool supported_head_dim = d_head == 64 || d_head == 128;
     const bool supported_long_self_attn = L_q == L_k && L_q >= 4096;
     const bool supported_short_f16_self_attn =
-        ggml_ext_env_flag_enabled("ED_CUDNN_SDPA_SHORT_F16_SELF_ATTN") &&
+        ggml_ext_env_flag_enabled_or_default("ED_CUDNN_SDPA_SHORT_F16_SELF_ATTN", true) &&
         L_q == L_k &&
         L_q >= 1024;
     return supported_head_dim && (supported_long_self_attn || supported_short_f16_self_attn);
@@ -1743,7 +1755,8 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
                                                       bool pad_kv_for_flash_attn = true,
                                                       bool v_is_seq_major = false,
                                                       int sage_layer_idx = -1,
-                                                      int sage_total_layers = -1) {  // avoid overflow
+                                                      int sage_total_layers = -1,
+                                                      bool allow_masked_flash_attn = false) {  // avoid overflow
     int64_t L_q;
     int64_t L_k;
     int64_t C;
@@ -1842,6 +1855,10 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
 
         if (mask_in != nullptr) {
             mask_in = ggml_transpose(ctx, mask_in);
+            if (kv_pad > 0) {
+                auto pad_tensor = ggml_ext_full(ctx, -INFINITY, kv_pad, L_q, 1, 1);
+                mask_in = ggml_concat(ctx, mask_in, pad_tensor, 0);
+            }
         } else {
             if (kv_pad > 0) {
                 mask_in         = ggml_ext_zeros(ctx, L_k, L_q, 1, 1);
@@ -1911,7 +1928,7 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
             kv_pad = GGML_PAD(L_k, 256) - static_cast<int>(L_k);
         }
 
-        if (mask != nullptr) {
+        if (mask != nullptr && !allow_masked_flash_attn) {
             can_use_flash_attn = false;
         }
 

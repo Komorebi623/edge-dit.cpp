@@ -25,6 +25,14 @@ namespace MiniMaxH3VAE {
         return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
     }
 
+    static bool h3_env_flag_enabled_or_default(const char* name, bool default_enabled) {
+        const char* value = std::getenv(name);
+        if (value == nullptr || value[0] == '\0') {
+            return default_enabled;
+        }
+        return std::strcmp(value, "0") != 0;
+    }
+
     static ggml_tensor* h3_profile_name(ggml_tensor* tensor, const std::string& name) {
         if (tensor != nullptr && h3_env_flag_enabled("ED_MINIMAX_H3_VAE_NAME_NODES")) {
             ggml_set_name(tensor, name.c_str());
@@ -111,7 +119,7 @@ namespace MiniMaxH3VAE {
             : GroupNorm(32, channels, 1e-6f, true) {}
 
         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
-            if (h3_env_flag_enabled("ED_MINIMAX_H3_VAE_FAST_TEMPORAL_GROUP_NORM")) {
+            if (h3_env_flag_enabled_or_default("ED_MINIMAX_H3_VAE_FAST_TEMPORAL_GROUP_NORM", true)) {
                 GGML_ASSERT(x->ne[3] % num_channels == 0);
                 const int64_t temporal_size = x->ne[2];
                 const int64_t batch_size    = x->ne[3] / num_channels;
@@ -407,7 +415,7 @@ namespace MiniMaxH3VAE {
             auto w2   = std::dynamic_pointer_cast<Linear>(blocks["w2"]);
             auto projected = w1->forward(ctx, x);
             h3_profile_name(projected, profile_prefix + ".w1");
-            if (h3_env_flag_enabled("ED_MINIMAX_H3_VAE_FUSED_SWIGLU")) {
+            if (h3_env_flag_enabled_or_default("ED_MINIMAX_H3_VAE_FUSED_SWIGLU", true)) {
                 auto activated = ggml_swiglu(ctx->ggml_ctx, projected);
                 h3_profile_name(activated, profile_prefix + ".swiglu");
                 return h3_profile_name(w2->forward(ctx, activated), profile_prefix + ".out");
@@ -710,7 +718,7 @@ namespace MiniMaxH3VAE {
             auto output            = std::move(current);
             extent                 = std::min({extent, previous.shape()[2], output.shape()[2]});
             int64_t previous_start = previous.shape()[2] - extent;
-            if (h3_env_flag_enabled("ED_MINIMAX_H3_FAST_TEMPORAL_BLEND")) {
+            if (h3_env_flag_enabled_or_default("ED_MINIMAX_H3_FAST_TEMPORAL_BLEND", true)) {
                 const int64_t frame_size = output.shape()[0] * output.shape()[1];
                 const int64_t frames_per_outer = output.shape()[2];
                 const int64_t previous_frames_per_outer = previous.shape()[2];
@@ -731,7 +739,7 @@ namespace MiniMaxH3VAE {
                 });
                 return output;
             }
-            if (h3_env_flag_enabled("ED_MINIMAX_H3_PARALLEL_TEMPORAL_COPY")) {
+            if (h3_env_flag_enabled_or_default("ED_MINIMAX_H3_PARALLEL_TEMPORAL_COPY", true)) {
                 const int64_t channels = output.shape()[3];
                 const int64_t batches = output.shape()[4];
                 sd_parallel_for(0, batches * channels * extent, 8, [&](int64_t index) {
@@ -784,7 +792,7 @@ namespace MiniMaxH3VAE {
             }
             shape[2] = total_frames;
             sd::Tensor<float> result(shape);
-            if (h3_env_flag_enabled("ED_MINIMAX_H3_PARALLEL_TEMPORAL_COPY")) {
+            if (h3_env_flag_enabled_or_default("ED_MINIMAX_H3_PARALLEL_TEMPORAL_COPY", true)) {
                 const int64_t frame_size = shape[0] * shape[1];
                 const int64_t outer_count = shape[3] * shape[4];
                 sd_parallel_for(0, outer_count, 8, [&](int64_t outer) {
@@ -930,7 +938,7 @@ namespace MiniMaxH3VAE {
 
             const bool collect_temporal_parts = h3_env_flag_enabled("ED_MINIMAX_H3_COLLECT_TEMPORAL_PARTS");
             const bool fused_temporal_assembly =
-                h3_env_flag_enabled("ED_MINIMAX_H3_FUSED_TEMPORAL_ASSEMBLY");
+                h3_env_flag_enabled_or_default("ED_MINIMAX_H3_FUSED_TEMPORAL_ASSEMBLY", true);
             sd::Tensor<float> result;
             std::vector<sd::Tensor<float>> temporal_parts;
             if (collect_temporal_parts && !fused_temporal_assembly) {
@@ -1045,7 +1053,7 @@ namespace MiniMaxH3VAE {
                 const int64_t blend_begin = profile_temporal ? ggml_time_us() : 0;
                 if (profile_temporal) output_slice_us += blend_begin - output_slice_begin;
                 if (!overlap.empty()) {
-                    first   = h3_env_flag_enabled("ED_MINIMAX_H3_MOVE_TEMPORAL_BLEND")
+                    first   = h3_env_flag_enabled_or_default("ED_MINIMAX_H3_MOVE_TEMPORAL_BLEND", true)
                                   ? blend_temporal(overlap, std::move(first), frame_overlap)
                                   : blend_temporal(overlap, first, frame_overlap);
                     overlap = {};
@@ -1136,7 +1144,7 @@ namespace MiniMaxH3VAE {
                                    bool decode_graph) override {
             auto input = ensure_video_shape(z);
             if (decode_graph) {
-                const bool reuse_rope = h3_env_flag_enabled("ED_MINIMAX_H3_VAE_REUSE_ROPE_CACHE");
+                const bool reuse_rope = h3_env_flag_enabled_or_default("ED_MINIMAX_H3_VAE_REUSE_ROPE_CACHE", true);
                 if (!reuse_rope ||
                     rope_cache.empty() ||
                     rope_cache_width != input.shape()[0] ||

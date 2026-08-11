@@ -337,7 +337,8 @@ static SDVersion infer_transformer_file_version(const std::string& file_path) {
     if (contains(lower_normalized, "kontext")) {
         return VERSION_FLUX_KONTEXT;
     }
-    if (!contains(normalized, "/transformer/")) {
+    if (!contains(normalized, "/transformer/") &&
+        !contains(normalized, "/transformer_ref/")) {
         return VERSION_COUNT;
     }
 
@@ -1365,6 +1366,8 @@ SDVersion ModelLoader::get_ld_version() {
     bool has_transformer_blocks = false;
     bool has_unet = false;
     bool has_second_text_encoder = false;
+    bool has_qwen3_vl_language = false;
+    bool has_qwen3_vl_vision = false;
 
     TensorStorage input_block_weight;
     TensorStorage token_embedding_weight;
@@ -1380,6 +1383,14 @@ SDVersion ModelLoader::get_ld_version() {
         if (contains(name, "model.diffusion_model.video_patch_proj.weight") &&
             tensor_storage_map_.find("model.diffusion_model.audio_patch_proj.weight") != tensor_storage_map_.end()) {
             return VERSION_MINIMAX_H3;
+        }
+        if (contains(name, "model.language_model.layers.") ||
+            contains(name, "text_encoders.llm.model.language_model.layers.")) {
+            has_qwen3_vl_language = true;
+        }
+        if (contains(name, "model.visual.blocks.") ||
+            contains(name, "text_encoders.llm.model.visual.blocks.")) {
+            has_qwen3_vl_vision = true;
         }
         // Wan video DiT: blocks carry a cross_attn sub-module (text conditioning)
         // that no other supported architecture uses, and a 3-D patch_embedding.
@@ -1420,6 +1431,9 @@ SDVersion ModelLoader::get_ld_version() {
             return VERSION_FLUX_CONTROLS;
         }
         return VERSION_FLUX;
+    }
+    if (has_qwen3_vl_language && has_qwen3_vl_vision) {
+        return VERSION_MINIMAX_H3;
     }
     if (has_unet && has_second_text_encoder) {
         return VERSION_SDXL;

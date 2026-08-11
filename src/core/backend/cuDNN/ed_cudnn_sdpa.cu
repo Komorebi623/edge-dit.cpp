@@ -204,7 +204,7 @@ static bool cudnn_sdpa_wan_sp_cross_attn_enabled() {
 }
 
 static bool cudnn_sdpa_short_f16_self_attn_enabled() {
-    static const bool enabled = env_flag_enabled_or_default("ED_CUDNN_SDPA_SHORT_F16_SELF_ATTN", false);
+    static const bool enabled = env_flag_enabled_or_default("ED_CUDNN_SDPA_SHORT_F16_SELF_ATTN", true);
     return enabled;
 }
 

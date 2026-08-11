@@ -276,9 +276,9 @@ namespace LLM {
         bool qkv_bias             = true;
         bool qk_norm              = false;
     int64_t vocab_size        = 152064;
-    float rms_norm_eps        = 1e-06f;
-    bool final_norm           = true;
-    LLMVisionParams vision;
+        float rms_norm_eps        = 1e-06f;
+        bool final_norm           = true;
+        LLMVisionParams vision;
     };
 
     struct LLMImageEmbedInfo {
@@ -1291,10 +1291,10 @@ namespace LLM {
                 }
             }
             if (is_debug_target(".attn.q_rope")) {
-                return q;
+                return ggml_cont(ctx->ggml_ctx, q);
             }
             if (is_debug_target(".attn.k_rope")) {
-                return k;
+                return ggml_cont(ctx->ggml_ctx, k);
             }
 
             q = ggml_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, q, 0, 2, 1, 3));  // [N, num_heads, n_token, head_dim]
@@ -1311,7 +1311,7 @@ namespace LLM {
                                        num_heads,
                                        attention_mask,
                                        true,
-                                       ctx->flash_attn_enabled);  // [N, n_token, hidden_size]
+                                       false);  // [N, n_token, hidden_size]
             if (diffusers_dtype &&
                 (attention_output_type == GGML_TYPE_F16 || attention_output_type == GGML_TYPE_BF16) &&
                 x->type != attention_output_type) {
@@ -1407,6 +1407,36 @@ namespace LLM {
         int64_t num_layers;
         bool diffusers_text_dtype;
         bool final_norm;
+
+        static ggml_tensor* add_deepstack_image_embeds(GGMLRunnerContext* ctx,
+                                                       ggml_tensor* x,
+                                                       const std::vector<std::pair<int, ggml_tensor*>>& image_embeds) {
+            if (image_embeds.empty()) {
+                return x;
+            }
+            GGML_ASSERT(x->ne[2] == 1);
+            auto raw_x = x->type == image_embeds[0].second->type ? x : ggml_cast(ctx->ggml_ctx, x, image_embeds[0].second->type);
+            int64_t token_start = 0;
+            ggml_tensor* output = nullptr;
+            for (const auto& [index, image_embed] : image_embeds) {
+                GGML_ASSERT(index >= token_start);
+                GGML_ASSERT(index + image_embed->ne[1] <= raw_x->ne[1]);
+                if (index > token_start) {
+                    auto text_embed = ggml_ext_slice(ctx->ggml_ctx, raw_x, 1, token_start, index);
+                    output = output == nullptr ? text_embed : ggml_concat(ctx->ggml_ctx, output, text_embed, 1);
+                }
+                auto visual_embed = ggml_ext_slice(ctx->ggml_ctx, raw_x, 1, index, index + image_embed->ne[1]);
+                visual_embed = ggml_add(ctx->ggml_ctx, visual_embed, image_embed);
+                output = output == nullptr ? visual_embed : ggml_concat(ctx->ggml_ctx, output, visual_embed, 1);
+                token_start = index + image_embed->ne[1];
+            }
+            if (token_start < raw_x->ne[1]) {
+                auto text_embed = ggml_ext_slice(ctx->ggml_ctx, raw_x, 1, token_start, raw_x->ne[1]);
+                output = output == nullptr ? text_embed : ggml_concat(ctx->ggml_ctx, output, text_embed, 1);
+            }
+            GGML_ASSERT(output != nullptr && output->ne[1] == raw_x->ne[1]);
+            return output;
+        }
 
     public:
         TextModel(const LLMParams& params)
@@ -1515,15 +1545,11 @@ namespace LLM {
 
                 const std::string block_debug_prefix = "block" + std::to_string(i);
                 x = block->forward(ctx, x, input_pos, attention_mask, debug_target, block_debug_prefix);
-                if (i < static_cast<int>(deepstack_image_embeds.size())) {
-                    for (const auto& [index, image_embed] : deepstack_image_embeds[static_cast<size_t>(i)]) {
-                        auto visual_embed = ggml_ext_slice(ctx->ggml_ctx, x, 1, index, index + image_embed->ne[1]);
-                        visual_embed = ggml_add(ctx->ggml_ctx, visual_embed, image_embed);
-                        x = ggml_set_2d(ctx->ggml_ctx, x, visual_embed, x->nb[1], index * x->nb[1]);
-                    }
-                }
                 if (debug_target.rfind(block_debug_prefix + ".", 0) == 0) {
                     return x;
+                }
+                if (i < static_cast<int>(deepstack_image_embeds.size())) {
+                    x = add_deepstack_image_embeds(ctx, x, deepstack_image_embeds[static_cast<size_t>(i)]);
                 }
                 if (out_layers.size() > 1) {
                     x = ggml_cont(ctx->ggml_ctx, x);
@@ -1798,63 +1824,47 @@ namespace LLM {
                           return a.token_index < b.token_index;
                       });
 
-            input_pos_vec.assign(static_cast<size_t>(n_tokens) * 4, 0);
-            auto set_pos = [&](int64_t token, int64_t t, int64_t h, int64_t w) {
-                input_pos_vec[static_cast<size_t>(token)] = static_cast<int>(t);
-                input_pos_vec[static_cast<size_t>(n_tokens + token)] = static_cast<int>(h);
-                input_pos_vec[static_cast<size_t>(2 * n_tokens + token)] = static_cast<int>(w);
+            input_pos_vec.resize(static_cast<size_t>(n_tokens) * 4);
+            for (int64_t token = 0; token < n_tokens; ++token) {
+                input_pos_vec[static_cast<size_t>(token)] = static_cast<int>(token);
+                input_pos_vec[static_cast<size_t>(n_tokens + token)] = static_cast<int>(token);
+                input_pos_vec[static_cast<size_t>(2 * n_tokens + token)] = static_cast<int>(token);
                 input_pos_vec[static_cast<size_t>(3 * n_tokens + token)] = 0;
-            };
-            auto fill_text = [&](int64_t token_start, int64_t text_len, int64_t pos_start) {
-                for (int64_t i = 0; i < text_len; ++i) {
-                    const int64_t pos = pos_start + i;
-                    set_pos(token_start + i, pos, pos, pos);
-                }
-            };
+            }
 
-            int64_t token_cursor = 0;
-            int64_t pos_cursor   = 0;
+            int64_t offset = 0;
             for (const auto& info : infos) {
-                const int64_t visual_start = static_cast<int64_t>(info.token_index);
-                const int64_t grid_t       = std::max<int64_t>(1, info.grid_t);
-                const int64_t grid_h       = info.grid_h;
-                const int64_t grid_w       = info.grid_w;
-                const int64_t token_count  = info.token_count > 0 ? info.token_count : grid_t * grid_h * grid_w;
-                if (visual_start < token_cursor || grid_h <= 0 || grid_w <= 0 ||
-                    token_count != grid_t * grid_h * grid_w ||
-                    visual_start + token_count > n_tokens) {
+                const int64_t index = static_cast<int64_t>(info.token_index);
+                const int64_t size = info.token_count;
+                const int64_t merge = std::max<int64_t>(1, params.vision.spatial_merge_size);
+                if (info.grid_h <= 0 || info.grid_w <= 0 ||
+                    info.grid_h % merge != 0 || info.grid_w % merge != 0) {
+                    return false;
+                }
+                const int64_t grid_h = info.grid_h / merge;
+                const int64_t grid_w = info.grid_w / merge;
+                const int64_t end = index + size;
+                if (index < 0 || end > n_tokens || grid_h <= 0 || grid_w <= 0 ||
+                    size != grid_h * grid_w) {
                     return false;
                 }
 
-                const int64_t text_len = visual_start - token_cursor;
-                fill_text(token_cursor, text_len, pos_cursor);
-
-                const int64_t visual_pos_start = pos_cursor + text_len;
-                int64_t max_visual_pos         = visual_pos_start;
-                int64_t visual_token           = visual_start;
-                for (int64_t t = 0; t < grid_t; ++t) {
-                    (void)t;
-                    for (int64_t h = 0; h < grid_h; ++h) {
-                        for (int64_t w = 0; w < grid_w; ++w) {
-                            set_pos(visual_token,
-                                    visual_pos_start,
-                                    visual_pos_start + h,
-                                    visual_pos_start + w);
-                            max_visual_pos = std::max(max_visual_pos,
-                                                      std::max(visual_pos_start,
-                                                               std::max(visual_pos_start + h,
-                                                                        visual_pos_start + w)));
-                            ++visual_token;
-                        }
-                    }
+                const int64_t len_max = std::max(grid_h, grid_w);
+                const int64_t next_pos = index + len_max + offset;
+                for (int64_t token = end; token < n_tokens; ++token) {
+                    const int64_t pos = next_pos + token - end;
+                    input_pos_vec[static_cast<size_t>(token)] = static_cast<int>(pos);
+                    input_pos_vec[static_cast<size_t>(n_tokens + token)] = static_cast<int>(pos);
+                    input_pos_vec[static_cast<size_t>(2 * n_tokens + token)] = static_cast<int>(pos);
                 }
-
-                token_cursor = visual_start + token_count;
-                pos_cursor   = max_visual_pos + 1;
-            }
-
-            if (token_cursor < n_tokens) {
-                fill_text(token_cursor, n_tokens - token_cursor, pos_cursor);
+                for (int64_t token = 0; token < size; ++token) {
+                    input_pos_vec[static_cast<size_t>(index + token)] = static_cast<int>(index + offset);
+                    input_pos_vec[static_cast<size_t>(n_tokens + index + token)] =
+                        static_cast<int>(index + offset + token / grid_w);
+                    input_pos_vec[static_cast<size_t>(2 * n_tokens + index + token)] =
+                        static_cast<int>(index + offset + token % grid_w);
+                }
+                offset += len_max - size;
             }
             if (qwen_align_debug_enabled()) {
                 LOG_INFO("qwen-align mrope_positions: n_tokens=%" PRId64 " axes=4", n_tokens);

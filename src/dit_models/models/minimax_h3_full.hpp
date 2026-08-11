@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <set>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -26,6 +27,23 @@ namespace MiniMaxH3 {
         const char* value = std::getenv(name);
         return value != nullptr && value[0] != '\0' && std::atoi(value) != 0;
     }
+
+    static bool h3_env_flag_enabled_or_default(const char* name, bool default_enabled) {
+        const char* value = std::getenv(name);
+        if (value == nullptr || value[0] == '\0') {
+            return default_enabled;
+        }
+        return std::atoi(value) != 0;
+    }
+
+    static bool h3_trace_first_step_enabled() {
+        if (!h3_env_flag_enabled("ED_MINIMAX_H3_TRACE")) {
+            return false;
+        }
+        const char* step = std::getenv("ED_MINIMAX_H3_CURRENT_STEP");
+        return step == nullptr || std::atoi(step) == 0;
+    }
+
 
     struct Config {
         int64_t hidden_size              = 5376;
@@ -161,17 +179,33 @@ namespace MiniMaxH3 {
     struct MLP : public UnaryBlock {
         MLP(int64_t hidden_size,
             int64_t ffn_hidden_size) {
-            blocks["fc1"] = std::make_shared<Linear>(hidden_size, ffn_hidden_size * 2, false, false, true, 1.f / 128.f);
-            blocks["fc2"] = std::make_shared<Linear>(ffn_hidden_size, hidden_size, false, false, true, 1.f / 128.f);
+            blocks["fc1"] = std::make_shared<Linear>(hidden_size,
+                                                      ffn_hidden_size * 2,
+                                                      false,
+                                                      false,
+                                                      true,
+                                                      1.f / 128.f,
+                                                      true);
+            blocks["fc2"] = std::make_shared<Linear>(ffn_hidden_size,
+                                                      hidden_size,
+                                                      false,
+                                                      false,
+                                                      true,
+                                                      1.f / 128.f,
+                                                      true);
         }
 
         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override {
             auto fc1 = std::dynamic_pointer_cast<Linear>(blocks["fc1"]);
             auto fc2 = std::dynamic_pointer_cast<Linear>(blocks["fc2"]);
+            if (h3_env_flag_enabled("ED_MINIMAX_H3_DISABLE_MLP_INPUT_SCALE")) {
+                fc1->set_scale(1.f);
+                fc2->set_scale(1.f);
+            }
             const bool use_mlp_tensor_cores = h3_env_flag_enabled("ED_MINIMAX_H3_MLP_FP16_CUBLAS");
             const bool use_fc1_tensor_cores = use_mlp_tensor_cores ||
                                               h3_env_flag_enabled("ED_MINIMAX_H3_FC1_FP16_CUBLAS") ||
-                                              h3_env_flag_enabled("ED_MINIMAX_H3_FC1_F32_OUTPUT");
+                                              h3_env_flag_enabled_or_default("ED_MINIMAX_H3_FC1_F32_OUTPUT", true);
             const bool use_fc2_tensor_cores = use_mlp_tensor_cores || h3_env_flag_enabled("ED_MINIMAX_H3_FC2_FP16_CUBLAS");
             fc1->set_force_prec_f32(!use_fc1_tensor_cores);
             fc2->set_force_prec_f32(!use_fc2_tensor_cores);
@@ -502,13 +536,32 @@ namespace MiniMaxH3 {
                              ggml_tensor* x,
                              ggml_tensor* t_emb,
                              const std::vector<TokenModulationSpan>& segments,
-                             ggml_tensor* pe) {
+                             ggml_tensor* pe,
+                             const std::string& debug_target = {},
+                             ggml_tensor** debug_output = nullptr) {
             auto norm1 = std::dynamic_pointer_cast<RMSNorm>(blocks["norm1"]);
             auto norm2 = std::dynamic_pointer_cast<RMSNorm>(blocks["norm2"]);
             auto attn  = std::dynamic_pointer_cast<Attention>(blocks["attn"]);
             auto mlp   = std::dynamic_pointer_cast<MLP>(blocks["mlp"]);
             auto adaln = std::dynamic_pointer_cast<AdaLayerNormModulation>(blocks["adaln_proj"]);
             auto mods  = adaln->forward(ctx, t_emb);
+            if (debug_output != nullptr && debug_target == "block0_adaln") {
+                *debug_output = mods;
+                return x;
+            }
+            if (debug_output != nullptr && starts_with(debug_target, "block0_mod_")) {
+                const int component = std::atoi(debug_target.substr(std::strlen("block0_mod_")).c_str());
+                if (component >= 0 && component < 6 && !segments.empty()) {
+                    auto selected = modulation_row(ctx->ggml_ctx,
+                                                   mods,
+                                                   config.hidden_size,
+                                                   6,
+                                                   3,
+                                                   segments.front().modulation_row);
+                    *debug_output = selected[component];
+                    return x;
+                }
+            }
 
             auto h = modulate_segments(ctx->ggml_ctx,
                                        norm1->forward(ctx, x),
@@ -519,13 +572,26 @@ namespace MiniMaxH3 {
                                        3,
                                        0,
                                        1);
+            if (debug_output != nullptr && debug_target == "block0_attn_input") {
+                *debug_output = h;
+                return x;
+            }
+            auto attn_output = attn->forward(ctx, h, pe);
+            if (debug_output != nullptr && debug_target == "block0_attn_output") {
+                *debug_output = attn_output;
+                return x;
+            }
             x      = gated_residual_segments(ctx->ggml_ctx,
                                              x,
-                                             attn->forward(ctx, h, pe),
+                                             attn_output,
                                              mods,
                                              segments,
                                              config.hidden_size,
                                              2);
+            if (debug_output != nullptr && debug_target == "block0_after_attn") {
+                *debug_output = x;
+                return x;
+            }
             h      = modulate_segments(ctx->ggml_ctx,
                                        norm2->forward(ctx, x),
                                        mods,
@@ -535,9 +601,18 @@ namespace MiniMaxH3 {
                                        3,
                                        3,
                                        4);
+            if (debug_output != nullptr && debug_target == "block0_mlp_input") {
+                *debug_output = h;
+                return x;
+            }
+            auto mlp_output = mlp->forward(ctx, h);
+            if (debug_output != nullptr && debug_target == "block0_mlp_output") {
+                *debug_output = mlp_output;
+                return x;
+            }
             return gated_residual_segments(ctx->ggml_ctx,
                                            x,
-                                           mlp->forward(ctx, h),
+                                           mlp_output,
                                            mods,
                                            segments,
                                            config.hidden_size,
@@ -687,7 +762,9 @@ namespace MiniMaxH3 {
                                                       const std::vector<SequenceSegment>& sequence_segments,
                                                       const TokenModulationSpan& video_segment,
                                                       const TokenModulationSpan& audio_segment,
-                                                      ggml_tensor* audio_slope) {
+                                                      ggml_tensor* audio_slope,
+                                                      const std::string& debug_target = {},
+                                                      ggml_tensor** debug_output = nullptr) {
             auto video_proj = std::dynamic_pointer_cast<Linear>(blocks["video_patch_proj"]);
             auto audio_proj = std::dynamic_pointer_cast<Linear>(blocks["audio_patch_proj"]);
 
@@ -779,10 +856,33 @@ namespace MiniMaxH3 {
                                         curve_indices,
                                         curve_upper_indices,
                                         curve_fractions);
+            if (debug_output != nullptr) {
+                if (debug_target == "temb") {
+                    *debug_output = t_emb;
+                    return {nullptr, nullptr};
+                }
+                if (debug_target == "packed_input") {
+                    *debug_output = h;
+                    return {nullptr, nullptr};
+                }
+            }
             auto pe    = build_rope(ctx, position_ids);
             for (int64_t i = 0; i < config.num_layers; ++i) {
                 auto block = std::dynamic_pointer_cast<TransformerBlock>(blocks["blocks." + std::to_string(i)]);
-                h          = block->forward(ctx, h, t_emb, segments, pe);
+                h          = block->forward(ctx,
+                                            h,
+                                            t_emb,
+                                            segments,
+                                            pe,
+                                            i == 0 ? debug_target : std::string(),
+                                            i == 0 ? debug_output : nullptr);
+                if (debug_output != nullptr && *debug_output != nullptr) {
+                    return {nullptr, nullptr};
+                }
+                if (debug_output != nullptr && debug_target == "block0" && i == 0) {
+                    *debug_output = h;
+                    return {nullptr, nullptr};
+                }
                 sd::ggml_graph_cut::mark_graph_cut(h,
                                                    "minimax_h3.blocks." + std::to_string(i),
                                                    "hidden_states");
@@ -1163,6 +1263,60 @@ namespace MiniMaxH3 {
                                          t_v,
                                          t_a);
 
+            if (h3_trace_first_step_enabled()) {
+                auto reference_kind_name = [](MiniMaxH3ReferenceKind kind) {
+                    switch (kind) {
+                        case MiniMaxH3ReferenceKind::IMAGE: return "image";
+                        case MiniMaxH3ReferenceKind::VIDEO: return "video";
+                        case MiniMaxH3ReferenceKind::VIDEO_AUDIO: return "video_audio";
+                        case MiniMaxH3ReferenceKind::AUDIO: return "audio";
+                    }
+                    return "unknown";
+                };
+                std::ostringstream ref_stream;
+                for (size_t index = 0; index < reference_blocks.size(); ++index) {
+                    const auto& block = reference_blocks[index];
+                    if (index > 0) {
+                        ref_stream << ";";
+                    }
+                    ref_stream << index << ":" << reference_kind_name(block.kind)
+                               << "(v=" << block.video_index
+                               << ",a=" << block.audio_index << ")";
+                }
+                LOG_INFO("minimax-h3 trace dit layout: text=%lld target_video=%lldx%lldx%lld target_audio=%d condition_videos=%zu condition_audios=%zu reference_blocks=%zu [%s] packed_tokens=%lld sequence_segments=%zu segments=%zu timesteps=%zu",
+                         static_cast<long long>(context_tensor.shape()[1]),
+                         static_cast<long long>(video_input_cache.shape()[2]),
+                         static_cast<long long>(video_input_cache.shape()[1]),
+                         static_cast<long long>(video_input_cache.shape()[0]),
+                         audio_length,
+                         condition_videos.size(),
+                         condition_audios.size(),
+                         reference_blocks.size(),
+                         ref_stream.str().c_str(),
+                         static_cast<long long>(layout.positions.size() / 3),
+                         layout.sequence_segments.size(),
+                         layout.segments.size(),
+                         layout.timesteps.size());
+                for (size_t index = 0; index < condition_videos.size(); ++index) {
+                    const auto& condition = condition_videos[index];
+                    LOG_INFO("minimax-h3 trace condition_video[%zu]: shape=%lldx%lldx%lldx%lldx%lld",
+                             index,
+                             static_cast<long long>(condition.shape()[0]),
+                             static_cast<long long>(condition.shape()[1]),
+                             static_cast<long long>(condition.shape()[2]),
+                             static_cast<long long>(condition.shape()[3]),
+                             static_cast<long long>(condition.shape()[4]));
+                }
+                for (size_t index = 0; index < condition_audios.size(); ++index) {
+                    const auto& condition = condition_audios[index];
+                    LOG_INFO("minimax-h3 trace condition_audio[%zu]: shape=%lldx%lldx%lld",
+                             index,
+                             static_cast<long long>(condition.shape()[0]),
+                             static_cast<long long>(condition.shape()[1]),
+                             static_cast<long long>(condition.shape()[2]));
+                }
+            }
+
             position_input_cache = sd::Tensor<float>(
                 {3, static_cast<int64_t>(layout.positions.size() / 3)},
                 layout.positions);
@@ -1212,6 +1366,9 @@ namespace MiniMaxH3 {
                 {1},
                 {time_shift_slope(sigma_v, video_shift, audio_shift)});
             auto audio_slope_tensor = make_input(audio_slope_input_cache);
+            const char* debug_target_env = std::getenv("ED_MINIMAX_H3_DEBUG_TARGET");
+            const std::string debug_target = debug_target_env == nullptr ? std::string() : std::string(debug_target_env);
+            ggml_tensor* debug_output = nullptr;
             auto output     = model.forward(&runner_ctx,
                                             video,
                                             audio,
@@ -1227,8 +1384,12 @@ namespace MiniMaxH3 {
                                             layout.sequence_segments,
                                             layout.video_segment,
                                             layout.audio_segment,
-                                            audio_slope_tensor);
-            auto merged     = merge_av_latents(compute_ctx, output.first, output.second);
+                                            audio_slope_tensor,
+                                            debug_target,
+                                            &debug_output);
+            auto merged     = debug_output == nullptr
+                                  ? merge_av_latents(compute_ctx, output.first, output.second)
+                                  : debug_output;
             auto graph      = new_graph_custom(H3_GRAPH_SIZE);
             ggml_build_forward_expand(graph, merged);
             return graph;
@@ -1260,7 +1421,8 @@ namespace MiniMaxH3 {
                                    params.minimax_video_sigma_shift,
                                    params.minimax_audio_sigma_shift);
             };
-            if (h3_env_flag_enabled("ED_MINIMAX_H3_REUSE_GRAPH")) {
+            if (h3_env_flag_enabled("ED_MINIMAX_H3_REUSE_GRAPH") &&
+                std::getenv("ED_MINIMAX_H3_DEBUG_TARGET") == nullptr) {
                 auto split_for_reuse = split_av_latents(*params.x, params.minimax_audio_length);
                 video_input_cache = std::move(split_for_reuse.first);
                 audio_input_cache = std::move(split_for_reuse.second);

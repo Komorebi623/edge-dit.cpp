@@ -45,7 +45,7 @@ std::unordered_map<workspace_key, std::unique_ptr<workspace>, workspace_key_hash
 static bool enabled() {
     static const bool value = [] {
         const char * env = getenv("ED_CUDNN_CONV_TRANSPOSE_1D");
-        return env != nullptr && atoi(env) != 0;
+        return env == nullptr || env[0] == '\0' || atoi(env) != 0;
     }();
     return value;
 }

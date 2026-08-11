@@ -1315,6 +1315,18 @@ std::string convert_tensor_name(std::string name, SDVersion version) {
     replace_with_prefix_map(name, prefix_map);
 
     if (ed_version_is_minimax_h3(version)) {
+        const std::string raw_language_prefix = "model.language_model.";
+        if (starts_with(name, raw_language_prefix)) {
+            name = "text_encoders.llm.model." + name.substr(raw_language_prefix.size());
+        }
+        const std::string hf_language_prefix = "text_encoders.llm.model.language_model.";
+        if (starts_with(name, hf_language_prefix)) {
+            name = "text_encoders.llm.model." + name.substr(hf_language_prefix.size());
+        }
+        const std::string raw_vision_prefix = "model.visual.";
+        if (starts_with(name, raw_vision_prefix)) {
+            name = "text_encoders.llm.visual." + name.substr(raw_vision_prefix.size());
+        }
         const std::string hf_vision_prefix = "text_encoders.llm.model.visual.";
         if (starts_with(name, hf_vision_prefix)) {
             name = "text_encoders.llm.visual." + name.substr(hf_vision_prefix.size());

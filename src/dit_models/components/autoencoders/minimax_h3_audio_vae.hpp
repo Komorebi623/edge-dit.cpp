@@ -2,12 +2,21 @@
 #define __ED_MINIMAX_H3_AUDIO_VAE_HPP__
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
 #include "backend/ggml/ggml_extend.hpp"
 namespace MiniMaxH3Audio {
 namespace Ops {
+    static bool h3_audio_env_flag_enabled_or_default(const char* name, bool default_enabled) {
+        const char* value = std::getenv(name);
+        if (value == nullptr || value[0] == '\0') {
+            return default_enabled;
+        }
+        return value[0] != '0';
+    }
+
     static ggml_type audio_conv_weight_type(ggml_type type) {
         return type == GGML_TYPE_BF16 ? GGML_TYPE_F16 : type;
     }
@@ -72,8 +81,7 @@ namespace Ops {
         auto ctx = runner_ctx->ggml_ctx;
         GGML_ASSERT(x->ne[2] == 1 && x->ne[3] == 1);
         auto tiled = tile_depthwise_filter_1d(runner_ctx, filter, x->ne[1]);
-        const char* direct = std::getenv("ED_MINIMAX_H3_AUDIO_DIRECT_DEPTHWISE");
-        if (direct != nullptr && direct[0] != '\0' && direct[0] != '0' &&
+        if (h3_audio_env_flag_enabled_or_default("ED_MINIMAX_H3_AUDIO_DIRECT_DEPTHWISE", true) &&
             sd_backend_is(runner_ctx->backend, "CUDA") && tiled->type == GGML_TYPE_F32 && x->type == GGML_TYPE_F32) {
             auto kernel = ggml_reshape_4d(ctx, tiled, tiled->ne[0], 1, 1, x->ne[1]);
             auto input = ggml_reshape_4d(ctx, x, x->ne[0], 1, x->ne[1], 1);
@@ -125,8 +133,7 @@ namespace Ops {
 
         auto reversed_filter = reverse_1d_filter(ctx, filter);
         ggml_tensor* out = nullptr;
-        const char* direct = std::getenv("ED_MINIMAX_H3_AUDIO_DIRECT_DEPTHWISE");
-        if (direct != nullptr && direct[0] != '\0' && direct[0] != '0' &&
+        if (h3_audio_env_flag_enabled_or_default("ED_MINIMAX_H3_AUDIO_DIRECT_DEPTHWISE", true) &&
             reversed_filter->type == GGML_TYPE_F32 && x_flat->type == GGML_TYPE_F32) {
             auto kernel = ggml_reshape_4d(ctx, reversed_filter, kernel_size, 1, 1, 1);
             auto input = ggml_reshape_4d(ctx, x_flat, time * stride, 1, 1, channels);
@@ -293,8 +300,7 @@ namespace Ops {
                          const String2TensorStorage& tensor_storage_map = {},
                          const std::string prefix                       = "") override {
             ggml_type down_type                 = audio_conv_weight_type(get_type(prefix + "downsample.lowpass.filter", tensor_storage_map, GGML_TYPE_F16));
-            const char* direct_depthwise = std::getenv("ED_MINIMAX_H3_AUDIO_DIRECT_DEPTHWISE");
-            if (direct_depthwise != nullptr && direct_depthwise[0] != '\0' && direct_depthwise[0] != '0') {
+            if (h3_audio_env_flag_enabled_or_default("ED_MINIMAX_H3_AUDIO_DIRECT_DEPTHWISE", true)) {
                 down_type = GGML_TYPE_F32;
             }
             params["downsample.lowpass.filter"] = ggml_new_tensor_3d(ctx, down_type, down_kernel_size, 1, 1);
