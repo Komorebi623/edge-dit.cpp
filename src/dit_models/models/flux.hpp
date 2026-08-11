@@ -4863,12 +4863,13 @@ namespace Flux {
             flux_params.num_heads = static_cast<int>(flux_params.hidden_size / head_dim);
             const bool pure_bf16_diffusion = diffusion_tensor_count > 0 &&
                                              diffusion_bf16_count == diffusion_tensor_count;
+            const bool auto_bf16_activations = version == VERSION_FLUX_KONTEXT;
             const char* bf16_acts_env = std::getenv("ED_FLUX_BF16_ACTIVATIONS");
             if (bf16_acts_env != nullptr && bf16_acts_env[0] != '\0') {
                 flux_params.activation_dtype = flux_env_flag_enabled("ED_FLUX_BF16_ACTIVATIONS")
                                                    ? GGML_TYPE_BF16
                                                    : GGML_TYPE_F32;
-            } else if (pure_bf16_diffusion) {
+            } else if (pure_bf16_diffusion && auto_bf16_activations) {
                 flux_params.activation_dtype = GGML_TYPE_BF16;
             }
 
