@@ -1063,10 +1063,17 @@ bool ModelLoader::init_from_file(const std::string& file_path, const std::string
     if (is_safetensors_file(resolved_path)) {
         LOG_INFO("load %s using safetensors format", resolved_path.c_str());
         std::string effective_prefix = prefix;
+        if (version_ == VERSION_COUNT) {
+            version_ = infer_transformer_file_version(resolved_path);
+        }
         std::string lower_name = fs::path(resolved_path).filename().string();
         std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) {
             return static_cast<char>(std::tolower(c));
         });
+        if (version_ == VERSION_COUNT &&
+            (contains(lower_name, "minimax_h3") || contains(lower_name, "minimax-h3"))) {
+            version_ = VERSION_MINIMAX_H3;
+        }
         if (effective_prefix.empty() && contains(lower_name, "flux")) {
             version_ = contains(lower_name, "kontext") ? VERSION_FLUX_KONTEXT : VERSION_FLUX;
             effective_prefix = "transformer.";
@@ -1075,6 +1082,9 @@ bool ModelLoader::init_from_file(const std::string& file_path, const std::string
     }
     if (is_safetensors_index_file(resolved_path)) {
         LOG_INFO("load %s using safetensors shard index format", resolved_path.c_str());
+        if (version_ == VERSION_COUNT) {
+            version_ = infer_transformer_file_version(resolved_path);
+        }
         return init_from_safetensors_index_file(resolved_path, prefix);
     }
 
@@ -1083,12 +1093,16 @@ bool ModelLoader::init_from_file(const std::string& file_path, const std::string
 }
 
 void ModelLoader::convert_tensors_name() {
-    SDVersion version = (version_ == VERSION_COUNT) ? get_ld_version() : version_;
+    if (version_ == VERSION_COUNT) {
+        version_ = get_ld_version();
+    }
+    SDVersion version = version_;
     if (version == VERSION_COUNT) {
         LOG_WARN("model version is unknown; tensor names are left mostly unchanged");
     }
 
     String2TensorStorage new_map;
+    size_t swiglu_half_swaps = 0;
     for (auto& item : tensor_storage_map_) {
         TensorStorage tensor_storage = item.second;
         const std::string original_name = tensor_storage.name;
@@ -1100,9 +1114,17 @@ void ModelLoader::convert_tensors_name() {
             contains(original_name, "norm_out.linear.")) {
             tensor_storage.swap_scale_shift = true;
         }
+        if (ed_version_is_minimax_h3(version) &&
+            contains(original_name, ".ff.net.0.proj.")) {
+            tensor_storage.swap_swiglu_halves = true;
+            ++swiglu_half_swaps;
+        }
         new_map[tensor_storage.name] = std::move(tensor_storage);
     }
     tensor_storage_map_.swap(new_map);
+    if (swiglu_half_swaps > 0) {
+        LOG_DEBUG("marked %zu MiniMax-H3 diffusers SwiGLU tensors for half swap", swiglu_half_swaps);
+    }
 }
 
 bool ModelLoader::init_from_file_and_convert_name(const std::string& file_path, const std::string& prefix, SDVersion version) {
@@ -1717,6 +1739,19 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_thread
                         f64_to_f32_vec(reinterpret_cast<double*>(read_buf), reinterpret_cast<float*>(target_buf), tensor_storage.nelements());
                     } else if (tensor_storage.is_i64) {
                         i64_to_i32_vec(reinterpret_cast<int64_t*>(read_buf), reinterpret_cast<int32_t*>(target_buf), tensor_storage.nelements());
+                    }
+
+                    if (tensor_storage.swap_swiglu_halves) {
+                        const size_t total = static_cast<size_t>(tensor_storage.nbytes());
+                        if (total % 2 == 0 && target_buf != nullptr) {
+                            const size_t half = total / 2;
+                            std::vector<uint8_t> tmp(target_buf, target_buf + half);
+                            std::memmove(target_buf, target_buf + half, half);
+                            std::memcpy(target_buf + half, tmp.data(), half);
+                        } else {
+                            LOG_WARN("tensor half swap skipped for '%s': odd byte size %zu",
+                                     tensor_storage.name.c_str(), total);
+                        }
                     }
 
                     if (tensor_storage.type != dst_tensor->type) {

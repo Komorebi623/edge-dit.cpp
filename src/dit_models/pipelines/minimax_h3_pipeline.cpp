@@ -549,6 +549,21 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     diffusion_->alloc_params_buffer();
     diffusion_->get_param_tensors(registry.tensors(), "model.diffusion_model");
 
+    const std::string rope_inv_freq_name = "model.diffusion_model.rope.inv_freq";
+    if (loader.get_tensor_storage_map().find(rope_inv_freq_name) == loader.get_tensor_storage_map().end()) {
+        auto rope_it = registry.tensors().find(rope_inv_freq_name);
+        if (rope_it == registry.tensors().end() || rope_it->second == nullptr) {
+            return set_minimax_error(error, "MiniMax-H3 RoPE parameter was not allocated");
+        }
+        ggml_tensor* rope_inv_freq = rope_it->second;
+        std::vector<float> values(static_cast<size_t>(rope_inv_freq->ne[0]));
+        for (size_t i = 0; i < values.size(); ++i) {
+            values[i] = static_cast<float>(std::pow(10000.0, -static_cast<double>(i) / values.size()));
+        }
+        ggml_backend_tensor_set(rope_inv_freq, values.data(), 0, values.size() * sizeof(float));
+        LOG_INFO("MiniMax-H3 synthesized missing rope.inv_freq (%zu values)", values.size());
+    }
+
     const bool text_offload = runtime.clip_offload_params_to_cpu();
     String2TensorStorage conditioner_tensors = loader.get_tensor_storage_map();
     const std::regex language_layer_pattern(R"(^text_encoders\.llm\.model\.layers\.(\d+)\.)");
