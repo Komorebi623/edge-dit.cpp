@@ -142,8 +142,9 @@ first+last-frame, and Ref2VA conditioning through standalone component loading.
 Ref2VA accepts repeatable images, frame directories or media files, paired or
 embedded video audio, and additional audio (additional audio cannot be used by
 itself). Both checkpoints support `--auto-fit --max-vram`; placement covers the
-DiT, Qwen3-VL, video VAE, and audio VAE. See [MiniMax-H3 usage and H200
-performance](minimax-h3.md).
+DiT, Qwen3-VL, video VAE, and audio VAE. Use `--video-duration` for seconds or
+`--video-frames` for an exact legal `17k+5` frame count. See [MiniMax-H3 usage,
+weights, and H200 performance](minimax-h3.md).
 
 Supported output formats are `auto`, `avi`, `mp4`, `mov`, `mkv`, and `webm`.
 The CLI uses `ED_FFMPEG` when set and can also find imageio-ffmpeg binaries in

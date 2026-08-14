@@ -487,6 +487,9 @@ struct FluxCliArgs {
     int width = 1024;
     int height = 1024;
     int frames = 1;
+    bool frames_explicit = false;
+    float video_duration = 0.0f;
+    bool video_duration_explicit = false;
     int fps = 16;
     int steps = -1;  // -1 = auto: distilled models (e.g. FLUX schnell) default to few steps, others to 20
     int threads = 0;
@@ -535,6 +538,28 @@ struct FluxCliArgs {
     int warmup = 1;
     int repeat = 1;
 };
+
+inline int resolve_video_frames(const FluxCliArgs& args, bool is_minimax_h3) {
+    if (args.video_duration <= 0.0f) {
+        return args.frames;
+    }
+
+    const int fps = is_minimax_h3 ? 24 : args.fps;
+    const int requested_frames = std::max(1, static_cast<int>(std::lround(args.video_duration * fps)));
+    if (!is_minimax_h3) {
+        return requested_frames;
+    }
+
+    const int sequence_index = std::max(0, static_cast<int>(std::lround((requested_frames - 5) / 17.0)));
+    return sequence_index * 17 + 5;
+}
+
+inline int resolve_video_fit_frames(const FluxCliArgs& args) {
+    if (args.video_duration <= 0.0f) {
+        return args.frames;
+    }
+    return resolve_video_frames(args, true);
+}
 
 // Parses argv into `args`. Returns false on any error or --help (the caller is
 // responsible for printing its own usage text). Accepts both ed-cli's canonical
@@ -633,6 +658,13 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             const char* v = require_value(key);
             if (!v) return false;
             args->frames = parse_int_value(v, args->frames);
+            args->frames_explicit = true;
+        } else if (std::strcmp(key, "--video-duration") == 0 ||
+                   std::strcmp(key, "--video_duration") == 0) {
+            const char* v = require_value(key);
+            if (!v) return false;
+            args->video_duration = parse_float_value(v, args->video_duration);
+            args->video_duration_explicit = true;
         } else if (std::strcmp(key, "--fps") == 0) {
             const char* v = require_value(key);
             if (!v) return false;
@@ -898,8 +930,31 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
         return false;
     }
 
+    if (args->video_duration_explicit &&
+        (!std::isfinite(args->video_duration) || args->video_duration <= 0.0f)) {
+        std::fprintf(stderr, "video duration must be a positive number of seconds\n");
+        return false;
+    }
+
+    if (args->video_duration_explicit && args->frames_explicit) {
+        std::fprintf(stderr, "--video-duration and --video-frames/--frames are mutually exclusive\n");
+        return false;
+    }
+
+    if (args->video_duration_explicit && !args->video) {
+        std::fprintf(stderr, "--video-duration requires --video or -M vid_gen\n");
+        return false;
+    }
+
     if (args->fps <= 0) {
         std::fprintf(stderr, "fps must be positive\n");
+        return false;
+    }
+
+    if (args->video_duration > 0.0f &&
+        static_cast<double>(args->video_duration) * std::max(args->fps, 24) >
+            static_cast<double>(std::numeric_limits<int>::max())) {
+        std::fprintf(stderr, "video duration is too large\n");
         return false;
     }
 

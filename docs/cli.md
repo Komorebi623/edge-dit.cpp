@@ -273,6 +273,7 @@ Video flags:
 ```text
 --video
 --frames <int>
+--video-duration <seconds>  # MiniMax-H3 only
 --fps <int>
 --video-format auto|avi|mp4|mov|mkv|webm
 ```
@@ -409,6 +410,11 @@ placement remains valid across FL2VA and Ref2VA workflows. The MiniMax-H3 video
 VAE also keeps its model-specific fixed `16x16` tiling regardless of the generic
 `--vae-tiling`/`--vae-tile-size` values.
 
+For MiniMax-H3, `--video-duration <seconds>` converts a requested duration at
+the model's fixed 24 fps to the nearest legal `17k+5` frame count. Keep using
+`--video-frames` when an exact legal count is required; the two options are
+mutually exclusive.
+
 ```bash
 # MiniMax-H3 Q8_0 under a 40 GiB hard placement budget.
 ./build-cuda/bin/ed-cli --video \
@@ -417,8 +423,7 @@ VAE also keeps its model-specific fixed `16x16` tiling regardless of the generic
   --audio-vae /path/to/minimax_h3_audio_vae_fp32.safetensors \
   --llm /path/to/qwen3vl_32b_minimax_h3-Q8_0.gguf \
   --auto-fit --max-vram 40 --vae-tiling auto \
-  -W 864 -H 480 --video-frames 124 --fps 24 --steps 20 \
-  --cfg-scale 1 --diffusion-fa --rng cpu \
+  -W 864 -H 480 --video-duration 5 --steps 20 --cfg-scale 1 \
   --prompt "A cinematic sunset over layered mountain ridges." \
   --video-format mp4 --output minimax-h3-autofit.mp4
 ```

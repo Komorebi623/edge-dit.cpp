@@ -1,329 +1,256 @@
 # MiniMax-H3
 
-edge-dit.cpp supports MiniMax-H3 video + audio generation through the standalone
-component-loading path. The implementation follows the MiniMax-H3 interface used
-by `stable-diffusion.cpp`: one diffusion checkpoint, Qwen3-VL text/vision encoder,
-video VAE, and optional audio VAE.
+edge-dit.cpp supports MiniMax-H3 video-and-audio generation through standalone
+components: one FL2VA or Ref2VA diffusion model, one Qwen3-VL text/vision
+encoder, the video VAE, and the optional audio VAE. CUDA is the validated
+backend for this model family.
+
+## Checkpoints and inputs
+
+FL2VA and Ref2VA share Qwen3-VL and both VAEs, but require different diffusion
+checkpoints.
+
+| Checkpoint | Supported conditioning |
+|---|---|
+| FL2VA | Text; first frame; last frame; first and last frames |
+| Ref2VA | Repeatable reference images, videos, paired video audio, and additional audio |
+
+FL2VA uses `--image`/`--init-img` for the first frame and `--end-img` for the
+last frame. Ref2VA uses the following options:
+
+| Input | CLI option | Behavior |
+|---|---|---|
+| Image | `--ref-image <path>` | Repeatable; presented as `<Picture N>` |
+| Video | `--ref-video <path>` | Repeatable frame directory or `mp4`/`mov`/`mkv`/`webm`/`avi`; media files require `ffmpeg` |
+| Paired audio | `--ref-video-audio <wav>` | The Nth WAV is paired with the Nth video and overrides embedded audio |
+| Additional audio | `--ref-audio <wav>` | Repeatable; requires at least one image or video reference |
+
+When `--ref-video` points to a media file, the CLI decodes it at 24 fps and
+automatically extracts an embedded audio track. Explicit paired WAV files map
+positionally to videos. Additional audio is numbered after paired or embedded
+video audio. Ref2VA references cannot be combined with FL2VA first/last-frame
+options, and audio-only Ref2VA requests are rejected.
 
 ## Model files
 
-MiniMax-H3 runs with four model components. The diffusion checkpoint changes by
-mode; the encoder and VAEs are shared.
+### Downloadable weights
 
-| Component | File name | Source |
-|---|---|---|
-| Qwen3-VL text/vision encoder | `qwen3vl_32b_minimax_h3-Q4_K_M.gguf` | [leejet/MiniMax-H3-GGUF](https://huggingface.co/leejet/MiniMax-H3-GGUF) |
-| Video VAE | `minimax_h3_video_vae_fp16.safetensors` | [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) |
-| Audio VAE | `minimax_h3_audio_vae_fp32.safetensors` | [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) |
+The complete, unpruned checkpoints are recommended. The smaller files whose
+names contain `pruned` are loadable but are not directly comparable with the
+official full DiTs.
 
-### FL2VA checkpoint
+| Precision | Component | File | Repository |
+|---|---|---|---|
+| Q4_K_M | FL2VA DiT | `minimax_h3_fl2va-Q4_K_M.gguf` | [`leejet/MiniMax-H3-GGUF`](https://huggingface.co/leejet/MiniMax-H3-GGUF) |
+| Q4_K_M | Ref2VA DiT | `minimax_h3_ref2va-Q4_K_M.gguf` | [`leejet/MiniMax-H3-GGUF`](https://huggingface.co/leejet/MiniMax-H3-GGUF) |
+| Q4_K_M | Qwen3-VL | `qwen3vl_32b_minimax_h3-Q4_K_M.gguf` | [`leejet/MiniMax-H3-GGUF`](https://huggingface.co/leejet/MiniMax-H3-GGUF) |
+| BF16 | FL2VA DiT | `diffusion_models/minimax_h3_fl2va_bf16.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
+| BF16 | Ref2VA DiT | `diffusion_models/minimax_h3_ref2va_bf16.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
+| BF16 | Qwen3-VL | `text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
+| FP16 | Video VAE | `vae/minimax_h3_video_vae_fp16.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
+| FP32 | Audio VAE | `vae/minimax_h3_audio_vae_fp32.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
 
-| Component | File name | Source |
-|---|---|---|
-| Diffusion model | `minimax_h3_fl2va-Q4_K_M.gguf` | [leejet/MiniMax-H3-GGUF](https://huggingface.co/leejet/MiniMax-H3-GGUF) |
+The official [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3)
+Diffusers shard indexes are also accepted for BF16 transformer loading. Merged
+Comfy-Org files are usually more convenient for standalone component commands.
 
-Supported modes:
-
-| Mode | Inputs | Output |
-|---|---|---|
-| T2VA | Text prompt | Video + audio |
-| I2VA | Text prompt + first frame image | Video + audio |
-| L2VA | Text prompt + last frame image | Video + audio |
-| FL2VA | Text prompt + first frame image + last frame image | Video + audio |
-
-### Ref2VA checkpoint
-
-| Component | File name | Source |
-|---|---|---|
-| Diffusion model | `minimax_h3_ref2va-Q4_K_M.gguf` | [leejet/MiniMax-H3-GGUF](https://huggingface.co/leejet/MiniMax-H3-GGUF) |
-
-Use the complete `minimax_h3_ref2va-Q4_K_M.gguf` for quality comparisons. The
-smaller `minimax_h3_ref2va-Q4_K_M.gguf` is loadable, but it is a pruned
-checkpoint and is not directly comparable with the official full Ref2VA DiT.
-
-Supported reference inputs:
-
-| Input | CLI flag | Notes |
-|---|---|---|
-| Reference image | `--ref-image <image>` | Repeatable. Presented as `<Picture N>` to Qwen3-VL. |
-| Reference video | `--ref-video <path>` | Repeatable. Accepts a frame directory or `mp4`/`mov`/`mkv`/`webm`/`avi`; media files are decoded at 24 fps with `ffmpeg`. |
-| Paired video audio | `--ref-video-audio <wav>` | Repeatable. The Nth WAV replaces/sets audio for the Nth `--ref-video`. Without it, an input media file's embedded audio is extracted automatically. |
-| Additional audio | `--ref-audio <wav>` | Repeatable, but must be combined with at least one reference image or video. Audio-only Ref2VA requests are rejected. |
-
-Reference images, videos, paired video audio, and additional audio can be mixed.
-Flags preserve command-line order. `--ref-video-audio` entries map positionally
-to the leading `--ref-video` entries, so keep each video and its explicit WAV in
-the same order. Ref2VA references cannot be combined with `--init-img`/`--image`
-or `--end-img` in the same request.
-
-MiniMax-H3 control frames are not supported for either checkpoint.
-
-## Common parameters
-
-MiniMax-H3 is a 24 fps audio-video model. The usual full-resolution setting is:
+Example downloads with the Hugging Face CLI:
 
 ```bash
--W 864 -H 480 --fps 24 --video-frames 56 --cfg-scale 1.0 --diffusion-fa --rng cpu
+hf download leejet/MiniMax-H3-GGUF \
+  minimax_h3_fl2va-Q4_K_M.gguf minimax_h3_ref2va-Q4_K_M.gguf \
+  qwen3vl_32b_minimax_h3-Q4_K_M.gguf --local-dir models/minimax-h3-q4
+
+hf download Comfy-Org/MiniMax-H3 \
+  diffusion_models/minimax_h3_fl2va_bf16.safetensors \
+  diffusion_models/minimax_h3_ref2va_bf16.safetensors \
+  text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors \
+  vae/minimax_h3_video_vae_fp16.safetensors \
+  vae/minimax_h3_audio_vae_fp32.safetensors \
+  --local-dir models/minimax-h3
 ```
 
-The frame count must satisfy `17k + 5` (for example `5`, `22`, `39`, `56`). The
-examples below use 56 frames and 20 steps.
+### Persistent Q8_0 GGUF
 
-`ed-cli` writes MiniMax-H3 output at 24 fps even if another `--fps` value is
-provided, matching sd.cpp and preserving the model's audio-video timing.
-
-Use `--video-format mp4` for H.264/AAC MP4 output when `ffmpeg` is available.
-Without `--audio-vae`, the model can still generate video, but no generated audio
-is decoded or muxed.
-
-## FL2VA usage
-
-### Text to video + audio
+Q8_0 benchmark files are offline conversions of the full BF16 DiTs and Qwen3-VL,
+not Comfy-Org INT8 ConvRot weights. Convert once with `ed-convert` instead of
+quantizing during every model load:
 
 ```bash
-ed-cli --video \
-  --diffusion-model minimax_h3_fl2va-Q4_K_M.gguf \
-  --vae minimax_h3_video_vae_fp16.safetensors \
-  --audio-vae minimax_h3_audio_vae_fp32.safetensors \
-  --llm qwen3vl_32b_minimax_h3-Q4_K_M.gguf \
-  -p "A cat surfs on an ocean wave with upbeat surf-rock music." \
-  --cfg-scale 1 -W 864 -H 480 --fps 24 --video-frames 56 --steps 20 \
-  --diffusion-fa --rng cpu --video-format mp4 \
-  -o minimax_h3_t2va.mp4
+ed-convert --model models/minimax-h3/diffusion_models/minimax_h3_fl2va_bf16.safetensors \
+  --type q8_0 --output models/minimax-h3-q8/minimax_h3_fl2va-Q8_0.gguf
+ed-convert --model models/minimax-h3/diffusion_models/minimax_h3_ref2va_bf16.safetensors \
+  --type q8_0 --output models/minimax-h3-q8/minimax_h3_ref2va-Q8_0.gguf
+ed-convert --model models/minimax-h3/text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors \
+  --type q8_0 --output models/minimax-h3-q8/qwen3vl_32b_minimax_h3-Q8_0.gguf
 ```
 
-### First-frame image to video + audio
+The same converter accepts an official transformer
+`model.safetensors.index.json`; the resulting persistent GGUF is equivalent at
+the selected quantization type and avoids repeated online conversion.
+
+## Duration and frame count
+
+MiniMax-H3 always generates at 24 fps. Its frame count must satisfy `17k + 5`,
+for example `5`, `22`, `39`, `56`, `73`, `90`, `107`, or `124`.
+
+Use `--video-duration <seconds>` for the convenient interface. The CLI converts
+the requested duration at 24 fps and selects the nearest legal frame count. For
+example, `--video-duration 5` resolves to 124 frames, or approximately 5.17
+seconds. The resolved value is printed before generation. Use
+`--video-frames <count>` when an exact legal frame count is required. The two
+options are mutually exclusive.
+
+Flash attention is enabled by default; use `--no-flash-attention` only for
+diagnosis. The legacy `--rng` option is accepted for command compatibility but
+does not select a different RNG, so it is intentionally omitted below.
+
+## Usage
+
+Set component paths for the desired precision. The video and audio VAE files are
+shared by every precision and checkpoint.
 
 ```bash
-ed-cli --video \
-  --diffusion-model minimax_h3_fl2va-Q4_K_M.gguf \
-  --vae minimax_h3_video_vae_fp16.safetensors \
-  --audio-vae minimax_h3_audio_vae_fp32.safetensors \
-  --llm qwen3vl_32b_minimax_h3-Q4_K_M.gguf \
-  --init-img first_frame.png \
-  -p "Animate the provided first frame into a cinematic shot with matching sound." \
-  --cfg-scale 1 -W 864 -H 480 --fps 24 --video-frames 56 --steps 20 \
-  --diffusion-fa --rng cpu --video-format mp4 \
-  -o minimax_h3_i2va.mp4
+# Q4_K_M example. Replace the DiT with the Ref2VA file for reference workflows.
+DIT=models/minimax-h3-q4/minimax_h3_fl2va-Q4_K_M.gguf
+LLM=models/minimax-h3-q4/qwen3vl_32b_minimax_h3-Q4_K_M.gguf
+VIDEO_VAE=models/minimax-h3/vae/minimax_h3_video_vae_fp16.safetensors
+AUDIO_VAE=models/minimax-h3/vae/minimax_h3_audio_vae_fp32.safetensors
 ```
 
-### First + last frame to video + audio
+For BF16, point `DIT` and `LLM` to the downloaded BF16 safetensors. For Q8_0,
+point them to the converted GGUF files.
+
+### FL2VA
 
 ```bash
-ed-cli --video \
-  --diffusion-model minimax_h3_fl2va-Q4_K_M.gguf \
-  --vae minimax_h3_video_vae_fp16.safetensors \
-  --audio-vae minimax_h3_audio_vae_fp32.safetensors \
-  --llm qwen3vl_32b_minimax_h3-Q4_K_M.gguf \
-  --image first_frame.png --end-img last_frame.png \
-  -p "Create a smooth transition from the first frame to the last frame with natural audio." \
-  --cfg-scale 1 -W 864 -H 480 --fps 24 --video-frames 56 --steps 20 \
-  --diffusion-fa --rng cpu --video-format mp4 \
-  -o minimax_h3_fl2va.mp4
+# Text to video and audio
+ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
+  --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
+  --video-duration 5 -W 864 -H 480 --steps 20 --cfg-scale 1 \
+  --prompt "A cinematic sunset over layered mountain ridges with quiet natural ambience." \
+  --video-format mp4 --output t2va.mp4
+
+# First frame
+ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
+  --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" --image first.png \
+  --video-duration 5 -W 864 -H 480 --steps 20 --cfg-scale 1 \
+  --prompt "Starting from <Picture 1>, preserve the scene and add subtle natural motion." \
+  --video-format mp4 --output i2va.mp4
+
+# Last frame: use --end-img last.png
+# First and last frames: use --image first.png --end-img last.png
 ```
 
-## Ref2VA usage
+### Ref2VA
 
-When using references, write the prompt so it explicitly mentions the reference
-slots, such as `<Picture 1>`, `<Video 1>`, and `<Audio 1>`. This makes reference
-adherence easier to evaluate and avoids text-only prompts dominating the output.
-
-Reference media uses the released Diffusers preprocessing geometry independently
-of the generated `-W`/`-H` canvas. Reference images preserve their aspect ratio
-and resize to a `2048` pixel short edge. Reference videos preserve their aspect
-ratio and resolve from a `768` pixel short edge with a pre-rounding area cap of
-`768x1344`; both axes then round to multiples of `32`. Images and videos outside
-the supported `1:4` through `4:1` aspect-ratio range are rejected. Small inputs
-can therefore be upscaled substantially, which improves conditioning fidelity
-but increases Qwen3-VL and video-VAE time and peak memory.
-
-### Reference image
+Use the Ref2VA DiT for all commands in this section.
 
 ```bash
-ed-cli --video \
-  --diffusion-model minimax_h3_ref2va-Q4_K_M.gguf \
-  --vae minimax_h3_video_vae_fp16.safetensors \
-  --audio-vae minimax_h3_audio_vae_fp32.safetensors \
-  --llm qwen3vl_32b_minimax_h3-Q4_K_M.gguf \
-  --ref-image reference.png \
-  -p "Use the landscape and lighting from <Picture 1> to create a cinematic video." \
-  --cfg-scale 1 -W 864 -H 480 --fps 24 --video-frames 56 --steps 20 \
-  --diffusion-fa --rng cpu --video-format mp4 \
-  -o minimax_h3_ref_image.mp4
+# Image reference
+ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
+  --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
+  --ref-image reference.png --video-duration 5 -W 864 -H 480 --steps 20 \
+  --cfg-scale 1 --prompt "Use <Picture 1> as the strict visual reference." \
+  --video-format mp4 --output ref-image.mp4
+
+# MP4 reference; embedded audio is paired automatically when present
+ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
+  --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
+  --ref-video reference.mp4 --video-duration 5 -W 864 -H 480 --steps 20 \
+  --cfg-scale 1 --prompt "Preserve <Video 1> and its <Audio 1> throughout the result." \
+  --video-format mp4 --output ref-video.mp4
+
+# Frame directory with explicit paired audio
+ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
+  --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
+  --ref-video reference-frames --ref-video-audio soundtrack.wav \
+  --video-duration 5 -W 864 -H 480 --steps 20 --cfg-scale 1 \
+  --prompt "Preserve <Video 1> and synchronize it with <Audio 1>." \
+  --video-format mp4 --output ref-video-audio.mp4
+
+# Mixed image, video, and additional audio
+ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
+  --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
+  --ref-image reference.png --ref-video reference.mp4 --ref-audio music.wav \
+  --video-duration 5 -W 864 -H 480 --steps 20 --cfg-scale 1 \
+  --prompt "Use <Video 1>, <Picture 1>, and every supplied audio reference in a natural transition." \
+  --video-format mp4 --output ref-mixed.mp4
 ```
-
-### Reference video
-
-```bash
-ed-cli --video \
-  --diffusion-model minimax_h3_ref2va-Q4_K_M.gguf \
-  --vae minimax_h3_video_vae_fp16.safetensors \
-  --audio-vae minimax_h3_audio_vae_fp32.safetensors \
-  --llm qwen3vl_32b_minimax_h3-Q4_K_M.gguf \
-  --ref-video reference_frames \
-  -p "Follow the camera motion and scene layout from <Video 1>." \
-  --cfg-scale 1 -W 864 -H 480 --fps 24 --video-frames 56 --steps 20 \
-  --diffusion-fa --rng cpu --video-format mp4 \
-  -o minimax_h3_ref_video.mp4
-```
-
-### Reference video with paired audio
-
-```bash
-ed-cli --video \
-  --diffusion-model minimax_h3_ref2va-Q4_K_M.gguf \
-  --vae minimax_h3_video_vae_fp16.safetensors \
-  --audio-vae minimax_h3_audio_vae_fp32.safetensors \
-  --llm qwen3vl_32b_minimax_h3-Q4_K_M.gguf \
-  --ref-video reference_frames \
-  --ref-video-audio reference_soundtrack.wav \
-  -p "Follow the motion from <Video 1> and use its paired soundtrack as audio guidance." \
-  --cfg-scale 1 -W 864 -H 480 --fps 24 --video-frames 56 --steps 20 \
-  --diffusion-fa --rng cpu --video-format mp4 \
-  -o minimax_h3_ref_video_audio.mp4
-```
-
-### Mixed references
-
-```bash
-ed-cli --video \
-  --diffusion-model minimax_h3_ref2va-Q4_K_M.gguf \
-  --vae minimax_h3_video_vae_fp16.safetensors \
-  --audio-vae minimax_h3_audio_vae_fp32.safetensors \
-  --llm qwen3vl_32b_minimax_h3-Q4_K_M.gguf \
-  --ref-image reference.png \
-  --ref-video reference_frames \
-  --ref-video-audio reference_soundtrack.wav \
-  --ref-audio extra_audio.wav \
-  -p "Use the style from <Picture 1>, motion from <Video 1>, the paired video soundtrack, and additional ambience from <Audio 2>." \
-  --cfg-scale 1 -W 864 -H 480 --fps 24 --video-frames 56 --steps 20 \
-  --diffusion-fa --rng cpu --video-format mp4 \
-  -o minimax_h3_ref_mixed.mp4
-```
-
-In a mixed prompt, paired video audio is presented before the video as `<Audio 1>`.
-Standalone `--ref-audio` entries are numbered after video-paired audio, so the
-first standalone audio in the example is `<Audio 2>`.
 
 ## Memory placement
 
-MiniMax-H3 supports the regular component offload flags:
-
-```text
---dit-offload
---text-encoder-offload
---vae-offload
---vae-tiling on|off|auto
-```
-
-For automatic placement, pass `--auto-fit --max-vram <GB>`. The runtime measures
-a conservative Ref2VA mixed-conditioning graph at the requested width, height,
-and frame count, then independently places the DiT, Qwen3-VL, video VAE, and
-audio VAE. `--max-vram` is a hard placement budget under `--auto-fit`; components
-that do not fit are segmented and staged from host memory while CUDA remains the
-compute backend.
+The explicit component controls are `--dit-offload`,
+`--text-encoder-offload`, and `--vae-offload`. For automatic placement, use
+`--auto-fit --max-vram <GB>`. MiniMax-H3 independently places the DiT,
+Qwen3-VL, video VAE, and audio VAE while retaining CUDA compute.
 
 ```bash
-ed-cli --video \
-  --diffusion-model minimax_h3_fl2va-diffusers-Q8_0.gguf \
-  --vae minimax_h3_video_vae_fp16.safetensors \
-  --audio-vae minimax_h3_audio_vae_fp32.safetensors \
-  --llm qwen3vl_32b_minimax_h3-Q8_0.gguf \
-  --auto-fit --max-vram 40 --vae-tiling auto \
-  -W 864 -H 480 --video-frames 124 --fps 24 --steps 20 \
-  --cfg-scale 1 --diffusion-fa --rng cpu \
-  -p "A cinematic sunset over layered mountain ridges." \
-  --video-format mp4 -o minimax_h3_autofit.mp4
+ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
+  --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
+  --auto-fit --max-vram 40 --video-duration 5 -W 864 -H 480 --steps 20 \
+  --cfg-scale 1 --prompt "A cinematic sunset over layered mountain ridges." \
+  --video-format mp4 --output auto-fit.mp4
 ```
 
-The explicit offload flags remain useful when placement must be fixed manually.
-Do not combine them merely to emulate `--auto-fit`; automatic placement normally
-chooses a safer component combination for the requested budget.
+MiniMax-H3 always uses its fixed `16x16` video-VAE tiling path. Generic
+`--vae-tiling` and `--vae-tile-size` values do not replace this model-specific
+layout.
 
-MiniMax-H3's video VAE always uses its model-specific fixed `16x16` spatial
-tiling path. This intentionally overrides the generic `--vae-tiling` state and
-`--vae-tile-size`; those flags continue to control other VAE implementations.
-The internal override can be disabled only with the diagnostic environment
-variable `ED_MINIMAX_H3_DISABLE_FORCED_VAE_TILING=1`, which is not recommended
-for normal generation.
+## H200 BF16 comparison
 
-On CUDA builds with cuDNN Conv3D, MiniMax-H3 reference encoding uses cuDNN for
-the video-VAE encoder and fuses its spatial reflect padding and temporal group
-normalization without changing the conditioning geometry. The reflect-padding
-and group-normalization paths are numerically identical to the legacy graph;
-cuDNN Conv3D can differ slightly because of floating-point reduction order. For
-diagnosis, the individual paths can be disabled with
-`ED_MINIMAX_H3_VAE_ENCODER_CUDNN_CONV3D=0`,
-`ED_MINIMAX_H3_VAE_ENCODER_CUDNN_CONV3D_ALL=0`,
-`ED_MINIMAX_H3_VAE_FUSED_REFLECT_PAD=0`, or
-`ED_MINIMAX_H3_VAE_FUSED_TEMPORAL_GROUP_NORM=0`. Contiguous causal temporal
-zero-padding uses a byte-equivalent 2D memset/copy CUDA path; set
-`ED_CUDA_PAD_TEMPORAL_COPY2D=0` to restore the elementwise padding kernel.
+The tables below use one H200, resident components, `864x480`, 124 frames at
+24 fps, 20 steps, CFG 1, and seed `424242`. Edge uses the complete Comfy-Org
+BF16 DiT/Qwen files, FP16 video VAE, and FP32 audio VAE. Diffusers uses the
+official complete BF16 DiT shards, BF16 Qwen3-VL, and its FP32 VAEs. “Generate”
+excludes model loading, output muxing, and process cleanup. Peak VRAM is sampled
+over the complete process. Values are `Edge / Diffusers`.
 
-Ref2VA multimodal presentations are assembled directly as token IDs. Visual
-placeholder tokens are no longer serialized into a large string and repeatedly
-tokenized as image and video blocks are appended. Set
-`ED_MINIMAX_H3_VERIFY_DIRECT_TOKEN_BUILD=1` to compare the direct sequence with
-the legacy tokenizer path token by token during debugging.
+FL2VA does not use Ref2VA resize preprocessing:
 
-Qwen3-VL vision FlashAttention synchronizes each long vision block before its
-temporary storage is reused. This avoids asynchronous scratch reuse changing
-the image-conditioning result and substantially reduces high-resolution image
-encoding time on H200. Set `ED_QWEN_VISION_FLASH_ATTN_SYNC=0` only for
-diagnostic comparison with the legacy path.
+| Task | Generate | Peak VRAM |
+|---|---:|---:|
+| Text | 51.396s / 53.986s | 125,051 / 128,801 MiB |
+| First frame | 54.810s / 57.817s | 125,353 / 129,957 MiB |
+| Last frame | 55.323s / 57.793s | 125,351 / 129,957 MiB |
+| First + last frames | 58.747s / 61.405s | 125,573 / 130,587 MiB |
 
-On SM90 GPUs, long-sequence Q8_0 MiniMax-H3 FC2 projections can be routed from
-GGML MMQ to cuBLAS. This route is enabled by default after its full-video H200
-quality gate reached 50.17 dB PSNR and 0.9932 SSIM while reducing DiT time by
-7.5%. Set `GGML_CUDA_SM90_Q8_CUBLAS_FC2=0` to restore the MMQ path.
-`GGML_CUDA_SM90_Q8_CUBLAS_FC2_STEPS` and
-`GGML_CUDA_SM90_Q8_CUBLAS_FC2_LAYERS` restrict the experiment to selected
-diffusion steps or transformer layers.
+### Ref2VA resize correction
 
-## H200 performance
+The legacy Edge snapshot below predates Diffusers-compatible reference resize.
+It encoded smaller reference images/videos, so its apparent speed and memory
+advantage does not represent equal conditioning geometry. Diffusers values are
+shown only as the comparison baseline.
 
-The following Edge measurements use CUDA on one H200, `864x480`, 124 frames,
-24 fps, 20 steps, CFG 1, CPU RNG, seed `424242`, resident components, and warmed
-model files. Wall time includes load, generation, mux/save, and cleanup.
+| Legacy task | Generate | Peak VRAM |
+|---|---:|---:|
+| Image | 54.858s / 136.656s | 125,245 / 139,253 MiB |
+| Video frames | 114.843s / 183.921s | 130,029 / 137,161 MiB |
+| Video frames + paired audio | 115.488s / 185.035s | 130,029 / 137,183 MiB |
+| Mixed references | 121.558s / 319.435s | 130,029 / 141,915 MiB |
 
-| Precision | T2VA | I2VA | L2VA | FL2VA |
-|---|---:|---:|---:|---:|
-| BF16 wall / peak VRAM | 71s / 125,051 MiB | 73s / 125,251 MiB | 81s / 125,247 MiB | 76s / 125,471 MiB |
-| Q8_0 wall / peak VRAM | 81.1s / 71,393 MiB | 84.5s / 71,585 MiB | 84.6s / 71,583 MiB | 90.0s / 71,805 MiB |
-| Q4_K_M wall / peak VRAM | 73.6s / 47,459 MiB | 73.1s / 47,609 MiB | 73.0s / 47,607 MiB | 76.7s / 47,785 MiB |
+Current preprocessing follows Diffusers geometry: image short edge 2048;
+video short edge 768 with a pre-rounding `768x1344` area cap; preserved aspect
+ratio; dimensions rounded to multiples of 32; Lanczos resize. Repeating the same
+BF16 tasks with aligned conditioning gives:
 
-Use persistent GGUF files for Q8/Q4 production runs. Loading official BF16
-shards with `--tensor-type-rules ...=q8_0` performs quantization on every start;
-in the measured FL2VA run that increased load from about 9.3s to about 45s.
-On SM90, the optimized MiniMax-H3 route applies only to named main-block QKV/FC1
-projections; it does not alter unrelated models.
+| Aligned task | Generate | Peak VRAM |
+|---|---:|---:|
+| Image | 140.827s / 136.656s | 130,379 / 139,253 MiB |
+| Video frames | 232.816s / 183.921s | 131,225 / 137,161 MiB |
+| Video frames + paired audio | 232.327s / 185.035s | 131,539 / 137,183 MiB |
+| Mixed references | 386.005s / 319.435s | 137,191 / 141,915 MiB |
 
-`--auto-fit` was also validated with the same Q8_0 components at two sampling
-steps. Every observed peak stayed below its requested cap:
+The two Ref2VA tables differ only in Edge reference preprocessing. They must not
+be combined into one speed trend: the first is historical and geometrically
+under-sized; the second is the cross-framework conditioning comparison.
 
-| `--max-vram` | DiT | Qwen3-VL | Video/Audio VAE | Peak VRAM | Wall |
-|---:|---|---|---|---:|---:|
-| 120 GB | resident | resident | resident / resident | 71,397 MiB | 28.7s |
-| 60 GB | resident | offloaded | offloaded / offloaded | 45,129 MiB | 39.8s |
-| 40 GB | offloaded | offloaded | resident / resident | 31,699 MiB | 46.5s |
-| 24 GB | offloaded | offloaded | offloaded / offloaded | 18,337 MiB | 50.6s |
+## Limitations
 
-The 40 GB configuration additionally passed FL2VA first+last-frame conditioning
-at 31,865 MiB. A Ref2VA mixed image+video+paired-audio+additional-audio run passed
-at a 60 GB budget with a 49,361 MiB peak. Full framework comparisons are in the
-[BF16 benchmark](optimization/minimax-h3-fl2va-ref2va-edge-sdcpp-diffusers-h200-bf16-full-ref-2026-08-13.md),
-[framework-native 8-bit benchmark](optimization/minimax-h3-fl2va-ref2va-edge-sdcpp-diffusers-h200-8bit-full-ref-2026-08-13.md),
-and [Q4 benchmark](optimization/minimax-h3-fl2va-ref2va-edge-sdcpp-diffusers-h200-q4-full-ref-2026-08-14.md).
-
-## Current limitations
-
-- Audio-only Ref2VA is intentionally rejected; `--ref-audio` needs at least one
-  `--ref-image` or `--ref-video`.
-- Matching seeds across Edge, sd.cpp, and Diffusers do not guarantee identical
-  videos because their quantization and numerical kernels differ.
-- Reference adherence remains prompt dependent. Mention `<Picture N>`,
-  `<Video N>`, and `<Audio N>` explicitly and visually inspect the result.
-- Media-file `--ref-video` decoding and embedded-audio extraction require
-  `ffmpeg`; use a frame directory plus `--ref-video-audio` when it is unavailable.
-- Audio reference effects are easiest to judge with listening tests; contact
-  sheets only validate the video stream.
+- Reference adherence is prompt dependent. Name `<Picture N>`, `<Video N>`, and
+  `<Audio N>` explicitly when their roles matter.
+- Matching seeds across frameworks does not guarantee identical videos because
+  numerical kernels and weight formats differ.
+- Media-file reference decoding and embedded-audio extraction require `ffmpeg`.
+- Without `--audio-vae`, video generation works but generated audio is not
+  decoded or muxed.

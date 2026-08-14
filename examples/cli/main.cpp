@@ -104,6 +104,7 @@ static void print_usage(const char* prog) {
         "  -W, --width <int>         Image width, default: 1024\n"
         "  -H, --height <int>        Image height, default: 1024\n"
         "  --frames, --video-frames <int>  Video frame count, default: 1\n"
+        "  --video-duration <seconds>  MiniMax-H3 duration; aligns to 17k+5 frames\n"
         "  --fps <int>               Video fps, default: 16\n"
         "  --ref-image <path>        MiniMax-H3 Ref2VA reference image; repeatable\n"
         "  --ref-video <path>        MiniMax-H3 Ref2VA reference video frames directory or media file; repeatable\n"
@@ -898,7 +899,7 @@ int main(int argc, char** argv) {
     // reflects the real activation footprint. Harmless when neither mode is on.
     ctx_params.fit_width = args.width;
     ctx_params.fit_height = args.height;
-    ctx_params.fit_frames = args.frames;
+    ctx_params.fit_frames = resolve_video_fit_frames(args);
     ctx_params.vae_offload = args.vae_offload;
     if (args.max_vram > 0.0f) {
         ctx_params.max_vram_gb = args.max_vram;
@@ -949,9 +950,25 @@ int main(int argc, char** argv) {
     if (args.video) {
         int output_fps = args.fps;
         const char* pipeline_name = ed_context_pipeline_name(ctx);
-        if (pipeline_name != nullptr && std::strcmp(pipeline_name, "minimax-h3") == 0 && output_fps != 24) {
+        const bool is_minimax_h3 = pipeline_name != nullptr && std::strcmp(pipeline_name, "minimax-h3") == 0;
+        if (args.video_duration_explicit && !is_minimax_h3) {
+            std::fprintf(stderr, "--video-duration is currently supported only by MiniMax-H3\n");
+            ed_free_context(ctx);
+            return 1;
+        }
+        if (is_minimax_h3 && output_fps != 24) {
             std::fprintf(stderr, "MiniMax-H3 uses 24 fps; overriding requested fps %d\n", output_fps);
             output_fps = 24;
+        }
+        const int generation_frames = resolve_video_frames(args, is_minimax_h3);
+        if (args.video_duration_explicit) {
+            std::fprintf(stderr,
+                         "video duration %.3fs resolved to %d frames (%.3fs at %d fps)%s\n",
+                         args.video_duration,
+                         generation_frames,
+                         static_cast<double>(generation_frames) / output_fps,
+                         output_fps,
+                         is_minimax_h3 ? "; MiniMax-H3 requires 17k+5 frames" : "");
         }
         ed_video_generation_params_t gen_params;
         ed_video_generation_params_init(&gen_params);
@@ -976,7 +993,7 @@ int main(int argc, char** argv) {
         gen_params.negative_prompt = args.negative_prompt;
         gen_params.width = args.width;
         gen_params.height = args.height;
-        gen_params.frames = args.frames;
+        gen_params.frames = generation_frames;
         gen_params.seed = args.seed;
         gen_params.sample.sampler = ED_SAMPLER_AUTO;
         gen_params.sample.scheduler = ED_SCHEDULER_AUTO;
@@ -1027,7 +1044,7 @@ int main(int argc, char** argv) {
             const bool explicit_audio_supplied = index < args.ref_video_audio_paths.size();
             if (!load_reference_video(args.ref_video_paths[index],
                                       output_fps,
-                                      args.frames,
+                                      generation_frames,
                                       &ref_video_temp_directories,
                                       &ref_video_frames[index],
                                       &ref_video_audio_samples[index],
