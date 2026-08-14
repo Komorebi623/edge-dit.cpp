@@ -360,6 +360,7 @@ Memory-oriented flags:
 --vae-offload
 --max-vram <GB>
 --auto-allocate
+--auto-fit
 ```
 
 `--vae-tiling` is tri-state `on|off|auto` and defaults to `auto`, which enables
@@ -394,6 +395,27 @@ Two levels of automation size a run to a hard VRAM budget instead of tuning
 requested resolution (`-W`/`-H`, and `--frames` for video) to size the resident
 headroom, so pass the generation size you intend to use. Without a size it falls
 back to a conservative fixed headroom.
+
+MiniMax-H3 applies this policy to four independently placeable components: DiT,
+Qwen3-VL, video VAE, and audio VAE. Its measurement graph conservatively includes
+mixed image, video, paired-audio, and additional-audio conditioning, so the same
+placement remains valid across FL2VA and Ref2VA workflows. The MiniMax-H3 video
+VAE also keeps its model-specific fixed `16x16` tiling regardless of the generic
+`--vae-tiling`/`--vae-tile-size` values.
+
+```bash
+# MiniMax-H3 Q8_0 under a 40 GiB hard placement budget.
+./build-cuda/bin/ed-cli --video \
+  --diffusion-model /path/to/minimax_h3_fl2va-diffusers-Q8_0.gguf \
+  --vae /path/to/minimax_h3_video_vae_fp16.safetensors \
+  --audio-vae /path/to/minimax_h3_audio_vae_fp32.safetensors \
+  --llm /path/to/qwen3vl_32b_minimax_h3-Q8_0.gguf \
+  --auto-fit --max-vram 40 --vae-tiling auto \
+  -W 864 -H 480 --video-frames 124 --fps 24 --steps 20 \
+  --cfg-scale 1 --diffusion-fa --rng cpu \
+  --prompt "A cinematic sunset over layered mountain ridges." \
+  --video-format mp4 --output minimax-h3-autofit.mp4
+```
 
 ```bash
 # Fully automatic under an 8 GiB budget — system picks DiT quant + placement.

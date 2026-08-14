@@ -18,6 +18,7 @@ support commitment.
 | Qwen-Image | Text-to-image | [`Qwen/Qwen-Image`](https://huggingface.co/Qwen/Qwen-Image) | Diffusers-style directory or components | CUDA first, CPU/Vulkan functional, Metal experimental | Supported |
 | Qwen-Image-Edit | Image editing | [`Qwen/Qwen-Image-Edit`](https://huggingface.co/Qwen/Qwen-Image-Edit) | Diffusers-style directory or components | CUDA first, CPU/Vulkan functional, Metal experimental | Supported |
 | Wan 2.1 | Video generation | [`Wan-AI/Wan2.1-T2V-1.3B-Diffusers`](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers) (and Wan2.1-T2V-14B-Diffusers) | Diffusers-style directory or components | CUDA first, CPU functional for validation, Metal/Vulkan experimental | Supported (Vulkan still optimizing) |
+| MiniMax-H3 | Video + audio generation | [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3), [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3), and [`leejet/MiniMax-H3-GGUF`](https://huggingface.co/leejet/MiniMax-H3-GGUF) | Standalone DiT + Qwen3-VL + video VAE + optional audio VAE | CUDA validated; other backends not performance-qualified | Supported |
 
 Backend availability means the runtime can be built for that backend. Model
 quality, memory use, and speed are workload dependent and should be validated
@@ -135,9 +136,13 @@ Command example: [Qwen-Image-Edit CLI](cli.md#qwen-image-edit).
 
 Wan video generation uses `--video`, `--frames`, and `--fps`.
 
-MiniMax-H3 video + audio generation supports text, first-frame, first+last-frame,
-and Ref2VA conditioning through standalone component loading. See
-[MiniMax-H3 usage](minimax-h3.md).
+MiniMax-H3 video + audio generation supports text, first-frame, last-frame,
+first+last-frame, and Ref2VA conditioning through standalone component loading.
+Ref2VA accepts repeatable images, frame directories or media files, paired or
+embedded video audio, and additional audio (additional audio cannot be used by
+itself). Both checkpoints support `--auto-fit --max-vram`; placement covers the
+DiT, Qwen3-VL, video VAE, and audio VAE. See [MiniMax-H3 usage and H200
+performance](minimax-h3.md).
 
 Supported output formats are `auto`, `avi`, `mp4`, `mov`, `mkv`, and `webm`.
 The CLI uses `ED_FFMPEG` when set and can also find imageio-ffmpeg binaries in

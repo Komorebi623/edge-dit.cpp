@@ -25,7 +25,7 @@ edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for loc
 
 - **Unified across tasks and model families**
   - **Text-to-image**, **image editing**, and **video generation** in one runtime
-  - SD3/SD3.5, FLUX.1, FLUX.1-Kontext, Qwen-Image, Qwen-Image-Edit, and Wan 2.1
+  - SD3/SD3.5, FLUX.1, FLUX.1-Kontext, Qwen-Image, Qwen-Image-Edit, Wan 2.1, and MiniMax-H3 video+audio
   - **Few-step distilled models** auto-detected — Turbo / Lightning / schnell default to a **4–8 step** schedule
   - Shared **C API, CLI, HTTP server, and Python** interfaces across every family
 
@@ -70,6 +70,7 @@ current support commitment unless documented in
 | **Qwen-Image** | Text-to-image | `Qwen/Qwen-Image` | Qwen-Image Lightning *(LoRA)* | Supported |
 | **Qwen-Image-Edit** | Image editing | `Qwen/Qwen-Image-Edit` | Qwen-Image-Edit Lightning *(LoRA)* | Supported |
 | **Wan 2.1** | Video generation | `Wan-AI/Wan2.1-T2V-1.3B` (and 14B) | Wan2.1-T2V-1.3B Distill | Supported (Vulkan still optimizing) |
+| **MiniMax-H3** | Video + audio generation | FL2VA / Ref2VA component checkpoints | — | Supported (CUDA validated) |
 
 Distilled checkpoints load through the same pipeline as the base model and are
 **auto-detected** (default **4–8 steps** when `--steps` is unset). Most ship as
@@ -147,6 +148,14 @@ configs and notes are in [Performance and benchmarks](docs/performance-H200.md).
 Load time follows each runtime's reported initialization boundary and may
 reflect different weight materialization or memory-mapping strategies.
 Generation latency is the primary cross-runtime performance metric.
+
+MiniMax-H3 has a separate 124-frame H200 benchmark because it generates video
+and audio rather than one image. With persistent weights, Edge FL2VA T2VA takes
+`71s` at BF16, `81.1s` at Q8_0, and `73.6s` at Q4_K_M; corresponding peaks are
+`125,051`, `71,393`, and `47,459 MiB`. `--auto-fit` was validated from 120 GB
+down to a 24 GB cap, with observed peaks below every requested budget. See
+[MiniMax-H3 usage and performance](docs/minimax-h3.md) for all four FL2VA modes,
+Ref2VA inputs, memory placement, and framework-comparison links.
 
 ## Open-Source Interfaces
 

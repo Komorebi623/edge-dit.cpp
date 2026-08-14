@@ -4,6 +4,7 @@
 #include <cudnn.h>
 
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -42,12 +43,18 @@ struct workspace {
 std::mutex g_workspace_mutex;
 std::unordered_map<workspace_key, std::unique_ptr<workspace>, workspace_key_hash> g_workspaces;
 
-static bool enabled() {
+static bool explicitly_enabled() {
     static const bool value = [] {
         const char * env = getenv("ED_CUDNN_CONV_TRANSPOSE_1D");
-        return env == nullptr || env[0] == '\0' || atoi(env) != 0;
+        return env != nullptr && env[0] != '\0' && atoi(env) != 0;
     }();
     return value;
+}
+
+static bool enabled(const ggml_tensor * dst) {
+    return explicitly_enabled() ||
+           (dst != nullptr &&
+            std::strcmp(dst->name, "minimax_h3.audio_vae.conv_transpose_1d") == 0);
 }
 
 static bool contiguous(const ggml_tensor * tensor) {
@@ -55,7 +62,7 @@ static bool contiguous(const ggml_tensor * tensor) {
 }
 
 static bool supported(const ggml_tensor * dst, int & stride) {
-    if (!enabled() || dst == nullptr || dst->op != GGML_OP_CONV_TRANSPOSE_1D ||
+    if (!enabled(dst) || dst == nullptr || dst->op != GGML_OP_CONV_TRANSPOSE_1D ||
         dst->src[0] == nullptr || dst->src[1] == nullptr) {
         return false;
     }

@@ -535,7 +535,49 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
         return set_minimax_error(error, "MiniMax-H3 diffusion transformer signature is incomplete");
     }
 
-    const bool diffusion_offload = runtime.dit_offload_params_to_cpu();
+    const bool has_audio_vae = std::any_of(loader.get_tensor_storage_map().begin(),
+                                           loader.get_tensor_storage_map().end(),
+                                           [](const auto& item) { return starts_with(item.first, "audio_vae."); });
+
+    runtime.reset_auto_allocate_state();
+    runtime.set_measured_dit_headroom(0);
+    if (runtime.auto_fit() && runtime.fit_width() > 0 && runtime.fit_height() > 0 && runtime.fit_frames() > 0) {
+        auto measure_runner = std::make_unique<MiniMaxH3::MiniMaxH3Runner>(runtime.backend(),
+                                                                          loader.get_tensor_storage_map(),
+                                                                          "model.diffusion_model",
+                                                                          false);
+        measure_runner->set_flash_attention_enabled(runtime.flash_attention());
+        const int latent_width = runtime.fit_width() / 16;
+        const int latent_height = runtime.fit_height() / 16;
+        const size_t measured = measure_runner->measure_compute_buffer_at(latent_width,
+                                                                          latent_height,
+                                                                          runtime.fit_frames());
+        if (measured > 0) {
+            runtime.set_measured_dit_headroom(measured);
+        }
+        LOG_INFO("auto-allocate: measured MiniMax-H3 DiT compute buffer = %.2f GB at latent %dx%dx%d",
+                 measured / (1024.0 * 1024.0 * 1024.0),
+                 latent_width,
+                 latent_height,
+                 runtime.fit_frames());
+    }
+
+    constexpr size_t minimax_staging_slack = static_cast<size_t>(3) * 1024 * 1024 * 1024;
+    const size_t effective_budget = runtime.effective_budget_bytes();
+    const size_t placement_budget = effective_budget > minimax_staging_slack
+                                        ? effective_budget - minimax_staging_slack
+                                        : effective_budget;
+    size_t remaining_free = placement_budget;
+    const bool diffusion_offload = runtime.dit_offload_params_to_cpu() ||
+                                   runtime.plan_component_offload(loader, "model.diffusion_model", remaining_free);
+    const bool text_offload = runtime.clip_offload_params_to_cpu() ||
+                              runtime.plan_component_offload(loader, "text_encoders.llm", remaining_free);
+    const bool vae_offload = runtime.vae_offload_params_to_cpu() ||
+                             runtime.plan_component_offload(loader, "first_stage_model", remaining_free);
+    const bool audio_vae_offload = runtime.vae_offload_params_to_cpu() ||
+                                   (has_audio_vae && runtime.plan_component_offload(loader, "audio_vae", remaining_free));
+    runtime.finalize_auto_segment_budget(effective_budget, minimax_staging_slack);
+
     diffusion_ = std::make_unique<MiniMaxH3::MiniMaxH3Runner>(runtime.backend(),
                                                               loader.get_tensor_storage_map(),
                                                               "model.diffusion_model",
@@ -564,7 +606,6 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
         LOG_INFO("MiniMax-H3 synthesized missing rope.inv_freq (%zu values)", values.size());
     }
 
-    const bool text_offload = runtime.clip_offload_params_to_cpu();
     String2TensorStorage conditioner_tensors = loader.get_tensor_storage_map();
     const std::regex language_layer_pattern(R"(^text_encoders\.llm\.model\.layers\.(\d+)\.)");
     for (auto it = conditioner_tensors.begin(); it != conditioner_tensors.end();) {
@@ -588,9 +629,11 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     conditioner_->model.set_flash_attention_enabled(runtime.flash_attention());
     conditioner_->alloc_params_buffer();
     conditioner_->get_param_tensors(registry.tensors(), "text_encoders.llm");
+    conditioner_->model.set_max_graph_vram_bytes(
+        runtime.text_encoder_segment_budget(conditioner_->model.get_params_buffer_size(), text_offload));
 
     vae_ = std::make_unique<MiniMaxH3VAE::MiniMaxH3VideoVAERunner>(runtime.vae_backend(),
-                                                                    runtime.vae_offload_params_to_cpu(),
+                                                                    vae_offload,
                                                                     loader.get_tensor_storage_map(),
                                                                     "first_stage_model");
     vae_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
@@ -598,12 +641,9 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     vae_->alloc_params_buffer();
     vae_->get_param_tensors(registry.tensors(), "first_stage_model");
 
-    const bool has_audio_vae = std::any_of(loader.get_tensor_storage_map().begin(),
-                                           loader.get_tensor_storage_map().end(),
-                                           [](const auto& item) { return starts_with(item.first, "audio_vae."); });
     if (has_audio_vae) {
         audio_vae_ = std::make_unique<MiniMaxH3Audio::AudioVAERunner>(runtime.vae_backend(),
-                                                                        runtime.vae_offload_params_to_cpu(),
+                                                                        audio_vae_offload,
                                                                         loader.get_tensor_storage_map(),
                                                                         "audio_vae");
         audio_vae_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());

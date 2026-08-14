@@ -467,13 +467,15 @@ bool ModelRuntime::plan_component_offload(const ::ModelLoader& loader,
 // resident components, minus compute headroom. Because graph_cut_segment_vram_bytes
 // already counts each segment's compute + weights + IO, this cap keeps
 // (resident + max_segment) within the effective budget. No-op outside auto-allocate.
-void ModelRuntime::finalize_auto_segment_budget(size_t effective_budget_bytes) {
+void ModelRuntime::finalize_auto_segment_budget(size_t effective_budget_bytes,
+                                                size_t additional_slack_bytes) {
     if (!auto_allocate_) {
         return;
     }
     size_t leftover = 0;
-    if (effective_budget_bytes > resident_bytes_total_ + kSegmentBudgetSlack) {
-        leftover = effective_budget_bytes - resident_bytes_total_ - kSegmentBudgetSlack;
+    const size_t reserved_slack = kSegmentBudgetSlack + additional_slack_bytes;
+    if (effective_budget_bytes > resident_bytes_total_ + reserved_slack) {
+        leftover = effective_budget_bytes - resident_bytes_total_ - reserved_slack;
     }
     // Floor: if the leftover is tiny (resident nearly filled the budget) an offloaded
     // component still needs *some* budget to segment against; use a 1 GB floor so a
@@ -483,10 +485,11 @@ void ModelRuntime::finalize_auto_segment_budget(size_t effective_budget_bytes) {
         leftover = kMinSegmentBudget;
     }
     max_graph_vram_bytes_ = leftover;
-    LOG_INFO("auto-allocate: segment budget = %.2f GB (effective %.2f GB - resident %.2f GB - headroom)",
+    LOG_INFO("auto-allocate: segment budget = %.2f GB (effective %.2f GB - resident %.2f GB - %.2f GB staging slack)",
              max_graph_vram_bytes_ / (1024.0 * 1024.0 * 1024.0),
              effective_budget_bytes / (1024.0 * 1024.0 * 1024.0),
-             resident_bytes_total_ / (1024.0 * 1024.0 * 1024.0));
+             resident_bytes_total_ / (1024.0 * 1024.0 * 1024.0),
+             reserved_slack / (1024.0 * 1024.0 * 1024.0));
 }
 
 void ModelRuntime::replan_dit_quant_for_budget(::ModelLoader& loader) {
@@ -608,9 +611,9 @@ size_t ModelRuntime::effective_budget_bytes() const {
 //
 // te_params_bytes is the TE's weight-buffer size (conditioner_->get_params_buffer_size()).
 // Resident TE (not offloaded) is untouched: we return the global value unchanged.
-size_t ModelRuntime::text_encoder_segment_budget(size_t te_params_bytes) const {
+size_t ModelRuntime::text_encoder_segment_budget(size_t te_params_bytes, bool component_offloaded) const {
     // Resident TE: no staging, keep the existing global budget (no behavior change).
-    if (!clip_offload_params_to_cpu()) {
+    if (!component_offloaded && !clip_offload_params_to_cpu()) {
         return max_graph_vram_bytes_;
     }
     if (te_params_bytes == 0) {

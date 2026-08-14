@@ -1711,7 +1711,8 @@ __STATIC_INLINE__ bool ggml_ext_prefer_cudnn_sdpa_unpadded(ggml_backend_t backen
                                                           int64_t L_q,
                                                           int64_t L_k,
                                                           int64_t d_head,
-                                                          ggml_tensor* mask) {
+                                                          ggml_tensor* mask,
+                                                          bool allow_short_f16_self_attn = false) {
 #ifdef ED_ENABLE_CUDNN_SDPA
     if (mask != nullptr ||
         !sd_backend_is(backend, "CUDA") ||
@@ -1723,7 +1724,8 @@ __STATIC_INLINE__ bool ggml_ext_prefer_cudnn_sdpa_unpadded(ggml_backend_t backen
     const bool supported_head_dim = d_head == 64 || d_head == 128;
     const bool supported_long_self_attn = L_q == L_k && L_q >= 4096;
     const bool supported_short_f16_self_attn =
-        ggml_ext_env_flag_enabled_or_default("ED_CUDNN_SDPA_SHORT_F16_SELF_ATTN", true) &&
+        (allow_short_f16_self_attn ||
+         ggml_ext_env_flag_enabled_or_default("ED_CUDNN_SDPA_SHORT_F16_SELF_ATTN", false)) &&
         L_q == L_k &&
         L_q >= 1024;
     return supported_head_dim && (supported_long_self_attn || supported_short_f16_self_attn);
@@ -1733,6 +1735,7 @@ __STATIC_INLINE__ bool ggml_ext_prefer_cudnn_sdpa_unpadded(ggml_backend_t backen
     ED_UNUSED(L_k);
     ED_UNUSED(d_head);
     ED_UNUSED(mask);
+    ED_UNUSED(allow_short_f16_self_attn);
     return false;
 #endif
 }
@@ -1756,7 +1759,8 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
                                                       bool v_is_seq_major = false,
                                                       int sage_layer_idx = -1,
                                                       int sage_total_layers = -1,
-                                                      bool allow_masked_flash_attn = false) {  // avoid overflow
+                                                      bool allow_masked_flash_attn = false,
+                                                      bool allow_short_cudnn_self_attn = false) {  // avoid overflow
     int64_t L_q;
     int64_t L_k;
     int64_t C;
@@ -1785,7 +1789,12 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
         k = ggml_reshape_4d(ctx, k, d_head, n_kv_head, L_k, N);  // [N, L_k, n_kv_head, d_head]
         const bool will_pad_kv_for_flash_attn =
             pad_kv_for_flash_attn &&
-            !ggml_ext_prefer_cudnn_sdpa_unpadded(backend, L_q, L_k, d_head, mask) &&
+            !ggml_ext_prefer_cudnn_sdpa_unpadded(backend,
+                                                 L_q,
+                                                 L_k,
+                                                 d_head,
+                                                 mask,
+                                                 allow_short_cudnn_self_attn) &&
             L_k % 256 != 0;
         if (flash_attn && mask == nullptr && sd_backend_is(backend, "CUDA") && !will_pad_kv_for_flash_attn) {
             if (auto k_f16 = edgedit::ggml_ext::attention_v_prep_custom_f16(ctx, k, false)) {
@@ -1883,6 +1892,9 @@ __STATIC_INLINE__ ggml_tensor* ggml_ext_attention_ext(ggml_context* ctx,
         }
 
         auto out = ggml_flash_attn_ext(ctx, q_in, k_in, v_in, mask_in, scale / kv_scale, 0, 0);
+        if (allow_short_cudnn_self_attn) {
+            ggml_set_name(out, "minimax_h3.vae.short_f16_self_attn");
+        }
         ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);
         if (kv_scale != 1.0f) {
             out = ggml_ext_scale(ctx, out, 1.0f / kv_scale);

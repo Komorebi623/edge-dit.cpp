@@ -393,7 +393,14 @@ namespace MiniMaxH3VAE {
                                                          num_head,
                                                          nullptr,
                                                          true,
-                                                         ctx->flash_attn_enabled);
+                                                         ctx->flash_attn_enabled,
+                                                         1.0f,
+                                                         true,
+                                                         false,
+                                                         -1,
+                                                         -1,
+                                                         false,
+                                                         true);
             h3_profile_name(out, profile_prefix + ".attn");
             return h3_profile_name(to_out->forward(ctx, out), profile_prefix + ".out");
         }

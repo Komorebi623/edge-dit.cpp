@@ -983,16 +983,20 @@ namespace MiniMaxH3 {
         int audio_condition_time_row = find_or_add_timestep(&layout.timesteps,
                                                             std::max(audio_timestep, 1.f));
 
-        int64_t run_start = 0;
-        int current_tag   = text_tags.empty() ? 1 : text_tags[0];
-        for (int64_t i = 1; i <= text_len; ++i) {
-            int tag = i < text_len && !text_tags.empty() ? text_tags[i] : -1;
-            if (i == text_len || tag != current_tag) {
-                layout.segments.push_back({run_start,
-                                           i,
-                                           video_time_row * 3 + current_tag});
-                run_start   = i;
-                current_tag = tag;
+        if (text_len > 0 && text_tags.empty()) {
+            layout.segments.push_back({0, text_len, video_time_row * 3 + 1});
+        } else if (text_len > 0) {
+            int64_t run_start = 0;
+            int current_tag   = text_tags[0];
+            for (int64_t i = 1; i <= text_len; ++i) {
+                int tag = i < text_len ? text_tags[i] : -1;
+                if (i == text_len || tag != current_tag) {
+                    layout.segments.push_back({run_start,
+                                               i,
+                                               video_time_row * 3 + current_tag});
+                    run_start   = i;
+                    current_tag = tag;
+                }
             }
         }
         row = text_len;
@@ -1195,6 +1199,54 @@ namespace MiniMaxH3 {
                         static_cast<size_t>(audio_values),
                         audio.data());
             return {video, audio};
+        }
+
+        size_t measure_compute_buffer_at(int latent_width, int latent_height, int frames) {
+            if (latent_width <= 0 || latent_height <= 0 || frames <= 0) {
+                return 0;
+            }
+            const int latent_frames = frames <= 5 ? 2 : ((frames - 5) / 17) * 5 + 2;
+            const int audio_length = std::max(1, static_cast<int>(std::lround(frames * 40.0 / 24.0)));
+            sd::Tensor<float> video = sd::zeros<float>(
+                {latent_width, latent_height, latent_frames, config.video_latent_channels, 1});
+            sd::Tensor<float> audio = sd::zeros<float>(
+                {audio_length, 2, config.audio_latent_channels, 1});
+            const int64_t spatial_size = video.shape()[0] * video.shape()[1] * video.shape()[2];
+            const int64_t extra_channels = (audio.numel() + spatial_size - 1) / spatial_size;
+            std::vector<int64_t> packed_shape = video.shape();
+            packed_shape[3] += extra_channels;
+            sd::Tensor<float> packed = sd::zeros<float>(packed_shape);
+            std::copy_n(video.data(), video.numel(), packed.data());
+            std::copy_n(audio.data(), audio.numel(), packed.data() + video.numel());
+            sd::Tensor<float> timestep({1}, {1000.0f});
+            sd::Tensor<float> context = sd::zeros<float>({config.text_dim, 256, 1});
+            const sd::Tensor<int32_t> empty_int;
+            std::vector<sd::Tensor<float>> condition_videos;
+            condition_videos.push_back(sd::zeros<float>(video.shape()));
+            condition_videos.push_back(sd::zeros<float>(
+                {latent_width, latent_height, 2, config.video_latent_channels, 1}));
+            std::vector<sd::Tensor<float>> condition_audios;
+            condition_audios.push_back(sd::zeros<float>(audio.shape()));
+            condition_audios.push_back(sd::zeros<float>(audio.shape()));
+            const std::vector<MiniMaxH3ReferenceBlock> reference_blocks = {
+                {MiniMaxH3ReferenceKind::VIDEO_AUDIO, 0, 0},
+                {MiniMaxH3ReferenceKind::IMAGE, 1, -1},
+                {MiniMaxH3ReferenceKind::AUDIO, -1, 1},
+            };
+            auto get_graph = [&]() -> ggml_cgraph* {
+                return build_graph(packed,
+                                   timestep,
+                                   context,
+                                   condition_videos,
+                                   condition_audios,
+                                   empty_int,
+                                   empty_int,
+                                   reference_blocks,
+                                   audio_length,
+                                   12.0f,
+                                   3.0f);
+            };
+            return measure_compute_buffer(get_graph);
         }
 
         ggml_tensor* merge_av_latents(ggml_context* ctx,
