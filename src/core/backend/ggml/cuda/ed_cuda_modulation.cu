@@ -3,6 +3,7 @@
 #include "backend/ggml/ed_ggml_modulation_ext.hpp"
 
 #include <cuda_runtime.h>
+#include <cstdlib>
 #include <cstring>
 
 namespace {
@@ -22,6 +23,11 @@ static bool is_contiguous_f32_output(const ggml_tensor* t) {
 
 static bool is_aligned_to(const void* ptr, uintptr_t alignment) {
     return (reinterpret_cast<uintptr_t>(ptr) % alignment) == 0;
+}
+
+static bool env_flag_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
 static bool can_vec4_modulate(const ggml_tensor* x,
@@ -88,14 +94,14 @@ __global__ void fused_modulate_f32_kernel(const float* x,
                                           int64_t scale_s1,
                                           int64_t scale_s2,
                                           int64_t scale_s3,
-                                          int shift_b0,
-                                          int shift_b1,
-                                          int shift_b2,
-                                          int shift_b3,
-                                          int scale_b0,
-                                          int scale_b1,
-                                          int scale_b2,
-                                          int scale_b3) {
+                                          int64_t shift_ne0,
+                                          int64_t shift_ne1,
+                                          int64_t shift_ne2,
+                                          int64_t shift_ne3,
+                                          int64_t scale_ne0,
+                                          int64_t scale_ne1,
+                                          int64_t scale_ne2,
+                                          int64_t scale_ne3) {
     const int64_t total = ne0 * ne1 * ne2 * ne3;
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx >= total) {
@@ -110,14 +116,14 @@ __global__ void fused_modulate_f32_kernel(const float* x,
     const int64_t i3 = rest / ne2;
 
     const int64_t x_idx = i0 * x_s0 + i1 * x_s1 + i2 * x_s2 + i3 * x_s3;
-    const int64_t shift_idx = (shift_b0 ? 0 : i0) * shift_s0 +
-                              (shift_b1 ? 0 : i1) * shift_s1 +
-                              (shift_b2 ? 0 : i2) * shift_s2 +
-                              (shift_b3 ? 0 : i3) * shift_s3;
-    const int64_t scale_idx = (scale_b0 ? 0 : i0) * scale_s0 +
-                              (scale_b1 ? 0 : i1) * scale_s1 +
-                              (scale_b2 ? 0 : i2) * scale_s2 +
-                              (scale_b3 ? 0 : i3) * scale_s3;
+    const int64_t shift_idx = (i0 % shift_ne0) * shift_s0 +
+                              (i1 % shift_ne1) * shift_s1 +
+                              (i2 % shift_ne2) * shift_s2 +
+                              (i3 % shift_ne3) * shift_s3;
+    const int64_t scale_idx = (i0 % scale_ne0) * scale_s0 +
+                              (i1 % scale_ne1) * scale_s1 +
+                              (i2 % scale_ne2) * scale_s2 +
+                              (i3 % scale_ne3) * scale_s3;
 
     const float xv = x[x_idx];
     const float prod = __fmul_rn(xv, scale[scale_idx]);
@@ -142,12 +148,12 @@ __global__ void fused_modulate_f32_vec4_kernel(const float* x,
                                                int64_t scale_s1,
                                                int64_t scale_s2,
                                                int64_t scale_s3,
-                                               int shift_b1,
-                                               int shift_b2,
-                                               int shift_b3,
-                                               int scale_b1,
-                                               int scale_b2,
-                                               int scale_b3) {
+                                               int64_t shift_ne1,
+                                               int64_t shift_ne2,
+                                               int64_t shift_ne3,
+                                               int64_t scale_ne1,
+                                               int64_t scale_ne2,
+                                               int64_t scale_ne3) {
     const int64_t ne0_vec = ne0 / 4;
     const int64_t total = ne0_vec * ne1 * ne2 * ne3;
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -165,13 +171,13 @@ __global__ void fused_modulate_f32_vec4_kernel(const float* x,
 
     const int64_t x_idx = i0 + i1 * x_s1 + i2 * x_s2 + i3 * x_s3;
     const int64_t shift_idx = i0 +
-                              (shift_b1 ? 0 : i1) * shift_s1 +
-                              (shift_b2 ? 0 : i2) * shift_s2 +
-                              (shift_b3 ? 0 : i3) * shift_s3;
+                              (i1 % shift_ne1) * shift_s1 +
+                              (i2 % shift_ne2) * shift_s2 +
+                              (i3 % shift_ne3) * shift_s3;
     const int64_t scale_idx = i0 +
-                              (scale_b1 ? 0 : i1) * scale_s1 +
-                              (scale_b2 ? 0 : i2) * scale_s2 +
-                              (scale_b3 ? 0 : i3) * scale_s3;
+                              (i1 % scale_ne1) * scale_s1 +
+                              (i2 % scale_ne2) * scale_s2 +
+                              (i3 % scale_ne3) * scale_s3;
 
     const float4 xv = reinterpret_cast<const float4*>(x + x_idx)[0];
     const float4 sv = reinterpret_cast<const float4*>(scale + scale_idx)[0];
@@ -208,15 +214,15 @@ __global__ void fused_residual_gate_f32_kernel(const float* residual,
                                                int64_t x_s0,
                                                int64_t x_s1,
                                                int64_t x_s2,
-                                               int64_t x_s3,
-                                               int64_t gate_s0,
-                                               int64_t gate_s1,
-                                               int64_t gate_s2,
-                                               int64_t gate_s3,
-                                               int gate_b0,
-                                               int gate_b1,
-                                               int gate_b2,
-                                               int gate_b3) {
+                                                   int64_t x_s3,
+                                                   int64_t gate_s0,
+                                                   int64_t gate_s1,
+                                                   int64_t gate_s2,
+                                                   int64_t gate_s3,
+                                                   int64_t gate_ne0,
+                                                   int64_t gate_ne1,
+                                                   int64_t gate_ne2,
+                                                   int64_t gate_ne3) {
     const int64_t total = ne0 * ne1 * ne2 * ne3;
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx >= total) {
@@ -232,10 +238,10 @@ __global__ void fused_residual_gate_f32_kernel(const float* residual,
 
     const int64_t residual_idx = i0 * residual_s0 + i1 * residual_s1 + i2 * residual_s2 + i3 * residual_s3;
     const int64_t x_idx = i0 * x_s0 + i1 * x_s1 + i2 * x_s2 + i3 * x_s3;
-    const int64_t gate_idx = (gate_b0 ? 0 : i0) * gate_s0 +
-                             (gate_b1 ? 0 : i1) * gate_s1 +
-                             (gate_b2 ? 0 : i2) * gate_s2 +
-                             (gate_b3 ? 0 : i3) * gate_s3;
+    const int64_t gate_idx = (i0 % gate_ne0) * gate_s0 +
+                             (i1 % gate_ne1) * gate_s1 +
+                             (i2 % gate_ne2) * gate_s2 +
+                             (i3 % gate_ne3) * gate_s3;
 
     const float prod = __fmul_rn(x[x_idx], gate[gate_idx]);
     dst[idx] = __fadd_rn(residual[residual_idx], prod);
@@ -258,9 +264,9 @@ __global__ void fused_residual_gate_f32_vec4_kernel(const float* residual,
                                                     int64_t gate_s1,
                                                     int64_t gate_s2,
                                                     int64_t gate_s3,
-                                                    int gate_b1,
-                                                    int gate_b2,
-                                                    int gate_b3) {
+                                                    int64_t gate_ne1,
+                                                    int64_t gate_ne2,
+                                                    int64_t gate_ne3) {
     const int64_t ne0_vec = ne0 / 4;
     const int64_t total = ne0_vec * ne1 * ne2 * ne3;
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -279,9 +285,9 @@ __global__ void fused_residual_gate_f32_vec4_kernel(const float* residual,
     const int64_t residual_idx = i0 + i1 * residual_s1 + i2 * residual_s2 + i3 * residual_s3;
     const int64_t x_idx = i0 + i1 * x_s1 + i2 * x_s2 + i3 * x_s3;
     const int64_t gate_idx = i0 +
-                             (gate_b1 ? 0 : i1) * gate_s1 +
-                             (gate_b2 ? 0 : i2) * gate_s2 +
-                             (gate_b3 ? 0 : i3) * gate_s3;
+                             (i1 % gate_ne1) * gate_s1 +
+                             (i2 % gate_ne2) * gate_s2 +
+                             (i3 % gate_ne3) * gate_s3;
 
     const float4 rv = reinterpret_cast<const float4*>(residual + residual_idx)[0];
     const float4 xv = reinterpret_cast<const float4*>(x + x_idx)[0];
@@ -537,7 +543,7 @@ static bool ed_cuda_fused_modulate_op_compute(ggml_tensor * dst, ed_cuda_modulat
     const int64_t total = ggml_nelements(dst);
     constexpr int threads = 256;
     auto cuda_stream = reinterpret_cast<cudaStream_t>(stream);
-    if (can_vec4_modulate(x, shift, scale, dst)) {
+    if (!env_flag_enabled("ED_CUDA_FUSED_MODULATION_DISABLE_VEC4") && can_vec4_modulate(x, shift, scale, dst)) {
         const int64_t total_vec = total / 4;
         const int blocks = static_cast<int>((total_vec + threads - 1) / threads);
         fused_modulate_f32_vec4_kernel<<<blocks, threads, 0, cuda_stream>>>(
@@ -558,12 +564,12 @@ static bool ed_cuda_fused_modulate_op_compute(ggml_tensor * dst, ed_cuda_modulat
             elem_stride(scale, 1),
             elem_stride(scale, 2),
             elem_stride(scale, 3),
-            shift->ne[1] == 1 ? 1 : 0,
-            shift->ne[2] == 1 ? 1 : 0,
-            shift->ne[3] == 1 ? 1 : 0,
-            scale->ne[1] == 1 ? 1 : 0,
-            scale->ne[2] == 1 ? 1 : 0,
-            scale->ne[3] == 1 ? 1 : 0);
+            shift->ne[1],
+            shift->ne[2],
+            shift->ne[3],
+            scale->ne[1],
+            scale->ne[2],
+            scale->ne[3]);
     } else {
         const int blocks = static_cast<int>((total + threads - 1) / threads);
         fused_modulate_f32_kernel<<<blocks, threads, 0, cuda_stream>>>(
@@ -587,14 +593,14 @@ static bool ed_cuda_fused_modulate_op_compute(ggml_tensor * dst, ed_cuda_modulat
             elem_stride(scale, 1),
             elem_stride(scale, 2),
             elem_stride(scale, 3),
-            shift->ne[0] == 1 ? 1 : 0,
-            shift->ne[1] == 1 ? 1 : 0,
-            shift->ne[2] == 1 ? 1 : 0,
-            shift->ne[3] == 1 ? 1 : 0,
-            scale->ne[0] == 1 ? 1 : 0,
-            scale->ne[1] == 1 ? 1 : 0,
-            scale->ne[2] == 1 ? 1 : 0,
-            scale->ne[3] == 1 ? 1 : 0);
+            shift->ne[0],
+            shift->ne[1],
+            shift->ne[2],
+            shift->ne[3],
+            scale->ne[0],
+            scale->ne[1],
+            scale->ne[2],
+            scale->ne[3]);
     }
     return true;
 }
@@ -611,7 +617,7 @@ static bool ed_cuda_fused_residual_gate_op_compute(ggml_tensor * dst, ed_cuda_mo
     const int64_t total = ggml_nelements(dst);
     constexpr int threads = 256;
     auto cuda_stream = reinterpret_cast<cudaStream_t>(stream);
-    if (can_vec4_residual_gate(residual, x, gate, dst)) {
+    if (!env_flag_enabled("ED_CUDA_FUSED_MODULATION_DISABLE_VEC4") && can_vec4_residual_gate(residual, x, gate, dst)) {
         const int64_t total_vec = total / 4;
         const int blocks = static_cast<int>((total_vec + threads - 1) / threads);
         fused_residual_gate_f32_vec4_kernel<<<blocks, threads, 0, cuda_stream>>>(
@@ -632,9 +638,9 @@ static bool ed_cuda_fused_residual_gate_op_compute(ggml_tensor * dst, ed_cuda_mo
             elem_stride(gate, 1),
             elem_stride(gate, 2),
             elem_stride(gate, 3),
-            gate->ne[1] == 1 ? 1 : 0,
-            gate->ne[2] == 1 ? 1 : 0,
-            gate->ne[3] == 1 ? 1 : 0);
+            gate->ne[1],
+            gate->ne[2],
+            gate->ne[3]);
     } else {
         const int blocks = static_cast<int>((total + threads - 1) / threads);
         fused_residual_gate_f32_kernel<<<blocks, threads, 0, cuda_stream>>>(
@@ -658,10 +664,10 @@ static bool ed_cuda_fused_residual_gate_op_compute(ggml_tensor * dst, ed_cuda_mo
             elem_stride(gate, 1),
             elem_stride(gate, 2),
             elem_stride(gate, 3),
-            gate->ne[0] == 1 ? 1 : 0,
-            gate->ne[1] == 1 ? 1 : 0,
-            gate->ne[2] == 1 ? 1 : 0,
-            gate->ne[3] == 1 ? 1 : 0);
+            gate->ne[0],
+            gate->ne[1],
+            gate->ne[2],
+            gate->ne[3]);
     }
     return true;
 }

@@ -22,6 +22,7 @@ CLAUDE.md
 # local benchmark outputs
 /test_outputs/
 /.wty_results/
+/assets/minimax-h3-ref2va/
 
 # local-only CPU profiling / benchmark tooling (not for commit)
 /scripts/run_image_cmp.sh

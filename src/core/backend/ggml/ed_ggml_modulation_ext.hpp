@@ -69,7 +69,7 @@ inline bool fused_where_select_params_valid(const FusedWhereSelectCustomParams& 
 }
 
 inline bool fused_modulate_broadcast_dim_supported(int64_t src, int64_t dst) {
-    return src == 1 || src == dst;
+    return src > 0 && dst > 0 && dst % src == 0;
 }
 
 inline bool fused_modulate_shape_supported(const ggml_tensor* x,
@@ -145,10 +145,10 @@ inline float fused_modulate_tensor_f32_at_broadcast(const ggml_tensor* t,
                                                     int64_t i1,
                                                     int64_t i2,
                                                     int64_t i3) {
-    const int64_t j0 = t->ne[0] == 1 ? 0 : i0;
-    const int64_t j1 = t->ne[1] == 1 ? 0 : i1;
-    const int64_t j2 = t->ne[2] == 1 ? 0 : i2;
-    const int64_t j3 = t->ne[3] == 1 ? 0 : i3;
+    const int64_t j0 = i0 % t->ne[0];
+    const int64_t j1 = i1 % t->ne[1];
+    const int64_t j2 = i2 % t->ne[2];
+    const int64_t j3 = i3 % t->ne[3];
     const char* base = static_cast<const char*>(t->data);
     const char* ptr = base + j0 * t->nb[0] + j1 * t->nb[1] + j2 * t->nb[2] + j3 * t->nb[3];
     return *reinterpret_cast<const float*>(ptr);

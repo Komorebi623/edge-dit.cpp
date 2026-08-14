@@ -25,6 +25,7 @@ struct TensorStorage {
     // engine (and BFL checkpoints) expect [scale, shift]; when set, the two halves
     // of dim0 are swapped at load time. See ModelLoader::convert_tensors_name.
     bool swap_scale_shift   = false;
+    bool swap_swiglu_halves = false;
     int64_t ne[ED_MAX_DIMS] = {1, 1, 1, 1, 1};
     int n_dims              = 0;
 

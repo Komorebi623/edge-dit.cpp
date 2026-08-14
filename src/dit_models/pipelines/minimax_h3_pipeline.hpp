@@ -17,6 +17,9 @@ struct MiniMaxH3VideoVAERunner;
 namespace MiniMaxH3Audio {
 struct AudioVAERunner;
 }
+namespace edgedit {
+struct MiniMaxH3Profile;
+}
 
 namespace edgedit {
 
@@ -64,6 +67,10 @@ private:
     ggml_tensor* sentinel_tensor_ = nullptr;
 
     bool build_text_context(const char* prompt,
+                            const ed_image_t* init_image,
+                            const ed_image_t* end_image,
+                            int canvas_width,
+                            int canvas_height,
                             const ed_image_t* ref_images,
                             int ref_image_count,
                             const ed_ref_video_t* ref_videos,
@@ -72,13 +79,16 @@ private:
                             int max_video_frames,
                             sd::Tensor<float>* context,
                             sd::Tensor<int32_t>* token_tags,
+                            MiniMaxH3Profile* profile,
                             std::string* error);
     ed_status_t decode_video_latent(const sd::Tensor<float>& latent,
                                     int requested_frames,
                                     ed_video_t* out,
+                                    MiniMaxH3Profile* profile,
                                     std::string* error);
     bool decode_audio_latent(const sd::Tensor<float>& latent,
                              ed_video_t* out,
+                             MiniMaxH3Profile* profile,
                              std::string* error);
 };
 

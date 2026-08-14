@@ -1,4 +1,5 @@
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <regex>
@@ -162,7 +163,15 @@ bool convert(const char* input_path,
              const char* imatrix_path) {
     ModelLoader model_loader;
 
-    if (!model_loader.init_from_file(input_path)) {
+    std::string input_prefix;
+    std::string normalized_input = input_path != nullptr ? input_path : "";
+    std::replace(normalized_input.begin(), normalized_input.end(), '\\', '/');
+    if (contains(normalized_input, "/transformer/") &&
+        contains(std::filesystem::path(normalized_input).filename().string(), "diffusion_pytorch_model")) {
+        input_prefix = "model.diffusion_model.";
+    }
+
+    if (!model_loader.init_from_file(input_path, input_prefix)) {
         LOG_ERROR("init model loader from file failed: '%s'", input_path);
         return false;
     }

@@ -11,6 +11,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <random>
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -89,7 +90,8 @@ static void print_usage(const char* prog) {
         "Options:\n"
         "  --video, -M vid_gen       Generate video frames instead of an image\n"
         "  --video-format <fmt>      Video format: auto, avi, mp4, mov, mkv, webm. Default: auto\n"
-        "  -i, --image <path>        Input/reference image for image-edit models\n"
+        "  -i, --image, --init-img <path>  Input image or MiniMax-H3 first frame\n"
+        "  --end-img <path>          MiniMax-H3 last-frame image\n"
         "  --diffusion-model <path>  Standalone DiT transformer weights\n"
         "  --vae <path>              Standalone VAE weights\n"
         "  --audio-vae <path>        Standalone audio VAE weights (MiniMax-H3)\n"
@@ -102,7 +104,13 @@ static void print_usage(const char* prog) {
         "  -W, --width <int>         Image width, default: 1024\n"
         "  -H, --height <int>        Image height, default: 1024\n"
         "  --frames, --video-frames <int>  Video frame count, default: 1\n"
+        "  --video-duration <seconds>  MiniMax-H3 duration; aligns to 17k+5 frames\n"
         "  --fps <int>               Video fps, default: 16\n"
+        "  --ref-image <path>        MiniMax-H3 Ref2VA reference image; repeatable\n"
+        "  --ref-video <path>        MiniMax-H3 Ref2VA reference video frames directory or media file; repeatable\n"
+        "                            Media files are decoded with ffmpeg; embedded audio is paired automatically\n"
+        "  --ref-video-audio <path>  WAV soundtrack paired with the corresponding --ref-video\n"
+        "  --ref-audio <path>        Additional MiniMax-H3 Ref2VA WAV; repeatable; requires an image/video reference\n"
         "  --steps <int>             Sampling steps, default: 20\n"
         "  -s, --seed <int64>        Seed, default: -1\n"
         "  -t, --threads <int>       Thread count, default: 0\n"
@@ -273,6 +281,138 @@ static std::string find_ffmpeg_binary() {
     }
 
     return "ffmpeg";
+}
+
+struct TemporaryDirectory {
+    fs::path path;
+    bool keep = false;
+
+    TemporaryDirectory() = default;
+    TemporaryDirectory(const TemporaryDirectory&) = delete;
+    TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
+    TemporaryDirectory(TemporaryDirectory&& other) noexcept : path(std::move(other.path)), keep(other.keep) {
+        other.keep = true;
+    }
+    TemporaryDirectory& operator=(TemporaryDirectory&& other) noexcept {
+        if (this != &other) {
+            if (!keep && !path.empty()) {
+                std::error_code error;
+                fs::remove_all(path, error);
+            }
+            path = std::move(other.path);
+            keep = other.keep;
+            other.keep = true;
+        }
+        return *this;
+    }
+
+    ~TemporaryDirectory() {
+        if (!keep && !path.empty()) {
+            std::error_code error;
+            fs::remove_all(path, error);
+        }
+    }
+};
+
+static bool make_temporary_directory(const std::string& prefix, TemporaryDirectory* directory) {
+    if (directory == nullptr) {
+        return false;
+    }
+    const fs::path base = fs::temp_directory_path();
+    std::random_device random;
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        const fs::path candidate = base / (prefix + std::to_string(static_cast<uint64_t>(random())) + "-" + std::to_string(attempt));
+        std::error_code error;
+        if (fs::create_directory(candidate, error)) {
+            directory->path = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool extract_reference_video_frames(const std::string& path, const fs::path& frames_dir, int fps, int max_frames) {
+    if (fps <= 0) {
+        fps = 24;
+    }
+    const std::string pattern = (frames_dir / "frame_%06d.png").string();
+    std::string command = shell_quote(find_ffmpeg_binary().c_str()) +
+                          " -hide_banner -loglevel error -y -i " + shell_quote(path.c_str()) +
+                          " -map 0:v:0 -an -vf " + shell_quote(("fps=" + std::to_string(fps)).c_str());
+    if (max_frames > 0) {
+        command += " -frames:v " + std::to_string(max_frames);
+    }
+    command += " " + shell_quote(pattern.c_str());
+    const int status = std::system(command.c_str());
+    if (status != 0) {
+        std::fprintf(stderr, "ffmpeg failed while extracting reference video frames from '%s', status=%d\n", path.c_str(), status);
+        return false;
+    }
+    return true;
+}
+
+static bool extract_reference_video_audio(const std::string& path, const fs::path& wav_path) {
+    const std::string command = shell_quote(find_ffmpeg_binary().c_str()) +
+                                " -hide_banner -loglevel quiet -y -i " + shell_quote(path.c_str()) +
+                                " -map 0:a:0? -vn -ac 2 -ar 32000 -c:a pcm_s16le " + shell_quote(wav_path.c_str());
+    const int status = std::system(command.c_str());
+    if (status != 0) {
+        return false;
+    }
+    std::error_code error;
+    return fs::is_regular_file(wav_path, error) && fs::file_size(wav_path, error) > 0;
+}
+
+static bool load_reference_video(const std::string& path,
+                                 int fps,
+                                 int max_frames,
+                                 std::vector<TemporaryDirectory>* temporary_directories,
+                                 std::vector<ed_image_t>* frames,
+                                 std::vector<float>* audio_samples,
+                                 ed_ref_video_t* reference,
+                                 bool explicit_audio_supplied) {
+    if (frames == nullptr || audio_samples == nullptr || reference == nullptr) {
+        return false;
+    }
+    if (fs::is_directory(path)) {
+        if (!load_images_from_dir(path, frames)) {
+            return false;
+        }
+        reference->frames = frames->data();
+        reference->frame_count = static_cast<int>(frames->size());
+        reference->fps = fps > 0 ? fps : 24;
+        return true;
+    }
+
+    const std::string ext = path_extension(path);
+    if (!is_supported_video_ext(ext)) {
+        return false;
+    }
+    temporary_directories->emplace_back();
+    TemporaryDirectory& directory = temporary_directories->back();
+    if (!make_temporary_directory("ed-ref-video-", &directory)) {
+        std::fprintf(stderr, "failed to create temporary directory for reference video '%s'\n", path.c_str());
+        return false;
+    }
+    const fs::path frames_dir = directory.path / "frames";
+    std::error_code error;
+    fs::create_directory(frames_dir, error);
+    if (error || !extract_reference_video_frames(path, frames_dir, fps, max_frames) || !load_images_from_dir(frames_dir.string(), frames)) {
+        return false;
+    }
+    reference->frames = frames->data();
+    reference->frame_count = static_cast<int>(frames->size());
+    reference->fps = fps > 0 ? fps : 24;
+    if (!explicit_audio_supplied) {
+        const fs::path wav_path = directory.path / "audio.wav";
+        if (extract_reference_video_audio(path, wav_path)) {
+            if (!load_wav(wav_path.string(), audio_samples, &reference->audio)) {
+                std::fprintf(stderr, "failed to load extracted reference video audio from '%s'\n", wav_path.c_str());
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 static bool write_rgb_frame(FILE* pipe, const ed_image_t& image, std::vector<uint8_t>* scratch) {
@@ -759,7 +899,7 @@ int main(int argc, char** argv) {
     // reflects the real activation footprint. Harmless when neither mode is on.
     ctx_params.fit_width = args.width;
     ctx_params.fit_height = args.height;
-    ctx_params.fit_frames = args.frames;
+    ctx_params.fit_frames = resolve_video_fit_frames(args);
     ctx_params.vae_offload = args.vae_offload;
     if (args.max_vram > 0.0f) {
         ctx_params.max_vram_gb = args.max_vram;
@@ -808,6 +948,28 @@ int main(int argc, char** argv) {
     }
 
     if (args.video) {
+        int output_fps = args.fps;
+        const char* pipeline_name = ed_context_pipeline_name(ctx);
+        const bool is_minimax_h3 = pipeline_name != nullptr && std::strcmp(pipeline_name, "minimax-h3") == 0;
+        if (args.video_duration_explicit && !is_minimax_h3) {
+            std::fprintf(stderr, "--video-duration is currently supported only by MiniMax-H3\n");
+            ed_free_context(ctx);
+            return 1;
+        }
+        if (is_minimax_h3 && output_fps != 24) {
+            std::fprintf(stderr, "MiniMax-H3 uses 24 fps; overriding requested fps %d\n", output_fps);
+            output_fps = 24;
+        }
+        const int generation_frames = resolve_video_frames(args, is_minimax_h3);
+        if (args.video_duration_explicit) {
+            std::fprintf(stderr,
+                         "video duration %.3fs resolved to %d frames (%.3fs at %d fps)%s\n",
+                         args.video_duration,
+                         generation_frames,
+                         static_cast<double>(generation_frames) / output_fps,
+                         output_fps,
+                         is_minimax_h3 ? "; MiniMax-H3 requires 17k+5 frames" : "");
+        }
         ed_video_generation_params_t gen_params;
         ed_video_generation_params_init(&gen_params);
         ed_image_t init_image = {};
@@ -816,6 +978,7 @@ int main(int argc, char** argv) {
         std::vector<std::vector<ed_image_t>> ref_video_frames(args.ref_video_paths.size());
         std::vector<std::vector<float>> ref_video_audio_samples(args.ref_video_paths.size());
         std::vector<ed_ref_video_t> ref_videos(args.ref_video_paths.size());
+        std::vector<TemporaryDirectory> ref_video_temp_directories;
         std::vector<std::vector<float>> ref_audio_samples(args.ref_audio_paths.size());
         std::vector<ed_audio_t> ref_audios(args.ref_audio_paths.size());
         auto free_video_references = [&]() {
@@ -830,7 +993,7 @@ int main(int argc, char** argv) {
         gen_params.negative_prompt = args.negative_prompt;
         gen_params.width = args.width;
         gen_params.height = args.height;
-        gen_params.frames = args.frames;
+        gen_params.frames = generation_frames;
         gen_params.seed = args.seed;
         gen_params.sample.sampler = ED_SAMPLER_AUTO;
         gen_params.sample.scheduler = ED_SCHEDULER_AUTO;
@@ -878,14 +1041,21 @@ int main(int argc, char** argv) {
         }
         if (!ref_audios.empty()) { gen_params.ref_audios = ref_audios.data(); gen_params.ref_audio_count = static_cast<int>(ref_audios.size()); }
         for (size_t index = 0; index < args.ref_video_paths.size(); ++index) {
-            if (!load_images_from_dir(args.ref_video_paths[index], &ref_video_frames[index])) {
-                std::fprintf(stderr, "failed to load reference video frames from '%s'\n", args.ref_video_paths[index].c_str());
+            const bool explicit_audio_supplied = index < args.ref_video_audio_paths.size();
+            if (!load_reference_video(args.ref_video_paths[index],
+                                      output_fps,
+                                      generation_frames,
+                                      &ref_video_temp_directories,
+                                      &ref_video_frames[index],
+                                      &ref_video_audio_samples[index],
+                                      &ref_videos[index],
+                                      explicit_audio_supplied)) {
+                std::fprintf(stderr, "failed to load reference video from '%s'\n", args.ref_video_paths[index].c_str());
                 for (ed_image_t& image : ref_images) ed_free_image(&image);
                 free_video_references();
                 ed_free_image(&init_image); ed_free_image(&end_image); ed_free_context(ctx); return 6;
             }
-            ref_videos[index].frames = ref_video_frames[index].data(); ref_videos[index].frame_count = static_cast<int>(ref_video_frames[index].size()); ref_videos[index].fps = 24;
-            if (index < args.ref_video_audio_paths.size() && !load_wav(args.ref_video_audio_paths[index], &ref_video_audio_samples[index], &ref_videos[index].audio)) {
+            if (explicit_audio_supplied && !load_wav(args.ref_video_audio_paths[index], &ref_video_audio_samples[index], &ref_videos[index].audio)) {
                 std::fprintf(stderr, "failed to load reference video WAV '%s'\n", args.ref_video_audio_paths[index].c_str());
                 for (ed_image_t& image : ref_images) ed_free_image(&image);
                 free_video_references();
@@ -935,7 +1105,7 @@ int main(int argc, char** argv) {
         const std::string output_path = video_output_path(args.output_path, args.video_format);
         auto ed_wall_save0 = ed_wall_clock::now();
         bool audio_muxed = false;
-        bool ed_save_ok = save_video_with_audio(output_path.c_str(), output, args.fps, &audio_muxed);
+        bool ed_save_ok = save_video_with_audio(output_path.c_str(), output, output_fps, &audio_muxed);
         ed_wall_save = ed_wall_ms(ed_wall_save0, ed_wall_clock::now());
         if (!ed_save_ok) {
             std::fprintf(stderr, "failed to save output video: %s\n", output_path.c_str());

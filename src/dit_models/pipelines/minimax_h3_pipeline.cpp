@@ -5,10 +5,14 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <iomanip>
+#include <regex>
 #include <set>
 #include <sstream>
+#include <thread>
+#include <vector>
 
 #include "dit_models/diffusion_model.hpp"
 #include "dit_models/components/autoencoders/minimax_h3_vae.hpp"
@@ -20,6 +24,32 @@
 
 namespace edgedit {
 namespace {
+
+constexpr int H3_REF_IMAGE_SHORT_EDGE = 2048;
+
+struct ScopedEnvVar {
+    std::string name;
+    std::string old_value;
+    bool had_value = false;
+
+    ScopedEnvVar(const char* key, const std::string& value)
+        : name(key) {
+        const char* current = std::getenv(key);
+        if (current != nullptr) {
+            had_value = true;
+            old_value = current;
+        }
+        setenv(name.c_str(), value.c_str(), 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (had_value) {
+            setenv(name.c_str(), old_value.c_str(), 1);
+        } else {
+            unsetenv(name.c_str());
+        }
+    }
+};
 
 bool set_minimax_error(std::string* error, const char* message) {
     if (error != nullptr) {
@@ -33,8 +63,66 @@ uint8_t h3_to_u8(float value) {
     return static_cast<uint8_t>(std::round(std::clamp(value, 0.0f, 1.0f) * 255.0f));
 }
 
+float h3_round_to_fp16(float value) {
+    return ggml_fp16_to_fp32(ggml_fp32_to_fp16(value));
+}
+
 int64_t h3_resolve_seed(int64_t seed) {
     return seed >= 0 ? seed : static_cast<int64_t>(std::time(nullptr));
+}
+
+bool h3_profile_enabled();
+
+bool h3_condition_debug_exit_enabled() {
+    const char* value = std::getenv("ED_MINIMAX_H3_CONDITION_DEBUG_EXIT");
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+std::string h3_text_debug_target() {
+    const char* value = std::getenv("ED_MINIMAX_H3_TEXT_DEBUG_TARGET");
+    return value == nullptr ? std::string() : std::string(value);
+}
+
+std::string h3_dit_debug_target() {
+    const char* value = std::getenv("ED_MINIMAX_H3_DEBUG_TARGET");
+    return value == nullptr ? std::string() : std::string(value);
+}
+
+void h3_dump_vae_latent_if_requested(const sd::Tensor<float>& latent) {
+    const char* base_path = std::getenv("ED_MINIMAX_H3_DUMP_VAE_LATENT");
+    if (base_path == nullptr || base_path[0] == '\0') {
+        return;
+    }
+    std::ofstream data_out(std::string(base_path) + ".f32.bin", std::ios::binary);
+    if (data_out) {
+        data_out.write(reinterpret_cast<const char*>(latent.values().data()),
+                       static_cast<std::streamsize>(latent.values().size() * sizeof(float)));
+    }
+    std::ofstream shape_out(std::string(base_path) + ".shape");
+    if (shape_out) {
+        for (size_t index = 0; index < latent.shape().size(); ++index) {
+            if (index > 0) {
+                shape_out << ' ';
+            }
+            shape_out << latent.shape()[index];
+        }
+        shape_out << '\n';
+    }
+}
+
+ed_tiling_params_t h3_vae_tiling(const ModelRuntime& runtime) {
+    ed_tiling_params_t tiling = runtime.vae_tiling();
+    if (tiling.force_disable) {
+        tiling.enabled = false;
+    }
+    if (h3_profile_enabled()) {
+        LOG_INFO("minimax-h3 profile VAE tiling: enabled=%d force-disable=%d rel=%.3f,%.3f",
+                 tiling.enabled,
+                 tiling.force_disable,
+                 tiling.rel_size_x,
+                 tiling.rel_size_y);
+    }
+    return tiling;
 }
 
 void h3_resize_for_vision(int source_width, int source_height, int* width, int* height) {
@@ -68,25 +156,65 @@ void h3_reference_video_dimensions(const ed_image_t& image, int* width, int* hei
     }
     *width = std::max(32, static_cast<int>(std::round(nominal_width / 32.0)) * 32);
     *height = std::max(32, static_cast<int>(std::round(nominal_height / 32.0)) * 32);
-    if (static_cast<int64_t>(image.width) * image.height < static_cast<int64_t>(*width) * *height) {
-        *width = std::max(32, static_cast<int>(std::round(static_cast<double>(image.width) / 32.0)) * 32);
-        *height = std::max(32, static_cast<int>(std::round(static_cast<double>(image.height) / 32.0)) * 32);
-    }
+}
+
+void h3_reference_image_dimensions(const ed_image_t& image, int* width, int* height) {
+    const double scale = static_cast<double>(H3_REF_IMAGE_SHORT_EDGE) /
+                         static_cast<double>(std::min(image.width, image.height));
+    *width = std::max(32, static_cast<int>(std::round(image.width * scale / 32.0)) * 32);
+    *height = std::max(32, static_cast<int>(std::round(image.height * scale / 32.0)) * 32);
+}
+
+bool h3_reference_aspect_ratio_supported(const ed_image_t& image) {
+    return image.width > 0 && image.height > 0 &&
+           static_cast<int64_t>(image.width) <= 4 * static_cast<int64_t>(image.height) &&
+           static_cast<int64_t>(image.height) <= 4 * static_cast<int64_t>(image.width);
 }
 
 float h3_discrete_flow_sigma(int step, int steps, float shift) {
     if (steps <= 1) {
-        return 1.0f;
+        return step <= 0 ? 1.0f : 0.0f;
     }
-    const float timestep = 999.0f - 999.0f * static_cast<float>(step) / static_cast<float>(steps - 1);
-    const float unit_timestep = (timestep + 1.0f) / 1000.0f;
-    return shift == 1.0f ? unit_timestep
-                         : shift * unit_timestep / (1.0f + (shift - 1.0f) * unit_timestep);
+    if (step >= steps) {
+        return 0.0f;
+    }
+    const float t_max = 999.0f;
+    const float t = t_max - (t_max / static_cast<float>(steps - 1)) * static_cast<float>(step);
+    const float sigma = (t + 1.0f) / 1000.0f;
+    return shift == 1.0f ? sigma
+                         : shift * sigma / (1.0f + (shift - 1.0f) * sigma);
 }
 
 bool h3_trace_enabled() {
     const char* value = std::getenv("ED_MINIMAX_H3_TRACE");
     return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+bool h3_profile_enabled() {
+    const char* value = std::getenv("ED_MINIMAX_H3_PROFILE");
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+bool h3_fast_video_postprocess_enabled() {
+    const char* value = std::getenv("ED_MINIMAX_H3_FAST_VIDEO_POSTPROCESS");
+    return value == nullptr || value[0] == '\0' || std::strcmp(value, "0") != 0;
+}
+
+bool h3_verify_fast_video_postprocess_enabled() {
+    const char* value = std::getenv("ED_MINIMAX_H3_VERIFY_FAST_VIDEO_POSTPROCESS");
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+int h3_fast_video_postprocess_threads() {
+    const char* value = std::getenv("ED_MINIMAX_H3_FAST_VIDEO_POSTPROCESS_THREADS");
+    if (value == nullptr || value[0] == '\0') {
+        return 16;
+    }
+    char* end = nullptr;
+    const long requested = std::strtol(value, &end, 10);
+    return end != value && requested > 1 && requested <= std::numeric_limits<int>::max()
+               ? static_cast<int>(requested)
+               : 0;
 }
 
 void h3_trace_tensor(const char* name, const sd::Tensor<float>& tensor) {
@@ -125,6 +253,95 @@ void h3_trace_tensor(const char* name, const sd::Tensor<float>& tensor) {
              maximum);
 }
 
+void h3_dump_debug_tensor_if_requested(const std::string& name, const sd::Tensor<float>& tensor) {
+    const char* base_path = std::getenv("ED_MINIMAX_H3_DEBUG_DUMP");
+    if (base_path == nullptr || base_path[0] == '\0' || tensor.empty()) {
+        return;
+    }
+    const std::string prefix = std::string(base_path) + "." + name;
+    std::ofstream data_out(prefix + ".f32.bin", std::ios::binary);
+    if (data_out) {
+        data_out.write(reinterpret_cast<const char*>(tensor.values().data()),
+                       static_cast<std::streamsize>(tensor.values().size() * sizeof(float)));
+    }
+    std::ofstream shape_out(prefix + ".shape");
+    if (shape_out) {
+        for (size_t index = 0; index < tensor.shape().size(); ++index) {
+            if (index > 0) {
+                shape_out << ' ';
+            }
+            shape_out << tensor.shape()[index];
+        }
+        shape_out << '\n';
+    }
+}
+
+sd::Tensor<float> h3_sample_vae_moments(const sd::Tensor<float>& moments,
+                                        std::shared_ptr<RNG> rng) {
+    if (moments.empty() || moments.shape().size() < 4 || moments.shape()[3] != 48) {
+        return {};
+    }
+    sd::Tensor<float> mean = sd::ops::slice(moments, 3, 0, 24);
+    sd::Tensor<float> logvar = sd::ops::slice(moments, 3, 24, 48);
+    sd::Tensor<float> stddev = sd::ops::exp(0.5f * sd::ops::clamp(logvar, -30.0f, 20.0f));
+    sd::Tensor<float> noise = sd::randn_like<float>(mean, rng);
+    sd::Tensor<float> latents = mean + stddev * noise;
+    for (int64_t index = 0; index < latents.numel(); ++index) {
+        latents[index] = h3_round_to_fp16(latents[index]);
+    }
+    return latents;
+}
+
+sd::Tensor<float> h3_encode_vae_condition(MiniMaxH3VAE::MiniMaxH3VideoVAERunner* vae,
+                                          int n_threads,
+                                          const sd::Tensor<float>& video,
+                                          ed_tiling_params_t tiling) {
+    auto encoded = vae->encode(n_threads, video, tiling);
+    const char* verify_value = std::getenv("ED_MINIMAX_H3_VERIFY_VAE_ENCODER_OPTIMIZATIONS");
+    if (encoded.empty() || verify_value == nullptr || verify_value[0] == '\0' || std::strcmp(verify_value, "0") == 0) {
+        return encoded;
+    }
+    ScopedEnvVar disable_cudnn("ED_MINIMAX_H3_VAE_ENCODER_CUDNN_CONV3D", "0");
+    ScopedEnvVar disable_cudnn_all("ED_MINIMAX_H3_VAE_ENCODER_CUDNN_CONV3D_ALL", "0");
+    ScopedEnvVar disable_reflect_pad("ED_MINIMAX_H3_VAE_FUSED_REFLECT_PAD", "0");
+    ScopedEnvVar disable_group_norm("ED_MINIMAX_H3_VAE_FUSED_TEMPORAL_GROUP_NORM", "0");
+    auto baseline = vae->encode(n_threads, video, tiling);
+    if (baseline.empty() || baseline.shape() != encoded.shape()) {
+        LOG_ERROR("MiniMax-H3 VAE encoder optimization verification failed: output shape mismatch");
+        return {};
+    }
+    double squared_error = 0.0;
+    double squared_baseline = 0.0;
+    double dot = 0.0;
+    double squared_encoded = 0.0;
+    float max_abs_error = 0.0f;
+    for (int64_t index = 0; index < encoded.numel(); ++index) {
+        const double reference = baseline[index];
+        const double candidate = encoded[index];
+        const double error_value = candidate - reference;
+        squared_error += error_value * error_value;
+        squared_baseline += reference * reference;
+        squared_encoded += candidate * candidate;
+        dot += reference * candidate;
+        max_abs_error = std::max(max_abs_error, static_cast<float>(std::abs(error_value)));
+    }
+    const double mse = squared_error / std::max<int64_t>(1, encoded.numel());
+    const double rmse = std::sqrt(mse);
+    const double signal_rms = std::sqrt(squared_baseline / std::max<int64_t>(1, encoded.numel()));
+    const double psnr = mse == 0.0 ? std::numeric_limits<double>::infinity()
+                                   : 20.0 * std::log10(std::max(1e-30, signal_rms) / rmse);
+    const double cosine = dot / std::max(1e-30, std::sqrt(squared_baseline * squared_encoded));
+    LOG_INFO("MiniMax-H3 VAE encoder optimization verification: n=%lld rmse=%.9g signal-rms=%.9g psnr=%.6g dB max-abs=%.9g cosine=%.12g",
+             static_cast<long long>(encoded.numel()), rmse, signal_rms, psnr, max_abs_error, cosine);
+    return encoded;
+}
+
+void h3_apply_condition_noise(sd::Tensor<float>* latent, uint64_t seed) {
+    auto rng = std::make_shared<PhiloxRNG>(seed);
+    *latent = *latent * MiniMaxH3::VISUAL_COND_TIMESTEP +
+              sd::randn_like<float>(*latent, rng) * (1.0f - MiniMaxH3::VISUAL_COND_TIMESTEP);
+}
+
 sd::Tensor<float> h3_pack_audio_and_video_latents(const sd::Tensor<float>& video,
                                                    const sd::Tensor<float>& audio) {
     if (audio.empty()) {
@@ -150,19 +367,46 @@ sd::Tensor<float> h3_image_to_tensor(const ed_image_t& image, int width, int hei
     const int source_width = static_cast<int>(image.width);
     const int source_height = static_cast<int>(image.height);
     const int source_channels = static_cast<int>(image.channels);
-    sd::Tensor<float> tensor({width, height, 3, 1});
-    for (int y = 0; y < height; ++y) {
-        const int source_y = std::min(source_height - 1, static_cast<int>((static_cast<int64_t>(y) * source_height) / height));
-        for (int x = 0; x < width; ++x) {
-            const int source_x = std::min(source_width - 1, static_cast<int>((static_cast<int64_t>(x) * source_width) / width));
+    sd::Tensor<float> source({source_width, source_height, 3, 1});
+    for (int y = 0; y < source_height; ++y) {
+        for (int x = 0; x < source_width; ++x) {
             const uint8_t* pixel = image.data +
-                                   (static_cast<size_t>(source_y) * source_width + static_cast<size_t>(source_x)) * source_channels;
+                                   (static_cast<size_t>(y) * source_width + static_cast<size_t>(x)) * source_channels;
             for (int channel = 0; channel < 3; ++channel) {
-                tensor.index(x, y, channel, 0) = static_cast<float>(pixel[std::min(channel, source_channels - 1)]) / 255.0f;
+                source.index(x, y, channel, 0) = static_cast<float>(pixel[std::min(channel, source_channels - 1)]) / 255.0f;
             }
         }
     }
-    return tensor;
+    return sd::ops::interpolate(source,
+                                std::vector<int64_t>{width, height, 3, 1},
+                                sd::ops::InterpolateMode::Lanczos,
+                                false,
+                                true);
+}
+
+sd::Tensor<float> h3_image_to_tensor_cover_crop(const ed_image_t& image, int width, int height) {
+    if (image.data == nullptr || image.width <= 0 || image.height <= 0 || image.channels <= 0) {
+        return {};
+    }
+    const double scale = std::max(static_cast<double>(width) / static_cast<double>(image.width),
+                                  static_cast<double>(height) / static_cast<double>(image.height));
+    const int resized_width = std::max(width, static_cast<int>(std::round(static_cast<double>(image.width) * scale)));
+    const int resized_height = std::max(height, static_cast<int>(std::round(static_cast<double>(image.height) * scale)));
+    sd::Tensor<float> resized = h3_image_to_tensor(image, resized_width, resized_height);
+    if (resized.empty()) {
+        return {};
+    }
+    const int left = std::max(0, (resized_width - width) / 2);
+    const int top = std::max(0, (resized_height - height) / 2);
+    sd::Tensor<float> cropped({width, height, 3, 1});
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            for (int channel = 0; channel < 3; ++channel) {
+                cropped.index(x, y, channel, 0) = resized.index(x + left, y + top, channel, 0);
+            }
+        }
+    }
+    return cropped;
 }
 
 struct MiniMaxH3DetectedConfig {
@@ -214,7 +458,14 @@ MiniMaxH3DetectedConfig detect_minimax_config(const String2TensorStorage& tensor
         config.attention_head_dim = weight->ne[0];
     }
     if (const auto* weight = find("blocks.0.attn.qkv_proj.weight")) {
-        config.num_attention_heads = weight->ne[1] / (3 * config.attention_head_dim);
+        int64_t qkv_out_dim = weight->ne[1];
+        if (const auto* k_weight = find("blocks.0.attn.qkv_proj.weight.1")) {
+            qkv_out_dim += k_weight->ne[1];
+        }
+        if (const auto* v_weight = find("blocks.0.attn.qkv_proj.weight.2")) {
+            qkv_out_dim += v_weight->ne[1];
+        }
+        config.num_attention_heads = qkv_out_dim / (3 * config.attention_head_dim);
     }
     if (const auto* weight = find("blocks.0.mlp.fc1.weight")) {
         config.ffn_hidden_size = weight->ne[1] / 2;
@@ -229,6 +480,56 @@ MiniMaxH3DetectedConfig detect_minimax_config(const String2TensorStorage& tensor
 }
 
 }  // namespace
+
+struct MiniMaxH3Profile {
+    int64_t total_ms = 0;
+    int64_t cond_context_ms = 0;
+    int64_t uncond_context_ms = 0;
+    int64_t vision_image_prepare_ms = 0;
+    int64_t vision_image_encode_ms = 0;
+    int64_t vision_video_prepare_ms = 0;
+    int64_t vision_video_encode_ms = 0;
+    int64_t text_tokenize_ms = 0;
+    int64_t text_encode_ms = 0;
+    int64_t keyframe_vae_encode_ms = 0;
+    int64_t reference_video_vae_encode_ms = 0;
+    int64_t reference_audio_prepare_ms = 0;
+    int64_t reference_audio_vae_encode_ms = 0;
+    int64_t noise_init_ms = 0;
+    int64_t diffusion_cond_ms = 0;
+    int64_t diffusion_uncond_ms = 0;
+    int64_t cfg_combine_ms = 0;
+    int64_t video_vae_decode_ms = 0;
+    int64_t video_postprocess_ms = 0;
+    int64_t audio_vae_decode_ms = 0;
+    int64_t audio_postprocess_ms = 0;
+    int diffusion_steps = 0;
+    int diffusion_calls = 0;
+
+    void log() const {
+        const int64_t diffusion_ms = diffusion_cond_ms + diffusion_uncond_ms + cfg_combine_ms;
+        const int64_t conditioning_ms = cond_context_ms + uncond_context_ms + keyframe_vae_encode_ms +
+                                        reference_video_vae_encode_ms + reference_audio_prepare_ms +
+                                        reference_audio_vae_encode_ms;
+        const int64_t decode_ms = video_vae_decode_ms + video_postprocess_ms + audio_vae_decode_ms + audio_postprocess_ms;
+        LOG_INFO("minimax-h3 profile: total=%lld ms | conditioning=%lld ms | diffusion=%lld ms (%d steps, %d calls) | decode=%lld ms | noise=%lld ms",
+                 static_cast<long long>(total_ms), static_cast<long long>(conditioning_ms),
+                 static_cast<long long>(diffusion_ms), diffusion_steps, diffusion_calls,
+                 static_cast<long long>(decode_ms), static_cast<long long>(noise_init_ms));
+        LOG_INFO("minimax-h3 profile conditioning: context cond=%lld ms uncond=%lld ms | vision image prepare=%lld ms encode=%lld ms | vision video prepare=%lld ms encode=%lld ms | text tokenize=%lld ms encode=%lld ms | keyframe vae encode=%lld ms | ref visual vae encode=%lld ms | ref audio prepare=%lld ms vae encode=%lld ms",
+                 static_cast<long long>(cond_context_ms), static_cast<long long>(uncond_context_ms),
+                 static_cast<long long>(vision_image_prepare_ms), static_cast<long long>(vision_image_encode_ms),
+                 static_cast<long long>(vision_video_prepare_ms), static_cast<long long>(vision_video_encode_ms),
+                 static_cast<long long>(text_tokenize_ms), static_cast<long long>(text_encode_ms),
+                 static_cast<long long>(keyframe_vae_encode_ms), static_cast<long long>(reference_video_vae_encode_ms),
+                 static_cast<long long>(reference_audio_prepare_ms), static_cast<long long>(reference_audio_vae_encode_ms));
+        LOG_INFO("minimax-h3 profile diffusion: conditional=%lld ms unconditional=%lld ms cfg-combine=%lld ms | decode video-vae=%lld ms video-copy=%lld ms audio-vae=%lld ms audio-copy=%lld ms",
+                 static_cast<long long>(diffusion_cond_ms), static_cast<long long>(diffusion_uncond_ms),
+                 static_cast<long long>(cfg_combine_ms), static_cast<long long>(video_vae_decode_ms),
+                 static_cast<long long>(video_postprocess_ms), static_cast<long long>(audio_vae_decode_ms),
+                 static_cast<long long>(audio_postprocess_ms));
+    }
+};
 
 MiniMaxH3Pipeline::MiniMaxH3Pipeline(SDVersion version)
     : version_(version) {
@@ -256,7 +557,49 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
         return set_minimax_error(error, "MiniMax-H3 diffusion transformer signature is incomplete");
     }
 
-    const bool diffusion_offload = runtime.dit_offload_params_to_cpu();
+    const bool has_audio_vae = std::any_of(loader.get_tensor_storage_map().begin(),
+                                           loader.get_tensor_storage_map().end(),
+                                           [](const auto& item) { return starts_with(item.first, "audio_vae."); });
+
+    runtime.reset_auto_allocate_state();
+    runtime.set_measured_dit_headroom(0);
+    if (runtime.auto_fit() && runtime.fit_width() > 0 && runtime.fit_height() > 0 && runtime.fit_frames() > 0) {
+        auto measure_runner = std::make_unique<MiniMaxH3::MiniMaxH3Runner>(runtime.backend(),
+                                                                          loader.get_tensor_storage_map(),
+                                                                          "model.diffusion_model",
+                                                                          false);
+        measure_runner->set_flash_attention_enabled(runtime.flash_attention());
+        const int latent_width = runtime.fit_width() / 16;
+        const int latent_height = runtime.fit_height() / 16;
+        const size_t measured = measure_runner->measure_compute_buffer_at(latent_width,
+                                                                          latent_height,
+                                                                          runtime.fit_frames());
+        if (measured > 0) {
+            runtime.set_measured_dit_headroom(measured);
+        }
+        LOG_INFO("auto-allocate: measured MiniMax-H3 DiT compute buffer = %.2f GB at latent %dx%dx%d",
+                 measured / (1024.0 * 1024.0 * 1024.0),
+                 latent_width,
+                 latent_height,
+                 runtime.fit_frames());
+    }
+
+    constexpr size_t minimax_staging_slack = static_cast<size_t>(3) * 1024 * 1024 * 1024;
+    const size_t effective_budget = runtime.effective_budget_bytes();
+    const size_t placement_budget = effective_budget > minimax_staging_slack
+                                        ? effective_budget - minimax_staging_slack
+                                        : effective_budget;
+    size_t remaining_free = placement_budget;
+    const bool diffusion_offload = runtime.dit_offload_params_to_cpu() ||
+                                   runtime.plan_component_offload(loader, "model.diffusion_model", remaining_free);
+    const bool text_offload = runtime.clip_offload_params_to_cpu() ||
+                              runtime.plan_component_offload(loader, "text_encoders.llm", remaining_free);
+    const bool vae_offload = runtime.vae_offload_params_to_cpu() ||
+                             runtime.plan_component_offload(loader, "first_stage_model", remaining_free);
+    const bool audio_vae_offload = runtime.vae_offload_params_to_cpu() ||
+                                   (has_audio_vae && runtime.plan_component_offload(loader, "audio_vae", remaining_free));
+    runtime.finalize_auto_segment_budget(effective_budget, minimax_staging_slack);
+
     diffusion_ = std::make_unique<MiniMaxH3::MiniMaxH3Runner>(runtime.backend(),
                                                               loader.get_tensor_storage_map(),
                                                               "model.diffusion_model",
@@ -270,18 +613,49 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     diffusion_->alloc_params_buffer();
     diffusion_->get_param_tensors(registry.tensors(), "model.diffusion_model");
 
-    const bool text_offload = runtime.clip_offload_params_to_cpu();
+    const std::string rope_inv_freq_name = "model.diffusion_model.rope.inv_freq";
+    if (loader.get_tensor_storage_map().find(rope_inv_freq_name) == loader.get_tensor_storage_map().end()) {
+        auto rope_it = registry.tensors().find(rope_inv_freq_name);
+        if (rope_it == registry.tensors().end() || rope_it->second == nullptr) {
+            return set_minimax_error(error, "MiniMax-H3 RoPE parameter was not allocated");
+        }
+        ggml_tensor* rope_inv_freq = rope_it->second;
+        std::vector<float> values(static_cast<size_t>(rope_inv_freq->ne[0]));
+        for (size_t i = 0; i < values.size(); ++i) {
+            values[i] = static_cast<float>(std::pow(10000.0, -static_cast<double>(i) / values.size()));
+        }
+        ggml_backend_tensor_set(rope_inv_freq, values.data(), 0, values.size() * sizeof(float));
+        LOG_INFO("MiniMax-H3 synthesized missing rope.inv_freq (%zu values)", values.size());
+    }
+
+    String2TensorStorage conditioner_tensors = loader.get_tensor_storage_map();
+    const std::regex language_layer_pattern(R"(^text_encoders\.llm\.model\.layers\.(\d+)\.)");
+    for (auto it = conditioner_tensors.begin(); it != conditioner_tensors.end();) {
+        std::smatch match;
+        const bool unused_language_layer = std::regex_search(it->first, match, language_layer_pattern) &&
+                                           std::stoi(match[1].str()) >= 50;
+        const bool unused_language_head = it->first == "text_encoders.llm.model.norm.weight" ||
+                                          starts_with(it->first, "text_encoders.llm.lm_head.");
+        if (unused_language_layer || unused_language_head) {
+            it = conditioner_tensors.erase(it);
+        } else {
+            ++it;
+        }
+    }
     conditioner_ = std::make_unique<LLM::LLMEmbedder>(LLM::LLMArch::QWEN3_VL,
                                                        runtime.clip_backend(),
                                                        text_offload,
-                                                       loader.get_tensor_storage_map(),
+                                                       conditioner_tensors,
                                                        "text_encoders.llm",
                                                        true);
+    conditioner_->model.set_flash_attention_enabled(runtime.flash_attention());
     conditioner_->alloc_params_buffer();
     conditioner_->get_param_tensors(registry.tensors(), "text_encoders.llm");
+    conditioner_->model.set_max_graph_vram_bytes(
+        runtime.text_encoder_segment_budget(conditioner_->model.get_params_buffer_size(), text_offload));
 
     vae_ = std::make_unique<MiniMaxH3VAE::MiniMaxH3VideoVAERunner>(runtime.vae_backend(),
-                                                                    runtime.vae_offload_params_to_cpu(),
+                                                                    vae_offload,
                                                                     loader.get_tensor_storage_map(),
                                                                     "first_stage_model");
     vae_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
@@ -289,12 +663,9 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     vae_->alloc_params_buffer();
     vae_->get_param_tensors(registry.tensors(), "first_stage_model");
 
-    const bool has_audio_vae = std::any_of(loader.get_tensor_storage_map().begin(),
-                                           loader.get_tensor_storage_map().end(),
-                                           [](const auto& item) { return starts_with(item.first, "audio_vae."); });
     if (has_audio_vae) {
         audio_vae_ = std::make_unique<MiniMaxH3Audio::AudioVAERunner>(runtime.vae_backend(),
-                                                                        runtime.vae_offload_params_to_cpu(),
+                                                                        audio_vae_offload,
                                                                         loader.get_tensor_storage_map(),
                                                                         "audio_vae");
         audio_vae_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
@@ -308,6 +679,7 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     registry.ignore_prefix("first_stage_model.encoder.");
     registry.ignore_prefix("text_encoders.llm.visual.");
     registry.ignore_prefix("text_encoders.llm.");
+    registry.ignore_prefix("model.diffusion_model.rope.inv_freq");
 
     if (sentinel_ctx_ == nullptr) {
         ggml_init_params init_params{};
@@ -349,6 +721,10 @@ ed_status_t MiniMaxH3Pipeline::generate_image(const ed_image_generation_params_t
 }
 
 bool MiniMaxH3Pipeline::build_text_context(const char* prompt,
+                                           const ed_image_t* init_image,
+                                           const ed_image_t* end_image,
+                                           int canvas_width,
+                                           int canvas_height,
                                            const ed_image_t* ref_images,
                                            int ref_image_count,
                                            const ed_ref_video_t* ref_videos,
@@ -357,47 +733,121 @@ bool MiniMaxH3Pipeline::build_text_context(const char* prompt,
                                            int max_video_frames,
                                            sd::Tensor<float>* context,
                                            sd::Tensor<int32_t>* token_tags,
+                                           MiniMaxH3Profile* profile,
                                            std::string* error) {
     if (context == nullptr || token_tags == nullptr || conditioner_ == nullptr || runtime_ == nullptr) {
         return set_minimax_error(error, "MiniMax-H3 text conditioner is not initialized");
     }
-    std::string presentations;
+    std::string pending_text;
+    std::vector<int> tokens;
+    int64_t tokenization_ms = 0;
+    const char* verify_token_build_value = std::getenv("ED_MINIMAX_H3_VERIFY_DIRECT_TOKEN_BUILD");
+    const bool verify_token_build = verify_token_build_value != nullptr &&
+                                   verify_token_build_value[0] != '\0' &&
+                                   std::strcmp(verify_token_build_value, "0") != 0;
+    std::string legacy_presentation;
     std::vector<std::pair<int, sd::Tensor<float>>> image_embeds;
     std::vector<LLM::LLMImageEmbedInfo> image_embed_infos;
     std::vector<std::vector<std::pair<int, sd::Tensor<float>>>> deepstack_image_embeds(3);
+    const int vision_patch_size = conditioner_->model.params.vision.patch_size;
+    const std::string vision_start = "<|vision_start|>";
+    const std::string vision_end = "<|vision_end|>";
+    const std::string image_pad = "<|image_pad|>";
+    const auto vision_start_tokens = conditioner_->tokenizer->tokenize(vision_start, nullptr, true, 0, 0, false);
+    const auto vision_end_tokens = conditioner_->tokenizer->tokenize(vision_end, nullptr, true, 0, 0, false);
+    const auto image_pad_tokens = conditioner_->tokenizer->tokenize(image_pad, nullptr, true, 0, 0, false);
+    if (vision_start_tokens.size() != 1 || vision_end_tokens.size() != 1 || image_pad_tokens.size() != 1) {
+        return set_minimax_error(error, "MiniMax-H3 tokenizer special tokens are invalid");
+    }
+    auto append_text = [&](const std::string& text) {
+        pending_text += text;
+        if (verify_token_build) {
+            legacy_presentation += text;
+        }
+    };
+    auto flush_text = [&]() {
+        if (pending_text.empty()) {
+            return;
+        }
+        const int64_t begin = profile != nullptr ? ggml_time_ms() : 0;
+        auto text_tokens = conditioner_->tokenizer->tokenize(pending_text, nullptr, false, 0, 0, false);
+        if (profile != nullptr) {
+            tokenization_ms += ggml_time_ms() - begin;
+        }
+        tokens.insert(tokens.end(), text_tokens.begin(), text_tokens.end());
+        pending_text.clear();
+    };
+    auto append_vision = [&](int64_t count) {
+        flush_text();
+        tokens.push_back(vision_start_tokens[0]);
+        const int embed_index = static_cast<int>(tokens.size());
+        tokens.insert(tokens.end(), static_cast<size_t>(count), image_pad_tokens[0]);
+        tokens.push_back(vision_end_tokens[0]);
+        if (verify_token_build) {
+            legacy_presentation += vision_start;
+            for (int64_t index = 0; index < count; ++index) {
+                legacy_presentation += image_pad;
+            }
+            legacy_presentation += vision_end;
+        }
+        return embed_index;
+    };
+    auto add_vision_image = [&](const ed_image_t& image,
+                                int image_index,
+                                int width,
+                                int height,
+                                bool keyframe) -> bool {
+        const int64_t prepare_begin = profile != nullptr ? ggml_time_ms() : 0;
+        sd::Tensor<float> image_tensor = keyframe && image_index > 0
+                                             ? h3_image_to_tensor_cover_crop(image, width, height)
+                                             : h3_image_to_tensor(image, width, height);
+        if (image_tensor.empty()) {
+            return set_minimax_error(error, keyframe ? "MiniMax-H3 keyframe vision image is invalid"
+                                                     : "MiniMax-H3 Ref2VA image reference is invalid");
+        }
+        image_tensor = image_tensor * 2.0f - 1.0f;
+        if (profile != nullptr) profile->vision_image_prepare_ms += ggml_time_ms() - prepare_begin;
+        const int64_t encode_begin = profile != nullptr ? ggml_time_ms() : 0;
+        std::vector<sd::Tensor<float>> image_outputs = conditioner_->model.encode_image_outputs(runtime_->n_threads(), image_tensor);
+        if (profile != nullptr) profile->vision_image_encode_ms += ggml_time_ms() - encode_begin;
+        if (image_outputs.size() != 4 || image_outputs[0].empty()) {
+            return set_minimax_error(error, keyframe ? "MiniMax-H3 keyframe vision encoder failed"
+                                                     : "MiniMax-H3 Ref2VA vision encoder failed");
+        }
+        sd::Tensor<float> image_embed = std::move(image_outputs[0]);
+        const int64_t image_tokens = image_embed.shape()[1];
+        append_text("<Picture " + std::to_string(image_index + 1) + ">: ");
+        const int embed_index = append_vision(image_tokens);
+        image_embeds.emplace_back(embed_index, std::move(image_embed));
+        for (size_t layer = 0; layer < deepstack_image_embeds.size(); ++layer) {
+            deepstack_image_embeds[layer].emplace_back(embed_index, std::move(image_outputs[layer + 1]));
+        }
+        image_embed_infos.push_back({embed_index, image_tokens, 1, height / vision_patch_size, width / vision_patch_size});
+        return true;
+    };
+    int keyframe_image_index = 0;
+    if (init_image != nullptr && init_image->data != nullptr) {
+        if (!add_vision_image(*init_image, keyframe_image_index++, canvas_width, canvas_height, true)) {
+            return false;
+        }
+    }
+    if (end_image != nullptr && end_image->data != nullptr) {
+        if (!add_vision_image(*end_image, keyframe_image_index++, canvas_width, canvas_height, true)) {
+            return false;
+        }
+    }
     for (int image_index = 0; image_index < ref_image_count; ++image_index) {
         const ed_image_t& image = ref_images[image_index];
         int width = 0;
         int height = 0;
-        h3_resize_for_vision(image.width, image.height, &width, &height);
-        sd::Tensor<float> image_tensor = h3_image_to_tensor(image, width, height);
-        if (image_tensor.empty()) {
-            return set_minimax_error(error, "MiniMax-H3 Ref2VA image reference is invalid");
-        }
-        image_tensor = image_tensor * 2.0f - 1.0f;
+        h3_reference_image_dimensions(image, &width, &height);
         LOG_DEBUG("MiniMax-H3 Ref2VA vision image=%dx%d tensor=%s",
                   width,
                   height,
-                  sd::tensor_shape_to_string(image_tensor.shape()).c_str());
-        std::vector<sd::Tensor<float>> image_outputs = conditioner_->model.encode_image_outputs(runtime_->n_threads(), image_tensor);
-        if (image_outputs.size() != 4 || image_outputs[0].empty()) {
-            return set_minimax_error(error, "MiniMax-H3 Ref2VA vision encoder failed");
+                  "");
+        if (!add_vision_image(image, image_index, width, height, false)) {
+            return false;
         }
-        sd::Tensor<float> image_embed = std::move(image_outputs[0]);
-        const int64_t image_tokens = image_embed.shape()[1];
-        const std::string prefix = "<Picture " + std::to_string(image_index + 1) + ">: <|vision_start|>";
-        const std::string prefix_text = "<|im_start|>user\n" + presentations + prefix;
-        const std::vector<int> prefix_tokens = conditioner_->tokenizer->tokenize(prefix_text, nullptr, true, 0, 4096, false);
-        presentations += prefix;
-        for (int64_t token = 0; token < image_tokens; ++token) {
-            presentations += "<|image_pad|>";
-        }
-        presentations += "<|vision_end|>\n";
-        image_embeds.emplace_back(static_cast<int>(prefix_tokens.size()), std::move(image_embed));
-        for (size_t layer = 0; layer < deepstack_image_embeds.size(); ++layer) {
-            deepstack_image_embeds[layer].emplace_back(static_cast<int>(prefix_tokens.size()), std::move(image_outputs[layer + 1]));
-        }
-        image_embed_infos.push_back({static_cast<int>(prefix_tokens.size()), image_tokens, 1, height / 16, width / 16});
     }
     int video_number = 0;
     int audio_number = 0;
@@ -414,58 +864,128 @@ bool MiniMaxH3Pipeline::build_text_context(const char* prompt,
             return ED_STATUS_INVALID_ARGUMENT;
         }
         if (reference.audio.data != nullptr && reference.audio.sample_count > 0) {
-            presentations += "<Audio " + std::to_string(++audio_number) + ">: ";
+            append_text("<Audio " + std::to_string(++audio_number) + ">: ");
         }
-        presentations += "<Video " + std::to_string(++video_number) + ">: ";
+        append_text("<Video " + std::to_string(++video_number) + ">: ");
         while (normalized_frames % 17 != 5) --normalized_frames;
-        for (int presentation_frame = 0; presentation_frame < normalized_frames; presentation_frame += 12) {
-            const int first_index = std::min(reference.frame_count - 1, static_cast<int>(std::floor(presentation_frame * source_fps / 24.0)));
-            const int second_index = std::min(reference.frame_count - 1, static_cast<int>(std::floor(std::min(presentation_frame + 12, normalized_frames - 1) * source_fps / 24.0)));
+        std::vector<int> sampled_frames;
+        sampled_frames.reserve(static_cast<size_t>((normalized_frames + 11) / 12));
+        for (int frame = 0; frame < normalized_frames; frame += 12) {
+            sampled_frames.push_back(frame);
+        }
+        for (size_t sampled_index = 0; sampled_index < sampled_frames.size(); sampled_index += 2) {
+            const int64_t prepare_begin = profile != nullptr ? ggml_time_ms() : 0;
+            const size_t next_sampled_index = std::min(sampled_index + 1, sampled_frames.size() - 1);
+            const int first_frame = sampled_frames[sampled_index];
+            const int second_frame = sampled_frames[next_sampled_index];
+            const int first_index = std::min(reference.frame_count - 1, static_cast<int>(std::floor(first_frame * source_fps / 24.0)));
+            const int second_index = std::min(reference.frame_count - 1, static_cast<int>(std::floor(second_frame * source_fps / 24.0)));
             const ed_image_t& first_image = reference.frames[first_index];
             int width = 0;
             int height = 0;
-            h3_resize_for_vision(first_image.width, first_image.height, &width, &height);
+            h3_reference_video_dimensions(first_image, &width, &height);
+            if (h3_trace_enabled() && sampled_index == 0) {
+                LOG_INFO("MiniMax-H3 Ref2VA video %d vision geometry: source=%dx%d normalized=%dx%d frames=%d",
+                         video_index + 1,
+                         first_image.width,
+                         first_image.height,
+                         width,
+                         height,
+                         normalized_frames);
+            }
             auto first = h3_image_to_tensor(first_image, width, height);
             auto second = h3_image_to_tensor(reference.frames[second_index], width, height);
             if (first.empty() || second.empty()) return set_minimax_error(error, "MiniMax-H3 Ref2VA video frame is invalid");
-            sd::Tensor<float> pair({width, height, 3, 2});
-            const size_t frame_values = static_cast<size_t>(width) * height * 3;
-            for (size_t value = 0; value < frame_values; ++value) { pair.data()[value] = first.data()[value] * 2.f - 1.f; pair.data()[value + frame_values] = second.data()[value] * 2.f - 1.f; }
-            auto outputs = conditioner_->model.encode_image_outputs(runtime_->n_threads(), pair);
+            sd::Tensor<float> pair({width, height, 2, 3, 1});
+            for (int channel = 0; channel < 3; ++channel) {
+                for (int y = 0; y < height; ++y) {
+                    for (int x = 0; x < width; ++x) {
+                        pair.index(x, y, 0, channel, 0) = first.index(x, y, channel, 0) * 2.f - 1.f;
+                        pair.index(x, y, 1, channel, 0) = second.index(x, y, channel, 0) * 2.f - 1.f;
+                    }
+                }
+            }
+            if (profile != nullptr) profile->vision_video_prepare_ms += ggml_time_ms() - prepare_begin;
+            const int64_t encode_begin = profile != nullptr ? ggml_time_ms() : 0;
+            auto outputs = conditioner_->model.encode_video_block_outputs(runtime_->n_threads(), pair);
+            if (profile != nullptr) profile->vision_video_encode_ms += ggml_time_ms() - encode_begin;
             if (outputs.size() != 4 || outputs[0].empty()) return set_minimax_error(error, "MiniMax-H3 Ref2VA video vision encoder failed");
-            const float first_time = static_cast<float>(presentation_frame) / 24.0f;
-            const float second_time = static_cast<float>(std::min(presentation_frame + 12, normalized_frames - 1)) / 24.0f;
+            const float first_time = static_cast<float>(first_frame) / 24.0f;
+            const float second_time = static_cast<float>(second_frame) / 24.0f;
             std::ostringstream timestamp_stream;
             timestamp_stream << '<' << std::fixed << std::setprecision(1)
                              << (first_time + second_time) * 0.5f << " seconds>";
             const std::string timestamp = timestamp_stream.str();
-            const auto prefix_tokens = conditioner_->tokenizer->tokenize("<|im_start|>user\n" + presentations + timestamp + "<|vision_start|>", nullptr, true, 0, 4096, false);
-            presentations += timestamp + "<|vision_start|>";
-            const int64_t tokens = outputs[0].shape()[1];
-            for (int64_t token = 0; token < tokens; ++token) presentations += "<|image_pad|>";
-            presentations += "<|vision_end|>";
-            image_embeds.emplace_back(static_cast<int>(prefix_tokens.size()), std::move(outputs[0]));
-            for (size_t layer = 0; layer < deepstack_image_embeds.size(); ++layer) deepstack_image_embeds[layer].emplace_back(static_cast<int>(prefix_tokens.size()), std::move(outputs[layer + 1]));
-            image_embed_infos.push_back({static_cast<int>(prefix_tokens.size()), tokens, 1, height / 16, width / 16});
+            append_text(timestamp);
+            const int64_t vision_tokens = outputs[0].shape()[1];
+            const int embed_index = append_vision(vision_tokens);
+            image_embeds.emplace_back(embed_index, std::move(outputs[0]));
+            for (size_t layer = 0; layer < deepstack_image_embeds.size(); ++layer) deepstack_image_embeds[layer].emplace_back(embed_index, std::move(outputs[layer + 1]));
+            image_embed_infos.push_back({embed_index, vision_tokens, 1, height / vision_patch_size, width / vision_patch_size});
         }
     }
     for (int audio_index = 0; audio_index < ref_audio_count; ++audio_index) {
-        presentations += "<Audio " + std::to_string(++audio_number) + ">: ";
+        append_text("<Audio " + std::to_string(++audio_number) + ">: ");
     }
-    const std::string text = "<|im_start|>user\n" + presentations +
-                             std::string(prompt == nullptr ? "" : prompt) +
-                             "<|im_end|>\n<|im_start|>assistant\n";
-    const std::vector<int> tokens = conditioner_->tokenizer->tokenize(text, nullptr, true, 0, 4096, false);
+    append_text(prompt == nullptr ? "" : prompt);
+    flush_text();
+    if (profile != nullptr) profile->text_tokenize_ms += tokenization_ms;
+    if (verify_token_build) {
+        const auto legacy_tokens = conditioner_->tokenizer->tokenize(legacy_presentation, nullptr, true, 0, 0, false);
+        if (legacy_tokens != tokens) {
+            size_t mismatch = 0;
+            while (mismatch < legacy_tokens.size() && mismatch < tokens.size() &&
+                   legacy_tokens[mismatch] == tokens[mismatch]) {
+                ++mismatch;
+            }
+            std::ostringstream message;
+            message << "MiniMax-H3 direct token build mismatch at " << mismatch
+                    << ": direct=" << tokens.size() << " legacy=" << legacy_tokens.size();
+            return set_minimax_error(error, message.str().c_str());
+        }
+        LOG_INFO("MiniMax-H3 direct token build verified: tokens=%zu", tokens.size());
+    }
     if (tokens.empty()) {
         return set_minimax_error(error, "MiniMax-H3 prompt tokenization produced no tokens");
     }
+    std::vector<int32_t> tags(tokens.size(), 1);
+    for (const auto& [index, image_embed] : image_embeds) {
+        const int64_t begin = std::max<int64_t>(0, index - 1);
+        const int64_t end = std::min<int64_t>(static_cast<int64_t>(tags.size()),
+                                              index + image_embed.shape()[1] + 1);
+        std::fill(tags.begin() + begin, tags.begin() + end, 0);
+    }
+    if (h3_trace_enabled()) {
+        const auto zero_tags = std::count(tags.begin(), tags.end(), 0);
+        std::ostringstream summary;
+        summary << "MiniMax-H3 presentation: tokens=" << tokens.size()
+                << " video-tags=" << zero_tags
+                << " text-tags=" << tags.size() - static_cast<size_t>(zero_tags)
+                << " head=";
+        for (size_t index = 0; index < std::min<size_t>(tokens.size(), 16); ++index) {
+            if (index > 0) summary << ',';
+            summary << tokens[index];
+        }
+        summary << " tail=";
+        const size_t tail_begin = tokens.size() > 16 ? tokens.size() - 16 : 0;
+        for (size_t index = tail_begin; index < tokens.size(); ++index) {
+            if (index > tail_begin) summary << ',';
+            summary << tokens[index];
+        }
+        LOG_INFO("%s", summary.str().c_str());
+    }
     sd::Tensor<int32_t> ids({static_cast<int64_t>(tokens.size())}, tokens);
-    *context = conditioner_->model.compute(runtime_->n_threads(), ids, {}, image_embeds, {50}, image_embed_infos, "", deepstack_image_embeds);
+    const int64_t text_encode_begin = profile != nullptr ? ggml_time_ms() : 0;
+    *context = conditioner_->model.compute(runtime_->n_threads(), ids, {}, image_embeds, {50}, image_embed_infos, h3_text_debug_target(), deepstack_image_embeds);
+    if (profile != nullptr) profile->text_encode_ms += ggml_time_ms() - text_encode_begin;
     if (context->empty()) {
         return set_minimax_error(error, "MiniMax-H3 text encoder compute failed");
     }
-    *token_tags = sd::Tensor<int32_t>({context->shape()[1]},
-                                      std::vector<int32_t>(static_cast<size_t>(context->shape()[1]), 1));
+    if (static_cast<int64_t>(tags.size()) != context->shape()[1]) {
+        return set_minimax_error(error, "MiniMax-H3 presentation tags do not match conditioner output");
+    }
+    const int64_t tag_count = static_cast<int64_t>(tags.size());
+    *token_tags = sd::Tensor<int32_t>({tag_count}, std::move(tags));
     h3_trace_tensor("text_context", *context);
     return true;
 }
@@ -473,13 +993,14 @@ bool MiniMaxH3Pipeline::build_text_context(const char* prompt,
 ed_status_t MiniMaxH3Pipeline::decode_video_latent(const sd::Tensor<float>& latent,
                                                     int requested_frames,
                                                     ed_video_t* out,
+                                                    MiniMaxH3Profile* profile,
                                                     std::string* error) {
     sd::Tensor<float> vae_latent = vae_->diffusion_to_vae_latents(latent);
-    ed_tiling_params_t tiling = runtime_->vae_tiling();
-    if (tiling.force_disable) {
-        tiling.enabled = false;
-    }
+    h3_dump_vae_latent_if_requested(vae_latent);
+    ed_tiling_params_t tiling = h3_vae_tiling(*runtime_);
+    const int64_t decode_begin = profile != nullptr ? ggml_time_ms() : 0;
     sd::Tensor<float> video = vae_->decode(runtime_->n_threads(), vae_latent, tiling, true);
+    if (profile != nullptr) profile->video_vae_decode_ms += ggml_time_ms() - decode_begin;
     if (video.empty() || video.dim() != 5) {
         set_minimax_error(error, "MiniMax-H3 video VAE decode failed");
         return ED_STATUS_GENERATION_FAILED;
@@ -495,6 +1016,10 @@ ed_status_t MiniMaxH3Pipeline::decode_video_latent(const sd::Tensor<float>& late
     const size_t height = static_cast<size_t>(video.shape()[1]);
     const size_t channels = static_cast<size_t>(video.shape()[3]);
     const size_t pixels = width * height;
+    const int64_t postprocess_begin = profile != nullptr ? ggml_time_ms() : 0;
+    const bool fast_postprocess = h3_fast_video_postprocess_enabled();
+    const bool verify_fast_postprocess = fast_postprocess && h3_verify_fast_video_postprocess_enabled();
+    const float* video_data     = video.data();
     for (int frame = 0; frame < frames_count; ++frame) {
         frames[frame].width = static_cast<int>(width);
         frames[frame].height = static_cast<int>(height);
@@ -506,29 +1031,66 @@ ed_status_t MiniMaxH3Pipeline::decode_video_latent(const sd::Tensor<float>& late
             set_minimax_error(error, "failed to allocate MiniMax-H3 frame pixels");
             return ED_STATUS_OUT_OF_MEMORY;
         }
-        for (size_t pixel = 0; pixel < pixels; ++pixel) {
-            for (size_t channel = 0; channel < channels; ++channel) {
-                frames[frame].data[pixel * channels + channel] =
-                    h3_to_u8(video.index(pixel % width,
-                                         pixel / width,
-                                         std::min(frame, decoded_frames - 1),
-                                         channel,
-                                         0));
+    }
+    auto convert_frame = [&](int frame) {
+        const int source_frame = std::min(frame, decoded_frames - 1);
+        if (fast_postprocess) {
+            for (size_t pixel = 0; pixel < pixels; ++pixel) {
+                const size_t x = pixel % width;
+                const size_t y = pixel / width;
+                for (size_t channel = 0; channel < channels; ++channel) {
+                    const size_t offset = x + width * (y + height * (source_frame + decoded_frames * channel));
+                    if (verify_fast_postprocess) {
+                        GGML_ASSERT(video_data[offset] == video.index(x, y, source_frame, channel, 0));
+                    }
+                    frames[frame].data[pixel * channels + channel] = h3_to_u8(video_data[offset]);
+                }
             }
+        } else {
+            for (size_t pixel = 0; pixel < pixels; ++pixel) {
+                for (size_t channel = 0; channel < channels; ++channel) {
+                    frames[frame].data[pixel * channels + channel] =
+                        h3_to_u8(video.index(pixel % width, pixel / width, source_frame, channel, 0));
+                }
+            }
+        }
+    };
+    const int requested_threads = fast_postprocess ? h3_fast_video_postprocess_threads() : 0;
+    const int conversion_threads = std::min(frames_count, requested_threads);
+    if (conversion_threads > 1) {
+        std::vector<std::thread> workers;
+        workers.reserve(static_cast<size_t>(conversion_threads));
+        for (int worker = 0; worker < conversion_threads; ++worker) {
+            workers.emplace_back([&, worker]() {
+                for (int frame = worker; frame < frames_count; frame += conversion_threads) {
+                    convert_frame(frame);
+                }
+            });
+        }
+        for (std::thread& worker : workers) {
+            worker.join();
+        }
+    } else {
+        for (int frame = 0; frame < frames_count; ++frame) {
+            convert_frame(frame);
         }
     }
     out->frames = frames;
     out->frame_count = frames_count;
+    if (profile != nullptr) profile->video_postprocess_ms += ggml_time_ms() - postprocess_begin;
     return ED_STATUS_OK;
 }
 
 bool MiniMaxH3Pipeline::decode_audio_latent(const sd::Tensor<float>& latent,
                                             ed_video_t* out,
+                                            MiniMaxH3Profile* profile,
                                             std::string* error) {
     if (audio_vae_ == nullptr || latent.empty()) {
         return set_minimax_error(error, "MiniMax-H3 audio VAE is not initialized");
     }
+    const int64_t decode_begin = profile != nullptr ? ggml_time_ms() : 0;
     sd::Tensor<float> waveform = audio_vae_->decode(runtime_->n_threads(), latent);
+    if (profile != nullptr) profile->audio_vae_decode_ms += ggml_time_ms() - decode_begin;
     if (waveform.empty() || waveform.dim() != 4 || waveform.shape()[1] != 2) {
         return set_minimax_error(error, "MiniMax-H3 audio VAE decode failed");
     }
@@ -541,6 +1103,7 @@ bool MiniMaxH3Pipeline::decode_audio_latent(const sd::Tensor<float>& latent,
     if (samples == nullptr) {
         return set_minimax_error(error, "failed to allocate MiniMax-H3 audio output");
     }
+    const int64_t postprocess_begin = profile != nullptr ? ggml_time_ms() : 0;
     for (int64_t sample = 0; sample < sample_count; ++sample) {
         for (int channel = 0; channel < channels; ++channel) {
             samples[sample * channels + channel] = std::clamp(waveform.index(sample, channel, 0, 0), -1.0f, 1.0f);
@@ -550,12 +1113,16 @@ bool MiniMaxH3Pipeline::decode_audio_latent(const sd::Tensor<float>& latent,
     out->audio_sample_count = static_cast<int>(sample_count);
     out->audio_channels = channels;
     out->audio_sample_rate = 32000;
+    if (profile != nullptr) profile->audio_postprocess_ms += ggml_time_ms() - postprocess_begin;
     return true;
 }
 
 ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t* params,
                                               ed_video_t* out,
                                               std::string* error) {
+    MiniMaxH3Profile profile;
+    MiniMaxH3Profile* profile_ptr = h3_profile_enabled() ? &profile : nullptr;
+    const int64_t generation_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
     if (out == nullptr || params == nullptr) {
         set_minimax_error(error, "MiniMax-H3 video parameters or output are null");
         return ED_STATUS_INVALID_ARGUMENT;
@@ -590,32 +1157,100 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         set_minimax_error(error, "MiniMax-H3 Ref2VA reference arrays are invalid");
         return ED_STATUS_INVALID_ARGUMENT;
     }
+    if (params->ref_audio_count > 0 && params->ref_image_count == 0 && params->ref_video_count == 0) {
+        set_minimax_error(error, "MiniMax-H3 Ref2VA audio references must be paired with at least one image or video reference");
+        return ED_STATUS_INVALID_ARGUMENT;
+    }
+    for (int image_index = 0; image_index < params->ref_image_count; ++image_index) {
+        if (!h3_reference_aspect_ratio_supported(params->ref_images[image_index])) {
+            set_minimax_error(error, "MiniMax-H3 Ref2VA reference images must have a positive size and an aspect ratio from 1:4 to 4:1");
+            return ED_STATUS_INVALID_ARGUMENT;
+        }
+    }
+    for (int video_index = 0; video_index < params->ref_video_count; ++video_index) {
+        const ed_ref_video_t& reference = params->ref_videos[video_index];
+        if (reference.frames == nullptr || reference.frame_count <= 0 ||
+            !h3_reference_aspect_ratio_supported(reference.frames[0])) {
+            set_minimax_error(error, "MiniMax-H3 Ref2VA reference videos must have frames with a positive size and an aspect ratio from 1:4 to 4:1");
+            return ED_STATUS_INVALID_ARGUMENT;
+        }
+    }
+    const int64_t resolved_seed = h3_resolve_seed(params->seed);
     sd::Tensor<float> context;
     sd::Tensor<int32_t> token_tags;
-    if (!build_text_context(params->prompt, params->ref_images, params->ref_image_count, params->ref_videos, params->ref_video_count, params->ref_audio_count, frames, &context, &token_tags, error)) return ED_STATUS_GENERATION_FAILED;
+    const int64_t cond_context_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
+    if (!build_text_context(params->prompt,
+                            params->init_image,
+                            params->end_image,
+                            params->width,
+                            params->height,
+                            params->ref_images,
+                            params->ref_image_count,
+                            params->ref_videos,
+                            params->ref_video_count,
+                            params->ref_audio_count,
+                            frames,
+                            &context,
+                            &token_tags,
+                            profile_ptr,
+                            error)) return ED_STATUS_GENERATION_FAILED;
+    if (profile_ptr != nullptr) profile.cond_context_ms = ggml_time_ms() - cond_context_begin;
+    if (!h3_text_debug_target().empty()) {
+        set_minimax_error(error, "MiniMax-H3 text debug target completed");
+        return ED_STATUS_GENERATION_FAILED;
+    }
+    const float cfg_scale = params->sample.cfg_scale;
+    const bool use_cfg = cfg_scale != 1.0f;
+    sd::Tensor<float> uncond_context;
+    sd::Tensor<int32_t> uncond_token_tags;
+    const int64_t uncond_context_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
+    if (use_cfg && !build_text_context(params->negative_prompt,
+                                       params->init_image,
+                                       params->end_image,
+                                       params->width,
+                                       params->height,
+                                       params->ref_images,
+                                       params->ref_image_count,
+                                       params->ref_videos,
+                                       params->ref_video_count,
+                                       params->ref_audio_count,
+                                       frames,
+                                       &uncond_context,
+                                       &uncond_token_tags,
+                                       profile_ptr,
+                                       error)) {
+        return ED_STATUS_GENERATION_FAILED;
+    }
+    if (profile_ptr != nullptr && use_cfg) profile.uncond_context_ms = ggml_time_ms() - uncond_context_begin;
     const int latent_frames = frames <= 5 ? 2 : ((frames - 5) / 17) * 5 + 2;
     const int audio_length = std::max(1, static_cast<int>(std::lround(static_cast<double>(frames) * 40.0 / 24.0)));
     const int latent_width = params->width / 16;
     const int latent_height = params->height / 16;
     std::vector<sd::Tensor<float>> keyframe_latents;
     std::vector<int32_t> keyframe_indices;
+    auto request_rng = std::make_shared<PhiloxRNG>(static_cast<uint64_t>(resolved_seed));
     auto add_keyframe = [&](const ed_image_t* image, int32_t frame_index, const char* name) -> bool {
         if (image == nullptr || image->data == nullptr) {
             return true;
         }
-        sd::Tensor<float> image_tensor = h3_image_to_tensor(*image, params->width, params->height);
+        sd::Tensor<float> image_tensor = frame_index == 0
+                                             ? h3_image_to_tensor(*image, params->width, params->height)
+                                             : h3_image_to_tensor_cover_crop(*image, params->width, params->height);
         if (image_tensor.empty()) {
             return set_minimax_error(error, "MiniMax-H3 keyframe image is invalid");
         }
         sd::Tensor<float> video_image = image_tensor.reshape({params->width, params->height, 1, 3, 1});
-        sd::Tensor<float> vae_latent = vae_->encode(runtime_->n_threads(), video_image, runtime_->vae_tiling());
+        const int64_t vae_encode_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
+        sd::Tensor<float> vae_latent = h3_encode_vae_condition(vae_.get(),
+                                                               runtime_->n_threads(),
+                                                               video_image,
+                                                               h3_vae_tiling(*runtime_));
+        if (profile_ptr != nullptr) profile.keyframe_vae_encode_ms += ggml_time_ms() - vae_encode_begin;
         if (vae_latent.empty()) {
             return set_minimax_error(error, "MiniMax-H3 keyframe VAE encode failed");
         }
         sd::Tensor<float> latent = vae_->vae_to_diffusion_latents(vae_latent);
-        auto condition_rng = std::make_shared<PhiloxRNG>(static_cast<uint64_t>(h3_resolve_seed(params->seed)));
-        latent = latent * MiniMaxH3::VISUAL_COND_TIMESTEP +
-                 sd::randn_like<float>(latent, condition_rng) * (1.0f - MiniMaxH3::VISUAL_COND_TIMESTEP);
+        h3_apply_condition_noise(&latent, static_cast<uint64_t>(resolved_seed));
         h3_trace_tensor((std::string(name) + "_keyframe_latent").c_str(), latent);
         keyframe_latents.push_back(std::move(latent));
         keyframe_indices.push_back(frame_index);
@@ -630,6 +1265,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
     std::vector<MiniMaxH3ReferenceBlock> reference_blocks;
     auto encode_reference_audio = [&](const ed_audio_t& source, int32_t* index) -> bool {
         if (audio_vae_ == nullptr || source.data == nullptr || source.sample_count == 0 || source.channels == 0 || source.sample_rate == 0) return false;
+        const int64_t prepare_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
         const uint64_t samples = std::max<uint64_t>(1, (source.sample_count * 32000ULL + source.sample_rate / 2) / source.sample_rate);
         sd::Tensor<float> waveform({static_cast<int64_t>(((samples + 799) / 800) * 800), 2, 1, 1});
         for (uint64_t sample = 0; sample < samples; ++sample) {
@@ -644,7 +1280,10 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
                 waveform.index(sample, channel, 0, 0) = std::clamp(a + (b - a) * fraction, -1.f, 1.f);
             }
         }
+        if (profile_ptr != nullptr) profile.reference_audio_prepare_ms += ggml_time_ms() - prepare_begin;
+        const int64_t vae_encode_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
         auto encoded = audio_vae_->encode(runtime_->n_threads(), waveform);
+        if (profile_ptr != nullptr) profile.reference_audio_vae_encode_ms += ggml_time_ms() - vae_encode_begin;
         if (encoded.empty()) return false;
         *index = static_cast<int32_t>(reference_audio_latents.size());
         reference_audio_latents.push_back(std::move(encoded));
@@ -652,26 +1291,31 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
     };
     for (int reference_index = 0; reference_index < params->ref_image_count; ++reference_index) {
         const ed_image_t& source_image = params->ref_images[reference_index];
-        const double source_area = static_cast<double>(source_image.width) * source_image.height;
-        const double target_area = static_cast<double>(params->width) * params->height;
-        const double scale = std::min(1.0, std::sqrt(target_area / source_area));
-        const int reference_width = std::max(32, static_cast<int>(std::round(source_image.width * scale / 32.0)) * 32);
-        const int reference_height = std::max(32, static_cast<int>(std::round(source_image.height * scale / 32.0)) * 32);
+        if (source_image.width <= 0 || source_image.height <= 0) {
+            set_minimax_error(error, "MiniMax-H3 Ref2VA image reference is invalid");
+            return ED_STATUS_INVALID_ARGUMENT;
+        }
+        int reference_width = 0;
+        int reference_height = 0;
+        h3_reference_image_dimensions(source_image, &reference_width, &reference_height);
         sd::Tensor<float> image_tensor = h3_image_to_tensor(source_image, reference_width, reference_height);
         if (image_tensor.empty()) {
             set_minimax_error(error, "MiniMax-H3 Ref2VA image reference is invalid");
             return ED_STATUS_INVALID_ARGUMENT;
         }
         sd::Tensor<float> video_image = image_tensor.reshape({reference_width, reference_height, 1, 3, 1});
-        sd::Tensor<float> vae_latent = vae_->encode(runtime_->n_threads(), video_image, runtime_->vae_tiling());
+        const int64_t vae_encode_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
+        sd::Tensor<float> vae_latent = h3_encode_vae_condition(vae_.get(),
+                                                               runtime_->n_threads(),
+                                                               video_image,
+                                                               h3_vae_tiling(*runtime_));
+        if (profile_ptr != nullptr) profile.reference_video_vae_encode_ms += ggml_time_ms() - vae_encode_begin;
         if (vae_latent.empty()) {
             set_minimax_error(error, "MiniMax-H3 Ref2VA image VAE encode failed");
             return ED_STATUS_GENERATION_FAILED;
         }
         sd::Tensor<float> latent = vae_->vae_to_diffusion_latents(vae_latent);
-        auto condition_rng = std::make_shared<PhiloxRNG>(static_cast<uint64_t>(h3_resolve_seed(params->seed)));
-        latent = latent * MiniMaxH3::VISUAL_COND_TIMESTEP +
-                 sd::randn_like<float>(latent, condition_rng) * (1.0f - MiniMaxH3::VISUAL_COND_TIMESTEP);
+        h3_apply_condition_noise(&latent, static_cast<uint64_t>(resolved_seed));
         h3_trace_tensor(("ref_image_" + std::to_string(reference_index) + "_latent").c_str(), latent);
         const int32_t encoded_image_index = static_cast<int32_t>(reference_latents.size());
         reference_latents.push_back(std::move(latent));
@@ -694,6 +1338,15 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         int reference_width = 0;
         int reference_height = 0;
         h3_reference_video_dimensions(reference.frames[0], &reference_width, &reference_height);
+        if (h3_trace_enabled()) {
+            LOG_INFO("MiniMax-H3 Ref2VA video %d VAE geometry: source=%dx%d normalized=%dx%d frames=%d",
+                     video_index + 1,
+                     reference.frames[0].width,
+                     reference.frames[0].height,
+                     reference_width,
+                     reference_height,
+                     normalized_frames);
+        }
         sd::Tensor<float> video_reference({reference_width, reference_height, normalized_frames, 3, 1});
         for (int frame = 0; frame < normalized_frames; ++frame) {
             const int source_index = std::min(reference.frame_count - 1, static_cast<int>(std::floor(frame * source_fps / 24.0)));
@@ -707,15 +1360,20 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
                 }
             }
         }
-        auto vae_latent = vae_->encode(runtime_->n_threads(), video_reference, runtime_->vae_tiling());
+        const int64_t vae_encode_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
+        auto vae_latent = h3_encode_vae_condition(vae_.get(),
+                                                  runtime_->n_threads(),
+                                                  video_reference,
+                                                  h3_vae_tiling(*runtime_));
+        if (profile_ptr != nullptr) profile.reference_video_vae_encode_ms += ggml_time_ms() - vae_encode_begin;
         if (vae_latent.empty()) { set_minimax_error(error, "MiniMax-H3 Ref2VA video VAE encode failed"); return ED_STATUS_GENERATION_FAILED; }
         int32_t audio_index = -1;
         if (reference.audio.data != nullptr && reference.audio.sample_count > 0 && !encode_reference_audio(reference.audio, &audio_index)) {
             set_minimax_error(error, "MiniMax-H3 Ref2VA video audio encode failed"); return ED_STATUS_GENERATION_FAILED;
         }
         auto latent = vae_->vae_to_diffusion_latents(vae_latent);
-        auto condition_rng = std::make_shared<PhiloxRNG>(static_cast<uint64_t>(h3_resolve_seed(params->seed)));
-        latent = latent * MiniMaxH3::VISUAL_COND_TIMESTEP + sd::randn_like<float>(latent, condition_rng) * (1.0f - MiniMaxH3::VISUAL_COND_TIMESTEP);
+        h3_apply_condition_noise(&latent, static_cast<uint64_t>(resolved_seed));
+        h3_trace_tensor(("ref_video_" + std::to_string(video_index) + "_latent").c_str(), latent);
         const int32_t encoded_video_index = static_cast<int32_t>(reference_latents.size());
         reference_latents.push_back(std::move(latent));
         reference_blocks.push_back({audio_index >= 0 ? MiniMaxH3ReferenceKind::VIDEO_AUDIO : MiniMaxH3ReferenceKind::VIDEO, encoded_video_index, audio_index});
@@ -728,18 +1386,62 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         }
         reference_blocks.push_back({MiniMaxH3ReferenceKind::AUDIO, -1, encoded_index});
     }
+    if (h3_condition_debug_exit_enabled()) {
+        if (profile_ptr != nullptr) {
+            profile.total_ms = ggml_time_ms() - generation_begin;
+            profile.log();
+            LOG_INFO("minimax-h3 conditioning debug profile: context=%lld ms tokenize=%lld ms text-encode=%lld ms ref-visual-vae-encode=%lld ms ref-audio-vae-encode=%lld ms",
+                     static_cast<long long>(profile.cond_context_ms),
+                     static_cast<long long>(profile.text_tokenize_ms),
+                     static_cast<long long>(profile.text_encode_ms),
+                     static_cast<long long>(profile.reference_video_vae_encode_ms),
+                     static_cast<long long>(profile.reference_audio_vae_encode_ms));
+        }
+        set_minimax_error(error, "MiniMax-H3 conditioning debug completed");
+        return ED_STATUS_GENERATION_FAILED;
+    }
     sd::Tensor<float> video = sd::zeros<float>({latent_width, latent_height, latent_frames, 24, 1});
     sd::Tensor<float> audio = sd::zeros<float>({audio_length, 2, 32, 1});
+    const int64_t noise_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
+    video = sd::randn_like<float>(video, request_rng);
+    audio = sd::randn_like<float>(audio, request_rng);
     sd::Tensor<float> packed = h3_pack_audio_and_video_latents(video, audio);
-    auto rng = std::make_shared<PhiloxRNG>(static_cast<uint64_t>(h3_resolve_seed(params->seed)));
-    packed = sd::randn_like<float>(packed, rng);
+    if (profile_ptr != nullptr) profile.noise_init_ms = ggml_time_ms() - noise_begin;
     h3_trace_tensor("initial_packed_noise", packed);
+    if (h3_trace_enabled()) {
+        auto reference_kind_name = [](MiniMaxH3ReferenceKind kind) {
+            switch (kind) {
+                case MiniMaxH3ReferenceKind::IMAGE: return "image";
+                case MiniMaxH3ReferenceKind::VIDEO: return "video";
+                case MiniMaxH3ReferenceKind::VIDEO_AUDIO: return "video_audio";
+                case MiniMaxH3ReferenceKind::AUDIO: return "audio";
+            }
+            return "unknown";
+        };
+        std::ostringstream blocks;
+        for (size_t index = 0; index < reference_blocks.size(); ++index) {
+            const auto& block = reference_blocks[index];
+            if (index > 0) {
+                blocks << ";";
+            }
+            blocks << index << ":" << reference_kind_name(block.kind)
+                   << "(v=" << block.video_index
+                   << ",a=" << block.audio_index << ")";
+        }
+        LOG_INFO("minimax-h3 trace reference summary: video_latents=%zu audio_latents=%zu blocks=%zu [%s]",
+                 reference_latents.size(),
+                 reference_audio_latents.size(),
+                 reference_blocks.size(),
+                 blocks.str().c_str());
+    }
     const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
     const float video_sigma_shift = params->sample.flow_shift > 0.0f ? params->sample.flow_shift : 12.0f;
+    // Match stable-diffusion.cpp's DiscreteScheduler + FluxFlowDenoiser: `steps`
+    // model evaluations plus a terminal sigma=0 point.
     for (int step = 0; step < steps; ++step) {
+        if (profile_ptr != nullptr) ++profile.diffusion_steps;
         const float sigma = h3_discrete_flow_sigma(step, steps, video_sigma_shift);
-        const float sigma_next = step + 1 == steps ? 0.0f
-                                                    : h3_discrete_flow_sigma(step + 1, steps, video_sigma_shift);
+        const float sigma_next = h3_discrete_flow_sigma(step + 1, steps, video_sigma_shift);
         sd::Tensor<float> timestep({1}, {sigma * 1000.0f});
         DiffusionParams diffusion_params{};
         diffusion_params.x = &packed;
@@ -758,10 +1460,40 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         diffusion_params.minimax_audio_length = audio_length;
         diffusion_params.minimax_video_sigma_shift = video_sigma_shift;
         diffusion_params.minimax_audio_sigma_shift = 3.0f;
+        const int64_t cond_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
+        ScopedEnvVar current_step_env("ED_MINIMAX_H3_CURRENT_STEP", std::to_string(step));
         sd::Tensor<float> velocity = diffusion_->compute(runtime_->n_threads(), diffusion_params);
+        if (profile_ptr != nullptr) {
+            profile.diffusion_cond_ms += ggml_time_ms() - cond_begin;
+            ++profile.diffusion_calls;
+        }
         if (velocity.empty()) {
             set_minimax_error(error, "MiniMax-H3 diffusion compute failed");
             return ED_STATUS_GENERATION_FAILED;
+        }
+        if (!h3_dit_debug_target().empty()) {
+            const std::string debug_name = "dit_" + h3_dit_debug_target();
+            h3_trace_tensor(debug_name.c_str(), velocity);
+            h3_dump_debug_tensor_if_requested(debug_name, velocity);
+            set_minimax_error(error, "MiniMax-H3 DiT debug target completed");
+            return ED_STATUS_GENERATION_FAILED;
+        }
+        if (use_cfg) {
+            diffusion_params.context = &uncond_context;
+            diffusion_params.minimax_text_token_tags = &uncond_token_tags;
+            const int64_t uncond_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
+            sd::Tensor<float> uncond_velocity = diffusion_->compute(runtime_->n_threads(), diffusion_params);
+            if (profile_ptr != nullptr) {
+                profile.diffusion_uncond_ms += ggml_time_ms() - uncond_begin;
+                ++profile.diffusion_calls;
+            }
+            if (uncond_velocity.empty()) {
+                set_minimax_error(error, "MiniMax-H3 unconditional diffusion compute failed");
+                return ED_STATUS_GENERATION_FAILED;
+            }
+            const int64_t cfg_combine_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
+            velocity = uncond_velocity + (velocity - uncond_velocity) * cfg_scale;
+            if (profile_ptr != nullptr) profile.cfg_combine_ms += ggml_time_ms() - cfg_combine_begin;
         }
         if (h3_trace_enabled()) {
             LOG_INFO("minimax-h3 trace step=%d sigma=%.8g sigma_next=%.8g", step, sigma, sigma_next);
@@ -773,13 +1505,17 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         }
     }
     auto av = diffusion_->split_av_latents(packed, audio_length);
-    ed_status_t status = decode_video_latent(av.first, frames, out, error);
+    ed_status_t status = decode_video_latent(av.first, frames, out, profile_ptr, error);
     if (status != ED_STATUS_OK) {
         return status;
     }
-    if (audio_vae_ != nullptr && !decode_audio_latent(av.second, out, error)) {
+    if (audio_vae_ != nullptr && !decode_audio_latent(av.second, out, profile_ptr, error)) {
         ed_free_video(out);
         return ED_STATUS_GENERATION_FAILED;
+    }
+    if (profile_ptr != nullptr) {
+        profile.total_ms = ggml_time_ms() - generation_begin;
+        profile.log();
     }
     return ED_STATUS_OK;
 }

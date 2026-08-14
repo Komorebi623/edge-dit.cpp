@@ -10,6 +10,7 @@ namespace edgedit::ggml_ext {
 constexpr uint32_t kAttentionVPrepCustomMagic = 0x45565050u; // "EVPP"
 constexpr uint32_t kAttentionPairPackCustomMagic = 0x45505150u; // "EPQP"
 constexpr uint32_t kAttentionQKVPairPackCustomMagic = 0x45514b50u; // "EQKP"
+constexpr uint32_t kAttentionQKVSplitPackCustomMagic = 0x45515350u; // "EQSP"
 
 struct AttentionVPrepCustomParams {
     uint32_t magic = kAttentionVPrepCustomMagic;
@@ -26,6 +27,10 @@ struct AttentionQKVPairPackCustomParams {
     int32_t n_head = 0;
 };
 
+struct AttentionQKVSplitPackCustomParams {
+    uint32_t magic = kAttentionQKVSplitPackCustomMagic;
+};
+
 inline bool attention_v_prep_enabled() {
     const char* env = std::getenv("ED_DISABLE_CUDA_ATTENTION_V_PREP");
     return !(env != nullptr && std::atoi(env) != 0);
@@ -39,6 +44,11 @@ inline bool attention_pair_pack_enabled() {
 inline bool attention_qkv_pair_pack_enabled() {
     const char* env = std::getenv("ED_DISABLE_CUDA_ATTENTION_QKV_PAIR_PACK");
     return !(env != nullptr && std::atoi(env) != 0);
+}
+
+inline bool attention_qkv_split_pack_enabled() {
+    const char* env = std::getenv("ED_MINIMAX_H3_VAE_FUSED_QKV_SPLIT");
+    return env != nullptr && std::atoi(env) != 0;
 }
 
 inline AttentionVPrepCustomParams attention_v_prep_params_from_userdata(void* userdata) {
@@ -83,6 +93,17 @@ inline void* attention_qkv_pair_pack_params_to_userdata(int64_t n_head) {
     return reinterpret_cast<void*>(packed);
 }
 
+inline AttentionQKVSplitPackCustomParams attention_qkv_split_pack_params_from_userdata(void* userdata) {
+    AttentionQKVSplitPackCustomParams params;
+    uintptr_t packed = reinterpret_cast<uintptr_t>(userdata);
+    params.magic = static_cast<uint32_t>(packed & 0xffffffffu);
+    return params;
+}
+
+inline void* attention_qkv_split_pack_params_to_userdata() {
+    return reinterpret_cast<void*>(static_cast<uintptr_t>(kAttentionQKVSplitPackCustomMagic));
+}
+
 inline bool attention_v_prep_params_valid(const AttentionVPrepCustomParams& params) {
     return params.magic == kAttentionVPrepCustomMagic &&
            (params.v_is_seq_major == 0 || params.v_is_seq_major == 1);
@@ -94,6 +115,10 @@ inline bool attention_pair_pack_params_valid(const AttentionPairPackCustomParams
 
 inline bool attention_qkv_pair_pack_params_valid(const AttentionQKVPairPackCustomParams& params) {
     return params.magic == kAttentionQKVPairPackCustomMagic && params.n_head > 0;
+}
+
+inline bool attention_qkv_split_pack_params_valid(const AttentionQKVSplitPackCustomParams& params) {
+    return params.magic == kAttentionQKVSplitPackCustomMagic;
 }
 
 inline float attention_tensor_f32_at(const ggml_tensor* t, int64_t i0, int64_t i1, int64_t i2, int64_t i3) {
@@ -174,6 +199,71 @@ inline bool attention_qkv_pair_pack_shape_supported(const ggml_tensor* q_first,
         return false;
     }
     return true;
+}
+
+inline bool attention_qkv_split_pack_shape_supported(const ggml_tensor* qkv) {
+    if (!attention_qkv_split_pack_enabled() || qkv == nullptr || qkv->type != GGML_TYPE_F32) {
+        return false;
+    }
+    if (qkv->ne[0] <= 0 || qkv->ne[1] <= 0 || qkv->ne[2] <= 0 || qkv->ne[3] <= 0) {
+        return false;
+    }
+    return qkv->ne[0] % 3 == 0;
+}
+
+inline void attention_qkv_split_pack_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdata) {
+    const AttentionQKVSplitPackCustomParams params = attention_qkv_split_pack_params_from_userdata(userdata);
+    GGML_ASSERT(attention_qkv_split_pack_params_valid(params));
+    GGML_ASSERT(dst->src[0] != nullptr);
+    const ggml_tensor* qkv = dst->src[0];
+    GGML_ASSERT(attention_qkv_split_pack_shape_supported(qkv));
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    const int64_t head_dim = qkv->ne[0] / 3;
+    const int64_t n_head = qkv->ne[1];
+    const int64_t seq = qkv->ne[2];
+    const int64_t batch = qkv->ne[3];
+    GGML_ASSERT(dst->ne[0] == head_dim && dst->ne[1] == n_head && dst->ne[2] == seq && dst->ne[3] == batch * 3);
+
+    const int64_t total = 3 * batch * seq * n_head * head_dim;
+    for (int64_t idx = ith; idx < total; idx += nth) {
+        int64_t t = idx;
+        const int64_t d = t % head_dim;
+        t /= head_dim;
+        const int64_t h = t % n_head;
+        t /= n_head;
+        const int64_t s = t % seq;
+        t /= seq;
+        const int64_t b = t % batch;
+        t /= batch;
+        const int64_t plane = t;
+
+        const float value = attention_tensor_f32_at(qkv, d + plane * head_dim, h, s, b);
+        char* base = static_cast<char*>(dst->data);
+        char* ptr = base + d * dst->nb[0] + h * dst->nb[1] + s * dst->nb[2] + (b + plane * batch) * dst->nb[3];
+        *reinterpret_cast<float*>(ptr) = value;
+    }
+}
+
+inline ggml_tensor* attention_qkv_split_pack_custom_f32(ggml_context* ctx, ggml_tensor* qkv) {
+    if (!attention_qkv_split_pack_shape_supported(qkv)) {
+        return nullptr;
+    }
+    ggml_tensor* args[] = { qkv };
+    const int64_t head_dim = qkv->ne[0] / 3;
+    ggml_tensor* out = ggml_custom_4d(ctx,
+                                      GGML_TYPE_F32,
+                                      head_dim,
+                                      qkv->ne[1],
+                                      qkv->ne[2],
+                                      qkv->ne[3] * 3,
+                                      args,
+                                      1,
+                                      attention_qkv_split_pack_cpu_custom_op,
+                                      GGML_N_TASKS_MAX,
+                                      attention_qkv_split_pack_params_to_userdata());
+    ggml_set_name(out, "ed_fused_attention_qkv_split_pack_f32");
+    return out;
 }
 
 inline void attention_v_prep_cpu_custom_op(ggml_tensor* dst, int ith, int nth, void* userdata) {

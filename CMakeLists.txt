@@ -29,6 +29,7 @@ option(ED_ENABLE_CUDNN_SDPA "Enable experimental cuDNN SDPA backend for CUDA fla
 option(ED_ENABLE_CUDA_NORM "Enable edge CUDA norm fast paths for ggml CUDA backend" ON)
 option(ED_ENABLE_CUDA_ROPE "Enable edge CUDA RoPE fast paths for ggml CUDA backend" ON)
 option(ED_ENABLE_CUDA_MODULATION "Enable edge CUDA fused modulation fast paths for ggml CUDA backend" ON)
+option(ED_ENABLE_CUDA_GRAPHS "Compile CUDA Graph support for opt-in edge inference" ON)
 option(ED_ENABLE_CUDA_SAGE_ATTN "Enable SageAttention2-style INT8-QK + F16-PV fused attention for ggml CUDA backend" OFF)
 option(ED_ENABLE_PARALLEL "Enable edge-dit lightweight parallel runtime" OFF)
 option(ED_ENABLE_NCCL "Enable NCCL communication backend" OFF)
@@ -254,6 +255,9 @@ if(ED_ENABLE_CUDA_MODULATION AND ED_GGML_CUDA)
 endif()
 
 if(ED_GGML_CUDA)
+    if(ED_ENABLE_CUDA_GRAPHS)
+        set(GGML_CUDA_GRAPHS ON CACHE BOOL "ggml: use CUDA graphs" FORCE)
+    endif()
     find_package(CUDAToolkit REQUIRED)
     target_sources(ggml-cuda
         PRIVATE
@@ -291,9 +295,10 @@ if(ED_ENABLE_CUDNN_SDPA)
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/cuDNN/ed_cudnn_conv2d.cu
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/cuDNN/ed_cudnn_conv3d.cu
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/cuDNN/ed_cudnn_conv_transpose_1d.cu
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/cuDNN/ed_cudnn_sdpa.cu
     )
-    target_compile_definitions(ggml-cuda PRIVATE ED_ENABLE_CUDNN_SDPA ED_ENABLE_CUDNN_CONV2D ED_ENABLE_CUDNN_CONV3D)
+    target_compile_definitions(ggml-cuda PRIVATE ED_ENABLE_CUDNN_SDPA ED_ENABLE_CUDNN_CONV2D ED_ENABLE_CUDNN_CONV3D ED_ENABLE_CUDNN_CONV_TRANSPOSE_1D)
     target_include_directories(ggml-cuda
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/cuDNN
@@ -391,7 +396,7 @@ target_compile_definitions(edgedit
 )
 
 if(ED_ENABLE_CUDNN_SDPA)
-    target_compile_definitions(edgedit PRIVATE ED_ENABLE_CUDNN_SDPA ED_ENABLE_CUDNN_CONV2D ED_ENABLE_CUDNN_CONV3D)
+    target_compile_definitions(edgedit PRIVATE ED_ENABLE_CUDNN_SDPA ED_ENABLE_CUDNN_CONV2D ED_ENABLE_CUDNN_CONV3D ED_ENABLE_CUDNN_CONV_TRANSPOSE_1D)
 endif()
 
 if(ED_ENABLE_CUDA_MODULATION AND ED_GGML_CUDA)

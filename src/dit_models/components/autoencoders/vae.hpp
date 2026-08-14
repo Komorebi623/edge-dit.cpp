@@ -126,7 +126,8 @@ public:
             int64_t H              = input.shape()[1] / scale_factor;
             float tile_overlap;
             int tile_size_x, tile_size_y;
-            get_tile_sizes(tile_size_x, tile_size_y, tile_overlap, tiling_params, W, H, 1.30539f);
+            const float encode_tile_factor = version == VERSION_MINIMAX_H3 ? 1.0f : 1.30539f;
+            get_tile_sizes(tile_size_x, tile_size_y, tile_overlap, tiling_params, W, H, encode_tile_factor);
             LOG_DEBUG("VAE Tile size: %dx%d", tile_size_x, tile_size_y);
             output = tiled_compute(input,
                                    n_threads,

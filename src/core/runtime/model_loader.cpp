@@ -337,7 +337,8 @@ static SDVersion infer_transformer_file_version(const std::string& file_path) {
     if (contains(lower_normalized, "kontext")) {
         return VERSION_FLUX_KONTEXT;
     }
-    if (!contains(normalized, "/transformer/")) {
+    if (!contains(normalized, "/transformer/") &&
+        !contains(normalized, "/transformer_ref/")) {
         return VERSION_COUNT;
     }
 
@@ -370,6 +371,9 @@ static SDVersion infer_transformer_file_version(const std::string& file_path) {
         }
         if (contains(klass, "Wan")) {
             return VERSION_WAN2;
+        }
+        if (contains(klass, "MiniMaxH3") || contains(klass, "MiniMax-H3")) {
+            return VERSION_MINIMAX_H3;
         }
     }
 
@@ -447,6 +451,9 @@ static SDVersion infer_diffusers_version(const std::string& dir_path) {
             const std::string klass = index["_class_name"].get<std::string>();
             if (contains(klass, "Wan")) {
                 return VERSION_WAN2;
+            }
+            if (contains(klass, "MiniMaxH3") || contains(klass, "MiniMax-H3")) {
+                return VERSION_MINIMAX_H3;
             }
             if (contains(klass, "QwenImageEdit") || contains(klass, "Qwen Image Edit")) {
                 return VERSION_QWEN_IMAGE_EDIT;
@@ -1074,6 +1081,10 @@ std::string ModelLoader::resolve_bare_transformer_prefix(const std::string& reso
         version_ = contains(lower_name, "kontext") ? VERSION_FLUX_KONTEXT : VERSION_FLUX;
         return "transformer.";
     }
+    if (contains(lower_name, "minimax_h3") || contains(lower_name, "minimax-h3")) {
+        version_ = VERSION_MINIMAX_H3;
+        return prefix;
+    }
 
     // A bare diffusers transformer file/shard-index (…/transformer/…) carries no
     // top-level config, so get_ld_version() -- which keys on canonical names --
@@ -1143,12 +1154,16 @@ bool ModelLoader::init_from_file(const std::string& file_path, const std::string
 }
 
 void ModelLoader::convert_tensors_name() {
-    SDVersion version = (version_ == VERSION_COUNT) ? get_ld_version() : version_;
+    if (version_ == VERSION_COUNT) {
+        version_ = get_ld_version();
+    }
+    SDVersion version = version_;
     if (version == VERSION_COUNT) {
         LOG_WARN("model version is unknown; tensor names are left mostly unchanged");
     }
 
     String2TensorStorage new_map;
+    size_t swiglu_half_swaps = 0;
     for (auto& item : tensor_storage_map_) {
         TensorStorage tensor_storage = item.second;
         const std::string original_name = tensor_storage.name;
@@ -1160,9 +1175,17 @@ void ModelLoader::convert_tensors_name() {
             contains(original_name, "norm_out.linear.")) {
             tensor_storage.swap_scale_shift = true;
         }
+        if (ed_version_is_minimax_h3(version) &&
+            contains(original_name, ".ff.net.0.proj.")) {
+            tensor_storage.swap_swiglu_halves = true;
+            ++swiglu_half_swaps;
+        }
         new_map[tensor_storage.name] = std::move(tensor_storage);
     }
     tensor_storage_map_.swap(new_map);
+    if (swiglu_half_swaps > 0) {
+        LOG_DEBUG("marked %zu MiniMax-H3 diffusers SwiGLU tensors for half swap", swiglu_half_swaps);
+    }
 }
 
 bool ModelLoader::init_from_file_and_convert_name(const std::string& file_path, const std::string& prefix, SDVersion version) {
@@ -1449,6 +1472,8 @@ SDVersion ModelLoader::get_ld_version() {
     bool has_transformer_blocks = false;
     bool has_unet = false;
     bool has_second_text_encoder = false;
+    bool has_qwen3_vl_language = false;
+    bool has_qwen3_vl_vision = false;
     bool has_flux2 = false;
     bool has_single_block_47 = false;
 
@@ -1466,6 +1491,14 @@ SDVersion ModelLoader::get_ld_version() {
         if (contains(name, "model.diffusion_model.video_patch_proj.weight") &&
             tensor_storage_map_.find("model.diffusion_model.audio_patch_proj.weight") != tensor_storage_map_.end()) {
             return VERSION_MINIMAX_H3;
+        }
+        if (contains(name, "model.language_model.layers.") ||
+            contains(name, "text_encoders.llm.model.language_model.layers.")) {
+            has_qwen3_vl_language = true;
+        }
+        if (contains(name, "model.visual.blocks.") ||
+            contains(name, "text_encoders.llm.model.visual.blocks.")) {
+            has_qwen3_vl_vision = true;
         }
         // Wan video DiT: blocks carry a cross_attn sub-module (text conditioning)
         // that no other supported architecture uses, and a 3-D patch_embedding.
@@ -1519,6 +1552,9 @@ SDVersion ModelLoader::get_ld_version() {
             return VERSION_FLUX_CONTROLS;
         }
         return VERSION_FLUX;
+    }
+    if (has_qwen3_vl_language && has_qwen3_vl_vision) {
+        return VERSION_MINIMAX_H3;
     }
     if (has_unet && has_second_text_encoder) {
         return VERSION_SDXL;
@@ -1804,6 +1840,19 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_thread
                         i64_to_i32_vec(reinterpret_cast<int64_t*>(read_buf), reinterpret_cast<int32_t*>(target_buf), tensor_storage.nelements());
                     }
 
+                    if (tensor_storage.swap_swiglu_halves) {
+                        const size_t total = static_cast<size_t>(tensor_storage.nbytes());
+                        if (total % 2 == 0 && target_buf != nullptr) {
+                            const size_t half = total / 2;
+                            std::vector<uint8_t> tmp(target_buf, target_buf + half);
+                            std::memmove(target_buf, target_buf + half, half);
+                            std::memcpy(target_buf + half, tmp.data(), half);
+                        } else {
+                            LOG_WARN("tensor half swap skipped for '%s': odd byte size %zu",
+                                     tensor_storage.name.c_str(), total);
+                        }
+                    }
+
                     if (tensor_storage.type != dst_tensor->type) {
                         if (convert_buf == nullptr) {
                             failed = true;
@@ -1989,6 +2038,16 @@ bool ModelLoader::load_tensors(std::map<std::string, ggml_tensor*>& tensors,
 
     for (const auto& item : tensors) {
         if (starts_with(item.first, "__ed_")) {
+            continue;
+        }
+        bool ignored = false;
+        for (const std::string& ignore_tensor : ignore_tensors) {
+            if (starts_with(item.first, ignore_tensor)) {
+                ignored = true;
+                break;
+            }
+        }
+        if (ignored) {
             continue;
         }
         if (tensor_names_in_file.find(item.first) == tensor_names_in_file.end()) {

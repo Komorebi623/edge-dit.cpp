@@ -74,6 +74,7 @@ void print_usage(const char* prog) {
         "  --image <path>            Input/reference image for image-editing models\n"
         "  --video, -M vid_gen       Generate video frames (calls ed_generate_video; writes .avi)\n"
         "  --frames, --video-frames <int>  Video frame count (with --video). Default 1\n"
+        "  --video-duration <seconds>  MiniMax-H3 duration; aligns to 17k+5 frames\n"
         "  --fps <int>               Video fps (with --video). Default 16\n"
         "  --start_index <int>       First prompt index (inclusive). Default 0\n"
         "  --end_index <int>         Last prompt index (exclusive). Default all\n"
@@ -578,6 +579,28 @@ int main(int argc, char** argv) {
     }
     const double load_seconds = std::chrono::duration<double>(load_t1 - load_t0).count();
     const bool is_root = ed_context_parallel_is_root(ctx);
+    int output_fps = args.fps;
+    const char* pipeline_name = ed_context_pipeline_name(ctx);
+    const bool is_minimax_h3 = pipeline_name != nullptr && std::strcmp(pipeline_name, "minimax-h3") == 0;
+    if (args.video && args.video_duration_explicit && !is_minimax_h3) {
+        std::fprintf(stderr, "--video-duration is currently supported only by MiniMax-H3\n");
+        ed_free_context(ctx);
+        return 1;
+    }
+    if (args.video && is_minimax_h3 && output_fps != 24) {
+        std::fprintf(stderr, "MiniMax-H3 uses 24 fps; overriding requested fps %d\n", output_fps);
+        output_fps = 24;
+    }
+    const int generation_frames = resolve_video_frames(args, is_minimax_h3);
+    if (args.video && args.video_duration_explicit) {
+        std::fprintf(stderr,
+                     "video duration %.3fs resolved to %d frames (%.3fs at %d fps)%s\n",
+                     args.video_duration,
+                     generation_frames,
+                     static_cast<double>(generation_frames) / output_fps,
+                     output_fps,
+                     is_minimax_h3 ? "; MiniMax-H3 requires 17k+5 frames" : "");
+    }
 
     if (is_root) {
         std::printf("=== ed-sample ===\n");
@@ -632,7 +655,7 @@ int main(int argc, char** argv) {
                 }
                 vgen.width = args.width;
                 vgen.height = args.height;
-                vgen.frames = args.frames;
+                vgen.frames = generation_frames;
                 vgen.seed = seed;
                 vgen.sample.sampler = ED_SAMPLER_AUTO;
                 vgen.sample.scheduler = ED_SCHEDULER_AUTO;
@@ -723,7 +746,7 @@ int main(int argc, char** argv) {
                 }
                 std::snprintf(fname, sizeof(fname), "vid_%06d.avi", idx);
                 save_ok = save_mjpg_avi((out_path / fname).string().c_str(),
-                                        video_output, args.fps, 95);
+                                        video_output, output_fps, 95);
             } else {
                 if (output.count <= 0 || output.images == nullptr) {
                     std::fprintf(stderr, "empty output for prompt %d\n", idx);

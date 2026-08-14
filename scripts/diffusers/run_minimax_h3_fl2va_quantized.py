@@ -1,0 +1,410 @@
+#!/usr/bin/env python3
+"""Run official Diffusers MiniMax-H3 FL2VA with TorchAO weight-only quantization."""
+
+import argparse
+import inspect
+import json
+import time
+from pathlib import Path
+
+import torch
+from diffusers import MiniMaxH3Transformer3DModel, ModularPipeline, TorchAoConfig
+from diffusers.hooks import apply_group_offloading
+from diffusers.utils import load_image
+from diffusers.utils.export_utils import encode_video
+from torchao.quantization import Int4WeightOnlyConfig, Int8WeightOnlyConfig
+from transformers import Qwen3VLForConditionalGeneration
+from transformers import TorchAoConfig as TransformersTorchAoConfig
+
+
+DEFAULT_PROMPT = (
+    "Create a smooth cinematic transition between the supplied first and last frame, "
+    "preserving the subject, lighting, and composition with natural coherent motion "
+    "and synchronized ambient audio."
+)
+
+TRANSFORMER_NOT_QUANTIZED = [
+    "proj_in",
+    "audio_proj_in",
+    "context_embedder",
+    "time_embedder",
+    "time_proj",
+    "token_refiner",
+    "norm_out",
+    "proj_out",
+    "audio_proj_out",
+]
+
+TEXT_ENCODER_NOT_QUANTIZED = [
+    "model.visual",
+    "model.language_model.embed_tokens",
+    "model.language_model.norm",
+    "lm_head",
+]
+
+
+def sync_time() -> float:
+    torch.cuda.synchronize()
+    return time.perf_counter()
+
+
+def make_quant_config(bits: int):
+    if bits == 8:
+        if "version" in inspect.signature(Int8WeightOnlyConfig).parameters:
+            return Int8WeightOnlyConfig(version=2)
+        return Int8WeightOnlyConfig()
+    if bits == 4:
+        return Int4WeightOnlyConfig(group_size=128)
+    raise ValueError(f"unsupported quantization bits: {bits}")
+
+
+def export_operator_profile(profiler, output_prefix: Path, captured_call: int) -> dict:
+    output_prefix.parent.mkdir(parents=True, exist_ok=True)
+    trace_path = output_prefix.with_suffix(".trace.json.gz")
+    summary_path = output_prefix.with_suffix(".json")
+    table_path = output_prefix.with_suffix(".txt")
+    profiler.export_chrome_trace(str(trace_path))
+    key_averages = profiler.key_averages(group_by_input_shape=True)
+    rows = []
+    for event in key_averages:
+        rows.append(
+            {
+                "key": event.key,
+                "input_shapes": event.input_shapes,
+                "count": event.count,
+                "self_cpu_time_total_us": event.self_cpu_time_total,
+                "cpu_time_total_us": event.cpu_time_total,
+                "self_cuda_time_total_us": event.self_device_time_total,
+                "cuda_time_total_us": event.device_time_total,
+                "cpu_memory_usage_bytes": event.cpu_memory_usage,
+                "cuda_memory_usage_bytes": event.device_memory_usage,
+            }
+        )
+    rows.sort(key=lambda row: row["self_cuda_time_total_us"], reverse=True)
+    summary_path.write_text(json.dumps(rows, indent=2))
+    table_path.write_text(key_averages.table(sort_by="self_cuda_time_total", row_limit=300, max_name_column_width=100))
+    return {
+        "captured_call": captured_call,
+        "summary": str(summary_path),
+        "table": str(table_path),
+        "trace": str(trace_path),
+        "self_cuda_time_total_us": sum(row["self_cuda_time_total_us"] for row in rows),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--image", type=Path, required=True)
+    parser.add_argument("--last-image", type=Path)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--prompt", default=DEFAULT_PROMPT)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--height", type=int, default=480)
+    parser.add_argument("--width", type=int, default=864)
+    parser.add_argument("--num-frames", type=int, default=124)
+    parser.add_argument("--steps", type=int, default=20)
+    parser.add_argument("--bits", type=int, choices=(4, 8), default=8)
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--no-stream-offload", action="store_true")
+    parser.add_argument("--resident", action="store_true", help="keep quantized components resident on the CUDA device")
+    parser.add_argument("--profile-transformer", action="store_true", help="synchronize and time every transformer forward")
+    parser.add_argument(
+        "--profile-operators-call",
+        type=int,
+        default=0,
+        help="capture a PyTorch CPU/CUDA operator profile for this 1-based transformer forward call",
+    )
+    parser.add_argument(
+        "--profile-operators-output",
+        type=Path,
+        help="write operator key averages as JSON and a Chrome trace using this path prefix",
+    )
+    parser.add_argument(
+        "--profile-component-operators",
+        choices=("video_vae_encode", "video_vae_decode", "audio_vae_encode", "audio_vae_decode"),
+        help="capture a PyTorch CPU/CUDA operator profile for one component method call",
+    )
+    parser.add_argument(
+        "--profile-component-operators-output",
+        type=Path,
+        help="write component operator profile files using this path prefix",
+    )
+    parser.add_argument(
+        "--profile-components",
+        action="store_true",
+        help="synchronize and time text encoder and VAE encode/decode calls without changing inference results",
+    )
+    arguments = parser.parse_args()
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("MiniMax-H3 Diffusers benchmark requires CUDA")
+    if arguments.height % 32 or arguments.width % 32:
+        raise ValueError("height and width must be divisible by 32")
+
+    arguments.output.parent.mkdir(parents=True, exist_ok=True)
+    quant_config = make_quant_config(arguments.bits)
+
+    started = time.perf_counter()
+    pipeline = ModularPipeline.from_pretrained(
+        arguments.model,
+        workflow="fl2va",
+        local_files_only=True,
+    )
+    initialized = time.perf_counter()
+
+    pipeline.update_components(
+        transformer=MiniMaxH3Transformer3DModel.from_pretrained(
+            arguments.model,
+            subfolder="transformer",
+            dtype=torch.bfloat16,
+            quantization_config=TorchAoConfig(
+                quant_config,
+                modules_to_not_convert=TRANSFORMER_NOT_QUANTIZED,
+            ),
+            low_cpu_mem_usage=True,
+            local_files_only=True,
+        ),
+        text_encoder=Qwen3VLForConditionalGeneration.from_pretrained(
+            arguments.model,
+            subfolder="text_encoder",
+            dtype=torch.bfloat16,
+            quantization_config=TransformersTorchAoConfig(
+                quant_config,
+                modules_to_not_convert=TEXT_ENCODER_NOT_QUANTIZED,
+            ),
+            local_files_only=True,
+        ),
+    )
+    quantized_loaded = time.perf_counter()
+
+    pipeline.load_components(dtype=torch.bfloat16, pretrained_model_name_or_path=str(arguments.model), local_files_only=True)
+    pipeline.transformer.requires_grad_(False)
+    pipeline.text_encoder.requires_grad_(False)
+
+    device = torch.device(arguments.device)
+    if arguments.resident:
+        pipeline.transformer.to(device)
+        pipeline.text_encoder.to(device)
+        offload_summary = {
+            "transformer": str(device),
+            "text_encoder": str(device),
+            "vae": str(device),
+            "audio_vae": str(device),
+            "use_stream": False,
+        }
+    else:
+        offload = {
+            "onload_device": device,
+            "offload_device": torch.device("cpu"),
+            "use_stream": not arguments.no_stream_offload,
+            "low_cpu_mem_usage": True,
+        }
+        pipeline.transformer.enable_group_offload(offload_type="block_level", num_blocks_per_group=1, **offload)
+        apply_group_offloading(pipeline.text_encoder.model, offload_type="leaf_level", **offload)
+        offload_summary = {
+            "transformer": "block_level group offload",
+            "text_encoder": "leaf_level group offload",
+            "vae": str(device),
+            "audio_vae": str(device),
+            "use_stream": not arguments.no_stream_offload,
+        }
+    pipeline.vae.to(device)
+    pipeline.audio_vae.to(device)
+    components_ready = time.perf_counter()
+
+    transformer_profile = {"calls": 0, "seconds": 0.0}
+    transformer_profile_stack = []
+    if arguments.profile_transformer:
+        def profile_forward_pre_hook(module, args, kwargs):
+            torch.cuda.synchronize()
+            transformer_profile_stack.append(time.perf_counter())
+
+        def profile_forward_hook(module, args, kwargs, output):
+            torch.cuda.synchronize()
+            forward_started = transformer_profile_stack.pop()
+            transformer_profile["calls"] += 1
+            transformer_profile["seconds"] += time.perf_counter() - forward_started
+
+        pipeline.transformer.register_forward_pre_hook(profile_forward_pre_hook, with_kwargs=True)
+        pipeline.transformer.register_forward_hook(profile_forward_hook, with_kwargs=True)
+
+    operator_profile = {"calls": 0, "profiler": None, "captured_call": None}
+    if arguments.profile_operators_call:
+        if arguments.profile_operators_call < 1:
+            raise ValueError("--profile-operators-call must be a positive 1-based call index")
+        if arguments.profile_operators_output is None:
+            raise ValueError("--profile-operators-output is required with --profile-operators-call")
+
+        def operator_profile_pre_hook(module, args, kwargs):
+            operator_profile["calls"] += 1
+            if operator_profile["calls"] != arguments.profile_operators_call:
+                return
+            torch.cuda.synchronize(device)
+            profiler = torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=False,
+            )
+            profiler.__enter__()
+            operator_profile["profiler"] = profiler
+            operator_profile["captured_call"] = operator_profile["calls"]
+
+        def operator_profile_hook(module, args, kwargs, output):
+            profiler = operator_profile["profiler"]
+            if profiler is None:
+                return
+            torch.cuda.synchronize(device)
+            profiler.__exit__(None, None, None)
+
+        pipeline.transformer.register_forward_pre_hook(operator_profile_pre_hook, with_kwargs=True)
+        pipeline.transformer.register_forward_hook(operator_profile_hook, with_kwargs=True)
+
+    component_profile = {
+        "text_encoder": {"calls": 0, "seconds": 0.0},
+        "video_vae_encode": {"calls": 0, "seconds": 0.0},
+        "video_vae_decode": {"calls": 0, "seconds": 0.0},
+        "audio_vae_encode": {"calls": 0, "seconds": 0.0},
+        "audio_vae_decode": {"calls": 0, "seconds": 0.0},
+    }
+    component_operator_profile = {"profiler": None, "component": None}
+
+    def profile_method(component_name, method):
+        def wrapped(*args, **kwargs):
+            torch.cuda.synchronize(device)
+            started_at = time.perf_counter()
+            profiler = None
+            if arguments.profile_component_operators == component_name:
+                profiler = torch.profiler.profile(
+                    activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                    record_shapes=True,
+                    profile_memory=True,
+                    with_stack=False,
+                )
+                profiler.__enter__()
+            result = method(*args, **kwargs)
+            torch.cuda.synchronize(device)
+            if profiler is not None:
+                profiler.__exit__(None, None, None)
+                component_operator_profile["profiler"] = profiler
+                component_operator_profile["component"] = component_name
+            component_profile[component_name]["calls"] += 1
+            component_profile[component_name]["seconds"] += time.perf_counter() - started_at
+            return result
+
+        return wrapped
+
+    if arguments.profile_component_operators and arguments.profile_component_operators_output is None:
+        raise ValueError("--profile-component-operators-output is required with --profile-component-operators")
+
+    if arguments.profile_components or arguments.profile_component_operators:
+        def text_encoder_profile_pre_hook(module, args, kwargs):
+            torch.cuda.synchronize(device)
+            component_profile["text_encoder"]["started_at"] = time.perf_counter()
+
+        def text_encoder_profile_hook(module, args, kwargs, output):
+            torch.cuda.synchronize(device)
+            started_at = component_profile["text_encoder"].pop("started_at")
+            component_profile["text_encoder"]["calls"] += 1
+            component_profile["text_encoder"]["seconds"] += time.perf_counter() - started_at
+
+        pipeline.text_encoder.model.register_forward_pre_hook(text_encoder_profile_pre_hook, with_kwargs=True)
+        pipeline.text_encoder.model.register_forward_hook(text_encoder_profile_hook, with_kwargs=True)
+        pipeline.vae.encode = profile_method("video_vae_encode", pipeline.vae.encode)
+        pipeline.vae.decode = profile_method("video_vae_decode", pipeline.vae.decode)
+        pipeline.audio_vae.encode = profile_method("audio_vae_encode", pipeline.audio_vae.encode)
+        pipeline.audio_vae.decode = profile_method("audio_vae_decode", pipeline.audio_vae.decode)
+
+    first_image = load_image(str(arguments.image))
+    last_image = load_image(str(arguments.last_image)) if arguments.last_image is not None else None
+    generator = torch.Generator(device="cpu").manual_seed(arguments.seed)
+
+    torch.cuda.reset_peak_memory_stats(device)
+    sync_time()
+    generated = pipeline(
+        prompt=arguments.prompt,
+        image=first_image,
+        last_image=last_image,
+        height=arguments.height,
+        width=arguments.width,
+        num_frames=arguments.num_frames,
+        num_inference_steps=arguments.steps,
+        generator=generator,
+        output=["videos", "audio", "sampling_rate"],
+    )
+    generated_at = sync_time()
+
+    operator_profile_summary = None
+    profiler = operator_profile["profiler"]
+    if profiler is not None:
+        operator_profile_summary = export_operator_profile(
+            profiler, arguments.profile_operators_output, operator_profile["captured_call"]
+        )
+
+    component_operator_profile_summary = None
+    if component_operator_profile["profiler"] is not None:
+        component_operator_profile_summary = export_operator_profile(
+            component_operator_profile["profiler"], arguments.profile_component_operators_output, 1
+        )
+        component_operator_profile_summary["component"] = component_operator_profile["component"]
+
+    encode_video(
+        generated["videos"][0],
+        fps=24,
+        output_path=str(arguments.output),
+        audio=generated["audio"][0],
+        audio_sample_rate=generated["sampling_rate"],
+    )
+    finished = time.perf_counter()
+
+    results = {
+        "framework": "diffusers-main",
+        "workflow": "fl2va" if arguments.last_image is not None else "i2va",
+        "model": str(arguments.model),
+        "device": arguments.device,
+        "dtype": "bfloat16",
+        "quantization": {
+            "method": "TorchAO weight-only",
+            "bits": arguments.bits,
+            "transformer_quantized": True,
+            "text_encoder_quantized": True,
+            "vae_quantized": False,
+            "audio_vae_quantized": False,
+            "scheduler_quantized": False,
+            "transformer_modules_to_not_convert": TRANSFORMER_NOT_QUANTIZED,
+            "text_encoder_modules_to_not_convert": TEXT_ENCODER_NOT_QUANTIZED,
+        },
+        "offload": offload_summary,
+        "prompt": arguments.prompt,
+        "seed": arguments.seed,
+        "height": arguments.height,
+        "width": arguments.width,
+        "requested_num_frames": arguments.num_frames,
+        "num_inference_steps": arguments.steps,
+        "output": str(arguments.output),
+        "seconds": {
+            "pipeline_init": initialized - started,
+            "quantized_component_load": quantized_loaded - initialized,
+            "component_finalize": components_ready - quantized_loaded,
+            "generate_cuda": generated_at - components_ready,
+            "transformer_forward_cuda": transformer_profile["seconds"],
+            "mux": finished - generated_at,
+            "end_to_end": finished - started,
+        },
+        "transformer_forward_calls": transformer_profile["calls"],
+        "operator_profile": operator_profile_summary,
+        "component_operator_profile": component_operator_profile_summary,
+        "component_profile": component_profile if arguments.profile_components else None,
+        "memory_bytes": {
+            "max_allocated_during_generate": torch.cuda.max_memory_allocated(device),
+            "max_reserved_during_generate": torch.cuda.max_memory_reserved(device),
+        },
+    }
+    result_path = arguments.output.with_suffix(".json")
+    result_path.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps(results, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()
