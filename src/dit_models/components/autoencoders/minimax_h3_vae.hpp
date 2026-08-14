@@ -95,8 +95,27 @@ namespace MiniMaxH3VAE {
                 return value;
             };
 
-            x                = reflect_pad(x, 0, std::get<2>(temporal_padding));
-            x                = reflect_pad(x, 1, std::get<1>(temporal_padding));
+            const int spatial_pad_x = std::get<2>(temporal_padding);
+            const int spatial_pad_y = std::get<1>(temporal_padding);
+            const bool fused_reflect_supported = sd_backend_is(ctx->backend, "CUDA") ||
+                                                  ggml_backend_is_cpu(ctx->backend);
+            if ((spatial_pad_x > 0 || spatial_pad_y > 0) &&
+                fused_reflect_supported &&
+                h3_env_flag_enabled_or_default("ED_MINIMAX_H3_VAE_FUSED_REFLECT_PAD", true)) {
+                x = ggml_pad_ext_reflect(ctx->ggml_ctx,
+                                         x,
+                                         spatial_pad_x,
+                                         spatial_pad_x,
+                                         spatial_pad_y,
+                                         spatial_pad_y,
+                                         0,
+                                         0,
+                                         0,
+                                         0);
+            } else {
+                x = reflect_pad(x, 0, spatial_pad_x);
+                x = reflect_pad(x, 1, spatial_pad_y);
+            }
             int temporal_pad = std::get<0>(temporal_padding) * 2;
             if (temporal_pad > 0) {
                 x = ggml_ext_pad_ext(ctx->ggml_ctx,
@@ -124,6 +143,21 @@ namespace MiniMaxH3VAE {
                 const int64_t temporal_size = x->ne[2];
                 const int64_t batch_size    = x->ne[3] / num_channels;
                 if (batch_size == 1 && temporal_size > 1) {
+                    const bool fused_group_norm_supported = sd_backend_is(ctx->backend, "CUDA") ||
+                                                            ggml_backend_is_cpu(ctx->backend);
+                    if (fused_group_norm_supported &&
+                        h3_env_flag_enabled_or_default("ED_MINIMAX_H3_VAE_FUSED_TEMPORAL_GROUP_NORM", true)) {
+                        ggml_tensor* result = ggml_group_norm_temporal(ctx->ggml_ctx, x, num_groups, eps);
+                        if (affine) {
+                            ggml_tensor* weight = params["weight"];
+                            ggml_tensor* bias = params["bias"];
+                            weight = ggml_reshape_4d(ctx->ggml_ctx, weight, 1, 1, 1, weight->ne[0]);
+                            bias = ggml_reshape_4d(ctx->ggml_ctx, bias, 1, 1, 1, bias->ne[0]);
+                            result = ggml_mul_inplace(ctx->ggml_ctx, result, weight);
+                            result = ggml_add_inplace(ctx->ggml_ctx, result, bias);
+                        }
+                        return result;
+                    }
                     x = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 0, 1, 3, 2));
                     x = GroupNorm::forward(ctx, x);
                     return ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 0, 1, 3, 2));
@@ -711,11 +745,28 @@ namespace MiniMaxH3VAE {
 
         static sd::Tensor<float> repeat_last_frame(const sd::Tensor<float>& input,
                                                    int64_t count) {
-            auto result = input;
-            auto last   = sd::ops::slice(input, 2, input.shape()[2] - 1, input.shape()[2]);
-            for (int64_t i = 0; i < count; ++i) {
-                result = sd::ops::concat(result, last, 2);
+            if (count <= 0) {
+                return input;
             }
+            std::vector<int64_t> shape = input.shape();
+            const int64_t input_frames = shape[2];
+            shape[2] += count;
+            sd::Tensor<float> result(std::move(shape));
+            const int64_t frame_size = input.shape()[0] * input.shape()[1];
+            const int64_t input_outer_stride = frame_size * input_frames;
+            const int64_t output_outer_stride = frame_size * result.shape()[2];
+            const int64_t outer_count = input.shape()[3] * input.shape()[4];
+            sd_parallel_for(0, outer_count, 1, [&](int64_t outer) {
+                const float* source = input.values().data() + outer * input_outer_stride;
+                float* destination = result.values().data() + outer * output_outer_stride;
+                std::copy_n(source, input_outer_stride, destination);
+                const float* last_frame = source + frame_size * (input_frames - 1);
+                for (int64_t frame = 0; frame < count; ++frame) {
+                    std::copy_n(last_frame,
+                                frame_size,
+                                destination + frame_size * (input_frames + frame));
+                }
+            });
             return result;
         }
 
@@ -850,16 +901,17 @@ namespace MiniMaxH3VAE {
             if (pad > 0) {
                 input = repeat_last_frame(input, pad);
             }
-            sd::Tensor<float> result;
+            std::vector<sd::Tensor<float>> encoded_parts;
+            encoded_parts.reserve(static_cast<size_t>(input.shape()[2] / 17));
             for (int64_t start = 0; start < input.shape()[2]; start += 17) {
                 auto chunk   = sd::ops::slice(input, 2, start, start + 17);
                 auto encoded = VAE::encode(n_threads, chunk, tiling, circular_x, circular_y);
                 if (encoded.empty()) {
                     return {};
                 }
-                result = result.empty() ? std::move(encoded)
-                                        : sd::ops::concat(result, encoded, 2);
+                encoded_parts.push_back(std::move(encoded));
             }
+            sd::Tensor<float> result = concatenate_temporal_parts(encoded_parts);
             if (result.shape()[2] > 3) {
                 result = sd::ops::slice(result, 2, 0, result.shape()[2] - 3);
             }
@@ -1170,6 +1222,13 @@ namespace MiniMaxH3VAE {
                 auto mean        = make_input(pixel_mean);
                 auto std         = make_input(pixel_std);
                 auto runner_ctx  = get_context();
+                runner_ctx.conv3d_auto_direct_enabled =
+                    !decode_graph &&
+                    h3_env_flag_enabled_or_default("ED_MINIMAX_H3_VAE_ENCODER_CUDNN_CONV3D", true) &&
+                    should_use_cuda_auto_conv3d();
+                runner_ctx.conv3d_force_direct_enabled =
+                    runner_ctx.conv3d_auto_direct_enabled &&
+                    h3_env_flag_enabled_or_default("ED_MINIMAX_H3_VAE_ENCODER_CUDNN_CONV3D_ALL", true);
                 ggml_tensor* out = nullptr;
                 if (decode_graph) {
                     auto pe = make_input(rope_cache);

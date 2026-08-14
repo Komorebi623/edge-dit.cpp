@@ -1303,6 +1303,7 @@ namespace LLM {
             k = ggml_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, k, 0, 2, 1, 3));  // [N, num_kv_heads, n_token, head_dim]
             k = ggml_reshape_3d(ctx->ggml_ctx, k, k->ne[0], k->ne[1], k->ne[2] * k->ne[3]);      // [N*num_kv_heads, n_token, head_dim]
 
+            const bool use_masked_flash_attention = arch == LLMArch::QWEN3_VL && n_token >= 2048;
             x = ggml_ext_attention_ext(ctx->ggml_ctx,
                                        ctx->backend,
                                        q,
@@ -1311,7 +1312,13 @@ namespace LLM {
                                        num_heads,
                                        attention_mask,
                                        true,
-                                       false);  // [N, n_token, hidden_size]
+                                       use_masked_flash_attention,
+                                       1.0f,
+                                       true,
+                                       false,
+                                       -1,
+                                       -1,
+                                       use_masked_flash_attention);  // [N, n_token, hidden_size]
             if (diffusers_dtype &&
                 (attention_output_type == GGML_TYPE_F16 || attention_output_type == GGML_TYPE_BF16) &&
                 x->type != attention_output_type) {

@@ -128,6 +128,15 @@ When using references, write the prompt so it explicitly mentions the reference
 slots, such as `<Picture 1>`, `<Video 1>`, and `<Audio 1>`. This makes reference
 adherence easier to evaluate and avoids text-only prompts dominating the output.
 
+Reference media uses the released Diffusers preprocessing geometry independently
+of the generated `-W`/`-H` canvas. Reference images preserve their aspect ratio
+and resize to a `2048` pixel short edge. Reference videos preserve their aspect
+ratio and resolve from a `768` pixel short edge with a pre-rounding area cap of
+`768x1344`; both axes then round to multiples of `32`. Images and videos outside
+the supported `1:4` through `4:1` aspect-ratio range are rejected. Small inputs
+can therefore be upscaled substantially, which improves conditioning fidelity
+but increases Qwen3-VL and video-VAE time and peak memory.
+
 ### Reference image
 
 ```bash
@@ -237,6 +246,39 @@ tiling path. This intentionally overrides the generic `--vae-tiling` state and
 The internal override can be disabled only with the diagnostic environment
 variable `ED_MINIMAX_H3_DISABLE_FORCED_VAE_TILING=1`, which is not recommended
 for normal generation.
+
+On CUDA builds with cuDNN Conv3D, MiniMax-H3 reference encoding uses cuDNN for
+the video-VAE encoder and fuses its spatial reflect padding and temporal group
+normalization without changing the conditioning geometry. The reflect-padding
+and group-normalization paths are numerically identical to the legacy graph;
+cuDNN Conv3D can differ slightly because of floating-point reduction order. For
+diagnosis, the individual paths can be disabled with
+`ED_MINIMAX_H3_VAE_ENCODER_CUDNN_CONV3D=0`,
+`ED_MINIMAX_H3_VAE_ENCODER_CUDNN_CONV3D_ALL=0`,
+`ED_MINIMAX_H3_VAE_FUSED_REFLECT_PAD=0`, or
+`ED_MINIMAX_H3_VAE_FUSED_TEMPORAL_GROUP_NORM=0`. Contiguous causal temporal
+zero-padding uses a byte-equivalent 2D memset/copy CUDA path; set
+`ED_CUDA_PAD_TEMPORAL_COPY2D=0` to restore the elementwise padding kernel.
+
+Ref2VA multimodal presentations are assembled directly as token IDs. Visual
+placeholder tokens are no longer serialized into a large string and repeatedly
+tokenized as image and video blocks are appended. Set
+`ED_MINIMAX_H3_VERIFY_DIRECT_TOKEN_BUILD=1` to compare the direct sequence with
+the legacy tokenizer path token by token during debugging.
+
+Qwen3-VL vision FlashAttention synchronizes each long vision block before its
+temporary storage is reused. This avoids asynchronous scratch reuse changing
+the image-conditioning result and substantially reduces high-resolution image
+encoding time on H200. Set `ED_QWEN_VISION_FLASH_ATTN_SYNC=0` only for
+diagnostic comparison with the legacy path.
+
+On SM90 GPUs, long-sequence Q8_0 MiniMax-H3 FC2 projections can be routed from
+GGML MMQ to cuBLAS. This route is enabled by default after its full-video H200
+quality gate reached 50.17 dB PSNR and 0.9932 SSIM while reducing DiT time by
+7.5%. Set `GGML_CUDA_SM90_Q8_CUBLAS_FC2=0` to restore the MMQ path.
+`GGML_CUDA_SM90_Q8_CUBLAS_FC2_STEPS` and
+`GGML_CUDA_SM90_Q8_CUBLAS_FC2_LAYERS` restrict the experiment to selected
+diffusion steps or transformer layers.
 
 ## H200 performance
 
