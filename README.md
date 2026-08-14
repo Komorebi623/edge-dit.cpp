@@ -19,9 +19,9 @@ runtime for image generation, image editing, and video generation across local,
 edge, and resource-constrained deployment environments.
 
 It supports major DiT model families including **FLUX.1, FLUX.2 [klein] 4B,
-Stable Diffusion 3/3.5, Qwen-Image, and Wan**, with explicit control over model
-loading, memory usage, graph execution, quantization, device placement, and
-backend selection.
+Stable Diffusion 3/3.5, Qwen-Image, Wan, and MiniMax-H3**, with explicit control
+over model loading, memory usage, graph execution, quantization, device
+placement, and backend selection.
 
 ## Features
 
@@ -54,6 +54,7 @@ backend selection.
 
 ## Latest News
 
+- **2026-08-14:** 🚀 Added **MiniMax-H3 FL2VA and Ref2VA video+audio generation** with image, video, embedded/paired audio, and mixed references; full or pruned BF16 DiTs, persistent Q8_0 conversion, Q4_K_M weights, and automatic VRAM fitting are supported ([usage and H200 results](docs/minimax-h3.md)).
 - **2026-08-05:** 🚀 Completed the **RTX 4090 (24 GB) benchmark** — full cross-system speed / VRAM / image-quality across text-to-image, editing, and video ([results](docs/performance-4090.md)).
 - **2026-07-30:** 🚀 Added **per-component offload** (`--dit-offload` / `--text-encoder-offload` / `--vae-offload`), unifying all offload paths on one semantics.
 - **2026-07-29:** 🚀 Added **`--auto-fit`** — one flag picks DiT quantization *and* per-component placement to fit a hard VRAM budget.
@@ -160,12 +161,15 @@ reflect different weight materialization or memory-mapping strategies.
 Generation latency is the primary cross-runtime performance metric.
 
 MiniMax-H3 has a separate 124-frame H200 benchmark because it generates video
-and audio rather than one image. With persistent weights, Edge FL2VA T2VA takes
-`71s` at BF16, `81.1s` at Q8_0, and `73.6s` at Q4_K_M; corresponding peaks are
-`125,051`, `71,393`, and `47,459 MiB`. `--auto-fit` was validated from 120 GB
-down to a 24 GB cap, with observed peaks below every requested budget. See
-[MiniMax-H3 usage and performance](docs/minimax-h3.md) for all four FL2VA modes,
-Ref2VA inputs, memory placement, and framework-comparison links.
+and audio rather than one image. In the current resident-component BF16
+comparison, Edge is faster than Diffusers in all four FL2VA and all four Ref2VA
+generation paths while using less peak VRAM. FL2VA text-to-video takes
+`51.396s` versus `53.986s`; Ref2VA image and mixed-reference generation reach
+`1.08x` and `1.06x` speedups. Full and pruned BF16 DiTs are supported directly,
+and either can be converted once to persistent Q8_0 GGUF. `--auto-fit` has also
+been validated down to a 24 GB VRAM budget. See [MiniMax-H3 usage and
+performance](docs/minimax-h3.md) for inputs, weights, memory placement, and the
+complete comparison.
 
 ## Open-Source Interfaces
 

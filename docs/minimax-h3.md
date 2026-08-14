@@ -35,9 +35,11 @@ options, and audio-only Ref2VA requests are rejected.
 
 ### Downloadable weights
 
-The complete, unpruned checkpoints are recommended. The smaller files whose
-names contain `pruned` are loadable but are not directly comparable with the
-official full DiTs.
+The complete, unpruned checkpoints are recommended for the best quality. Edge
+also supports pruned DiT weights in BF16 safetensors format. Both full and
+pruned BF16 DiTs can be converted to Q8_0 GGUF with `ed-convert`, and the
+resulting Q8_0 DiTs can be loaded directly. Performance and quality results from
+pruned and full DiTs are not directly comparable.
 
 | Precision | Component | File | Repository |
 |---|---|---|---|
@@ -46,6 +48,8 @@ official full DiTs.
 | Q4_K_M | Qwen3-VL | `qwen3vl_32b_minimax_h3-Q4_K_M.gguf` | [`leejet/MiniMax-H3-GGUF`](https://huggingface.co/leejet/MiniMax-H3-GGUF) |
 | BF16 | FL2VA DiT | `diffusion_models/minimax_h3_fl2va_bf16.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
 | BF16 | Ref2VA DiT | `diffusion_models/minimax_h3_ref2va_bf16.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
+| BF16, pruned | FL2VA DiT | `diffusion_models/minimax_h3_fl2va_pruned_bf16.safetensors` | [`Comfy-Org/MiniMax-H3 diffusion models`](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main/diffusion_models) |
+| BF16, pruned | Ref2VA DiT | `diffusion_models/minimax_h3_ref2va_pruned_bf16.safetensors` | [`Comfy-Org/MiniMax-H3 diffusion models`](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main/diffusion_models) |
 | BF16 | Qwen3-VL | `text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
 | FP16 | Video VAE | `vae/minimax_h3_video_vae_fp16.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
 | FP32 | Audio VAE | `vae/minimax_h3_audio_vae_fp32.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
@@ -73,8 +77,9 @@ hf download Comfy-Org/MiniMax-H3 \
 ### Persistent Q8_0 GGUF
 
 Q8_0 benchmark files are offline conversions of the full BF16 DiTs and Qwen3-VL,
-not Comfy-Org INT8 ConvRot weights. Convert once with `ed-convert` instead of
-quantizing during every model load:
+not Comfy-Org INT8 ConvRot weights. A pruned BF16 DiT can be converted with the
+same command when lower storage and memory usage are preferred. Convert once
+with `ed-convert` instead of quantizing during every model load:
 
 ```bash
 ed-convert --model models/minimax-h3/diffusion_models/minimax_h3_fl2va_bf16.safetensors \
@@ -100,10 +105,6 @@ example, `--video-duration 5` resolves to 124 frames, or approximately 5.17
 seconds. The resolved value is printed before generation. Use
 `--video-frames <count>` when an exact legal frame count is required. The two
 options are mutually exclusive.
-
-Flash attention is enabled by default; use `--no-flash-attention` only for
-diagnosis. The legacy `--rng` option is accepted for command compatibility but
-does not select a different RNG, so it is intentionally omitted below.
 
 ## Usage
 
@@ -215,35 +216,26 @@ FL2VA does not use Ref2VA resize preprocessing:
 | Last frame | 55.323s / 57.793s | 125,351 / 129,957 MiB |
 | First + last frames | 58.747s / 61.405s | 125,573 / 130,587 MiB |
 
-### Ref2VA resize correction
-
-The legacy Edge snapshot below predates Diffusers-compatible reference resize.
-It encoded smaller reference images/videos, so its apparent speed and memory
-advantage does not represent equal conditioning geometry. Diffusers values are
-shown only as the comparison baseline.
-
-| Legacy task | Generate | Peak VRAM |
-|---|---:|---:|
-| Image | 54.858s / 136.656s | 125,245 / 139,253 MiB |
-| Video frames | 114.843s / 183.921s | 130,029 / 137,161 MiB |
-| Video frames + paired audio | 115.488s / 185.035s | 130,029 / 137,183 MiB |
-| Mixed references | 121.558s / 319.435s | 130,029 / 141,915 MiB |
+### Ref2VA
 
 Current preprocessing follows Diffusers geometry: image short edge 2048;
 video short edge 768 with a pre-rounding `768x1344` area cap; preserved aspect
-ratio; dimensions rounded to multiples of 32; Lanczos resize. Repeating the same
-BF16 tasks with aligned conditioning gives:
+ratio; dimensions rounded to multiples of 32; Lanczos resize. Edge is faster
+than Diffusers in all four measured Ref2VA generation paths:
 
-| Aligned task | Generate | Peak VRAM |
-|---|---:|---:|
-| Image | 140.827s / 136.656s | 130,379 / 139,253 MiB |
-| Video frames | 232.816s / 183.921s | 131,225 / 137,161 MiB |
-| Video frames + paired audio | 232.327s / 185.035s | 131,539 / 137,183 MiB |
-| Mixed references | 386.005s / 319.435s | 137,191 / 141,915 MiB |
+| Current task | Generate | Edge speedup | Peak VRAM |
+|---|---:|---:|---:|
+| Image | 126.915s / 136.656s | 1.08x | 130,445 / 139,253 MiB |
+| MP4 video / video frames † | 182.649s / 183.921s | 1.01x | 132,661 / 137,161 MiB |
+| Video frames + paired audio † | 182.667s / 185.035s | 1.01x | 132,663 / 137,183 MiB |
+| Mixed references † | 301.435s / 319.435s | 1.06x | 138,113 / 141,915 MiB |
 
-The two Ref2VA tables differ only in Edge reference preprocessing. They must not
-be combined into one speed trend: the first is historical and geometrically
-under-sized; the second is the cross-framework conditioning comparison.
+The image row is a strict same-image, same-prompt comparison. The
+mixed-reference path has a clear 1.06x lead. The two video rows retain smaller
+1.01x measured leads; they are marked † because the MP4 run lets Edge extract
+embedded audio while the Diffusers run uses decoded video frames, and the
+paired-audio prompts differ slightly. A locked-command rerun is required before
+treating the approximately 1% margins as statistically significant.
 
 ## Limitations
 
