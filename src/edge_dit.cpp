@@ -132,6 +132,7 @@ void ed_video_generation_params_init(ed_video_generation_params_t * params) {
     params->height = 1024;
     params->frames = 1;
     params->seed = -1;
+    params->ref_image_size = ED_REF_IMAGE_SIZE_MAX;
     params->strength = 0.75f;
     params->vace_strength = 1.0f;
     params->moe_boundary = 0.5f;

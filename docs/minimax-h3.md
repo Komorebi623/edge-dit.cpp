@@ -21,6 +21,7 @@ last frame. Ref2VA uses the following options:
 | Input | CLI option | Behavior |
 |---|---|---|
 | Image | `--ref-image <path>` | Repeatable; presented as `<Picture N>` |
+| Image sizing | `--ref-image-size match|max` | `match` only downsizes to the output pixel area; `max` uses the 2048px-short-edge path (default) |
 | Video | `--ref-video <path>` | Repeatable frame directory or `mp4`/`mov`/`mkv`/`webm`/`avi`; media files require `ffmpeg` |
 | Paired audio | `--ref-video-audio <wav>` | The Nth WAV is paired with the Nth video and overrides embedded audio |
 | Additional audio | `--ref-audio <wav>` | Repeatable; requires at least one image or video reference |
@@ -35,11 +36,11 @@ options, and audio-only Ref2VA requests are rejected.
 
 ### Downloadable weights
 
-The complete, unpruned checkpoints are recommended for the best quality. Edge
-also supports pruned DiT weights in BF16 safetensors format. Both full and
-pruned BF16 DiTs can be converted to Q8_0 GGUF with `ed-convert`, and the
-resulting Q8_0 DiTs can be loaded directly. Performance and quality results from
-pruned and full DiTs are not directly comparable.
+The complete, unpruned checkpoints are recommended for the best quality.
+edge-dit.cpp also supports pruned DiT weights in BF16 safetensors format. Both
+full and pruned BF16 DiTs can be converted to Q8_0 GGUF with `ed-convert`, and
+the resulting Q8_0 DiTs can be loaded directly. Performance and quality results
+from pruned and full DiTs are not directly comparable.
 
 | Precision | Component | File | Repository |
 |---|---|---|---|
@@ -147,6 +148,11 @@ ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
 
 Use the Ref2VA DiT for all commands in this section.
 
+The ComfyUI MiniMax-H3 template uses the `res_multistep` sampler with the
+`simple` sigma schedule. Add `--sampler res_multistep --scheduler simple` when
+reproducing that workflow. The default remains `euler` with `discrete` for
+compatibility with existing edge-dit.cpp commands.
+
 ```bash
 # Image reference
 ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
@@ -201,11 +207,11 @@ layout.
 ## H200 BF16 comparison
 
 The tables below use one H200, resident components, `864x480`, 124 frames at
-24 fps, 20 steps, CFG 1, and seed `424242`. Edge uses the complete Comfy-Org
-BF16 DiT/Qwen files, FP16 video VAE, and FP32 audio VAE. Diffusers uses the
+24 fps, 20 steps, CFG 1, and seed `424242`. edge-dit.cpp uses the complete
+Comfy-Org BF16 DiT/Qwen files, FP16 video VAE, and FP32 audio VAE. Diffusers uses the
 official complete BF16 DiT shards, BF16 Qwen3-VL, and its FP32 VAEs. “Generate”
 excludes model loading, output muxing, and process cleanup. Peak VRAM is sampled
-over the complete process. Values are `Edge / Diffusers`.
+over the complete process. Values are `edge-dit.cpp / Diffusers`.
 
 FL2VA does not use Ref2VA resize preprocessing:
 
@@ -220,10 +226,10 @@ FL2VA does not use Ref2VA resize preprocessing:
 
 Current preprocessing follows Diffusers geometry: image short edge 2048;
 video short edge 768 with a pre-rounding `768x1344` area cap; preserved aspect
-ratio; dimensions rounded to multiples of 32; Lanczos resize. Edge is faster
-than Diffusers in all four measured Ref2VA generation paths:
+ratio; dimensions rounded to multiples of 32; Lanczos resize. edge-dit.cpp is
+faster than Diffusers in all four measured Ref2VA generation paths:
 
-| Current task | Generate | Edge speedup | Peak VRAM |
+| Current task | Generate | edge-dit.cpp speedup | Peak VRAM |
 |---|---:|---:|---:|
 | Image | 126.915s / 136.656s | 1.08x | 130,445 / 139,253 MiB |
 | MP4 video / video frames † | 182.649s / 183.921s | 1.01x | 132,661 / 137,161 MiB |
@@ -232,8 +238,8 @@ than Diffusers in all four measured Ref2VA generation paths:
 
 The image row is a strict same-image, same-prompt comparison. The
 mixed-reference path has a clear 1.06x lead. The two video rows retain smaller
-1.01x measured leads; they are marked † because the MP4 run lets Edge extract
-embedded audio while the Diffusers run uses decoded video frames, and the
+1.01x measured leads; they are marked † because the MP4 run lets edge-dit.cpp
+extract embedded audio while the Diffusers run uses decoded video frames, and the
 paired-audio prompts differ slightly. A locked-command rerun is required before
 treating the approximately 1% margins as statistically significant.
 

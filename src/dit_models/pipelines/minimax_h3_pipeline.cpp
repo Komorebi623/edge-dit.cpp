@@ -158,7 +158,20 @@ void h3_reference_video_dimensions(const ed_image_t& image, int* width, int* hei
     *height = std::max(32, static_cast<int>(std::round(nominal_height / 32.0)) * 32);
 }
 
-void h3_reference_image_dimensions(const ed_image_t& image, int* width, int* height) {
+void h3_reference_image_dimensions(const ed_image_t& image,
+                                   ed_ref_image_size_t size_mode,
+                                   int canvas_width,
+                                   int canvas_height,
+                                   int* width,
+                                   int* height) {
+    if (size_mode == ED_REF_IMAGE_SIZE_MATCH) {
+        const double source_area = static_cast<double>(image.width) * image.height;
+        const double canvas_area = static_cast<double>(canvas_width) * canvas_height;
+        const double scale = std::min(1.0, std::sqrt(canvas_area / source_area));
+        *width = std::max(32, static_cast<int>(std::round(image.width * scale / 32.0)) * 32);
+        *height = std::max(32, static_cast<int>(std::round(image.height * scale / 32.0)) * 32);
+        return;
+    }
     const double scale = static_cast<double>(H3_REF_IMAGE_SHORT_EDGE) /
                          static_cast<double>(std::min(image.width, image.height));
     *width = std::max(32, static_cast<int>(std::round(image.width * scale / 32.0)) * 32);
@@ -181,6 +194,15 @@ float h3_discrete_flow_sigma(int step, int steps, float shift) {
     const float t_max = 999.0f;
     const float t = t_max - (t_max / static_cast<float>(steps - 1)) * static_cast<float>(step);
     const float sigma = (t + 1.0f) / 1000.0f;
+    return shift == 1.0f ? sigma
+                         : shift * sigma / (1.0f + (shift - 1.0f) * sigma);
+}
+
+float h3_simple_flow_sigma(int step, int steps, float shift) {
+    if (steps <= 0 || step >= steps) {
+        return 0.0f;
+    }
+    const float sigma = static_cast<float>(steps - step) / static_cast<float>(steps);
     return shift == 1.0f ? sigma
                          : shift * sigma / (1.0f + (shift - 1.0f) * sigma);
 }
@@ -727,6 +749,7 @@ bool MiniMaxH3Pipeline::build_text_context(const char* prompt,
                                            int canvas_height,
                                            const ed_image_t* ref_images,
                                            int ref_image_count,
+                                           ed_ref_image_size_t ref_image_size,
                                            const ed_ref_video_t* ref_videos,
                                            int ref_video_count,
                                            int ref_audio_count,
@@ -840,7 +863,7 @@ bool MiniMaxH3Pipeline::build_text_context(const char* prompt,
         const ed_image_t& image = ref_images[image_index];
         int width = 0;
         int height = 0;
-        h3_reference_image_dimensions(image, &width, &height);
+        h3_reference_image_dimensions(image, ref_image_size, canvas_width, canvas_height, &width, &height);
         LOG_DEBUG("MiniMax-H3 Ref2VA vision image=%dx%d tensor=%s",
                   width,
                   height,
@@ -1186,6 +1209,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
                             params->height,
                             params->ref_images,
                             params->ref_image_count,
+                            params->ref_image_size,
                             params->ref_videos,
                             params->ref_video_count,
                             params->ref_audio_count,
@@ -1211,6 +1235,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
                                        params->height,
                                        params->ref_images,
                                        params->ref_image_count,
+                                       params->ref_image_size,
                                        params->ref_videos,
                                        params->ref_video_count,
                                        params->ref_audio_count,
@@ -1297,7 +1322,12 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         }
         int reference_width = 0;
         int reference_height = 0;
-        h3_reference_image_dimensions(source_image, &reference_width, &reference_height);
+        h3_reference_image_dimensions(source_image,
+                                      params->ref_image_size,
+                                      params->width,
+                                      params->height,
+                                      &reference_width,
+                                      &reference_height);
         sd::Tensor<float> image_tensor = h3_image_to_tensor(source_image, reference_width, reference_height);
         if (image_tensor.empty()) {
             set_minimax_error(error, "MiniMax-H3 Ref2VA image reference is invalid");
@@ -1436,15 +1466,57 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
     }
     const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
     const float video_sigma_shift = params->sample.flow_shift > 0.0f ? params->sample.flow_shift : 12.0f;
-    // Match stable-diffusion.cpp's DiscreteScheduler + FluxFlowDenoiser: `steps`
-    // model evaluations plus a terminal sigma=0 point.
+    const ed_sampler_t sampler = params->sample.sampler == ED_SAMPLER_AUTO
+                                     ? default_sample_method()
+                                     : params->sample.sampler;
+    const ed_scheduler_t scheduler = params->sample.scheduler == ED_SCHEDULER_AUTO
+                                         ? default_scheduler(sampler)
+                                         : params->sample.scheduler;
+    if (sampler != ED_SAMPLER_EULER && sampler != ED_SAMPLER_RES_MULTISTEP) {
+        set_minimax_error(error, "MiniMax-H3 currently supports Euler and RES multistep samplers");
+        return ED_STATUS_UNSUPPORTED;
+    }
+    if (scheduler != ED_SCHEDULER_DISCRETE && scheduler != ED_SCHEDULER_SIMPLE) {
+        set_minimax_error(error, "MiniMax-H3 currently supports discrete and simple schedulers");
+        return ED_STATUS_UNSUPPORTED;
+    }
+    auto sigma_at = [&](int step) {
+        return scheduler == ED_SCHEDULER_SIMPLE
+                   ? h3_simple_flow_sigma(step, steps, video_sigma_shift)
+                   : h3_discrete_flow_sigma(step, steps, video_sigma_shift);
+    };
+    LOG_INFO("MiniMax-H3 sampling: sampler=%s scheduler=%s steps=%d flow-shift=%.6g",
+             sampler == ED_SAMPLER_RES_MULTISTEP ? "res_multistep" : "euler",
+             scheduler == ED_SCHEDULER_SIMPLE ? "simple" : "discrete",
+             steps,
+             video_sigma_shift);
+    if (sampler == ED_SAMPLER_RES_MULTISTEP) {
+        auto initial_av = diffusion_->split_av_latents(packed, audio_length);
+        initial_av.second *= video_sigma_shift / 3.0f;
+        packed = h3_pack_audio_and_video_latents(initial_av.first, initial_av.second);
+    }
+    sd::Tensor<float> old_denoised;
+    float old_sigma_down = 0.0f;
+    bool have_old_denoised = false;
     for (int step = 0; step < steps; ++step) {
         if (profile_ptr != nullptr) ++profile.diffusion_steps;
-        const float sigma = h3_discrete_flow_sigma(step, steps, video_sigma_shift);
-        const float sigma_next = h3_discrete_flow_sigma(step + 1, steps, video_sigma_shift);
+        const float sigma = sigma_at(step);
+        const float sigma_next = sigma_at(step + 1);
+        sd::Tensor<float> model_packed = packed;
+        float audio_sigma = sigma;
+        float audio_slope = 1.0f;
+        float audio_scale = 1.0f;
+        if (sampler == ED_SAMPLER_RES_MULTISTEP) {
+            audio_sigma = MiniMaxH3::time_shift_sigma(sigma, video_sigma_shift, 3.0f);
+            audio_slope = MiniMaxH3::time_shift_slope(sigma, video_sigma_shift, 3.0f);
+            audio_scale = video_sigma_shift / 3.0f;
+            auto model_av = diffusion_->split_av_latents(packed, audio_length);
+            model_av.second *= audio_sigma / sigma;
+            model_packed = h3_pack_audio_and_video_latents(model_av.first, model_av.second);
+        }
         sd::Tensor<float> timestep({1}, {sigma * 1000.0f});
         DiffusionParams diffusion_params{};
-        diffusion_params.x = &packed;
+        diffusion_params.x = &model_packed;
         diffusion_params.timesteps = &timestep;
         diffusion_params.context = &context;
         diffusion_params.minimax_text_token_tags = &token_tags;
@@ -1495,16 +1567,51 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
             velocity = uncond_velocity + (velocity - uncond_velocity) * cfg_scale;
             if (profile_ptr != nullptr) profile.cfg_combine_ms += ggml_time_ms() - cfg_combine_begin;
         }
+        if (sampler == ED_SAMPLER_RES_MULTISTEP) {
+            auto model_av = diffusion_->split_av_latents(model_packed, audio_length);
+            auto velocity_av = diffusion_->split_av_latents(velocity, audio_length);
+            velocity_av.second = (1.0f - audio_scale) * model_av.second +
+                                 (1.0f + (audio_scale - 1.0f) * audio_sigma) *
+                                     (velocity_av.second / audio_slope);
+            velocity = h3_pack_audio_and_video_latents(velocity_av.first, velocity_av.second);
+        }
         if (h3_trace_enabled()) {
             LOG_INFO("minimax-h3 trace step=%d sigma=%.8g sigma_next=%.8g", step, sigma, sigma_next);
             h3_trace_tensor(("step_" + std::to_string(step) + "_velocity").c_str(), velocity);
         }
-        packed += velocity * (sigma_next - sigma);
+        if (sampler == ED_SAMPLER_RES_MULTISTEP) {
+            sd::Tensor<float> denoised = packed - velocity * sigma;
+            if (sigma_next == 0.0f || !have_old_denoised) {
+                packed += velocity * (sigma_next - sigma);
+            } else {
+                const float t = -std::log(sigma);
+                const float t_old = -std::log(old_sigma_down);
+                const float t_next = -std::log(sigma_next);
+                const float t_prev = -std::log(sigma_at(step - 1));
+                const float h = t_next - t;
+                const float c2 = (t_prev - t_old) / h;
+                const float phi1 = std::expm1(-h) / -h;
+                const float phi2 = (phi1 - 1.0f) / -h;
+                float b1 = phi1 - phi2 / c2;
+                float b2 = phi2 / c2;
+                if (!std::isfinite(b1)) b1 = 0.0f;
+                if (!std::isfinite(b2)) b2 = 0.0f;
+                packed = std::exp(-h) * packed + h * (b1 * denoised + b2 * old_denoised);
+            }
+            old_denoised = std::move(denoised);
+            old_sigma_down = sigma_next;
+            have_old_denoised = true;
+        } else {
+            packed += velocity * (sigma_next - sigma);
+        }
         if (h3_trace_enabled()) {
             h3_trace_tensor(("step_" + std::to_string(step) + "_packed").c_str(), packed);
         }
     }
     auto av = diffusion_->split_av_latents(packed, audio_length);
+    if (sampler == ED_SAMPLER_RES_MULTISTEP) {
+        av.second /= video_sigma_shift / 3.0f;
+    }
     ed_status_t status = decode_video_latent(av.first, frames, out, profile_ptr, error);
     if (status != ED_STATUS_OK) {
         return status;

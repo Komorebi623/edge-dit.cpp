@@ -817,6 +817,39 @@ static __global__ void half_to_float2_bias_kernel(const half * __restrict__ src,
     reinterpret_cast<float2 *>(dst)[idx2] = v;
 }
 
+static __global__ void float_bias_inplace_kernel(float * __restrict__ dst,
+                                                 const float * __restrict__ bias,
+                                                 int64_t total,
+                                                 int64_t plane,
+                                                 int64_t oc) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total) {
+        dst[idx] += bias[(idx / plane) % oc];
+    }
+}
+
+static __global__ void half_bias_inplace_kernel(half * __restrict__ dst,
+                                                const float * __restrict__ bias,
+                                                int64_t total,
+                                                int64_t plane,
+                                                int64_t oc) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total) {
+        dst[idx] = __float2half_rn(__half2float(dst[idx]) + bias[(idx / plane) % oc]);
+    }
+}
+
+static __global__ void bf16_bias_inplace_kernel(__nv_bfloat16 * __restrict__ dst,
+                                                const float * __restrict__ bias,
+                                                int64_t total,
+                                                int64_t plane,
+                                                int64_t oc) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total) {
+        dst[idx] = __float2bfloat16_rn(__bfloat162float(dst[idx]) + bias[(idx / plane) % oc]);
+    }
+}
+
 static bool aligned_for_float2_to_half2(const void * src, const void * dst, int64_t n) {
     return (n & 1) == 0 &&
            (reinterpret_cast<uintptr_t>(src) % alignof(float2)) == 0 &&
@@ -875,6 +908,31 @@ static void half_to_float_bias_async(const void * src,
     const int64_t grid_size = (total + block_size - 1) / block_size;
     half_to_float_bias_kernel<<<grid_size, block_size, 0, stream>>>(
         (const half *) src, (const float *) bias, (float *) dst, ow, oh, od, oc, n);
+}
+
+static void output_bias_inplace_async(void * dst,
+                                      const void * bias,
+                                      ggml_type dst_type,
+                                      int64_t ow,
+                                      int64_t oh,
+                                      int64_t od,
+                                      int64_t oc,
+                                      int64_t n,
+                                      cudaStream_t stream) {
+    constexpr int block_size = 256;
+    const int64_t plane = ow * oh * od;
+    const int64_t total = plane * oc * n;
+    const int64_t grid_size = (total + block_size - 1) / block_size;
+    if (dst_type == GGML_TYPE_F32) {
+        float_bias_inplace_kernel<<<grid_size, block_size, 0, stream>>>(
+            (float *) dst, (const float *) bias, total, plane, oc);
+    } else if (dst_type == GGML_TYPE_F16) {
+        half_bias_inplace_kernel<<<grid_size, block_size, 0, stream>>>(
+            (half *) dst, (const float *) bias, total, plane, oc);
+    } else if (dst_type == GGML_TYPE_BF16) {
+        bf16_bias_inplace_kernel<<<grid_size, block_size, 0, stream>>>(
+            (__nv_bfloat16 *) dst, (const float *) bias, total, plane, oc);
+    }
 }
 
 static double elapsed_ms(cudaEvent_t start, cudaEvent_t stop) {
@@ -1089,6 +1147,24 @@ ed_cudnn_conv3d_result_t ed_cudnn_conv3d_compute(ggml_tensor * dst, ed_cudnn_con
         } else {
             half_to_float_async(y_cast_data, dst->data, y_elems, stream);
         }
+        if (do_profile) {
+            cudaEventRecord(profile_stop, stream);
+            cudaEventSynchronize(profile_stop);
+            finalize_ms = elapsed_ms(profile_start, profile_stop);
+        }
+    } else if (dst->src[2] != nullptr) {
+        if (do_profile) {
+            cudaEventRecord(profile_start, stream);
+        }
+        output_bias_inplace_async(dst->data,
+                                  dst->src[2]->data,
+                                  dst->type,
+                                  key.ow,
+                                  key.oh,
+                                  key.od,
+                                  key.oc,
+                                  key.n,
+                                  stream);
         if (do_profile) {
             cudaEventRecord(profile_stop, stream);
             cudaEventSynchronize(profile_stop);

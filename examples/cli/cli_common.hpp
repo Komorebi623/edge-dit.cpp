@@ -465,6 +465,7 @@ struct FluxCliArgs {
     const char* image_path = nullptr;
     const char* end_image_path = nullptr;
     std::vector<std::string> ref_image_paths;
+    ed_ref_image_size_t ref_image_size = ED_REF_IMAGE_SIZE_MAX;
     std::vector<std::string> ref_video_paths;
     std::vector<std::string> ref_video_audio_paths;
     std::vector<std::string> ref_audio_paths;
@@ -498,6 +499,8 @@ struct FluxCliArgs {
     float guidance = 3.5f;
     float cfg_scale = 1.0f;
     float flow_shift = 0.0f;
+    ed_sampler_t sampler = ED_SAMPLER_AUTO;
+    ed_scheduler_t scheduler = ED_SCHEDULER_AUTO;
 
     ed_cache_mode_t cache_mode = ED_CACHE_DISABLED;
     float cache_reuse_threshold = std::numeric_limits<float>::infinity();
@@ -631,6 +634,17 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             const char* path = require_value(key);
             if (!path) return false;
             args->ref_image_paths.emplace_back(path);
+        } else if (std::strcmp(key, "--ref-image-size") == 0 || std::strcmp(key, "--ref_image_size") == 0) {
+            const char* value = require_value(key);
+            if (!value) return false;
+            if (std::strcmp(value, "match") == 0) {
+                args->ref_image_size = ED_REF_IMAGE_SIZE_MATCH;
+            } else if (std::strcmp(value, "max") == 0) {
+                args->ref_image_size = ED_REF_IMAGE_SIZE_MAX;
+            } else {
+                std::fprintf(stderr, "invalid %s value '%s'; expected match or max\n", key, value);
+                return false;
+            }
         } else if (std::strcmp(key, "--ref-video") == 0 || std::strcmp(key, "--ref_video") == 0) {
             const char* path = require_value(key);
             if (!path) return false;
@@ -696,6 +710,32 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             const char* v = require_value(key);
             if (!v) return false;
             args->flow_shift = parse_float_value(v, args->flow_shift);
+        } else if (std::strcmp(key, "--sampler") == 0 || std::strcmp(key, "--sampling-method") == 0) {
+            const char* value = require_value(key);
+            if (!value) return false;
+            if (std::strcmp(value, "auto") == 0) {
+                args->sampler = ED_SAMPLER_AUTO;
+            } else if (std::strcmp(value, "euler") == 0) {
+                args->sampler = ED_SAMPLER_EULER;
+            } else if (std::strcmp(value, "res_multistep") == 0 || std::strcmp(value, "res-multistep") == 0) {
+                args->sampler = ED_SAMPLER_RES_MULTISTEP;
+            } else {
+                std::fprintf(stderr, "invalid %s value '%s'; expected auto, euler, or res_multistep\n", key, value);
+                return false;
+            }
+        } else if (std::strcmp(key, "--scheduler") == 0) {
+            const char* value = require_value(key);
+            if (!value) return false;
+            if (std::strcmp(value, "auto") == 0) {
+                args->scheduler = ED_SCHEDULER_AUTO;
+            } else if (std::strcmp(value, "discrete") == 0) {
+                args->scheduler = ED_SCHEDULER_DISCRETE;
+            } else if (std::strcmp(value, "simple") == 0) {
+                args->scheduler = ED_SCHEDULER_SIMPLE;
+            } else {
+                std::fprintf(stderr, "invalid %s value '%s'; expected auto, discrete, or simple\n", key, value);
+                return false;
+            }
         } else if (std::strcmp(key, "--start_index") == 0 || std::strcmp(key, "--start-index") == 0) {
             const char* v = require_value(key);
             if (!v) return false;

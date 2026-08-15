@@ -70,6 +70,8 @@ void print_usage(const char* prog) {
         "  --guidance_scale <float>  Flux distilled guidance. Default 3.5\n"
         "  --cfg_scale <float>       Classifier-free guidance scale. Default 1.0\n"
         "  --flow_shift <float>      Flow scheduler shift. Default model default\n"
+        "  --sampler <name>          Sampling method: auto, euler, res_multistep\n"
+        "  --scheduler <name>        Sigma scheduler: auto, discrete, simple\n"
         "  --negative_prompt <text>  Negative prompt (used when cfg_scale != 1). Default empty\n"
         "  --image <path>            Input/reference image for image-editing models\n"
         "  --video, -M vid_gen       Generate video frames (calls ed_generate_video; writes .avi)\n"
@@ -657,8 +659,8 @@ int main(int argc, char** argv) {
                 vgen.height = args.height;
                 vgen.frames = generation_frames;
                 vgen.seed = seed;
-                vgen.sample.sampler = ED_SAMPLER_AUTO;
-                vgen.sample.scheduler = ED_SCHEDULER_AUTO;
+                vgen.sample.sampler = args.sampler;
+                vgen.sample.scheduler = args.scheduler;
                 vgen.sample.steps = args.steps;
                 vgen.sample.cfg_scale = args.cfg_scale;
                 vgen.sample.image_cfg_scale = 1.0f;
@@ -695,8 +697,8 @@ int main(int argc, char** argv) {
                 gen.height = args.height;
                 gen.seed = seed;
                 gen.batch_count = 1;
-                gen.sample.sampler = ED_SAMPLER_AUTO;
-                gen.sample.scheduler = ED_SCHEDULER_AUTO;
+                gen.sample.sampler = args.sampler;
+                gen.sample.scheduler = args.scheduler;
                 gen.sample.steps = args.steps;
                 gen.sample.cfg_scale = args.cfg_scale;
                 gen.sample.image_cfg_scale = 1.0f;

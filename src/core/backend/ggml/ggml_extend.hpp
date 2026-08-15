@@ -8024,15 +8024,20 @@ public:
         return w;
     }
 
+    ggml_tensor* bias_for_forward(GGMLRunnerContext* ctx) {
+        if (!bias) {
+            return nullptr;
+        }
+        ggml_tensor* b = params["bias"];
+        if (ctx->weight_adapter) {
+            b = ctx->weight_adapter->patch_weight(ctx->ggml_ctx, ctx->backend, b, prefix + "bias");
+        }
+        return b;
+    }
+
     ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
         ggml_tensor* w = weight_for_forward(ctx, false);
-        ggml_tensor* b = nullptr;
-        if (bias) {
-            b = params["bias"];
-            if (ctx->weight_adapter) {
-                b = ctx->weight_adapter->patch_weight(ctx->ggml_ctx, ctx->backend, b, prefix + "bias");
-            }
-        }
+        ggml_tensor* b = bias_for_forward(ctx);
         const bool direct_compatible = ctx->conv3d_auto_direct_enabled &&
                                        x != nullptr &&
                                        w != nullptr &&

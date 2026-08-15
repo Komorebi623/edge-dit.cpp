@@ -95,6 +95,11 @@ typedef enum ed_scheduler_t {
     ED_SCHEDULER_BONG_TANGENT
 } ed_scheduler_t;
 
+typedef enum ed_ref_image_size_t {
+    ED_REF_IMAGE_SIZE_MAX = 0,
+    ED_REF_IMAGE_SIZE_MATCH = 1,
+} ed_ref_image_size_t;
+
 typedef enum ed_cache_mode_t {
     ED_CACHE_DISABLED = 0,
     ED_CACHE_EASYCACHE,
@@ -276,6 +281,7 @@ typedef struct ed_video_generation_params_t {
 
     const ed_image_t * ref_images;
     int ref_image_count;
+    ed_ref_image_size_t ref_image_size;
     const ed_ref_video_t * ref_videos;
     int ref_video_count;
     const ed_audio_t * ref_audios;

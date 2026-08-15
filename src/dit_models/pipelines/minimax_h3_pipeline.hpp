@@ -73,6 +73,7 @@ private:
                             int canvas_height,
                             const ed_image_t* ref_images,
                             int ref_image_count,
+                            ed_ref_image_size_t ref_image_size,
                             const ed_ref_video_t* ref_videos,
                             int ref_video_count,
                             int ref_audio_count,

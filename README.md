@@ -162,8 +162,8 @@ Generation latency is the primary cross-runtime performance metric.
 
 MiniMax-H3 has a separate 124-frame H200 benchmark because it generates video
 and audio rather than one image. In the current resident-component BF16
-comparison, Edge is faster than Diffusers in all four FL2VA and all four Ref2VA
-generation paths while using less peak VRAM. FL2VA text-to-video takes
+comparison, edge-dit.cpp is faster than Diffusers in all four FL2VA and all four
+Ref2VA generation paths while using less peak VRAM. FL2VA text-to-video takes
 `51.396s` versus `53.986s`; Ref2VA image and mixed-reference generation reach
 `1.08x` and `1.06x` speedups. Full and pruned BF16 DiTs are supported directly,
 and either can be converted once to persistent Q8_0 GGUF. `--auto-fit` has also

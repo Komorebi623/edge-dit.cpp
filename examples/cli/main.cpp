@@ -107,6 +107,7 @@ static void print_usage(const char* prog) {
         "  --video-duration <seconds>  MiniMax-H3 duration; aligns to 17k+5 frames\n"
         "  --fps <int>               Video fps, default: 16\n"
         "  --ref-image <path>        MiniMax-H3 Ref2VA reference image; repeatable\n"
+        "  --ref-image-size <mode>   Reference image sizing: match or max, default: max\n"
         "  --ref-video <path>        MiniMax-H3 Ref2VA reference video frames directory or media file; repeatable\n"
         "                            Media files are decoded with ffmpeg; embedded audio is paired automatically\n"
         "  --ref-video-audio <path>  WAV soundtrack paired with the corresponding --ref-video\n"
@@ -117,6 +118,8 @@ static void print_usage(const char* prog) {
         "  --guidance <float>        Flux distilled guidance, default: 3.5\n"
         "  --cfg-scale <float>       Classifier-free guidance scale, default: 1.0\n"
         "  --flow-shift <float>      Flow scheduler shift, default: model default\n"
+        "  --sampler <name>          Sampling method: auto, euler, res_multistep\n"
+        "  --scheduler <name>        Sigma scheduler: auto, discrete, simple\n"
         "  --cache <mode>            Cache mode: off, easycache, ucache, dbcache, taylorseer, cache-dit, magcache, dicache, sencache\n"
         "  --cache-threshold <float> EasyCache/UCache reuse threshold\n"
         "  --cache-start <float>     Cache active window start percent, default: 0.15\n"
@@ -995,8 +998,9 @@ int main(int argc, char** argv) {
         gen_params.height = args.height;
         gen_params.frames = generation_frames;
         gen_params.seed = args.seed;
-        gen_params.sample.sampler = ED_SAMPLER_AUTO;
-        gen_params.sample.scheduler = ED_SCHEDULER_AUTO;
+        gen_params.ref_image_size = args.ref_image_size;
+        gen_params.sample.sampler = args.sampler;
+        gen_params.sample.scheduler = args.scheduler;
         gen_params.sample.steps = args.steps;
         gen_params.sample.cfg_scale = args.cfg_scale;
         gen_params.sample.image_cfg_scale = 1.0f;
@@ -1159,8 +1163,8 @@ int main(int argc, char** argv) {
          * - set cfg_scale to 1.0 to avoid the traditional CFG negative-conditioning branch
          * - use the common Flux value of 3.5 for distilled_guidance
          */
-        gen_params.sample.sampler = ED_SAMPLER_AUTO;
-        gen_params.sample.scheduler = ED_SCHEDULER_AUTO;
+        gen_params.sample.sampler = args.sampler;
+        gen_params.sample.scheduler = args.scheduler;
         gen_params.sample.steps = args.steps;
         gen_params.sample.cfg_scale = args.cfg_scale;
         gen_params.sample.image_cfg_scale = 1.0f;
