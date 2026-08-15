@@ -160,7 +160,8 @@ public:
     // Call once after all components are decided: sets the graph VRAM budget for offloaded
     // components to (effective_budget - resident_total - compute headroom). No-op outside
     // auto-allocate. Resets the internal resident accumulator for the next model load.
-    void finalize_auto_segment_budget(size_t effective_budget_bytes);
+    void finalize_auto_segment_budget(size_t effective_budget_bytes,
+                                      size_t additional_slack_bytes = 0);
     void reset_auto_allocate_state() { resident_bytes_total_ = 0; any_component_offloaded_ = false; }
     // Hard-cap budget = min(user --max-vram, live free VRAM). If no --max-vram, = live free.
     // Used to seed the auto-allocate tally and finalize_auto_segment_budget. 0 if CPU backend.
@@ -169,7 +170,7 @@ public:
     // guaranteed below the TE's own weight size (te_params_bytes) so its graph-cut segments
     // don't collapse into one whole-TE stage (the OOM cause). Resident TE returns the global
     // budget unchanged. Pass conditioner_->get_params_buffer_size() as te_params_bytes.
-    size_t text_encoder_segment_budget(size_t te_params_bytes) const;
+    size_t text_encoder_segment_budget(size_t te_params_bytes, bool component_offloaded = false) const;
     // Target generation resolution for compute-buffer measurement (0 = unset).
     int fit_width() const { return fit_width_; }
     int fit_height() const { return fit_height_; }

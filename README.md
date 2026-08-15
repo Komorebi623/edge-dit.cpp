@@ -2,18 +2,26 @@
   <img src="assets/logo.png" alt="edge-dit.cpp logo" width="100%">
 </p>
 
-<h1>edge-dit.cpp</h1>
+<h1 align="center">edge-dit.cpp</h1>
 
 <p align="center">
-  <strong>A lightweight native C/C++ runtime for Diffusion Transformer inference
-  on resource-constrained devices and local deployment environments.</strong>
+  <strong>A lightweight C/C++ inference engine for efficient Diffusion Transformer (DiT)
+  inference on local and resource-constrained devices.</strong>
 </p>
 
 [![Status](https://img.shields.io/badge/status-alpha-orange)](#latest-news)
 [![Backend](https://img.shields.io/badge/backend-CUDA--first-blue)](#backend-support)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](#license)
 
-edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for local, edge, and resource-constrained deployment. Built on ggml, it provides a unified runtime for image generation, image editing, and video generation, with explicit control over model loading, memory usage, graph execution, and backend selection.
+**edge-dit.cpp** is an open-source, DiT-first C/C++ inference engine for efficient
+**Diffusion Transformer (DiT)** inference. Built on **ggml**, it provides a unified
+runtime for image generation, image editing, and video generation across local,
+edge, and resource-constrained deployment environments.
+
+It supports major DiT model families including **FLUX.1, FLUX.2 [klein] 4B,
+Stable Diffusion 3/3.5, Qwen-Image, Wan, and MiniMax-H3**, with explicit control
+over model loading, memory usage, graph execution, quantization, device
+placement, and backend selection.
 
 ## Features
 
@@ -25,7 +33,8 @@ edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for loc
 
 - **Unified across tasks and model families**
   - **Text-to-image**, **image editing**, and **video generation** in one runtime
-  - SD3/SD3.5, FLUX.1, FLUX.1-Kontext, Qwen-Image, Qwen-Image-Edit, and Wan 2.1
+  - SD3/SD3.5, FLUX.1, FLUX.1-Kontext, FLUX.2 [klein] 4B, Qwen-Image,
+    Qwen-Image-Edit, Wan 2.1, and MiniMax-H3 video+audio
   - **Few-step distilled models** auto-detected — Turbo / Lightning / schnell default to a **4–8 step** schedule
   - Shared **C API, CLI, HTTP server, and Python** interfaces across every family
 
@@ -45,6 +54,7 @@ edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for loc
 
 ## Latest News
 
+- **2026-08-14:** 🚀 Added **MiniMax-H3 FL2VA and Ref2VA video+audio generation** with image, video, embedded/paired audio, and mixed references; full or pruned BF16 DiTs, persistent Q8_0 conversion, Q4_K_M weights, and automatic VRAM fitting are supported ([usage and H200 results](docs/minimax-h3.md)).
 - **2026-08-05:** 🚀 Completed the **RTX 4090 (24 GB) benchmark** — full cross-system speed / VRAM / image-quality across text-to-image, editing, and video ([results](docs/performance-4090.md)).
 - **2026-07-30:** 🚀 Added **per-component offload** (`--dit-offload` / `--text-encoder-offload` / `--vae-offload`), unifying all offload paths on one semantics.
 - **2026-07-29:** 🚀 Added **`--auto-fit`** — one flag picks DiT quantization *and* per-component placement to fit a hard VRAM budget.
@@ -56,10 +66,10 @@ edge-dit.cpp is a lightweight, DiT-first C/C++ inference engine designed for loc
 
 ## Supported Models
 
-This release focuses on the model families below, each with a base
-checkpoint and a **few-step distilled variant**. Some source files contain
-experimental model scaffolding beyond this table; those are not part of the
-current support commitment unless documented in
+This release focuses on the model families below. Most ship as a base
+checkpoint plus a **few-step distilled variant**; some source files contain
+experimental model scaffolding beyond this table, and those are not part of
+the current support commitment unless documented in
 [Supported Models](docs/models.md).
 
 | Model family | Task | Base checkpoint | Distilled variant (few-step) | Status |
@@ -67,9 +77,11 @@ current support commitment unless documented in
 | **SD3 / SD3.5** | Text-to-image | `stabilityai/stable-diffusion-3-medium` | SD3.5-medium-turbo | Supported |
 | **FLUX.1** | Text-to-image | `black-forest-labs/FLUX.1-dev` | FLUX.1-schnell | Supported |
 | **FLUX.1-Kontext** | Image editing / reference-guided | `black-forest-labs/FLUX.1-Kontext-dev` | Kontext Lightning | Supported |
+| **FLUX.2 [klein] 4B** | Text-to-image / image editing | `black-forest-labs/FLUX.2-klein-4B` | Native FLUX.2 [klein] 4B checkpoint | Supported |
 | **Qwen-Image** | Text-to-image | `Qwen/Qwen-Image` | Qwen-Image Lightning *(LoRA)* | Supported |
 | **Qwen-Image-Edit** | Image editing | `Qwen/Qwen-Image-Edit` | Qwen-Image-Edit Lightning *(LoRA)* | Supported |
 | **Wan 2.1** | Video generation | `Wan-AI/Wan2.1-T2V-1.3B` (and 14B) | Wan2.1-T2V-1.3B Distill | Supported (Vulkan still optimizing) |
+| **MiniMax-H3** | Video + audio generation | FL2VA / Ref2VA component checkpoints | — | Supported (CUDA validated) |
 
 Distilled checkpoints load through the same pipeline as the base model and are
 **auto-detected** (default **4–8 steps** when `--steps` is unset). Most ship as
@@ -147,6 +159,17 @@ configs and notes are in [Performance and benchmarks](docs/performance-H200.md).
 Load time follows each runtime's reported initialization boundary and may
 reflect different weight materialization or memory-mapping strategies.
 Generation latency is the primary cross-runtime performance metric.
+
+MiniMax-H3 has a separate 124-frame H200 benchmark because it generates video
+and audio rather than one image. In the current resident-component BF16
+comparison, Edge is faster than Diffusers in all four FL2VA and all four Ref2VA
+generation paths while using less peak VRAM. FL2VA text-to-video takes
+`51.396s` versus `53.986s`; Ref2VA image and mixed-reference generation reach
+`1.08x` and `1.06x` speedups. Full and pruned BF16 DiTs are supported directly,
+and either can be converted once to persistent Q8_0 GGUF. `--auto-fit` has also
+been validated down to a 24 GB VRAM budget. See [MiniMax-H3 usage and
+performance](docs/minimax-h3.md) for inputs, weights, memory placement, and the
+complete comparison.
 
 ## Open-Source Interfaces
 

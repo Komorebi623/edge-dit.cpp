@@ -52,6 +52,7 @@ struct ed_cudnn_sdpa_key {
     float attn_scale = 0.0f;
     bool padding_mask = false;
     bool allow_short_kv_cross_attn = false;
+    bool allow_short_f16_self_attn = false;
     int64_t q_stride[4] = {};
     int64_t k_stride[4] = {};
     int64_t v_stride[4] = {};
@@ -61,6 +62,7 @@ struct ed_cudnn_sdpa_key {
         return device == other.device && io_type == other.io_type && dst_type == other.dst_type && b == other.b && h == other.h && sq == other.sq && sk == other.sk &&
                sk_actual == other.sk_actual && d == other.d && attn_scale == other.attn_scale && padding_mask == other.padding_mask &&
                allow_short_kv_cross_attn == other.allow_short_kv_cross_attn &&
+               allow_short_f16_self_attn == other.allow_short_f16_self_attn &&
                std::memcmp(q_stride, other.q_stride, sizeof(q_stride)) == 0 &&
                std::memcmp(k_stride, other.k_stride, sizeof(k_stride)) == 0 &&
                std::memcmp(v_stride, other.v_stride, sizeof(v_stride)) == 0 &&
@@ -87,6 +89,7 @@ struct ed_cudnn_sdpa_key_hash {
         mix(scale_bits);
         mix(key.padding_mask ? 1 : 0);
         mix(key.allow_short_kv_cross_attn ? 1 : 0);
+        mix(key.allow_short_f16_self_attn ? 1 : 0);
         for (int i = 0; i < 4; ++i) {
             mix(key.q_stride[i]);
             mix(key.k_stride[i]);
@@ -204,7 +207,7 @@ static bool cudnn_sdpa_wan_sp_cross_attn_enabled() {
 }
 
 static bool cudnn_sdpa_short_f16_self_attn_enabled() {
-    static const bool enabled = env_flag_enabled_or_default("ED_CUDNN_SDPA_SHORT_F16_SELF_ATTN", true);
+    static const bool enabled = env_flag_enabled_or_default("ED_CUDNN_SDPA_SHORT_F16_SELF_ATTN", false);
     return enabled;
 }
 
@@ -360,6 +363,11 @@ static bool is_wan_sp_cross_attn_tensor(const ggml_tensor * dst) {
            std::strstr(dst->name, "_cross_attn") != nullptr;
 }
 
+static bool is_minimax_h3_short_f16_self_attn_tensor(const ggml_tensor * dst) {
+    return dst != nullptr &&
+           std::strcmp(dst->name, "minimax_h3.vae.short_f16_self_attn") == 0;
+}
+
 static void log_unsupported_shape(const char * reason, const ggml_tensor * q, const ggml_tensor * k, const ggml_tensor * v, const ggml_tensor * dst, const ggml_tensor * mask) {
     if (!profile_enabled()) {
         return;
@@ -476,6 +484,7 @@ static bool make_key(const ggml_tensor * dst, ed_cudnn_sdpa_key & key, int devic
     key.attn_scale = attn_scale;
     key.padding_mask = padding_mask;
     key.allow_short_kv_cross_attn = is_wan_sp_cross_attn_tensor(dst);
+    key.allow_short_f16_self_attn = is_minimax_h3_short_f16_self_attn_tensor(dst);
 
     // cuDNN logical dim is [B,H,S,D]. The current ggml attention inputs are contiguous [D,S,H].
     key.q_stride[0] = h * sq * d;
@@ -531,6 +540,7 @@ static bool make_self_attn_key(int device,
     key.attn_scale = attn_scale;
     key.padding_mask = false;
     key.allow_short_kv_cross_attn = false;
+    key.allow_short_f16_self_attn = false;
 
     key.q_stride[0] = h * seq * d;
     key.q_stride[1] = seq * d;
@@ -620,7 +630,7 @@ static bool should_use_cudnn_sdpa(const ed_cudnn_sdpa_key & key) {
                                          ((key.sq == key.sk && !key.padding_mask) ||
                                           (key.padding_mask && key.sk_actual == key.sq && key.sk >= key.sq));
     const bool supported_short_f16_self_sequence =
-        cudnn_sdpa_short_f16_self_attn_enabled() &&
+        (key.allow_short_f16_self_attn || cudnn_sdpa_short_f16_self_attn_enabled()) &&
         key.io_type == GGML_TYPE_F16 &&
         key.sq >= 1024 &&
         ((key.sq == key.sk && !key.padding_mask) ||

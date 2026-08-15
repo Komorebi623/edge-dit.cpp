@@ -244,6 +244,7 @@ namespace Ops {
         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override {
             GGML_ASSERT(dilation == 1);
             x = ggml_conv_transpose_1d(ctx->ggml_ctx, params["weight"], x, stride, 0, dilation);
+            ggml_set_name(x, "minimax_h3.audio_vae.conv_transpose_1d");
             if (padding > 0) {
                 x = ggml_ext_slice(ctx->ggml_ctx, x, 0, padding, x->ne[0] - padding);
             }
