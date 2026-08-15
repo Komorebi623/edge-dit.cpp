@@ -43,7 +43,7 @@ Supported reference inputs:
 | Reference image | `--ref-image <image>` | Repeatable. Presented as `<Picture N>` to Qwen3-VL. |
 | Reference video | `--ref-video <frame-dir>` | Repeatable. Directory of image frames sorted lexicographically; treated as 24 fps. |
 | Paired video audio | `--ref-video-audio <wav>` | Repeatable. The Nth WAV is paired with the Nth `--ref-video`. |
-| Standalone audio | `--ref-audio <wav>` | Repeatable. Independent audio reference, not attached to a video. |
+| Standalone audio | `--ref-audio <wav>` | Repeatable. Independent audio reference, not attached to a video. Must be paired with at least one `--ref-image` or `--ref-video` (audio-only Ref2VA is rejected). |
 
 The reference inputs can be combined freely within Ref2VA. Ref2VA cannot be used
 with `--image` or `--end-img` in the same request.
@@ -168,14 +168,19 @@ ed-cli --video \
 
 ### Standalone reference audio
 
+Standalone `--ref-audio` must be paired with at least one `--ref-image` or
+`--ref-video` (audio-only Ref2VA is rejected). The example below anchors the
+audio to a reference image.
+
 ```bash
 ed-cli --video \
   --diffusion-model minimax_h3_ref2va_pruned-Q4_K_M.gguf \
   --vae minimax_h3_video_vae_fp16.safetensors \
   --audio-vae minimax_h3_audio_vae_fp32.safetensors \
   --llm qwen3vl_32b_minimax_h3-Q4_K_M.gguf \
+  --ref-image reference.png \
   --ref-audio reference_audio.wav \
-  -p "Generate a video with audio inspired by <Audio 1>." \
+  -p "Use the scene from <Picture 1> and generate audio inspired by <Audio 1>." \
   --cfg-scale 1 -W 864 -H 480 --fps 24 --video-frames 56 --steps 20 \
   --diffusion-fa --rng cpu --video-format mp4 \
   -o minimax_h3_ref_audio.mp4

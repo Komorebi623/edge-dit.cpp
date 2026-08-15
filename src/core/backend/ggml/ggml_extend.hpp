@@ -6775,7 +6775,7 @@ protected:
 #endif
             auto segment_output             = execute_graph<T>(segment_graph,
                                        n_threads,
-                                       false,
+                                       true,
                                        runtime_param_tensors,
                                        true,
                                        !is_last_segment || no_return,

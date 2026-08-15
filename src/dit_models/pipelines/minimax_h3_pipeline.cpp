@@ -535,12 +535,15 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
         return set_minimax_error(error, "MiniMax-H3 diffusion transformer signature is incomplete");
     }
 
-    const bool diffusion_offload = runtime.dit_offload_params_to_cpu();
+    runtime.reset_auto_allocate_state();
+    const size_t eff_budget = runtime.effective_budget_bytes();
+    size_t remaining_free = eff_budget;
+    const bool diffusion_offload = runtime.dit_offload_params_to_cpu() ||
+                                   runtime.plan_component_offload(loader, "model.diffusion_model", remaining_free);
     diffusion_ = std::make_unique<MiniMaxH3::MiniMaxH3Runner>(runtime.backend(),
                                                               loader.get_tensor_storage_map(),
                                                               "model.diffusion_model",
                                                               diffusion_offload);
-    diffusion_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
     diffusion_->set_flash_attention_enabled(runtime.flash_attention());
     if (auto process_group = runtime.graph_process_group_ref()) {
         diffusion_->set_process_group(process_group);
@@ -564,7 +567,8 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
         LOG_INFO("MiniMax-H3 synthesized missing rope.inv_freq (%zu values)", values.size());
     }
 
-    const bool text_offload = runtime.clip_offload_params_to_cpu();
+    const bool text_offload = runtime.clip_offload_params_to_cpu() ||
+                             runtime.plan_component_offload(loader, "text_encoders", remaining_free);
     String2TensorStorage conditioner_tensors = loader.get_tensor_storage_map();
     const std::regex language_layer_pattern(R"(^text_encoders\.llm\.model\.layers\.(\d+)\.)");
     for (auto it = conditioner_tensors.begin(); it != conditioner_tensors.end();) {
@@ -589,11 +593,12 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     conditioner_->alloc_params_buffer();
     conditioner_->get_param_tensors(registry.tensors(), "text_encoders.llm");
 
+    const bool vae_offload = runtime.vae_offload_params_to_cpu() ||
+                            runtime.plan_component_offload(loader, "first_stage_model", remaining_free);
     vae_ = std::make_unique<MiniMaxH3VAE::MiniMaxH3VideoVAERunner>(runtime.vae_backend(),
-                                                                    runtime.vae_offload_params_to_cpu(),
+                                                                    vae_offload,
                                                                     loader.get_tensor_storage_map(),
                                                                     "first_stage_model");
-    vae_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
     vae_->set_flash_attention_enabled(runtime.flash_attention());
     vae_->alloc_params_buffer();
     vae_->get_param_tensors(registry.tensors(), "first_stage_model");
@@ -602,17 +607,29 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
                                            loader.get_tensor_storage_map().end(),
                                            [](const auto& item) { return starts_with(item.first, "audio_vae."); });
     if (has_audio_vae) {
+        const bool audio_vae_offload = runtime.vae_offload_params_to_cpu() ||
+                                       runtime.plan_component_offload(loader, "audio_vae", remaining_free);
         audio_vae_ = std::make_unique<MiniMaxH3Audio::AudioVAERunner>(runtime.vae_backend(),
-                                                                        runtime.vae_offload_params_to_cpu(),
+                                                                        audio_vae_offload,
                                                                         loader.get_tensor_storage_map(),
                                                                         "audio_vae");
-        audio_vae_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
         audio_vae_->set_flash_attention_enabled(runtime.flash_attention());
         audio_vae_->alloc_params_buffer();
         audio_vae_->get_param_tensors(registry.tensors(), "audio_vae");
     } else {
         LOG_INFO("MiniMax-H3 audio VAE not provided; generated video will have no decoded audio track");
     }
+
+    runtime.finalize_auto_segment_budget(eff_budget);
+
+    // Apply finalized segment budget to all components (must come after finalize).
+    diffusion_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
+    vae_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
+    if (audio_vae_) {
+        audio_vae_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
+    }
+    conditioner_->model.set_max_graph_vram_bytes(
+        runtime.text_encoder_segment_budget(conditioner_->model.get_params_buffer_size()));
 
     registry.ignore_prefix("first_stage_model.encoder.");
     registry.ignore_prefix("text_encoders.llm.visual.");
@@ -1380,6 +1397,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
             h3_trace_tensor(("step_" + std::to_string(step) + "_velocity").c_str(), velocity);
         }
         packed += velocity * (sigma_next - sigma);
+        LOG_INFO("minimax-h3 step %d/%d sigma=%.6f next=%.6f", step + 1, steps, sigma, sigma_next);
         if (h3_trace_enabled()) {
             h3_trace_tensor(("step_" + std::to_string(step) + "_packed").c_str(), packed);
         }
