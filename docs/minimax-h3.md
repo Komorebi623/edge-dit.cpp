@@ -198,6 +198,47 @@ MiniMax-H3 always uses its fixed `16x16` video-VAE tiling path. Generic
 `--vae-tiling` and `--vae-tile-size` values do not replace this model-specific
 layout.
 
+## RTX 4090 offloaded comparison
+
+Measured on one RTX 4090 (24 GB), `864x480`, 56 frames at 24 fps, 20 steps,
+CFG 1, seed `42`, every component offloaded to CPU (`--offload-to-cpu`),
+`--max-vram 22`, model-specific `16x16` VAE tiling. On a single 24 GB card
+neither the BF16 DiT nor the Qwen3-VL encoder fits resident, so both engines
+stream weights per segment. Q8_0 rows quantize the BF16 files on load
+(`--type q8_0`). Wall is the end-to-end process time (measured identically for
+both engines); TE / Diffusion / VAE are per-stage times. "Load" is not shown as
+a column because the engines load differently — edge-dit loads all components up
+front, sd.cpp loads each lazily on first use — so a single load figure would not
+be comparable. Peak VRAM is sampled over the whole process. Bold marks the
+better value in each edge-dit vs stable-diffusion.cpp pair.
+
+| Task | Precision | System | Wall (s) | TE (ms) | Diffusion (ms) | VAE (ms) | Peak VRAM (MiB) |
+|---|---|---|---:|---:|---:|---:|---:|
+| Text | q4_K_M | edge-dit.cpp | 117 | **1551** | **81466** | **4929** | **18630** |
+| | | stable-diffusion.cpp | **113** | 10370 | 82550 | 13450 | 20554 |
+| First frame | q4_K_M | edge-dit.cpp | 129 | **3099** | **91589** | **4804** | **18544** |
+| | | stable-diffusion.cpp | **123** | 11500 | 91670 | 11170 | 20632 |
+| First + last frames | q4_K_M | edge-dit.cpp | 140 | **4065** | **101269** | **4812** | **18258** |
+| | | stable-diffusion.cpp | **135** | 11910 | 101350 | 12590 | 20868 |
+| Text | q8_0 | edge-dit.cpp | **159** | **2154** | **83656** | **4755** | **18808** |
+| | | stable-diffusion.cpp | 185 | 32750 | 132220 | 12810 | 22472 |
+| First frame | q8_0 | edge-dit.cpp | **170** | **3366** | **93107** | **4514** | **19094** |
+| | | stable-diffusion.cpp | 195 | 33730 | 138440 | 12980 | 22554 |
+| Text | bf16 | edge-dit.cpp | 206 | 4060 | 134334 | 4962 | 21120 |
+| | | stable-diffusion.cpp | — | — | — | — | — |
+| First frame | bf16 | edge-dit.cpp | 218 | 5544 | 145351 | 4850 | 20986 |
+| | | stable-diffusion.cpp | — | — | — | — | — |
+
+At q4_K_M the two engines match on diffusion time; edge-dit encodes text
+**3–8x faster**, decodes the VAE **~2.5x faster**, and holds peak VRAM roughly
+**2 GB lower**. At q8_0 edge-dit leads across the board — **~25–30s lower wall
+time**, diffusion **~40% faster**, peak VRAM **~3.5 GB lower**.
+
+sd.cpp has no BF16 rows on this card: it stages the full-precision DiT weights
+to the GPU in one block (~38 GB), which overflows the 24 GB budget and aborts
+before sampling. edge-dit streams the BF16 weights per segment, so it runs
+within the 24 GB limit.
+
 ## H200 BF16 comparison
 
 The tables below use one H200, resident components, `864x480`, 124 frames at
