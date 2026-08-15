@@ -40,5 +40,10 @@
   "stage_lifecycle": false,
   "max_vram_gib": 24.0,
   "auto_allocate": true,
-  "auto_fit": false
+  "auto_fit": false,
+  "quality_vs_default_1step": {
+    "video_psnr_db": 48.769097,
+    "audio_correlation": 0.9834688143,
+    "audio_snr_db": 14.834916
+  }
 }

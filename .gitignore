@@ -58,6 +58,7 @@ outputs/
 !docs/assets/*.png
 !docs/assets/minimax-h3-ref2va-four-image-edge-comfyui-diffusers-demo.mp4
 !docs/assets/minimax-h3-ref2va-two-character-edge-comfyui-diffusers-demo.mp4
+!docs/assets/minimax-h3-ref2va-two-character-resident-max24-comparison.mp4
 !benchmark/assets/*.png
 !website/assets/**/*.png
 !website/assets/**/*.jpg

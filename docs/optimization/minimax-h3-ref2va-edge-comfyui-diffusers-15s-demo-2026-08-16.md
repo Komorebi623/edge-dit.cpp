@@ -8,7 +8,7 @@
 - Edge-DiT.cpp 两项任务的端到端速度均快于 ComfyUI 和 Diffusers。
 - Edge-DiT.cpp 的 DiT 明显快于另外两个框架，但 Video VAE decode 约 43 秒，约为 ComfyUI/Diffusers 的 20 秒两倍。
 - MiniMax-H3 阶段式生命周期将 Edge 双角色任务峰值从 77,377 MiB 降至 52,777 MiB，生成阶段速度基本不变。
-- `--max-vram 24 --auto-allocate` 不是进程级硬上限：该长序列任务实测峰值仍为 39,503 MiB；把预算降至 8 GiB 后仍为 33,921 MiB，因此当前版本不能在 24 GiB GPU 上按此分辨率和时长运行。
+- `--max-vram 24 --auto-allocate` 不是进程级硬上限：该长序列完整 20-step 任务实测峰值仍为 39,505 MiB；把预算降至 8 GiB 后仍为 33,921 MiB，因此当前版本不能在 24 GiB GPU 上按此分辨率和时长运行。
 
 ## Demo
 
@@ -123,6 +123,21 @@ Diffusers 官方 pipeline 在传入 `num_inference_steps=20` 时实际记录到 
 | `--max-vram 24 --auto-allocate` | 43.361 s | 45.284 s | **39,503 MiB** | 成功，但超过 24 GiB |
 | `--max-vram 8 --auto-allocate` | 44.759 s | 159.939 s | **33,921 MiB** | 成功，仍超过 24 GiB且 VAE 显著变慢 |
 
+24 GiB 规划版本与同 seed、同输入、同 prompt 的常驻 1-step 输出相比，视频平均 PSNR 为 **48.769 dB**；解码音频波形相关系数为 **0.98347**、SNR 为 **14.835 dB**。图切分没有造成明显画面退化，但音频存在可测的数值变化；由于实测峰值仍超过 24 GiB，这不是物理 24 GiB GPU 上的质量保证。
+
+随后用完全相同的双角色任务完成 20-step 质量和速度门禁：
+
+| 指标 | 常驻基准 | `--max-vram 24 --auto-allocate` | 变化 |
+|---|---:|---:|---:|
+| Conditioning | **1.155 s** | 1.954 s | +69.18%（绝对增加 0.799 s） |
+| DiT | **811.664 s** | 854.183 s | +5.24% |
+| Video VAE decode | **43.101 s** | 44.896 s | +4.16% |
+| Generation | **866.212 s** | 911.731 s | +5.25% |
+| 端到端 | **878.903 s** | 935.137 s | +6.40% |
+| GPU 峰值 | 77,377 MiB | **39,505 MiB** | -48.94% |
+
+[常驻 / 24 GiB 规划左右对比视频](../assets/minimax-h3-ref2va-two-character-resident-max24-comparison.mp4)显示两者均保持角色、雨夜酒会场景和镜头质量，没有明显质量崩坏。扩散轨迹经过 20 steps 后并非像素一致，平均 PSNR 为 **20.536 dB**；预算版本音频与常驻版的波形相关系数为 **0.98089**、SNR 为 **14.157 dB**。该结果证明当前 graph-cut 路径能够完成高质量生成，但不能改变其 39.5 GiB 实测峰值仍不适用于物理 24 GiB GPU 的结论。
+
 首次 24 GiB 分段测试还暴露了超长 RMSNorm CUDA grid 维度限制；修复为展平 outer grid 后，分段 DiT 可以正确完成。图切分 profile 显示 51 个 DiT segment、单段 cache 约 2079.9 MiB，但单个长序列 block 的 activation/backend workspace 仍使进程峰值高于规划预算。
 
 因此当前结论是：
@@ -131,7 +146,7 @@ Diffusers 官方 pipeline 在传入 `num_inference_steps=20` 时实际记录到 
 - H200 上设置 24 GiB 只能模拟预算逻辑，不能模拟 RTX 4090 算力或证明任务能在 24 GiB 物理显存上运行。
 - 该 15 秒长序列任务当前不能作为 4090 可运行 Demo；需要进一步降低单 block activation/workspace，或支持 block 内切分/CPU activation staging。
 
-[24 GiB profile metrics](../assets/minimax-h3-ref2va-demo-edge-max24-metrics.json)记录了该次运行的完整阶段数据；命令在常驻基准上增加 `--max-vram 24 --auto-allocate` 并将 steps 设为 1，未叠加阶段式生命周期。
+[1-step 24 GiB profile metrics](../assets/minimax-h3-ref2va-demo-edge-max24-metrics.json)和[20-step 完整 metrics](../assets/minimax-h3-ref2va-demo-edge-max24-full20-metrics.json)记录了完整阶段数据。两次命令均在常驻基准上增加 `--max-vram 24 --auto-allocate`，未叠加阶段式生命周期。
 
 ## 回归验证
 
