@@ -186,11 +186,15 @@ Memory-oriented options:
 `--vae-tiling` takes an explicit `on|off|auto` value. Under `--auto-allocate`
 with a `--max-vram` budget, the runtime decides per component (diffusion
 transformer, text encoder, VAE) what stays resident on the GPU and what streams
-from host memory, so large models can run within a fixed VRAM budget.
+from host memory. This is a placement and graph-planning budget rather than a
+hard process-memory limit.
 `--auto-fit` goes one step further — a superset of `--auto-allocate` that also
-picks the quantization to fit the budget (text encoders forced to `q8_0`, the
-diffusion transformer walking a `q8_0 → q4_K` ladder), ignoring `--type`; use it
-to fit a hard VRAM cap without hand-tuning quantization and placement.
+picks the quantization to fit the budget (text encoders lowered toward `q8_0`
+without increasing already lower quantization, and the diffusion transformer
+walking a `q8_0 → q4_K` ladder), ignoring `--type`; use it
+to fit a VRAM planning budget without hand-tuning quantization and placement.
+Backend workspaces and transient allocations can still raise the measured
+process peak above this budget.
 
 See [Command line usage](cli.md#quantization-and-memory) for runnable examples
 and [performance (H200)](performance-H200.md) for cache, parallelism, and

@@ -149,14 +149,15 @@ well — either `--offload-to-cpu` (full-model offload) or add `--dit-offload`.
 ### Automatic placement (`--auto-allocate`)
 
 Rather than deciding offload per component by hand, `--auto-allocate` fits
-components against a hard VRAM budget of `min(--max-vram, live free VRAM)`.
+components against a VRAM planning budget of `min(--max-vram, live free VRAM)`.
 Components are considered in priority order — diffusion transformer, then text
 encoders, then VAE — and each is placed resident on the GPU if its
 (post-quantization) weights plus a compute-headroom reserve still fit the
 remaining budget; otherwise it is offloaded. After placement, the leftover
 budget becomes the graph VRAM budget (Section 4) for whatever was offloaded, so
 the largest, most-reused weights get first claim on resident VRAM and the rest
-is graph-segmented to stay within the cap.
+is graph-segmented to stay within the graph budget. Backend-owned CUDA/cuDNN
+workspaces may still make the measured process peak higher than `--max-vram`.
 
 ### Fully automatic budgeting (`--auto-fit`)
 
@@ -165,7 +166,8 @@ placement, so one flag covers the whole budget. On top of the resident/offload
 decision, `--auto-fit` also **chooses the quantization** to make components fit,
 ignoring `--type`:
 
-- the text encoders are forced to `q8_0` unconditionally — TE compute time is
+- text encoders above `q8_0` are lowered to `q8_0`; an input already below
+  `q8_0` keeps its existing quantization — TE compute time is
   negligible next to the DiT, so `q8_0` is near-lossless yet frees the budget
   that a bf16 TE (FLUX's T5 alone is ~9 GB) would otherwise consume;
 - the diffusion transformer walks a `q8_0 → q4_K` ladder, picking the highest
@@ -173,7 +175,7 @@ ignoring `--type`:
   fit, it stays at `q8_0` and is offloaded (an offloaded `q8_0` beats a `q4_K`
   that would have to offload anyway).
 
-Use `--auto-fit` when you just want a model to fit a hard VRAM cap without
+Use `--auto-fit` when you want automatic quantization and placement without
 hand-tuning `--type` and placement; use `--auto-allocate` when you want to keep
 control of the quantization (`--type`) and only automate placement.
 
@@ -298,8 +300,8 @@ exact model and resolution being targeted.
 | `--dit-offload` | Keep diffusion-transformer weights in CPU memory and stage them onto the GPU per step (compute runs on the GPU) |
 | `--text-encoder-offload` | Keep text-encoder weights in CPU memory and stage them onto the GPU per encode (compute runs on the GPU) |
 | `--vae-offload` | Keep VAE weights in CPU memory and stage them onto the GPU per decode (compute runs on the GPU) |
-| `--auto-allocate` | Budget-capped automatic placement: fit components (DiT, then text encoders, then VAE) resident on the GPU under a hard `min(--max-vram, free VRAM)` cap, offloading and graph-segmenting whatever does not fit |
-| `--auto-fit` | Superset of `--auto-allocate`: also chooses quantization to fit the budget (text encoders forced to `q8_0`, DiT walks a `q8_0 → q4_K` ladder), ignoring `--type` |
+| `--auto-allocate` | Budget-driven automatic placement: fit components (DiT, then text encoders, then VAE) against `min(--max-vram, free VRAM)`, offloading and graph-segmenting whatever does not fit; external backend workspaces can raise the measured process peak |
+| `--auto-fit` | Superset of `--auto-allocate`: also chooses quantization to fit the budget (text encoders are lowered to at most `q8_0`, DiT walks a `q8_0 → q4_K` ladder), ignoring `--type` |
 | `--max-vram <GB>` | Compute-graph VRAM budget; drives graph-cut segmentation. Used with offload or `--auto-allocate`; when offload is set without it, the runtime defaults to `0.85 × free VRAM` |
 | `--vae-tiling <on\|off\|auto>` | VAE tiling: `on` forces it, `off` forces it off (suppressing the low-VRAM auto-enable), `auto` (the default) enables it only on lower-VRAM GPUs (<=25 GiB total) |
 | `--vae-tile-size <float>` | Enable VAE tiling and set the relative tile size (larger value = finer grid) |

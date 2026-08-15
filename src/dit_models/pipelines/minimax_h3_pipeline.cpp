@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <iomanip>
 #include <regex>
@@ -49,6 +50,26 @@ struct ScopedEnvVar {
             unsetenv(name.c_str());
         }
     }
+};
+
+class ScopeExit {
+public:
+    explicit ScopeExit(std::function<void()> callback)
+        : callback_(std::move(callback)) {}
+
+    ~ScopeExit() {
+        run_now();
+    }
+
+    void run_now() {
+        if (callback_) {
+            callback_();
+            callback_ = nullptr;
+        }
+    }
+
+private:
+    std::function<void()> callback_;
 };
 
 bool set_minimax_error(std::string* error, const char* message) {
@@ -612,21 +633,29 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
                                         ? effective_budget - minimax_staging_slack
                                         : effective_budget;
     size_t remaining_free = placement_budget;
-    const bool diffusion_offload = runtime.dit_offload_params_to_cpu() ||
-                                   runtime.plan_component_offload(loader, "model.diffusion_model", remaining_free);
-    const bool text_offload = runtime.clip_offload_params_to_cpu() ||
-                              runtime.plan_component_offload(loader, "text_encoders.llm", remaining_free);
-    const bool vae_offload = runtime.vae_offload_params_to_cpu() ||
-                             runtime.plan_component_offload(loader, "first_stage_model", remaining_free);
-    const bool audio_vae_offload = runtime.vae_offload_params_to_cpu() ||
-                                   (has_audio_vae && runtime.plan_component_offload(loader, "audio_vae", remaining_free));
+    const bool diffusion_policy_offload = runtime.dit_offload_params_to_cpu() ||
+                                          runtime.plan_component_offload(loader, "model.diffusion_model", remaining_free);
+    const bool text_policy_offload = runtime.clip_offload_params_to_cpu() ||
+                                     runtime.plan_component_offload(loader, "text_encoders.llm", remaining_free);
+    const bool vae_policy_offload = runtime.vae_offload_params_to_cpu() ||
+                                    runtime.plan_component_offload(loader, "first_stage_model", remaining_free);
+    const bool audio_vae_policy_offload = runtime.vae_offload_params_to_cpu() ||
+                                          (has_audio_vae && runtime.plan_component_offload(loader, "audio_vae", remaining_free));
+    stage_diffusion_lifecycle_ = runtime.minimax_h3_stage_lifecycle() && !diffusion_policy_offload;
+    stage_text_lifecycle_ = runtime.minimax_h3_stage_lifecycle() && !text_policy_offload;
+    stage_video_vae_lifecycle_ = runtime.minimax_h3_stage_lifecycle() && !vae_policy_offload;
+    stage_audio_vae_lifecycle_ = runtime.minimax_h3_stage_lifecycle() && has_audio_vae && !audio_vae_policy_offload;
+    const bool diffusion_offload = diffusion_policy_offload || stage_diffusion_lifecycle_;
+    const bool text_offload = text_policy_offload || stage_text_lifecycle_;
+    const bool vae_offload = vae_policy_offload || stage_video_vae_lifecycle_;
+    const bool audio_vae_offload = audio_vae_policy_offload || stage_audio_vae_lifecycle_;
     runtime.finalize_auto_segment_budget(effective_budget, minimax_staging_slack);
 
     diffusion_ = std::make_unique<MiniMaxH3::MiniMaxH3Runner>(runtime.backend(),
                                                               loader.get_tensor_storage_map(),
                                                               "model.diffusion_model",
                                                               diffusion_offload);
-    diffusion_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
+    diffusion_->set_max_graph_vram_bytes(stage_diffusion_lifecycle_ ? 0 : runtime.max_graph_vram_bytes());
     diffusion_->set_flash_attention_enabled(runtime.flash_attention());
     if (auto process_group = runtime.graph_process_group_ref()) {
         diffusion_->set_process_group(process_group);
@@ -673,14 +702,16 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     conditioner_->model.set_flash_attention_enabled(runtime.flash_attention());
     conditioner_->alloc_params_buffer();
     conditioner_->get_param_tensors(registry.tensors(), "text_encoders.llm");
-    conditioner_->model.set_max_graph_vram_bytes(
-        runtime.text_encoder_segment_budget(conditioner_->model.get_params_buffer_size(), text_offload));
+    conditioner_->model.set_max_graph_vram_bytes(stage_text_lifecycle_
+                                                     ? 0
+                                                     : runtime.text_encoder_segment_budget(
+                                                           conditioner_->model.get_params_buffer_size(), text_offload));
 
     vae_ = std::make_unique<MiniMaxH3VAE::MiniMaxH3VideoVAERunner>(runtime.vae_backend(),
                                                                     vae_offload,
                                                                     loader.get_tensor_storage_map(),
                                                                     "first_stage_model");
-    vae_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
+    vae_->set_max_graph_vram_bytes(stage_video_vae_lifecycle_ ? 0 : runtime.max_graph_vram_bytes());
     vae_->set_flash_attention_enabled(runtime.flash_attention());
     vae_->alloc_params_buffer();
     vae_->get_param_tensors(registry.tensors(), "first_stage_model");
@@ -690,7 +721,7 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
                                                                         audio_vae_offload,
                                                                         loader.get_tensor_storage_map(),
                                                                         "audio_vae");
-        audio_vae_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
+        audio_vae_->set_max_graph_vram_bytes(stage_audio_vae_lifecycle_ ? 0 : runtime.max_graph_vram_bytes());
         audio_vae_->set_flash_attention_enabled(runtime.flash_attention());
         audio_vae_->alloc_params_buffer();
         audio_vae_->get_param_tensors(registry.tensors(), "audio_vae");
@@ -1013,11 +1044,50 @@ bool MiniMaxH3Pipeline::build_text_context(const char* prompt,
     return true;
 }
 
+bool MiniMaxH3Pipeline::stage_conditioning_components(bool need_video_vae,
+                                                       bool need_audio_vae,
+                                                       std::string* error) {
+    if (stage_text_lifecycle_ && !conditioner_->model.stage_params_for_phase()) {
+        return set_minimax_error(error, "MiniMax-H3 failed to stage text encoder for conditioning");
+    }
+    if (stage_video_vae_lifecycle_ && need_video_vae && !vae_->stage_params_for_phase()) {
+        release_conditioning_components();
+        return set_minimax_error(error, "MiniMax-H3 failed to stage video VAE for conditioning");
+    }
+    if (stage_audio_vae_lifecycle_ && need_audio_vae &&
+        audio_vae_ != nullptr && !audio_vae_->stage_params_for_phase()) {
+        release_conditioning_components();
+        return set_minimax_error(error, "MiniMax-H3 failed to stage audio VAE for conditioning");
+    }
+    return true;
+}
+
+void MiniMaxH3Pipeline::release_conditioning_components() {
+    if (conditioner_ != nullptr) {
+        conditioner_->model.release_params_after_phase();
+    }
+    if (vae_ != nullptr) {
+        vae_->release_params_after_phase();
+    }
+    if (audio_vae_ != nullptr) {
+        audio_vae_->release_params_after_phase();
+    }
+}
+
 ed_status_t MiniMaxH3Pipeline::decode_video_latent(const sd::Tensor<float>& latent,
                                                     int requested_frames,
                                                     ed_video_t* out,
                                                     MiniMaxH3Profile* profile,
                                                     std::string* error) {
+    if (stage_video_vae_lifecycle_ && !vae_->stage_params_for_phase()) {
+        set_minimax_error(error, "MiniMax-H3 failed to stage video VAE for decode");
+        return ED_STATUS_OUT_OF_MEMORY;
+    }
+    ScopeExit release_vae([this]() {
+        if (vae_ != nullptr) {
+            vae_->release_params_after_phase();
+        }
+    });
     sd::Tensor<float> vae_latent = vae_->diffusion_to_vae_latents(latent);
     h3_dump_vae_latent_if_requested(vae_latent);
     ed_tiling_params_t tiling = h3_vae_tiling(*runtime_);
@@ -1111,6 +1181,14 @@ bool MiniMaxH3Pipeline::decode_audio_latent(const sd::Tensor<float>& latent,
     if (audio_vae_ == nullptr || latent.empty()) {
         return set_minimax_error(error, "MiniMax-H3 audio VAE is not initialized");
     }
+    if (stage_audio_vae_lifecycle_ && !audio_vae_->stage_params_for_phase()) {
+        return set_minimax_error(error, "MiniMax-H3 failed to stage audio VAE for decode");
+    }
+    ScopeExit release_audio_vae([this]() {
+        if (audio_vae_ != nullptr) {
+            audio_vae_->release_params_after_phase();
+        }
+    });
     const int64_t decode_begin = profile != nullptr ? ggml_time_ms() : 0;
     sd::Tensor<float> waveform = audio_vae_->decode(runtime_->n_threads(), latent);
     if (profile != nullptr) profile->audio_vae_decode_ms += ggml_time_ms() - decode_begin;
@@ -1199,6 +1277,21 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         }
     }
     const int64_t resolved_seed = h3_resolve_seed(params->seed);
+    bool need_audio_vae_for_conditioning = params->ref_audio_count > 0;
+    for (int video_index = 0; video_index < params->ref_video_count; ++video_index) {
+        const ed_audio_t& audio = params->ref_videos[video_index].audio;
+        need_audio_vae_for_conditioning = need_audio_vae_for_conditioning ||
+                                          (audio.data != nullptr && audio.sample_count > 0);
+    }
+    const bool need_video_vae_for_conditioning = has_keyframes ||
+                                                  params->ref_image_count > 0 ||
+                                                  params->ref_video_count > 0;
+    if (!stage_conditioning_components(need_video_vae_for_conditioning,
+                                       need_audio_vae_for_conditioning,
+                                       error)) {
+        return ED_STATUS_OUT_OF_MEMORY;
+    }
+    ScopeExit release_conditioning([this]() { release_conditioning_components(); });
     sd::Tensor<float> context;
     sd::Tensor<int32_t> token_tags;
     const int64_t cond_context_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
@@ -1416,6 +1509,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         }
         reference_blocks.push_back({MiniMaxH3ReferenceKind::AUDIO, -1, encoded_index});
     }
+    release_conditioning.run_now();
     if (h3_condition_debug_exit_enabled()) {
         if (profile_ptr != nullptr) {
             profile.total_ms = ggml_time_ms() - generation_begin;
@@ -1490,6 +1584,15 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
              scheduler == ED_SCHEDULER_SIMPLE ? "simple" : "discrete",
              steps,
              video_sigma_shift);
+    if (stage_diffusion_lifecycle_ && !diffusion_->stage_params_for_phase()) {
+        set_minimax_error(error, "MiniMax-H3 failed to stage diffusion model for denoising");
+        return ED_STATUS_OUT_OF_MEMORY;
+    }
+    ScopeExit release_diffusion([this]() {
+        if (diffusion_ != nullptr) {
+            diffusion_->release_params_after_phase();
+        }
+    });
     if (sampler == ED_SAMPLER_RES_MULTISTEP) {
         auto initial_av = diffusion_->split_av_latents(packed, audio_length);
         initial_av.second *= video_sigma_shift / 3.0f;
@@ -1608,6 +1711,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
             h3_trace_tensor(("step_" + std::to_string(step) + "_packed").c_str(), packed);
         }
     }
+    release_diffusion.run_now();
     auto av = diffusion_->split_av_latents(packed, audio_length);
     if (sampler == ED_SAMPLER_RES_MULTISTEP) {
         av.second /= video_sigma_shift / 3.0f;

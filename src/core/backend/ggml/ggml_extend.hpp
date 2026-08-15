@@ -2672,6 +2672,7 @@ protected:
     ggml_context* offload_ctx                   = nullptr;
     ggml_backend_buffer_t runtime_params_buffer = nullptr;
     bool params_on_runtime_backend              = false;
+    bool phase_params_pinned_                   = false;
 
     ggml_context* cache_ctx            = nullptr;
     ggml_backend_buffer_t cache_buffer = nullptr;
@@ -6870,6 +6871,27 @@ protected:
 public:
     virtual std::string get_desc() = 0;
 
+    bool stage_params_for_phase() {
+        if (params_backend == runtime_backend) {
+            return true;
+        }
+        phase_params_pinned_ = true;
+        if (offload_all_params()) {
+            return true;
+        }
+        phase_params_pinned_ = false;
+        return false;
+    }
+
+    void release_params_after_phase() {
+        if (!phase_params_pinned_) {
+            return;
+        }
+        phase_params_pinned_ = false;
+        invalidate_persistent_graph();
+        restore_all_params();
+    }
+
     // On Apple Silicon the Metal GPU and the CPU share the same physical RAM
     // (unified memory). "Offloading" weights between a CPU backend and the Metal
     // backend therefore copies bytes that already live in the very same physical
@@ -6940,6 +6962,7 @@ public:
     }
 
     virtual ~GGMLRunner() {
+        release_params_after_phase();
         free_runtime_const_cache();
         free_params_buffer();
         free_compute_buffer();
@@ -7081,7 +7104,9 @@ public:
         // the next compute_reuse() rebuilds instead of re-executing dangling nodes.
         invalidate_persistent_graph();
         restore_partial_params();
-        restore_all_params();
+        if (!phase_params_pinned_) {
+            restore_all_params();
+        }
     }
 
     // do copy after alloc graph

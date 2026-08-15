@@ -376,25 +376,27 @@ it off. The offload flags share one semantics — **weights kept on CPU and stag
 to the GPU per compute** (compute always runs on the GPU): `--offload-to-cpu`
 offloads the whole model, while `--dit-offload` / `--text-encoder-offload` /
 `--vae-offload` offload just that one component. `--auto-allocate` places each
-component (DiT, text encoder, VAE) under a hard VRAM cap of `min(--max-vram,
-free)`, keeping a component resident when it fits and offloading (staging) it
-otherwise.
+component (DiT, text encoder, VAE) against a planning budget of
+`min(--max-vram, free)`, keeping a component resident when it fits and
+offloading (staging) it otherwise. Backend-owned CUDA/cuDNN workspaces are not
+all represented in this budget, so validate the measured process peak for the
+target model, sequence length, and resolution.
 
 These options are workload dependent. Validate output quality and latency for
 the exact model and resolution you plan to run.
 
 ### Budget-driven placement (`--auto-allocate`) and full auto (`--auto-fit`)
 
-Two levels of automation size a run to a hard VRAM budget instead of tuning
+Two levels of automation size a run to a VRAM planning budget instead of tuning
 `--type` and offload flags by hand:
 
 - `--auto-allocate` — you pick the quantization (`--type`); the runtime decides,
   per component (DiT / text encoder / VAE), what stays resident on the GPU and
-  what streams from host, so the peak stays under `--max-vram`.
+  what streams from host. `--max-vram` is not a universal process-level peak clamp.
 - `--auto-fit` — fully automatic. It **implies `--auto-allocate`** and, in
   addition, chooses the quantization itself: the DiT is driven down the ladder
   `q8_0 → q4_k` to the highest level that stays resident within the budget, the
-  text encoder is set to `q8_0` (near-lossless, halves its footprint), and
+  text encoder is lowered to at most `q8_0` (an already smaller quant stays unchanged), and
   placement is decided as above. `--auto-fit` **ignores `--type`** (it owns the
   quantization) and logs that it is doing so.
 

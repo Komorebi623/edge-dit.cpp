@@ -200,9 +200,28 @@ ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --video-format mp4 --output auto-fit.mp4
 ```
 
+For long Ref2VA jobs on GPUs that can hold one major component at a time, add
+`--minimax-h3-stage-lifecycle`. Qwen and the conditioning VAEs are released
+after context/reference encoding, the DiT remains resident across all denoise
+steps, and the decode VAEs are staged only after the DiT is released. The
+encoded context remains on the GPU and DiT throughput is unchanged apart from
+normal run-to-run variation.
+
+`--max-vram` is a placement and graph-planning budget, not a hard CUDA process
+limit. Backend workspaces and a single graph segment's activations can exceed
+it; setting `--max-vram 24` on a larger GPU does not by itself prove that the
+same workload fits a physical 24 GiB GPU.
+
 MiniMax-H3 always uses its fixed `16x16` video-VAE tiling path. Generic
 `--vae-tiling` and `--vae-tile-size` values do not replace this model-specific
 layout.
+
+## Ref2VA 15-second demo
+
+The [Edge-DiT.cpp / ComfyUI / Diffusers comparison](optimization/minimax-h3-ref2va-edge-comfyui-diffusers-15s-demo-2026-08-16.md)
+contains two vertically stacked 15-second videos, aligned inputs and sampling
+parameters, stage timings, peak VRAM, lifecycle validation, a 24 GiB planning
+budget experiment, and reproducible command/workflow entry points.
 
 ## H200 BF16 comparison
 

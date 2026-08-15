@@ -233,6 +233,7 @@ bool ModelRuntime::init_flags(const ed_context_params_t& params, std::string* er
     use_mmap_ = params.use_mmap;
     offload_params_to_cpu_ = params.offload_params_to_cpu;
     text_encoder_offload_ = params.text_encoder_offload;
+    minimax_h3_stage_lifecycle_ = params.minimax_h3_stage_lifecycle;
     dit_offload_ = params.dit_offload;
     vae_offload_ = params.vae_offload;
     auto_fit_ = params.auto_fit;
@@ -512,9 +513,9 @@ void ModelRuntime::replan_dit_quant_for_budget(::ModelLoader& loader) {
     // auto-fit also OWNS the text-encoder quantization. TE (CLIP+T5) is often bf16 and
     // large (~9 GB for flux's T5), but its compute time is negligible vs the DiT, so
     // quantizing it to q8_0 is near-lossless in quality, costs no speed, and halves its
-    // footprint. Forcing TE -> q8_0 frees budget so the DiT can stay resident without the
-    // DiT+TE bf16 pair overflowing VRAM (the 24G OOM cause). Unconditional: q8_0 TE has no
-    // downside here. tensor_should_be_converted already protects embeddings/projections.
+    // footprint. Lowering TE to q8_0 frees budget so the DiT can stay resident without the
+    // DiT+TE bf16 pair overflowing VRAM (the 24G OOM cause). A source already below q8_0
+    // stays at its existing precision; tensor_should_be_converted also protects embeddings/projections.
     const size_t te_before = component_effective_bytes(loader, kTE);
     if (te_before > 0) {
         loader.override_component_wtype(kTE, GGML_TYPE_Q8_0);
@@ -571,10 +572,15 @@ void ModelRuntime::replan_dit_quant_for_budget(::ModelLoader& loader) {
 
     // Even q4_k does not fit: revert to q8_0 (offloaded is better quality than a q4 that
     // still has to offload anyway).
-    loader.override_component_wtype(kDiT, GGML_TYPE_Q8_0);
-    LOG_INFO("auto-fit: DiT does not fit %.2f GB budget even at q4_K (q4=%.2f GB) -> q8_0, will offload",
-             dit_budget / (1024.0 * 1024.0 * 1024.0),
-             q4_bytes / (1024.0 * 1024.0 * 1024.0));
+    if (q8_bytes != q4_bytes) {
+        loader.override_component_wtype(kDiT, GGML_TYPE_Q8_0, true);
+        LOG_INFO("auto-fit: DiT does not fit %.2f GB budget even at q4_K (q4=%.2f GB) -> q8_0, will offload",
+                 dit_budget / (1024.0 * 1024.0 * 1024.0),
+                 q4_bytes / (1024.0 * 1024.0 * 1024.0));
+    } else {
+        LOG_INFO("auto-fit: source DiT is already q4_K and does not fit %.2f GB budget -> keep q4_K and offload",
+                 dit_budget / (1024.0 * 1024.0 * 1024.0));
+    }
 }
 
 size_t ModelRuntime::effective_budget_bytes() const {
@@ -698,6 +704,7 @@ void ModelRuntime::reset() {
     use_mmap_ = false;
     offload_params_to_cpu_ = false;
     text_encoder_offload_ = false;
+    minimax_h3_stage_lifecycle_ = false;
     dit_offload_ = false;
     vae_offload_ = false;
     free_params_immediately_ = false;

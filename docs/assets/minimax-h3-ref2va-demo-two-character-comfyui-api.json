@@ -1,0 +1,290 @@
+{
+  "prompt": {
+    "92": {
+      "inputs": {
+        "filename_prefix": "video/MiniMax_H3_urban_portrait",
+        "format": "auto",
+        "codec": "auto",
+        "video": [
+          "130",
+          0
+        ]
+      },
+      "class_type": "SaveVideo",
+      "_meta": {
+        "title": "保存视频"
+      }
+    },
+    "115": {
+      "inputs": {
+        "aspect_ratio": "9:16 (Portrait Widescreen)",
+        "megapixels": 0.9,
+        "multiple": 32
+      },
+      "class_type": "ResolutionSelector",
+      "_meta": {
+        "title": "Resolution Selector (Size)"
+      }
+    },
+    "119": {
+      "inputs": {
+        "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+      },
+      "class_type": "VAELoader",
+      "_meta": {
+        "title": "加载VAE"
+      }
+    },
+    "120": {
+      "inputs": {
+        "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+      },
+      "class_type": "VAELoader",
+      "_meta": {
+        "title": "加载VAE"
+      }
+    },
+    "121": {
+      "inputs": {
+        "samples": [
+          "125",
+          0
+        ],
+        "vae": [
+          "120",
+          0
+        ]
+      },
+      "class_type": "VAEDecodeAudio",
+      "_meta": {
+        "title": "VAE解码（音频）"
+      }
+    },
+    "122": {
+      "inputs": {
+        "samples": [
+          "125",
+          0
+        ],
+        "vae": [
+          "119",
+          0
+        ]
+      },
+      "class_type": "VAEDecode",
+      "_meta": {
+        "title": "VAE解码"
+      }
+    },
+    "123": {
+      "inputs": {
+        "sampler_name": "res_multistep"
+      },
+      "class_type": "KSamplerSelect",
+      "_meta": {
+        "title": "K采样器选择"
+      }
+    },
+    "124": {
+      "inputs": {
+        "scheduler": "simple",
+        "steps": 20,
+        "denoise": 1.0,
+        "model": [
+          "127",
+          0
+        ]
+      },
+      "class_type": "BasicScheduler",
+      "_meta": {
+        "title": "基本调度器"
+      }
+    },
+    "125": {
+      "inputs": {
+        "noise": [
+          "129",
+          0
+        ],
+        "guider": [
+          "126",
+          0
+        ],
+        "sampler": [
+          "123",
+          0
+        ],
+        "sigmas": [
+          "124",
+          0
+        ],
+        "latent_image": [
+          "136",
+          1
+        ]
+      },
+      "class_type": "SamplerCustomAdvanced",
+      "_meta": {
+        "title": "自定义采样器（高级）"
+      }
+    },
+    "126": {
+      "inputs": {
+        "model": [
+          "127",
+          0
+        ],
+        "conditioning": [
+          "136",
+          0
+        ]
+      },
+      "class_type": "BasicGuider",
+      "_meta": {
+        "title": "基本引导器"
+      }
+    },
+    "127": {
+      "inputs": {
+        "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "weight_dtype": "default"
+      },
+      "class_type": "UNETLoader",
+      "_meta": {
+        "title": "UNet加载器"
+      }
+    },
+    "128": {
+      "inputs": {
+        "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "type": "minimax",
+        "device": "default"
+      },
+      "class_type": "CLIPLoader",
+      "_meta": {
+        "title": "加载CLIP"
+      }
+    },
+    "129": {
+      "inputs": {
+        "noise_seed": 157368968253448
+      },
+      "class_type": "RandomNoise",
+      "_meta": {
+        "title": "随机噪波"
+      }
+    },
+    "130": {
+      "inputs": {
+        "fps": 24.0,
+        "bit_depth": 8,
+        "images": [
+          "122",
+          0
+        ],
+        "audio": [
+          "121",
+          0
+        ]
+      },
+      "class_type": "CreateVideo",
+      "_meta": {
+        "title": "创建视频"
+      }
+    },
+    "131": {
+      "inputs": {
+        "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+        "values.a": [
+          "132",
+          0
+        ]
+      },
+      "class_type": "ComfyMathExpression",
+      "_meta": {
+        "title": "数学表达式"
+      }
+    },
+    "132": {
+      "inputs": {
+        "value": 15.0
+      },
+      "class_type": "PrimitiveFloat",
+      "_meta": {
+        "title": "Float (Duration)"
+      }
+    },
+    "136": {
+      "inputs": {
+        "prompt": [
+          "138",
+          0
+        ],
+        "width": [
+          "115",
+          0
+        ],
+        "height": [
+          "115",
+          1
+        ],
+        "length": [
+          "131",
+          1
+        ],
+        "ref_image_size": "match",
+        "clip": [
+          "128",
+          0
+        ],
+        "vae": [
+          "119",
+          0
+        ],
+        "audio_vae": [
+          "120",
+          0
+        ],
+        "ref_images.ref_image_0": [
+          "137",
+          0
+        ],
+        "ref_images.ref_image_1": [
+          "139",
+          0
+        ]
+      },
+      "class_type": "MiniMaxH3ReferenceToVideo",
+      "_meta": {
+        "title": "MiniMax H3 Reference to Video"
+      }
+    },
+    "137": {
+      "inputs": {
+        "image": "urban-picture1-gu-qinglan.png"
+      },
+      "class_type": "LoadImage",
+      "_meta": {
+        "title": "加载图像"
+      }
+    },
+    "138": {
+      "inputs": {
+        "value": "15秒，9:16竖屏，720p，真人写实，高质感现代都市情感短剧。参考图绑定：<Picture 1>只负责锁定顾清岚同一张脸、脸型、五官、30岁成年女性年龄感、黑色长卷发侧分披肩、右眼下方清晰小痣、身形、墨绿色单肩褶皱缎面高开衩曳地礼服、黑色尖头细高跟鞋、银色长款钻石耳坠与细手链；<Picture 2>只负责锁定周叙白同一张脸、脸型、五官、31岁成年男性年龄感、凌乱感黑色短发、细边金属框眼镜、身形、白色长袖衬衫、深海军蓝修身马甲与同色西裤、酒红色领带和黑色皮鞋。两张参考图均为角色资产参考，不作为视频首帧或尾帧；每张四视图中的正面、侧面和背面都代表同一个角色，禁止生成多角度分身，禁止把白底、拼图、分格版式或角色设定板布局带入视频。全片真实主角始终只有顾清岚和周叙白两人，脸型、五官、发型、年龄、身形、服装、配饰与色彩严格参考对应图片并保持连续一致。\n\n顾清岚30岁，成年女性，黑色长卷发侧分披肩，右眼下方有一颗清晰小痣，佩戴银色长款钻石耳坠与细手链，穿墨绿色单肩褶皱缎面高开衩曳地礼服和黑色尖头细高跟鞋，妆容精致克制，红唇；周叙白31岁，成年男性，凌乱感黑色短发，佩戴细边金属框眼镜，穿白色长袖衬衫、深海军蓝修身马甲与同色西裤、酒红色领带和黑色皮鞋。\n\n场景为雨夜城市高层酒店的艺术慈善酒会。宴会厅有深色大理石地面、挑高水晶灯、香槟塔、黑色钢琴、白色花艺、金属烛台和整面落地玻璃幕墙，窗外雨线缓慢滑落，城市灯光在湿润玻璃上形成蓝金色散景。来宾穿正式晚礼服，在远处轻声交谈，侍者端着香槟穿行。水晶灯在墨绿色缎面礼服上游走出细腻高光，香槟气泡持续上升，杯壁折射出倒置的人影，一束暖光穿过香槟塔形成短暂虹彩光斑。\n\n两位主角已经七年没有见面，重逢前互不知道对方会出席。视频风格：高质感现代都市爱情电影，深墨绿、海军蓝、酒红与暖金为主色，窗外冷蓝雨夜作为背景层次。使用浅景深、柔和高光、轻微胶片颗粒、克制的镜头呼吸和细微慢动作。镜头以礼服下摆与皮鞋特写、香槟塔反射、眼神近景、肩后镜头、跟随移镜和前景遮挡转场为主。人物表演含蓄，情绪通过呼吸停顿、握杯力度、视线闪躲和重新对视呈现。两人靠近后仍保留半步距离，不拥抱，不立即握手，让未说完的过去停留在画面里。\n\n镜头切换设计：全片拆成9个镜头，单镜头约0.7至2秒。开场拍黑色高跟鞋和墨绿色裙摆掠过镜面地面，切周叙白手中香槟杯的气泡，再通过香槟塔的折射看见顾清岚进入会场；两人目光相遇时，焦点从杯壁倒影迅速切到真实面孔，背景人群和水晶灯化成流动散景，现场交谈声被短暂压低，只留下心跳、呼吸与一记钢琴延音；侍者从镜头前经过形成自然遮挡，遮挡消失后两人已经隔着人群向彼此走近；结尾用缓慢侧移镜头把两人、雨夜玻璃和城市灯海叠在同一画面，香槟塔投出的虹彩光斑恰好掠过两人的眼睛。\n\n0至3秒，黑色高跟鞋踏入宴会厅，墨绿色缎面裙摆扫过大理石倒影。顾清岚从来宾之间走过，水晶灯高光沿礼服褶皱流动。切香槟塔近景，她的身影被杯壁折射成数层倒影，站在塔另一侧的周叙白无意抬眼，看见她后手中的酒杯停在唇边。\n\n3至6秒，周叙白眼睛特写，镜片上掠过一道香槟金光，他握杯的手指微微收紧。切顾清岚半身近景，她也认出他，脚步停顿半拍，随后把惊讶压回平静。周围来宾仍在移动，背景乐与谈笑声逐渐变远，只剩玻璃杯轻碰和一次清晰呼吸。\n\n6至10秒，一名侍者端着酒盘从镜头前经过，形成黑色前景遮挡。遮挡消失后，两人分别绕过香槟塔向对方走去。镜头交替拍周叙白微微松开的领带结、顾清岚垂在身侧却悄悄收紧的手指、两人在大理石地面逐渐接近的倒影。顾清岚先停下，轻声说：“好久不见。”\n\n10至15秒，周叙白看着她，沉默半秒后回答：“七年零三个月。”顾清岚眼神轻轻一颤，低声问：“你还记得？”周叙白放下始终没有喝过的香槟，直视她：“你什么时候愿意给我个解释？”窗外雨水划过玻璃，钢琴落下一记低音。两人隔着半步距离安静对视，香槟塔折出的虹彩光斑从他们之间缓慢掠过，画面停在顾清岚终于浮现的一点笑意上。\n\n\n环境声为克制的弦乐与钢琴、酒会低声交谈、香槟气泡、杯壁轻碰、雨水敲击玻璃、高跟鞋落地和衣料摩擦声。目光相遇时使用短暂低通音效与轻微心跳，随后环境声自然回归。对白清晰，口型准确，无字幕，无旁白。保持香槟杯液面、人物站位、礼服开衩方向、耳坠、眼镜、领带和发型连续。避免人物换脸、礼服变色、眼镜消失、酒杯穿模、多余手指、过度哭泣、夸张拥抱、背景人群突然静止、随机文字、品牌标志、UI和水印。\n"
+      },
+      "class_type": "PrimitiveStringMultiline",
+      "_meta": {
+        "title": "Input Text (Prompt)"
+      }
+    },
+    "139": {
+      "inputs": {
+        "image": "urban-picture2-zhou-xubai.png"
+      },
+      "class_type": "LoadImage",
+      "_meta": {
+        "title": "加载图像"
+      }
+    }
+  }
+}

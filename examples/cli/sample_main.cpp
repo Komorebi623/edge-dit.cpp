@@ -87,9 +87,10 @@ void print_usage(const char* prog) {
         "  --offload-to-cpu          Full offload: all weights on CPU, staged to GPU per compute\n"
         "  --dit-offload             DiT weights on CPU, staged to GPU per step (compute on GPU)\n"
         "  --text-encoder-offload    Text-encoder weights on CPU, staged to GPU per encode\n"
+        "  --minimax-h3-stage-lifecycle  MiniMax-H3: stage Qwen/VAE by phase and release them during DiT\n"
         "  --vae-offload             VAE weights on CPU, staged to GPU per decode\n"
         "  --max-vram <GB>           Limit compute-graph VRAM (segments the graph). Implies --auto-allocate path\n"
-        "  --auto-allocate           Auto per-component placement under a hard VRAM cap\n"
+        "  --auto-allocate           Auto per-component placement under a VRAM planning budget\n"
         "  --auto-fit                Fully automatic: choose DiT quant + placement to fit; ignores --type\n"
         "  --vae-tiling <on|off|auto>  VAE tiled decode (reduces VRAM)\n\n"
         "Timing:\n"
@@ -546,6 +547,7 @@ int main(int argc, char** argv) {
     ctx_params.offload_params_to_cpu = args.offload_to_cpu;
     ctx_params.dit_offload = args.dit_offload;
     ctx_params.text_encoder_offload = args.text_encoder_offload;
+    ctx_params.minimax_h3_stage_lifecycle = args.minimax_h3_stage_lifecycle;
     ctx_params.auto_allocate = args.auto_allocate;
     ctx_params.auto_fit = args.auto_fit;
     ctx_params.vae_offload = args.vae_offload;

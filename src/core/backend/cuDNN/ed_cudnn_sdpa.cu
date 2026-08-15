@@ -675,8 +675,11 @@ static bool should_sync_plan_build(const ed_cudnn_sdpa_key & key) {
     if (key.io_type == GGML_TYPE_BF16 || key.dst_type == GGML_TYPE_F16) {
         return true;
     }
+    const bool long_self_attn = !key.padding_mask &&
+                                key.sq == key.sk &&
+                                key.sq >= 65536;
     return key.dst_type == GGML_TYPE_F32 &&
-           cudnn_sdpa_sync_f32_self_attn_enabled() &&
+           (long_self_attn || cudnn_sdpa_sync_f32_self_attn_enabled()) &&
            !key.padding_mask &&
            key.sq == key.sk &&
            key.sq >= MIN_CUDNN_SDPA_FAST_SEQ;

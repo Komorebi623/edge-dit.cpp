@@ -528,6 +528,7 @@ struct FluxCliArgs {
     bool offload_to_cpu = false;
     bool text_encoder_offload = false;
     bool dit_offload = false;
+    bool minimax_h3_stage_lifecycle = false;
     bool auto_allocate = false;
     bool auto_fit = false;
     bool vae_offload = false;
@@ -880,6 +881,8 @@ inline bool parse_args(int argc, char** argv, FluxCliArgs* args) {
             args->text_encoder_offload = true;
         } else if (std::strcmp(key, "--dit-offload") == 0) {
             args->dit_offload = true;
+        } else if (std::strcmp(key, "--minimax-h3-stage-lifecycle") == 0) {
+            args->minimax_h3_stage_lifecycle = true;
         } else if (std::strcmp(key, "--auto-allocate") == 0) {
             args->auto_allocate = true;
         } else if (std::strcmp(key, "--auto-fit") == 0) {

@@ -164,11 +164,13 @@ static void print_usage(const char* prog) {
         "  --offload-to-cpu          Keep model weights on CPU, copy to GPU per-compute (saves VRAM)\n"
         "  --dit-offload             Keep DiT weights on CPU, stage to GPU per step (compute on GPU)\n"
         "  --text-encoder-offload    Keep text-encoder weights on CPU, stage to GPU per encode (compute on GPU)\n"
+        "  --minimax-h3-stage-lifecycle  MiniMax-H3: stage Qwen/VAE by phase and release them during DiT\n"
         "  --vae-offload             Keep VAE weights on CPU, stage to GPU per decode (compute on GPU)\n"
-        "  --max-vram <GB>           Limit VRAM usage for compute graphs (e.g. 8.0)\n"
-        "  --auto-allocate           Auto per-component placement under a hard VRAM cap\n"
+        "  --max-vram <GB>           Set the VRAM planning budget for compute graphs (e.g. 8.0)\n"
+        "  --auto-allocate           Auto per-component placement under a VRAM planning budget\n"
         "                            = min(--max-vram, free); keeps components resident\n"
         "                            when they fit, offloads (segments) the rest\n"
+        "                            (external CUDA workspaces can raise the process peak)\n"
         "  --auto-fit                Fully automatic: choose DiT quantization (q8_0 down\n"
         "                            to q4_k) AND placement to fit the VRAM budget.\n"
         "                            Implies --auto-allocate; ignores --type. Off by default.\n"
@@ -895,6 +897,7 @@ int main(int argc, char** argv) {
     ctx_params.offload_params_to_cpu = args.offload_to_cpu;
     ctx_params.dit_offload = args.dit_offload;
     ctx_params.text_encoder_offload = args.text_encoder_offload;
+    ctx_params.minimax_h3_stage_lifecycle = args.minimax_h3_stage_lifecycle;
     ctx_params.auto_allocate = args.auto_allocate;
     ctx_params.auto_fit = args.auto_fit;
     // For auto-allocate/auto-fit compute-buffer measurement: use the requested

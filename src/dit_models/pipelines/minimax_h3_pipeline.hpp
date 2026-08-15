@@ -63,6 +63,10 @@ private:
     std::unique_ptr<LLM::LLMEmbedder> conditioner_;
     std::unique_ptr<MiniMaxH3VAE::MiniMaxH3VideoVAERunner> vae_;
     std::unique_ptr<MiniMaxH3Audio::AudioVAERunner> audio_vae_;
+    bool stage_diffusion_lifecycle_ = false;
+    bool stage_text_lifecycle_ = false;
+    bool stage_video_vae_lifecycle_ = false;
+    bool stage_audio_vae_lifecycle_ = false;
     ggml_context* sentinel_ctx_ = nullptr;
     ggml_tensor* sentinel_tensor_ = nullptr;
 
@@ -91,6 +95,10 @@ private:
                              ed_video_t* out,
                              MiniMaxH3Profile* profile,
                              std::string* error);
+    bool stage_conditioning_components(bool need_video_vae,
+                                       bool need_audio_vae,
+                                       std::string* error);
+    void release_conditioning_components();
 };
 
 }  // namespace edgedit

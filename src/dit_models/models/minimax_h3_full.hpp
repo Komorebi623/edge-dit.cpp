@@ -334,7 +334,8 @@ namespace MiniMaxH3 {
                                               nullptr,
                                               true,
                                               ctx->flash_attn_enabled,
-                                              1.f / 128.f);
+                                              1.f / 128.f,
+                                              sequence < 65536);
             return out_proj->forward(ctx, out);
         }
     };

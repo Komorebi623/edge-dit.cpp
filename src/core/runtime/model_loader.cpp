@@ -1703,7 +1703,9 @@ void ModelLoader::set_wtype_override(ggml_type wtype, std::string tensor_type_ru
              tensor_storage_map_.size());
 }
 
-size_t ModelLoader::override_component_wtype(const std::string& prefix, ggml_type dst_type) {
+size_t ModelLoader::override_component_wtype(const std::string& prefix,
+                                             ggml_type dst_type,
+                                             bool allow_precision_increase) {
     if (dst_type == GGML_TYPE_COUNT) {
         return 0;
     }
@@ -1711,6 +1713,16 @@ size_t ModelLoader::override_component_wtype(const std::string& prefix, ggml_typ
     for (auto& item : tensor_storage_map_) {
         if (item.first.rfind(prefix, 0) != 0) {
             continue;  // not in this component
+        }
+        const ggml_type current_type = item.second.expected_type != GGML_TYPE_COUNT
+                                           ? item.second.expected_type
+                                           : item.second.type;
+        if (!allow_precision_increase && ggml_is_quantized(current_type)) {
+            const double current_bpw = 8.0 * ggml_type_size(current_type) / ggml_blck_size(current_type);
+            const double target_bpw  = 8.0 * ggml_type_size(dst_type) / ggml_blck_size(dst_type);
+            if (target_bpw >= current_bpw) {
+                continue;
+            }
         }
         if (!tensor_should_be_converted(item.second, dst_type)) {
             continue;  // biases/norms/embeds etc. stay as-is (mirrors set_wtype_override)
