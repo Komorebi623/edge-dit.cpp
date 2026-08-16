@@ -199,7 +199,7 @@ bool EdgeDitEngine::init(const ed_ctx_params_t* params) {
 
     PipelineTensorRegistry registry;
     // Auto-fit: before offload planning, let the runtime choose the DiT quant level
-    // (q8_0..q4_k, ignoring --type) that keeps it resident within the VRAM budget (no-op
+    // (q8_0..q4_k, superseding --type for the DiT) that keeps it resident within the VRAM budget (no-op
     // unless --auto-fit). Must run after apply_dtype_policy (expected_type is set) and
     // before prepare (which reads expected_type for offload decisions) and bind_weights
     // (which materializes the quantized weights). Uses the non-const loader.

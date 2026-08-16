@@ -12,6 +12,9 @@
 #include "utils/rng_philox.hpp"
 #include "utils/util.h"
 #include "runtime/model_loader.h"
+#if defined(GGML_USE_CUDA)
+#include "ggml-cuda.h"
+#endif
 
 namespace edgedit {
 namespace {
@@ -233,6 +236,7 @@ bool ModelRuntime::init_flags(const ed_context_params_t& params, std::string* er
     use_mmap_ = params.use_mmap;
     offload_params_to_cpu_ = params.offload_params_to_cpu;
     text_encoder_offload_ = params.text_encoder_offload;
+    minimax_h3_stage_lifecycle_ = params.minimax_h3_stage_lifecycle;
     dit_offload_ = params.dit_offload;
     vae_offload_ = params.vae_offload;
     auto_fit_ = params.auto_fit;
@@ -281,6 +285,27 @@ bool ModelRuntime::init_backends(const ed_context_params_t& params, std::string*
         return fail(error, msg);
     }
     LOG_INFO("default backend: %s", ggml_backend_name(backends_.backend));
+
+#if defined(GGML_USE_CUDA)
+    if (ggml_backend_is_cuda(backends_.backend)) {
+        size_t cuda_allocation_budget = 0;
+        if (auto_fit_ && max_graph_vram_bytes_ > 0) {
+            constexpr size_t external_workspace_reserve = static_cast<size_t>(1) * 1024 * 1024 * 1024;
+            if (max_graph_vram_bytes_ <= external_workspace_reserve) {
+                return fail(error, "--auto-fit --max-vram must exceed the 1 GiB CUDA workspace reserve");
+            }
+            cuda_allocation_budget = max_graph_vram_bytes_ - external_workspace_reserve;
+        }
+        if (!ggml_backend_cuda_set_memory_budget(backends_.backend, cuda_allocation_budget)) {
+            return fail(error, "failed to configure CUDA memory budget");
+        }
+        if (cuda_allocation_budget > 0) {
+            LOG_INFO("auto-fit: CUDA allocation guard = %.2f GiB (%.2f GiB requested, 1.00 GiB reserved for external workspaces)",
+                     cuda_allocation_budget / (1024.0 * 1024.0 * 1024.0),
+                     max_graph_vram_bytes_ / (1024.0 * 1024.0 * 1024.0));
+        }
+    }
+#endif
 
     // Text encoder and VAE no longer run on a dedicated CPU backend. When their
     // offload flags are set they keep weights on CPU but stage to the GPU per
@@ -512,29 +537,36 @@ void ModelRuntime::replan_dit_quant_for_budget(::ModelLoader& loader) {
     // auto-fit also OWNS the text-encoder quantization. TE (CLIP+T5) is often bf16 and
     // large (~9 GB for flux's T5), but its compute time is negligible vs the DiT, so
     // quantizing it to q8_0 is near-lossless in quality, costs no speed, and halves its
-    // footprint. Forcing TE -> q8_0 frees budget so the DiT can stay resident without the
-    // DiT+TE bf16 pair overflowing VRAM (the 24G OOM cause). Unconditional: q8_0 TE has no
-    // downside here. tensor_should_be_converted already protects embeddings/projections.
+    // footprint. Lowering TE to q8_0 frees budget so the DiT can stay resident without the
+    // DiT+TE bf16 pair overflowing VRAM (the 24G OOM cause). A source already below q8_0
+    // stays at its existing precision; tensor_should_be_converted also protects embeddings/projections.
     const size_t te_before = component_effective_bytes(loader, kTE);
     if (te_before > 0) {
         loader.override_component_wtype(kTE, GGML_TYPE_Q8_0);
         const size_t te_after = component_effective_bytes(loader, kTE);
         if (te_after != te_before) {
-            LOG_INFO("auto-fit: TE quant set to q8_0 (ignoring --type), %.2f GB -> %.2f GB",
+            LOG_INFO("auto-fit: TE quant set to q8_0 (superseding global --type for TE), %.2f GB -> %.2f GB",
                      te_before / (1024.0 * 1024.0 * 1024.0),
                      te_after / (1024.0 * 1024.0 * 1024.0));
         }
     }
 
-    // auto-fit OWNS the DiT quantization: it ignores the user's --type and drives the DiT
-    // through the ladder q8_0 -> q4_k, picking the highest level that stays resident. On a
-    // 4090 q8_0 is the best starting point (bf16 is both larger and slower due to the
-    // FP32-accumulate penalty), so we never consider bf16.
+    // auto-fit owns the DiT decision after the global --type policy is applied. It lowers
+    // eligible high-precision tensors toward q8_0 -> q4_k, but never increases an existing
+    // lower-precision tensor. On a 4090 q8_0 is the best high-quality starting point (bf16
+    // is both larger and slower due to the FP32-accumulate penalty), so we do not retain
+    // bf16 merely to satisfy the automatic budget.
     const size_t bytes_before = component_effective_bytes(loader, kDiT);
     loader.override_component_wtype(kDiT, GGML_TYPE_Q8_0);
     const size_t q8_bytes = component_effective_bytes(loader, kDiT);
+    std::vector<std::pair<std::string, ggml_type>> q8_precision_state;
+    for (const auto& item : loader.get_tensor_storage_map()) {
+        if (item.first.rfind(kDiT, 0) == 0) {
+            q8_precision_state.emplace_back(item.first, item.second.expected_type);
+        }
+    }
     if (q8_bytes != bytes_before) {
-        LOG_INFO("auto-fit: DiT quant set to q8_0 (ignoring --type), %.2f GB",
+        LOG_INFO("auto-fit: DiT quant set to q8_0 (superseding global --type for DiT), %.2f GB",
                  q8_bytes / (1024.0 * 1024.0 * 1024.0));
     }
 
@@ -551,30 +583,39 @@ void ModelRuntime::replan_dit_quant_for_budget(::ModelLoader& loader) {
     const size_t dit_budget = budget - headroom;
 
     if (q8_bytes <= dit_budget) {
-        LOG_INFO("auto-fit: DiT q8_0 %.2f GB fits %.2f GB budget -> resident",
+        LOG_INFO("auto-fit: DiT source-or-Q8 precision %.2f GB fits %.2f GB budget -> resident",
                  q8_bytes / (1024.0 * 1024.0 * 1024.0),
                  dit_budget / (1024.0 * 1024.0 * 1024.0));
         return;  // q8_0 already fits -> keep it (highest precision in the ladder)
     }
 
-    // q8_0 does not fit -> try q4_k (the floor). Keep it if it fits; else leave at q8_0
-    // and let plan_component_offload offload the DiT.
+    // The source-or-Q8 candidate does not fit -> try q4_k (the floor). Keep it if it fits;
+    // otherwise restore the candidate precision and let plan_component_offload offload it.
     loader.override_component_wtype(kDiT, GGML_TYPE_Q4_K);
     const size_t q4_bytes = component_effective_bytes(loader, kDiT);
     if (q4_bytes <= dit_budget) {
-        LOG_INFO("auto-fit: DiT q8_0 %.2f GB -> q4_K %.2f GB to fit %.2f GB budget (resident)",
+        LOG_INFO("auto-fit: DiT source-or-Q8 %.2f GB -> q4_K %.2f GB to fit %.2f GB budget (resident)",
                  q8_bytes / (1024.0 * 1024.0 * 1024.0),
                  q4_bytes / (1024.0 * 1024.0 * 1024.0),
                  dit_budget / (1024.0 * 1024.0 * 1024.0));
         return;
     }
 
-    // Even q4_k does not fit: revert to q8_0 (offloaded is better quality than a q4 that
-    // still has to offload anyway).
-    loader.override_component_wtype(kDiT, GGML_TYPE_Q8_0);
-    LOG_INFO("auto-fit: DiT does not fit %.2f GB budget even at q4_K (q4=%.2f GB) -> q8_0, will offload",
-             dit_budget / (1024.0 * 1024.0 * 1024.0),
-             q4_bytes / (1024.0 * 1024.0 * 1024.0));
+    // Even q4_k does not fit: restore the post-Q8 planning state. This keeps BF16/F16
+    // sources at Q8 while preserving any user-supplied Q5/Q6/Q4-or-lower tensors instead
+    // of accidentally increasing their precision during the fallback.
+    if (q8_bytes != q4_bytes) {
+        auto& storage_map = loader.get_tensor_storage_map();
+        for (const auto& state : q8_precision_state) {
+            storage_map.at(state.first).expected_type = state.second;
+        }
+        LOG_INFO("auto-fit: DiT does not fit %.2f GB budget even at q4_K (q4=%.2f GB) -> restore source-or-Q8 precision, will offload",
+                 dit_budget / (1024.0 * 1024.0 * 1024.0),
+                 q4_bytes / (1024.0 * 1024.0 * 1024.0));
+    } else {
+        LOG_INFO("auto-fit: source DiT is already q4_K or lower and does not fit %.2f GB budget -> preserve source precision and offload",
+                 dit_budget / (1024.0 * 1024.0 * 1024.0));
+    }
 }
 
 size_t ModelRuntime::effective_budget_bytes() const {
@@ -698,6 +739,7 @@ void ModelRuntime::reset() {
     use_mmap_ = false;
     offload_params_to_cpu_ = false;
     text_encoder_offload_ = false;
+    minimax_h3_stage_lifecycle_ = false;
     dit_offload_ = false;
     vae_offload_ = false;
     free_params_immediately_ = false;

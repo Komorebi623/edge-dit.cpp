@@ -2218,6 +2218,7 @@ struct GGMLRunnerContext {
     // means "unknown" -> sage applies to all layers (stage-1 behavior).
     int sage_layer_idx    = -1;
     int sage_total_layers = -1;
+    size_t max_graph_vram_bytes = 0;
 };
 
 // Model-facing tap primitive. Called by a model's forward() at a structural
@@ -2672,6 +2673,7 @@ protected:
     ggml_context* offload_ctx                   = nullptr;
     ggml_backend_buffer_t runtime_params_buffer = nullptr;
     bool params_on_runtime_backend              = false;
+    bool phase_params_pinned_                   = false;
 
     ggml_context* cache_ctx            = nullptr;
     ggml_backend_buffer_t cache_buffer = nullptr;
@@ -6374,10 +6376,12 @@ protected:
         // params_already_resident: the segment loop (double-buffer prefetch) has
         // already swapped this segment's weights onto the GPU, so skip the internal
         // offload/restore entirely. Default false keeps every other caller identical.
-        const bool use_partial_param_offload = !runtime_param_tensors.empty() && !params_already_resident;
+        const bool weights_already_resident = params_already_resident || params_on_runtime_backend;
+        const bool use_partial_param_offload = !runtime_param_tensors.empty() && !weights_already_resident;
         int64_t t_offload_begin              = ggml_time_ms();
-        if (params_already_resident) {
-            // weights pre-swapped by caller; nothing to offload here
+        if (weights_already_resident) {
+            // Weights were pre-swapped by the async segment caller or pinned for the
+            // current component phase; do not stage the same tensors a second time.
         } else if (use_partial_param_offload) {
             if (!offload_partial_params(runtime_param_tensors)) {
                 LOG_ERROR("%s offload partial params to runtime backend failed", get_desc().c_str());
@@ -6582,8 +6586,10 @@ protected:
         // P0-A Phase 2-3: async double-buffered weight prefetch across segments.
         // Only engages when offloading (params on CPU) and ED_ASYNC_OFFLOAD >= 1.
         const int async_lvl = async_offload_level();
-        const bool async_prefetch_on =
-            async_lvl >= 1 && params_backend != runtime_backend && plan.segments.size() > 1;
+        const bool async_prefetch_on = async_lvl >= 1 &&
+                                       params_backend != runtime_backend &&
+                                       !params_on_runtime_backend &&
+                                       plan.segments.size() > 1;
         std::vector<std::vector<ggml_tensor*>> async_seg_params;
         if (async_prefetch_on) {
             // Precompute every segment's param list + a STABLE cpu-source map
@@ -6870,6 +6876,27 @@ protected:
 public:
     virtual std::string get_desc() = 0;
 
+    bool stage_params_for_phase() {
+        if (params_backend == runtime_backend) {
+            return true;
+        }
+        phase_params_pinned_ = true;
+        if (offload_all_params()) {
+            return true;
+        }
+        phase_params_pinned_ = false;
+        return false;
+    }
+
+    void release_params_after_phase() {
+        if (!phase_params_pinned_) {
+            return;
+        }
+        phase_params_pinned_ = false;
+        invalidate_persistent_graph();
+        restore_all_params();
+    }
+
     // On Apple Silicon the Metal GPU and the CPU share the same physical RAM
     // (unified memory). "Offloading" weights between a CPU backend and the Metal
     // backend therefore copies bytes that already live in the very same physical
@@ -6940,6 +6967,7 @@ public:
     }
 
     virtual ~GGMLRunner() {
+        release_params_after_phase();
         free_runtime_const_cache();
         free_params_buffer();
         free_compute_buffer();
@@ -6963,6 +6991,7 @@ public:
         runner_ctx.circular_y_enabled    = circular_y_enabled;
         runner_ctx.weight_adapter        = weight_adapter;
         runner_ctx.tap_registry          = tap_registry_;
+        runner_ctx.max_graph_vram_bytes  = max_graph_vram_bytes;
         return runner_ctx;
     }
 
@@ -7081,7 +7110,9 @@ public:
         // the next compute_reuse() rebuilds instead of re-executing dangling nodes.
         invalidate_persistent_graph();
         restore_partial_params();
-        restore_all_params();
+        if (!phase_params_pinned_) {
+            restore_all_params();
+        }
     }
 
     // do copy after alloc graph
@@ -8024,15 +8055,20 @@ public:
         return w;
     }
 
+    ggml_tensor* bias_for_forward(GGMLRunnerContext* ctx) {
+        if (!bias) {
+            return nullptr;
+        }
+        ggml_tensor* b = params["bias"];
+        if (ctx->weight_adapter) {
+            b = ctx->weight_adapter->patch_weight(ctx->ggml_ctx, ctx->backend, b, prefix + "bias");
+        }
+        return b;
+    }
+
     ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
         ggml_tensor* w = weight_for_forward(ctx, false);
-        ggml_tensor* b = nullptr;
-        if (bias) {
-            b = params["bias"];
-            if (ctx->weight_adapter) {
-                b = ctx->weight_adapter->patch_weight(ctx->ggml_ctx, ctx->backend, b, prefix + "bias");
-            }
-        }
+        ggml_tensor* b = bias_for_forward(ctx);
         const bool direct_compatible = ctx->conv3d_auto_direct_enabled &&
                                        x != nullptr &&
                                        w != nullptr &&

@@ -70,6 +70,8 @@ void print_usage(const char* prog) {
         "  --guidance_scale <float>  Flux distilled guidance. Default 3.5\n"
         "  --cfg_scale <float>       Classifier-free guidance scale. Default 1.0\n"
         "  --flow_shift <float>      Flow scheduler shift. Default model default\n"
+        "  --sampler <name>          Sampling method: auto, euler, res_multistep\n"
+        "  --scheduler <name>        Sigma scheduler: auto, discrete, simple\n"
         "  --negative_prompt <text>  Negative prompt (used when cfg_scale != 1). Default empty\n"
         "  --image <path>            Input/reference image for image-editing models\n"
         "  --video, -M vid_gen       Generate video frames (calls ed_generate_video; writes .avi)\n"
@@ -80,15 +82,17 @@ void print_usage(const char* prog) {
         "  --end_index <int>         Last prompt index (exclusive). Default all\n"
         "  --threads <int>           CPU thread count. Default auto\n"
         "  --backend <name>          auto|cpu|cuda|vulkan|metal|gpu. Default auto\n"
+        "  --type <dtype>            Global weight policy. Default preserve ('auto' is an alias)\n"
         "  --no-flash-attention      Disable flash attention\n\n"
         "Memory / offload:\n"
         "  --offload-to-cpu          Full offload: all weights on CPU, staged to GPU per compute\n"
         "  --dit-offload             DiT weights on CPU, staged to GPU per step (compute on GPU)\n"
         "  --text-encoder-offload    Text-encoder weights on CPU, staged to GPU per encode\n"
+        "  --minimax-h3-stage-lifecycle  MiniMax-H3: stage Qwen/VAE by phase and release them during DiT\n"
         "  --vae-offload             VAE weights on CPU, staged to GPU per decode\n"
-        "  --max-vram <GB>           Limit compute-graph VRAM (segments the graph). Implies --auto-allocate path\n"
-        "  --auto-allocate           Auto per-component placement under a hard VRAM cap\n"
-        "  --auto-fit                Fully automatic: choose DiT quant + placement to fit; ignores --type\n"
+        "  --max-vram <GB>           Compute-graph budget; with --auto-fit on single-device CUDA, also a guarded ceiling\n"
+        "  --auto-allocate           Auto per-component placement under a VRAM planning budget\n"
+        "  --auto-fit                Replan TE/DiT quant + placement; --type still controls VAE precision\n"
         "  --vae-tiling <on|off|auto>  VAE tiled decode (reduces VRAM)\n\n"
         "Timing:\n"
         "  --warmup <int>            Untimed warm-up generations (images still written). Default 1\n"
@@ -544,6 +548,7 @@ int main(int argc, char** argv) {
     ctx_params.offload_params_to_cpu = args.offload_to_cpu;
     ctx_params.dit_offload = args.dit_offload;
     ctx_params.text_encoder_offload = args.text_encoder_offload;
+    ctx_params.minimax_h3_stage_lifecycle = args.minimax_h3_stage_lifecycle;
     ctx_params.auto_allocate = args.auto_allocate;
     ctx_params.auto_fit = args.auto_fit;
     ctx_params.vae_offload = args.vae_offload;
@@ -657,8 +662,8 @@ int main(int argc, char** argv) {
                 vgen.height = args.height;
                 vgen.frames = generation_frames;
                 vgen.seed = seed;
-                vgen.sample.sampler = ED_SAMPLER_AUTO;
-                vgen.sample.scheduler = ED_SCHEDULER_AUTO;
+                vgen.sample.sampler = args.sampler;
+                vgen.sample.scheduler = args.scheduler;
                 vgen.sample.steps = args.steps;
                 vgen.sample.cfg_scale = args.cfg_scale;
                 vgen.sample.image_cfg_scale = 1.0f;
@@ -695,8 +700,8 @@ int main(int argc, char** argv) {
                 gen.height = args.height;
                 gen.seed = seed;
                 gen.batch_count = 1;
-                gen.sample.sampler = ED_SAMPLER_AUTO;
-                gen.sample.scheduler = ED_SCHEDULER_AUTO;
+                gen.sample.sampler = args.sampler;
+                gen.sample.scheduler = args.scheduler;
                 gen.sample.steps = args.steps;
                 gen.sample.cfg_scale = args.cfg_scale;
                 gen.sample.image_cfg_scale = 1.0f;

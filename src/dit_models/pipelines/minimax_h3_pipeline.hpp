@@ -63,6 +63,10 @@ private:
     std::unique_ptr<LLM::LLMEmbedder> conditioner_;
     std::unique_ptr<MiniMaxH3VAE::MiniMaxH3VideoVAERunner> vae_;
     std::unique_ptr<MiniMaxH3Audio::AudioVAERunner> audio_vae_;
+    bool stage_diffusion_lifecycle_ = false;
+    bool stage_text_lifecycle_ = false;
+    bool stage_video_vae_lifecycle_ = false;
+    bool stage_audio_vae_lifecycle_ = false;
     ggml_context* sentinel_ctx_ = nullptr;
     ggml_tensor* sentinel_tensor_ = nullptr;
 
@@ -73,6 +77,7 @@ private:
                             int canvas_height,
                             const ed_image_t* ref_images,
                             int ref_image_count,
+                            ed_ref_image_size_t ref_image_size,
                             const ed_ref_video_t* ref_videos,
                             int ref_video_count,
                             int ref_audio_count,

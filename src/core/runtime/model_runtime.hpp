@@ -128,6 +128,7 @@ public:
     // Text encoder should offload (weights on CPU, staged to GPU per encode) when
     // either the global offload flag or the TE-specific flag is set.
     bool clip_offload_params_to_cpu() const { return offload_params_to_cpu_ || text_encoder_offload_; }
+    bool minimax_h3_stage_lifecycle() const { return minimax_h3_stage_lifecycle_; }
     // DiT should offload (weights on CPU, staged to GPU per step) when either the
     // global offload flag or the DiT-specific flag is set.
     bool dit_offload_params_to_cpu() const { return offload_params_to_cpu_ || dit_offload_; }
@@ -227,6 +228,7 @@ private:
     bool use_mmap_ = false;
     bool offload_params_to_cpu_ = false;
     bool text_encoder_offload_ = false;
+    bool minimax_h3_stage_lifecycle_ = false;
     bool dit_offload_ = false;
     bool vae_offload_ = false;
     bool auto_allocate_ = false;

@@ -337,11 +337,20 @@ On-load weight type selection:
   --output flux-q4.png
 ```
 
+`--type` is a global loading policy: it applies to every eligible tensor in
+every loaded component (DiT, text encoder, video VAE, and audio VAE). Biases,
+norms, embeddings, protected tensors, and shapes incompatible with a block
+quant remain at their stored type.
+
 Supported `--type` values:
 
 ```text
-f32 f16 bf16 q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k
+preserve f32 f16 bf16 q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k
 ```
+
+`preserve` is the default and leaves every source tensor at its stored type.
+The older value `auto` remains accepted as a compatibility alias for
+`preserve`; it does not perform automatic quantization.
 
 > **Qwen-Image models and FP16:** the Qwen-Image family (`qwen-image`,
 > `qwen-image-edit`, and their distilled/lightning variants) is not supported in
@@ -376,27 +385,36 @@ it off. The offload flags share one semantics — **weights kept on CPU and stag
 to the GPU per compute** (compute always runs on the GPU): `--offload-to-cpu`
 offloads the whole model, while `--dit-offload` / `--text-encoder-offload` /
 `--vae-offload` offload just that one component. `--auto-allocate` places each
-component (DiT, text encoder, VAE) under a hard VRAM cap of `min(--max-vram,
-free)`, keeping a component resident when it fits and offloading (staging) it
-otherwise.
+component (DiT, text encoder, VAE) against a planning budget of
+`min(--max-vram, free)`, keeping a component resident when it fits and
+offloading (staging) it otherwise. By itself this remains a placement-planning
+budget. On single-device CUDA, `--auto-fit --max-vram <GB>` additionally installs a guarded
+allocation ceiling below the requested value, reserving 1 GiB for external
+library workspaces. An allocation that cannot fit is rejected before the
+process crosses the requested ceiling.
 
 These options are workload dependent. Validate output quality and latency for
 the exact model and resolution you plan to run.
 
 ### Budget-driven placement (`--auto-allocate`) and full auto (`--auto-fit`)
 
-Two levels of automation size a run to a hard VRAM budget instead of tuning
+Two levels of automation size a run to a VRAM planning budget instead of tuning
 `--type` and offload flags by hand:
 
 - `--auto-allocate` — you pick the quantization (`--type`); the runtime decides,
   per component (DiT / text encoder / VAE), what stays resident on the GPU and
-  what streams from host, so the peak stays under `--max-vram`.
+  what streams from host. `--max-vram` is not a universal process-level peak clamp.
 - `--auto-fit` — fully automatic. It **implies `--auto-allocate`** and, in
   addition, chooses the quantization itself: the DiT is driven down the ladder
   `q8_0 → q4_k` to the highest level that stays resident within the budget, the
-  text encoder is set to `q8_0` (near-lossless, halves its footprint), and
-  placement is decided as above. `--auto-fit` **ignores `--type`** (it owns the
-  quantization) and logs that it is doing so.
+  text encoder is lowered to at most `q8_0` (an already smaller quant stays unchanged), and
+  placement is decided as above. For the text encoder and DiT, this automatic
+  decision supersedes the global `--type` without ever increasing an already
+  lower-precision source. The VAEs are not replanned: they still follow
+  `--type`, where `preserve` means keeping each source tensor's stored type.
+  With an explicit `--max-vram` on
+  single-device CUDA, it also enables the hard allocation guard; an intrinsically too-large
+  graph fails safely instead of exceeding the budget.
 
 `--auto-fit` measures each component's real compute-buffer footprint at the
 requested resolution (`-W`/`-H`, and `--frames` for video) to size the resident
@@ -416,7 +434,7 @@ the model's fixed 24 fps to the nearest legal `17k+5` frame count. Keep using
 mutually exclusive.
 
 ```bash
-# MiniMax-H3 Q8_0 under a 40 GiB hard placement budget.
+# MiniMax-H3 with automatic quantization/placement and a 40 GiB CUDA ceiling.
 ./build-cuda/bin/ed-cli --video \
   --diffusion-model /path/to/minimax_h3_fl2va-diffusers-Q8_0.gguf \
   --vae /path/to/minimax_h3_video_vae_fp16.safetensors \

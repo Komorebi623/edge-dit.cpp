@@ -447,6 +447,7 @@ namespace LLM {
                 auto proj = std::dynamic_pointer_cast<Conv3d>(blocks["proj"]);
 
                 ggml_tensor* w = proj->weight_for_forward(ctx, true);
+                ggml_tensor* b = proj->bias_for_forward(ctx);
                 if ((w->type == GGML_TYPE_F16 || w->type == GGML_TYPE_BF16) && x->type != w->type) {
                     x = ggml_cast(ctx->ggml_ctx, x, w->type);
                 }
@@ -467,7 +468,7 @@ namespace LLM {
                     ggml_tensor* y_conv = ggml_ext_conv_3d_direct_typed(ctx->ggml_ctx,
                                                                         x_conv,
                                                                         w,
-                                                                        nullptr,
+                                                                        b,
                                                                         in_channels,
                                                                         patch_count,
                                                                         embed_dim,
@@ -490,7 +491,7 @@ namespace LLM {
                                     w,
                                     patch_dim,
                                     embed_dim);
-                x = ggml_ext_linear(ctx->ggml_ctx, x, w, nullptr);
+                x = ggml_ext_linear(ctx->ggml_ctx, x, w, b);
                 if (qwen_align_diffusers_vision_dtype_enabled() &&
                     (w->type == GGML_TYPE_F16 || w->type == GGML_TYPE_BF16) &&
                     x->type != w->type) {
@@ -674,7 +675,7 @@ namespace LLM {
             head_dim = static_cast<int>(hidden_size / num_heads);
             GGML_ASSERT(num_heads * head_dim == hidden_size);
             const bool diffusers_dtype = arch_ == LLMVisionArch::QWEN2_5_VL && qwen_align_diffusers_vision_dtype_enabled();
-            const bool bias = arch_ == LLMVisionArch::QWEN2_5_VL;
+            const bool bias = arch_ == LLMVisionArch::QWEN2_5_VL || arch_ == LLMVisionArch::QWEN3_VL;
             if (llama_cpp_style) {
                 blocks["q_proj"] = std::shared_ptr<GGMLBlock>(new Linear(hidden_size,
                                                                          hidden_size,
@@ -1303,7 +1304,6 @@ namespace LLM {
             k = ggml_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, k, 0, 2, 1, 3));  // [N, num_kv_heads, n_token, head_dim]
             k = ggml_reshape_3d(ctx->ggml_ctx, k, k->ne[0], k->ne[1], k->ne[2] * k->ne[3]);      // [N*num_kv_heads, n_token, head_dim]
 
-            const bool use_masked_flash_attention = arch == LLMArch::QWEN3_VL && n_token >= 2048;
             x = ggml_ext_attention_ext(ctx->ggml_ctx,
                                        ctx->backend,
                                        q,
@@ -1312,13 +1312,13 @@ namespace LLM {
                                        num_heads,
                                        attention_mask,
                                        true,
-                                       use_masked_flash_attention,
+                                       false,
                                        1.0f,
                                        true,
                                        false,
                                        -1,
                                        -1,
-                                       use_masked_flash_attention);  // [N, n_token, hidden_size]
+                                       false);  // [N, n_token, hidden_size]
             if (diffusers_dtype &&
                 (attention_output_type == GGML_TYPE_F16 || attention_output_type == GGML_TYPE_BF16) &&
                 x->type != attention_output_type) {

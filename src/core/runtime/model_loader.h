@@ -259,11 +259,12 @@ public:
                             std::string tensor_type_rules = "");
 
     // Budget-aware re-quantization (auto-fit scheduler). Force every tensor whose
-    // name starts with `prefix` (e.g. "model.diffusion_model") to `dst_type`,
-    // overwriting expected_type. Returns the number of tensors changed. Used before
-    // bind_weights to trade a lower DiT quant level for GPU residency. Only lowers
-    // precision in practice; caller enforces the quality floor.
-    size_t override_component_wtype(const std::string& prefix, ggml_type dst_type);
+    // name starts with `prefix` (e.g. "model.diffusion_model") toward `dst_type`.
+    // Existing tensors below the target precision remain unchanged unless
+    // allow_precision_increase is set. Returns the number of tensors changed.
+    size_t override_component_wtype(const std::string& prefix,
+                                    ggml_type dst_type,
+                                    bool allow_precision_increase = false);
 
     bool tensor_should_be_converted(const TensorStorage& tensor_storage,
                                     ggml_type type) const;

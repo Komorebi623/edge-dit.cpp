@@ -21,9 +21,23 @@ last frame. Ref2VA uses the following options:
 | Input | CLI option | Behavior |
 |---|---|---|
 | Image | `--ref-image <path>` | Repeatable; presented as `<Picture N>` |
+| Image sizing | `--ref-image-size match|max` | `match` only downsizes to the output pixel area; `max` resizes to a 2048px short edge, including upscaling, to match official Diffusers geometry (default) |
 | Video | `--ref-video <path>` | Repeatable frame directory or `mp4`/`mov`/`mkv`/`webm`/`avi`; media files require `ffmpeg` |
 | Paired audio | `--ref-video-audio <wav>` | The Nth WAV is paired with the Nth video and overrides embedded audio |
 | Additional audio | `--ref-audio <wav>` | Repeatable; requires at least one image or video reference |
+
+Reference-image resize policy changes both conditioning cost and every Ref2VA
+Transformer step because the encoded reference latents are appended to the DiT
+sequence:
+
+| Mode | Reference-image geometry |
+|---|---|
+| `max` (default) | Scales the short edge to 2048px, including upscaling |
+| `match` | Never upscales; caps the image at the output pixel area |
+
+The selected mode and post-resize reference dimensions affect both conditioning
+cost and DiT sequence length. Use `match` when smaller reference images should
+not be enlarged.
 
 When `--ref-video` points to a media file, the CLI decodes it at 24 fps and
 automatically extracts an embedded audio track. Explicit paired WAV files map
@@ -35,11 +49,11 @@ options, and audio-only Ref2VA requests are rejected.
 
 ### Downloadable weights
 
-The complete, unpruned checkpoints are recommended for the best quality. Edge
-also supports pruned DiT weights in BF16 safetensors format. Both full and
-pruned BF16 DiTs can be converted to Q8_0 GGUF with `ed-convert`, and the
-resulting Q8_0 DiTs can be loaded directly. Performance and quality results from
-pruned and full DiTs are not directly comparable.
+The complete, unpruned checkpoints are recommended for the best quality.
+edge-dit.cpp also supports pruned DiT weights in BF16 safetensors format. Both
+full and pruned BF16 DiTs can be converted to Q8_0 GGUF with `ed-convert`, and
+the resulting Q8_0 DiTs can be loaded directly. Performance and quality results
+from pruned and full DiTs are not directly comparable.
 
 | Precision | Component | File | Repository |
 |---|---|---|---|
@@ -53,6 +67,12 @@ pruned and full DiTs are not directly comparable.
 | BF16 | Qwen3-VL | `text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
 | FP16 | Video VAE | `vae/minimax_h3_video_vae_fp16.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
 | FP32 | Audio VAE | `vae/minimax_h3_audio_vae_fp32.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
+
+BF16 and FP16 both use 16 bits per weight, so converting the FP16 video VAE to
+BF16 would not reduce its weight memory. With `--type preserve`, `--auto-fit`
+therefore preserves the supplied VAE precision and focuses automatic
+quantization on Qwen3-VL and the DiT. An explicit `--type` still applies to
+eligible VAE tensors.
 
 The official [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3)
 Diffusers shard indexes are also accepted for BF16 transformer loading. Merged
@@ -76,10 +96,11 @@ hf download Comfy-Org/MiniMax-H3 \
 
 ### Persistent Q8_0 GGUF
 
-Q8_0 benchmark files are offline conversions of the full BF16 DiTs and Qwen3-VL,
-not Comfy-Org INT8 ConvRot weights. A pruned BF16 DiT can be converted with the
-same command when lower storage and memory usage are preferred. Convert once
-with `ed-convert` instead of quantizing during every model load:
+Create persistent Q8_0 GGUF files from the BF16 DiTs and Qwen3-VL. The INT8
+ConvRot safetensors use a different representation and are not interchangeable
+with GGUF Q8_0. A pruned BF16 DiT can be converted with the same command when
+lower storage and memory usage are preferred. Convert once with `ed-convert`
+instead of quantizing during every model load:
 
 ```bash
 ed-convert --model models/minimax-h3/diffusion_models/minimax_h3_fl2va_bf16.safetensors \
@@ -129,6 +150,7 @@ point them to the converted GGUF files.
 ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
   --video-duration 5 -W 864 -H 480 --steps 20 --cfg-scale 1 \
+  --sampler res_multistep --scheduler simple \
   --prompt "A cinematic sunset over layered mountain ridges with quiet natural ambience." \
   --video-format mp4 --output t2va.mp4
 
@@ -136,6 +158,7 @@ ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
 ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" --image first.png \
   --video-duration 5 -W 864 -H 480 --steps 20 --cfg-scale 1 \
+  --sampler res_multistep --scheduler simple \
   --prompt "Starting from <Picture 1>, preserve the scene and add subtle natural motion." \
   --video-format mp4 --output i2va.mp4
 
@@ -147,19 +170,25 @@ ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
 
 Use the Ref2VA DiT for all commands in this section.
 
+For the recommended MiniMax-H3 sampling path, use `res_multistep` with the
+`simple` sigma schedule. The default remains `euler` with `discrete` for
+compatibility with existing edge-dit.cpp commands.
+
 ```bash
 # Image reference
 ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
   --ref-image reference.png --video-duration 5 -W 864 -H 480 --steps 20 \
-  --cfg-scale 1 --prompt "Use <Picture 1> as the strict visual reference." \
+  --cfg-scale 1 --sampler res_multistep --scheduler simple \
+  --prompt "Use <Picture 1> as the strict visual reference." \
   --video-format mp4 --output ref-image.mp4
 
 # MP4 reference; embedded audio is paired automatically when present
 ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
   --ref-video reference.mp4 --video-duration 5 -W 864 -H 480 --steps 20 \
-  --cfg-scale 1 --prompt "Preserve <Video 1> and its <Audio 1> throughout the result." \
+  --cfg-scale 1 --sampler res_multistep --scheduler simple \
+  --prompt "Preserve <Video 1> and its <Audio 1> throughout the result." \
   --video-format mp4 --output ref-video.mp4
 
 # Frame directory with explicit paired audio
@@ -167,6 +196,7 @@ ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
   --ref-video reference-frames --ref-video-audio soundtrack.wav \
   --video-duration 5 -W 864 -H 480 --steps 20 --cfg-scale 1 \
+  --sampler res_multistep --scheduler simple \
   --prompt "Preserve <Video 1> and synchronize it with <Audio 1>." \
   --video-format mp4 --output ref-video-audio.mp4
 
@@ -175,6 +205,7 @@ ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
   --ref-image reference.png --ref-video reference.mp4 --ref-audio music.wav \
   --video-duration 5 -W 864 -H 480 --steps 20 --cfg-scale 1 \
+  --sampler res_multistep --scheduler simple \
   --prompt "Use <Video 1>, <Picture 1>, and every supplied audio reference in a natural transition." \
   --video-format mp4 --output ref-mixed.mp4
 ```
@@ -190,9 +221,29 @@ Qwen3-VL, video VAE, and audio VAE while retaining CUDA compute.
 ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
   --auto-fit --max-vram 40 --video-duration 5 -W 864 -H 480 --steps 20 \
-  --cfg-scale 1 --prompt "A cinematic sunset over layered mountain ridges." \
+  --cfg-scale 1 --sampler res_multistep --scheduler simple \
+  --prompt "A cinematic sunset over layered mountain ridges." \
   --video-format mp4 --output auto-fit.mp4
 ```
+
+For long Ref2VA jobs on GPUs that can hold one major component at a time,
+`--auto-fit --max-vram` automatically uses the MiniMax-H3 staged lifecycle.
+Resident components are staged serially: Qwen is loaded only for positive and
+negative context encoding, then released before the video VAE encodes visual
+references; the video VAE is then released before the audio VAE encodes paired
+or standalone reference audio. DiT weights are staged for denoising and released
+before the video and audio VAEs are loaded again for final decode. Components
+that cannot fit as a whole remain layer/graph-segment offloaded instead. The
+explicit `--minimax-h3-stage-lifecycle` option enables the same phase behavior
+without `--auto-fit`.
+
+On single-device CUDA, the combined `--auto-fit --max-vram 24` mode installs a guarded
+allocation ceiling below 24 GiB and reserves 1 GiB for CUDA/cuDNN workspaces.
+Automatic quantization, phase lifecycle, component placement, and graph
+segmentation are attempted first. If the workload's minimum graph segment still
+cannot fit, generation fails before crossing the requested 24 GiB ceiling.
+`--max-vram` without `--auto-fit` remains a planning input rather than this hard
+allocation guard.
 
 MiniMax-H3 always uses its fixed `16x16` video-VAE tiling path. Generic
 `--vae-tiling` and `--vae-tile-size` values do not replace this model-specific
@@ -242,11 +293,11 @@ within the 24 GB limit.
 ## H200 BF16 comparison
 
 The tables below use one H200, resident components, `864x480`, 124 frames at
-24 fps, 20 steps, CFG 1, and seed `424242`. Edge uses the complete Comfy-Org
-BF16 DiT/Qwen files, FP16 video VAE, and FP32 audio VAE. Diffusers uses the
+24 fps, 20 steps, CFG 1, and seed `424242`. edge-dit.cpp uses the complete
+Comfy-Org BF16 DiT/Qwen files, FP16 video VAE, and FP32 audio VAE. Diffusers uses the
 official complete BF16 DiT shards, BF16 Qwen3-VL, and its FP32 VAEs. “Generate”
 excludes model loading, output muxing, and process cleanup. Peak VRAM is sampled
-over the complete process. Values are `Edge / Diffusers`.
+over the complete process. Values are `edge-dit.cpp / Diffusers`.
 
 FL2VA does not use Ref2VA resize preprocessing:
 
@@ -259,12 +310,13 @@ FL2VA does not use Ref2VA resize preprocessing:
 
 ### Ref2VA
 
-Current preprocessing follows Diffusers geometry: image short edge 2048;
-video short edge 768 with a pre-rounding `768x1344` area cap; preserved aspect
-ratio; dimensions rounded to multiples of 32; Lanczos resize. Edge is faster
-than Diffusers in all four measured Ref2VA generation paths:
+These benchmark rows use Edge-DiT.cpp `--ref-image-size max`, matching the
+official Diffusers image geometry: image short edge 2048; video short edge 768
+with a pre-rounding `768x1344` area cap; preserved aspect ratio; dimensions
+rounded to multiples of 32; Lanczos resize. Edge-DiT.cpp is faster than
+Diffusers in all four measured Ref2VA generation paths:
 
-| Current task | Generate | Edge speedup | Peak VRAM |
+| Current task | Generate | edge-dit.cpp speedup | Peak VRAM |
 |---|---:|---:|---:|
 | Image | 126.915s / 136.656s | 1.08x | 130,445 / 139,253 MiB |
 | MP4 video / video frames † | 182.649s / 183.921s | 1.01x | 132,661 / 137,161 MiB |
@@ -273,10 +325,120 @@ than Diffusers in all four measured Ref2VA generation paths:
 
 The image row is a strict same-image, same-prompt comparison. The
 mixed-reference path has a clear 1.06x lead. The two video rows retain smaller
-1.01x measured leads; they are marked † because the MP4 run lets Edge extract
-embedded audio while the Diffusers run uses decoded video frames, and the
+1.01x measured leads; they are marked † because the MP4 run lets edge-dit.cpp
+extract embedded audio while the Diffusers run uses decoded video frames, and the
 paired-audio prompts differ slightly. A locked-command rerun is required before
 treating the approximately 1% margins as statistically significant.
+
+#### H200 15-second multi-reference comparison
+
+The following longer Ref2VA runs are a separate benchmark from the BF16 tables
+above. They compare two reference-image-heavy prompts across edge-dit.cpp,
+ComfyUI, and Diffusers on one H200. The four-image action task uses `1280x736`;
+the two-character portrait task uses `736x1280`. Both generate 362 frames at
+24 fps (approximately 15.08 seconds), with 20 steps, CFG 1, seed
+`157368968253448`, and `res_multistep`/`simple`. Each task uses the same prompt,
+reference images in the same order, output canvas, frame count, and sampling
+parameters across all three frameworks.
+
+These dimensions are not `768x1344` and are not a MiniMax-H3 requirement. The
+experiment preserved the submitted UI workflow configuration: a 0.9-megapixel
+`ResolutionSelector`, 16:9 or 9:16 aspect ratio, and dimensions aligned to a
+multiple of 32. That configuration resolves to `1280x736` or `736x1280`. The
+parameters were retained so all three frameworks could replay the actual task;
+therefore these results must not be compared directly with an older
+`768x1344` run.
+
+Outputs:
+
+- [Four-image action three-framework comparison](assets/minimax-h3-ref2va-four-image-edge-comfyui-diffusers-demo.mp4)
+- [Two-character portrait three-framework comparison](assets/minimax-h3-ref2va-two-character-edge-comfyui-diffusers-demo.mp4)
+- [Machine-readable benchmark metrics](assets/minimax-h3-ref2va-h200-15s-metrics.json)
+
+The linked comparison videos are compressed documentation assets tracked in the
+repository. Full-resolution per-framework outputs remain benchmark artifacts
+rather than source-tree dependencies.
+
+The three frameworks use their practical quantized representations rather than
+byte-identical weights:
+
+| Framework | Ref2VA DiT | Qwen3-VL | Video / audio VAE |
+|---|---|---|---|
+| edge-dit.cpp | Pruned Q8_0 GGUF | Q4_K_M GGUF | FP16 / FP32 |
+| ComfyUI | Pruned INT8 ConvRot | NVFP4 AWQ | FP16 / FP32 |
+| Diffusers | Official full weights with TorchAO weight-only INT8 | Official weights with TorchAO weight-only INT8 | FP16 / FP32 |
+
+End-to-end wall time includes loading, conditioning, generation, decode, and
+saving. edge-dit.cpp and ComfyUI peaks are device-level samples; Diffusers only
+recorded PyTorch allocator peaks, so its allocated/reserved values are shown
+separately.
+
+| Task | Framework | End-to-end | Peak VRAM |
+|---|---|---:|---:|
+| Four-image action | edge-dit.cpp | **919.765s** | **52,667 MiB (51.43 GiB)** |
+| Four-image action | ComfyUI | 1055.354s | **49,413 MiB (48.25 GiB)** |
+| Four-image action | Diffusers | 2343.937s | 107.38 GiB allocated / 108.27 GiB reserved |
+| Two-character portrait | edge-dit.cpp | **888.636s** | 52,809 MiB (51.57 GiB) |
+| Two-character portrait | ComfyUI | 1025.864s | **49,159 MiB (48.01 GiB)** |
+| Two-character portrait | Diffusers | 1625.178s | 96.86 GiB allocated / 106.10 GiB reserved |
+
+Four-image action stage times:
+
+| Stage | edge-dit.cpp | ComfyUI | Diffusers |
+|---|---:|---:|---:|
+| Load / initialization | 17.773s | Not isolated | 32.260s |
+| Text, image, and reference-VAE conditioning | 2.641s | Not isolated | 14.924s |
+| DiT / sampling | **839.890s** | Not isolated | 2263.720s |
+| Video VAE decode | 41.842s | Not isolated | **20.679s** |
+| Audio VAE decode | 0.369s | Not isolated | **0.145s** |
+| Save / mux | 5.519s | Not isolated | **4.699s** |
+| End-to-end | **919.765s** | 1055.354s | 2343.937s |
+
+The profiled four-image ComfyUI rerun collected 3,321 device-memory samples at
+0.2-second intervals from a zero-MiB baseline and measured a 49,413 MiB peak.
+Its decoded video frames and PCM audio are bit-identical to the original
+1070.928-second run. The historical run did not retain a node-level profile, so
+unavailable stage values are intentionally not reconstructed. A separate
+constrained rerun completed in 1059.844s with an observed 22,789 MiB peak under
+a 24 GiB limit and produced the same decoded frames and audio.
+
+Two-character portrait stage times:
+
+| Stage | edge-dit.cpp | ComfyUI | Diffusers |
+|---|---:|---:|---:|
+| Load / initialization | 17.784s | Deferred; not independently comparable | 32.838s |
+| Text, image, and reference-VAE conditioning | **1.168s** | 33.140s | 7.176s |
+| DiT / sampling | **811.867s** | 965.504s | 1553.626s |
+| Video VAE decode | 41.871s | **19.947s** | 20.567s |
+| Audio VAE decode | 0.355s | 0.501s | **0.144s** |
+| Save / mux | 3.737s | 5.927s | **3.481s** |
+| End-to-end | **888.636s** | 1025.864s | 1625.178s |
+
+ComfyUI's conditioning and sampler nodes include deferred model staging and are
+not pure kernel timings. The edge-dit.cpp phase peaks were sampled at 0.2-second
+intervals:
+
+| edge-dit.cpp phase | Four-image action | Two-character portrait |
+|---|---:|---:|
+| Load | 19,481 MiB | 615 MiB |
+| Conditioning / text context | 22,675 MiB | 20,563 MiB |
+| Reference video-VAE encode | Included above | 5,827 MiB |
+| DiT / sampling | **52,667 MiB** | **52,809 MiB** |
+| Decode | 37,521 MiB | 37,521 MiB |
+| Save | 32,373 MiB | 32,515 MiB |
+
+Reference preprocessing is an important limitation of this comparison.
+edge-dit.cpp and the captured ComfyUI workflow use `ref_image_size=match`, which
+does not upscale the small source images. Diffusers uses the official
+`MiniMaxH3ImageReference` path and enlarges every reference image to a 2048px
+short edge. For the four-image task, edge-dit.cpp/ComfyUI use `512x320`,
+`576x320`, `512x288`, and `512x288`, while Diffusers uses `3232x2048`,
+`3648x2048`, `3648x2048`, and `3648x2048`. For the two-character task, the
+respective sizes are `416x224` and `416x224` versus `3488x2048` and
+`3616x2048`. Diffusers therefore processes substantially longer reference
+sequences, increasing conditioning time, every DiT step, and peak memory. The
+table is useful as an actual-workflow result and quality comparison, but it is
+not a same-compute kernel benchmark.
 
 ## Limitations
 

@@ -1,4 +1,5 @@
 #include "ed_cudnn_conv_transpose_1d.h"
+#include "ggml-cuda.h"
 
 #include <cuda_runtime.h>
 #include <cudnn.h>
@@ -96,7 +97,7 @@ static void * get_workspace(int device, cudaStream_t stream, size_t required) {
         return entry->ptr;
     }
     void * replacement = nullptr;
-    if (cudaMalloc(&replacement, required) != cudaSuccess) {
+    if (!ggml_backend_cuda_try_malloc(device, &replacement, required)) {
         return nullptr;
     }
     cudaFree(entry->ptr);

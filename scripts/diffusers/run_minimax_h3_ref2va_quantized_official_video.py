@@ -78,12 +78,14 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--model", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
+    ap.add_argument("--metrics", type=Path)
     ap.add_argument("--prompt", required=True)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--height", type=int, default=480)
     ap.add_argument("--width", type=int, default=864)
     ap.add_argument("--num-frames", type=int, default=124)
     ap.add_argument("--steps", type=int, default=20)
+    ap.add_argument("--fps", type=float, default=24.0)
     ap.add_argument("--bits", type=int, choices=(4,8), default=4)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--resident", action="store_true")
@@ -100,6 +102,8 @@ def main():
     refs=build_refs(args)
     started=time.perf_counter()
     pipe=ModularPipeline.from_pretrained(args.model, workflow="ref2va", local_files_only=True)
+    if args.fps == 24.0 and args.num_frames == 362:
+        type(pipe).max_duration = property(lambda self: args.num_frames / args.fps)
     initialized=time.perf_counter()
     qconf=make_quant_config(args.bits)
     pipe.update_components(
@@ -130,11 +134,16 @@ def main():
             return inner
         pipe.vae.encode=wrap("video_vae_encode", pipe.vae.encode); pipe.vae.decode=wrap("video_vae_decode", pipe.vae.decode)
         pipe.audio_vae.encode=wrap("audio_vae_encode", pipe.audio_vae.encode); pipe.audio_vae.decode=wrap("audio_vae_decode", pipe.audio_vae.decode)
+        pipe.text_encoder.model.forward=wrap("text_encoder", pipe.text_encoder.model.forward)
     gen=torch.Generator(device="cpu").manual_seed(args.seed)
     torch.cuda.reset_peak_memory_stats(device); sync_time()
     out=pipe(prompt=args.prompt, references=refs, height=args.height, width=args.width, num_frames=args.num_frames, num_inference_steps=args.steps, generator=gen, output=["videos","audio","sampling_rate"])
     generated_at=sync_time()
-    encode_video(out["videos"][0], fps=24, output_path=str(args.output), audio=out["audio"][0], audio_sample_rate=out["sampling_rate"])
+    encode_video(out["videos"][0], fps=args.fps, output_path=str(args.output), audio=out["audio"][0], audio_sample_rate=out["sampling_rate"])
     finished=time.perf_counter()
-    print(json.dumps({"framework":"diffusers-main","workflow":"ref2va","model":str(args.model),"dtype":"bfloat16","quantization":{"method":"TorchAO weight-only","bits":args.bits,"transformer_quantized":True,"text_encoder_quantized":True,"vae_quantized":False,"audio_vae_quantized":False},"prompt":args.prompt,"references":[{"type":type(r).__name__,"kind":getattr(r,"kind",None),"fps":getattr(r,"fps",None),"frames":(len(getattr(r,"frames",[])) if not hasattr(getattr(r,"frames",None),"shape") else int(getattr(r,"frames").shape[0])) if hasattr(r,"frames") else None,"has_audio":bool(getattr(r,"has_audio",False)),"sample_rate":getattr(r,"sample_rate",None)} for r in refs],"height":args.height,"width":args.width,"requested_num_frames":args.num_frames,"num_inference_steps":args.steps,"seconds":{"pipeline_init":initialized-started,"quantized_component_load":quant_loaded-initialized,"component_finalize":ready-quant_loaded,"generate_cuda":generated_at-ready,"transformer_forward_cuda":transformer_profile["seconds"],"mux":finished-generated_at,"end_to_end":finished-started},"transformer_forward_calls":transformer_profile["calls"],"component_profile":comp,"memory_bytes":{"max_allocated_during_generate":torch.cuda.max_memory_allocated(device),"max_reserved_during_generate":torch.cuda.max_memory_reserved(device)}}, indent=2))
+    metrics={"framework":"diffusers-main","workflow":"ref2va","model":str(args.model),"dtype":"bfloat16","quantization":{"method":"TorchAO weight-only","bits":args.bits,"transformer_quantized":True,"text_encoder_quantized":True,"vae_quantized":False,"audio_vae_quantized":False},"prompt":args.prompt,"references":[{"type":type(r).__name__,"kind":getattr(r,"kind",None),"fps":getattr(r,"fps",None),"frames":(len(getattr(r,"frames",[])) if not hasattr(getattr(r,"frames",None),"shape") else int(getattr(r,"frames").shape[0])) if hasattr(r,"frames") else None,"has_audio":bool(getattr(r,"has_audio",False)),"sample_rate":getattr(r,"sample_rate",None)} for r in refs],"height":args.height,"width":args.width,"requested_num_frames":args.num_frames,"fps":args.fps,"num_inference_steps":args.steps,"seconds":{"pipeline_init":initialized-started,"quantized_component_load":quant_loaded-initialized,"component_finalize":ready-quant_loaded,"generate_cuda":generated_at-ready,"transformer_forward_cuda":transformer_profile["seconds"],"mux":finished-generated_at,"end_to_end":finished-started},"transformer_forward_calls":transformer_profile["calls"],"component_profile":comp,"memory_bytes":{"max_allocated_during_generate":torch.cuda.max_memory_allocated(device),"max_reserved_during_generate":torch.cuda.max_memory_reserved(device)}}
+    if args.metrics:
+        args.metrics.parent.mkdir(parents=True, exist_ok=True)
+        args.metrics.write_text(json.dumps(metrics, indent=2))
+    print(json.dumps(metrics, indent=2))
 if __name__ == "__main__": main()

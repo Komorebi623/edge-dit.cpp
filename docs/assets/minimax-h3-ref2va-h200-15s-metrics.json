@@ -1,0 +1,92 @@
+{
+  "date": "2026-08-16",
+  "device": "NVIDIA H200",
+  "sampling": {
+    "frames": 362,
+    "fps": 24,
+    "steps": 20,
+    "cfg": 1.0,
+    "seed": 157368968253448,
+    "sampler": "res_multistep",
+    "scheduler": "simple"
+  },
+  "tasks": {
+    "four_image_action": {
+      "width": 1280,
+      "height": 736,
+      "reference_images": 4,
+      "frameworks": {
+        "edge-dit.cpp": {
+          "end_to_end_seconds": 919.765,
+          "load_seconds": 17.773,
+          "conditioning_seconds": 2.641,
+          "dit_seconds": 839.890,
+          "video_vae_decode_seconds": 41.842,
+          "audio_vae_decode_seconds": 0.369,
+          "save_seconds": 5.519,
+          "peak_device_mib": 52667
+        },
+        "ComfyUI": {
+          "end_to_end_seconds": 1055.354,
+          "peak_device_mib": 49413,
+          "memory_sample_interval_seconds": 0.2,
+          "memory_sample_count": 3321,
+          "decoded_output_matches_original": true
+        },
+        "Diffusers": {
+          "end_to_end_seconds": 2343.937,
+          "load_seconds": 32.260,
+          "conditioning_seconds": 14.924,
+          "dit_seconds": 2263.720,
+          "video_vae_decode_seconds": 20.679,
+          "audio_vae_decode_seconds": 0.145,
+          "mux_seconds": 4.699,
+          "pytorch_max_allocated_mib": 109960,
+          "pytorch_max_reserved_mib": 110866
+        }
+      }
+    },
+    "two_character_portrait": {
+      "width": 736,
+      "height": 1280,
+      "reference_images": 2,
+      "frameworks": {
+        "edge-dit.cpp": {
+          "end_to_end_seconds": 888.636,
+          "load_seconds": 17.784,
+          "conditioning_seconds": 1.168,
+          "dit_seconds": 811.867,
+          "video_vae_decode_seconds": 41.871,
+          "audio_vae_decode_seconds": 0.355,
+          "save_seconds": 3.737,
+          "peak_device_mib": 52809
+        },
+        "ComfyUI": {
+          "end_to_end_seconds": 1025.864,
+          "conditioning_node_seconds": 33.140,
+          "sampler_node_seconds": 965.504,
+          "video_vae_decode_seconds": 19.947,
+          "audio_vae_decode_seconds": 0.501,
+          "save_seconds": 5.927,
+          "peak_device_mib": 49159
+        },
+        "Diffusers": {
+          "end_to_end_seconds": 1625.178,
+          "load_seconds": 32.838,
+          "conditioning_seconds": 7.176,
+          "dit_seconds": 1553.626,
+          "video_vae_decode_seconds": 20.567,
+          "audio_vae_decode_seconds": 0.144,
+          "mux_seconds": 3.481,
+          "pytorch_max_allocated_mib": 99189,
+          "pytorch_max_reserved_mib": 108646
+        }
+      }
+    }
+  },
+  "reference_resize": {
+    "edge-dit.cpp": "match; no upscaling",
+    "ComfyUI": "match; no upscaling",
+    "Diffusers": "official MiniMaxH3ImageReference; 2048px short edge"
+  }
+}

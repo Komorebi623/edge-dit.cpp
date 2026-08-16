@@ -107,6 +107,7 @@ static void print_usage(const char* prog) {
         "  --video-duration <seconds>  MiniMax-H3 duration; aligns to 17k+5 frames\n"
         "  --fps <int>               Video fps, default: 16\n"
         "  --ref-image <path>        MiniMax-H3 Ref2VA reference image; repeatable\n"
+        "  --ref-image-size <mode>   Reference image sizing: match or max, default: max\n"
         "  --ref-video <path>        MiniMax-H3 Ref2VA reference video frames directory or media file; repeatable\n"
         "                            Media files are decoded with ffmpeg; embedded audio is paired automatically\n"
         "  --ref-video-audio <path>  WAV soundtrack paired with the corresponding --ref-video\n"
@@ -117,6 +118,8 @@ static void print_usage(const char* prog) {
         "  --guidance <float>        Flux distilled guidance, default: 3.5\n"
         "  --cfg-scale <float>       Classifier-free guidance scale, default: 1.0\n"
         "  --flow-shift <float>      Flow scheduler shift, default: model default\n"
+        "  --sampler <name>          Sampling method: auto, euler, res_multistep\n"
+        "  --scheduler <name>        Sigma scheduler: auto, discrete, simple\n"
         "  --cache <mode>            Cache mode: off, easycache, ucache, dbcache, taylorseer, cache-dit, magcache, dicache, sencache\n"
         "  --cache-threshold <float> EasyCache/UCache reuse threshold\n"
         "  --cache-start <float>     Cache active window start percent, default: 0.15\n"
@@ -152,7 +155,9 @@ static void print_usage(const char* prog) {
         "  --gpu                     Alias for --backend gpu\n"
         "  --devices <csv>           GPU devices for parallel workers, e.g. 0,1,2,3\n"
         "  --type <dtype>            Weight type / on-the-fly quantization when loading safetensors:\n"
-        "                            f32, f16, bf16, q4_0, q4_1, q5_0, q5_1, q8_0, q2_k, q3_k, q4_k, q5_k, q6_k. Default: auto\n"
+        "                            preserve, f32, f16, bf16, q4_0, q4_1, q5_0, q5_1, q8_0,\n"
+        "                            q2_k, q3_k, q4_k, q5_k, q6_k. Default: preserve\n"
+        "                            ('auto' remains accepted as a compatibility alias)\n"
         "  --tensor-type-rules <csv> Per-tensor quant overrides (mixed quant), e.g. \"attn=q4_0,norm=f16\"\n"
         "                            Each rule is <name-regex>=<ggml-type-name>, comma-separated\n"
         "  --no-t5                   Skip loading T5XXL text encoder (SD3 only; reduces memory, degrades prompt adherence)\n"
@@ -161,14 +166,19 @@ static void print_usage(const char* prog) {
         "  --offload-to-cpu          Keep model weights on CPU, copy to GPU per-compute (saves VRAM)\n"
         "  --dit-offload             Keep DiT weights on CPU, stage to GPU per step (compute on GPU)\n"
         "  --text-encoder-offload    Keep text-encoder weights on CPU, stage to GPU per encode (compute on GPU)\n"
+        "  --minimax-h3-stage-lifecycle  MiniMax-H3: stage Qwen/VAE by phase and release them during DiT\n"
         "  --vae-offload             Keep VAE weights on CPU, stage to GPU per decode (compute on GPU)\n"
-        "  --max-vram <GB>           Limit VRAM usage for compute graphs (e.g. 8.0)\n"
-        "  --auto-allocate           Auto per-component placement under a hard VRAM cap\n"
+        "  --max-vram <GB>           Set the VRAM planning budget; with --auto-fit on\n"
+        "                            single-device CUDA, also enforce a guarded allocation ceiling\n"
+        "  --auto-allocate           Auto per-component placement under a VRAM planning budget\n"
         "                            = min(--max-vram, free); keeps components resident\n"
         "                            when they fit, offloads (segments) the rest\n"
-        "  --auto-fit                Fully automatic: choose DiT quantization (q8_0 down\n"
-        "                            to q4_k) AND placement to fit the VRAM budget.\n"
-        "                            Implies --auto-allocate; ignores --type. Off by default.\n"
+        "                            (external CUDA workspaces can raise the process peak)\n"
+        "  --auto-fit                Fully automatic: choose TE/DiT quantization (DiT q8_0\n"
+        "                            down to q4_k) AND placement to fit the VRAM budget.\n"
+        "                            Implies --auto-allocate; replans TE/DiT precision while\n"
+        "                            --type still controls VAE precision. With --max-vram,\n"
+        "                            oversized workloads fail safely. Off by default.\n"
         "  --flash-attention         Enable flash attention, default: on\n"
         "  --no-flash-attention      Disable flash attention\n"
         "  --cfg-parallel-size <n>   Split CFG cond/uncond branches across n GPUs, currently supports 1 or 2\n"
@@ -892,6 +902,7 @@ int main(int argc, char** argv) {
     ctx_params.offload_params_to_cpu = args.offload_to_cpu;
     ctx_params.dit_offload = args.dit_offload;
     ctx_params.text_encoder_offload = args.text_encoder_offload;
+    ctx_params.minimax_h3_stage_lifecycle = args.minimax_h3_stage_lifecycle;
     ctx_params.auto_allocate = args.auto_allocate;
     ctx_params.auto_fit = args.auto_fit;
     // For auto-allocate/auto-fit compute-buffer measurement: use the requested
@@ -995,8 +1006,9 @@ int main(int argc, char** argv) {
         gen_params.height = args.height;
         gen_params.frames = generation_frames;
         gen_params.seed = args.seed;
-        gen_params.sample.sampler = ED_SAMPLER_AUTO;
-        gen_params.sample.scheduler = ED_SCHEDULER_AUTO;
+        gen_params.ref_image_size = args.ref_image_size;
+        gen_params.sample.sampler = args.sampler;
+        gen_params.sample.scheduler = args.scheduler;
         gen_params.sample.steps = args.steps;
         gen_params.sample.cfg_scale = args.cfg_scale;
         gen_params.sample.image_cfg_scale = 1.0f;
@@ -1159,8 +1171,8 @@ int main(int argc, char** argv) {
          * - set cfg_scale to 1.0 to avoid the traditional CFG negative-conditioning branch
          * - use the common Flux value of 3.5 for distilled_guidance
          */
-        gen_params.sample.sampler = ED_SAMPLER_AUTO;
-        gen_params.sample.scheduler = ED_SCHEDULER_AUTO;
+        gen_params.sample.sampler = args.sampler;
+        gen_params.sample.scheduler = args.scheduler;
         gen_params.sample.steps = args.steps;
         gen_params.sample.cfg_scale = args.cfg_scale;
         gen_params.sample.image_cfg_scale = 1.0f;
