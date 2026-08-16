@@ -177,8 +177,13 @@ namespace MiniMaxH3 {
     };
 
     struct MLP : public UnaryBlock {
+        int64_t hidden_size;
+        int64_t ffn_hidden_size;
+
         MLP(int64_t hidden_size,
-            int64_t ffn_hidden_size) {
+            int64_t ffn_hidden_size)
+            : hidden_size(hidden_size),
+              ffn_hidden_size(ffn_hidden_size) {
             blocks["fc1"] = std::make_shared<Linear>(hidden_size,
                                                       ffn_hidden_size * 2,
                                                       false,
@@ -209,13 +214,45 @@ namespace MiniMaxH3 {
             const bool use_fc2_tensor_cores = use_mlp_tensor_cores || h3_env_flag_enabled("ED_MINIMAX_H3_FC2_FP16_CUBLAS");
             fc1->set_force_prec_f32(!use_fc1_tensor_cores);
             fc2->set_force_prec_f32(!use_fc2_tensor_cores);
-            if (h3_env_flag_enabled("ED_MINIMAX_H3_DISABLE_SWIGLU_FUSION")) {
-                auto uv = ggml_ext_chunk(ctx->ggml_ctx, fc1->forward(ctx, x), 2, 0);
-                return fc2->forward(ctx, ggml_mul(ctx->ggml_ctx,
-                                                  ggml_silu(ctx->ggml_ctx, uv[0]),
-                                                  uv[1]));
+            auto forward_chunk = [&](ggml_tensor* chunk) {
+                auto fc1_output = fc1->forward(ctx, chunk);
+                if (h3_env_flag_enabled("ED_MINIMAX_H3_DISABLE_SWIGLU_FUSION")) {
+                    auto uv = ggml_ext_chunk(ctx->ggml_ctx, fc1_output, 2, 0);
+                    return fc2->forward(ctx, ggml_mul(ctx->ggml_ctx,
+                                                      ggml_silu(ctx->ggml_ctx, uv[0]),
+                                                      uv[1]));
+                }
+                return fc2->forward(ctx, ggml_swiglu(ctx->ggml_ctx, fc1_output));
+            };
+
+            const int64_t sequence = x->ne[1];
+            if (ctx->max_graph_vram_bytes == 0 || sequence <= 32768) {
+                return forward_chunk(x);
             }
-            return fc2->forward(ctx, ggml_swiglu(ctx->ggml_ctx, fc1->forward(ctx, x)));
+
+            constexpr size_t min_working_bytes = static_cast<size_t>(512) * 1024 * 1024;
+            const size_t persistent_bytes = ggml_nbytes(x) * 2 + min_working_bytes;
+            const size_t working_bytes = ctx->max_graph_vram_bytes > persistent_bytes
+                                             ? ctx->max_graph_vram_bytes - persistent_bytes
+                                             : min_working_bytes;
+            const size_t bytes_per_token = static_cast<size_t>(3 * ffn_hidden_size + hidden_size) * sizeof(float);
+            int64_t chunk_tokens = static_cast<int64_t>(working_bytes / std::max<size_t>(bytes_per_token, 1));
+            const int64_t max_chunk_tokens = ctx->max_graph_vram_bytes <= static_cast<size_t>(20) * 1024 * 1024 * 1024
+                                                 ? 8192
+                                                 : 32768;
+            chunk_tokens = std::clamp<int64_t>((chunk_tokens / 256) * 256, 2048, max_chunk_tokens);
+            if (chunk_tokens >= sequence) {
+                return forward_chunk(x);
+            }
+
+            ggml_tensor* output = nullptr;
+            for (int64_t start = 0; start < sequence; start += chunk_tokens) {
+                const int64_t end = std::min(sequence, start + chunk_tokens);
+                auto chunk = ggml_ext_slice(ctx->ggml_ctx, x, 1, start, end, true);
+                auto chunk_output = forward_chunk(chunk);
+                output = output == nullptr ? chunk_output : ggml_concat(ctx->ggml_ctx, output, chunk_output, 1);
+            }
+            return output;
         }
     };
 
@@ -303,15 +340,32 @@ namespace MiniMaxH3 {
 
             int64_t sequence = x->ne[1];
             int64_t batch    = x->ne[2] * x->ne[3];
-            auto qkv_out     = qkv_proj->forward(ctx, x);
+            const int64_t inner = heads * head_dim;
+            const size_t attention_activation_bytes =
+                static_cast<size_t>(sequence) * static_cast<size_t>(batch) *
+                    static_cast<size_t>(3 * x->ne[0] + 6 * inner) * sizeof(float) +
+                static_cast<size_t>(1) * 1024 * 1024 * 1024;
+            const bool low_memory_attention = ctx->max_graph_vram_bytes > 0 &&
+                                              sequence > 32768 &&
+                                              attention_activation_bytes > ctx->max_graph_vram_bytes;
             std::vector<ggml_tensor*> qkv;
-            if (h3_env_flag_enabled("ED_MINIMAX_H3_DISABLE_QKV_VIEW")) {
-                qkv = ggml_ext_chunk(ctx->ggml_ctx, qkv_out, 3, 0);
-                qkv[0] = ggml_reshape_4d(ctx->ggml_ctx, qkv[0], head_dim, heads, sequence, batch);
-                qkv[1] = ggml_reshape_4d(ctx->ggml_ctx, qkv[1], head_dim, heads, sequence, batch);
-                qkv[2] = ggml_reshape_4d(ctx->ggml_ctx, qkv[2], head_dim, heads, sequence, batch);
+            if (low_memory_attention) {
+                qkv.reserve(3);
+                for (int projection = 0; projection < 3; ++projection) {
+                    auto projected = qkv_proj->forward_output_slice(ctx, x, projection * inner, inner);
+                    projected = ggml_reshape_4d(ctx->ggml_ctx, projected, head_dim, heads, sequence, batch);
+                    qkv.push_back(projected);
+                }
             } else {
-                qkv = h3_qkv_views(ctx->ggml_ctx, qkv_out, head_dim, heads, sequence, batch);
+                auto qkv_out = qkv_proj->forward(ctx, x);
+                if (h3_env_flag_enabled("ED_MINIMAX_H3_DISABLE_QKV_VIEW")) {
+                    qkv = ggml_ext_chunk(ctx->ggml_ctx, qkv_out, 3, 0);
+                    qkv[0] = ggml_reshape_4d(ctx->ggml_ctx, qkv[0], head_dim, heads, sequence, batch);
+                    qkv[1] = ggml_reshape_4d(ctx->ggml_ctx, qkv[1], head_dim, heads, sequence, batch);
+                    qkv[2] = ggml_reshape_4d(ctx->ggml_ctx, qkv[2], head_dim, heads, sequence, batch);
+                } else {
+                    qkv = h3_qkv_views(ctx->ggml_ctx, qkv_out, head_dim, heads, sequence, batch);
+                }
             }
             auto q           = qkv[0];
             auto k           = qkv[1];
@@ -324,6 +378,11 @@ namespace MiniMaxH3 {
             } else {
                 q = attention_layout(ctx->ggml_ctx, q);
                 k = attention_layout(ctx->ggml_ctx, k);
+            }
+            if (low_memory_attention) {
+                q = ggml_cast(ctx->ggml_ctx, q, GGML_TYPE_BF16);
+                k = ggml_cast(ctx->ggml_ctx, k, GGML_TYPE_BF16);
+                v = ggml_cast(ctx->ggml_ctx, v, GGML_TYPE_BF16);
             }
             auto out = ggml_ext_attention_ext(ctx->ggml_ctx,
                                               ctx->backend,
@@ -538,6 +597,7 @@ namespace MiniMaxH3 {
                              ggml_tensor* t_emb,
                              const std::vector<TokenModulationSpan>& segments,
                              ggml_tensor* pe,
+                             const std::string& cut_group,
                              const std::string& debug_target = {},
                              ggml_tensor** debug_output = nullptr) {
             auto norm1 = std::dynamic_pointer_cast<RMSNorm>(blocks["norm1"]);
@@ -592,6 +652,9 @@ namespace MiniMaxH3 {
             if (debug_output != nullptr && debug_target == "block0_after_attn") {
                 *debug_output = x;
                 return x;
+            }
+            if (ctx->max_graph_vram_bytes > 0 && !cut_group.empty()) {
+                sd::ggml_graph_cut::mark_graph_cut(x, cut_group + ".attn.output", "hidden_states");
             }
             h      = modulate_segments(ctx->ggml_ctx,
                                        norm2->forward(ctx, x),
@@ -870,11 +933,13 @@ namespace MiniMaxH3 {
             auto pe    = build_rope(ctx, position_ids);
             for (int64_t i = 0; i < config.num_layers; ++i) {
                 auto block = std::dynamic_pointer_cast<TransformerBlock>(blocks["blocks." + std::to_string(i)]);
+                const std::string cut_group = "minimax_h3.blocks." + std::to_string(i);
                 h          = block->forward(ctx,
                                             h,
                                             t_emb,
                                             segments,
                                             pe,
+                                            cut_group,
                                             i == 0 ? debug_target : std::string(),
                                             i == 0 ? debug_output : nullptr);
                 if (debug_output != nullptr && *debug_output != nullptr) {
@@ -885,7 +950,7 @@ namespace MiniMaxH3 {
                     return {nullptr, nullptr};
                 }
                 sd::ggml_graph_cut::mark_graph_cut(h,
-                                                   "minimax_h3.blocks." + std::to_string(i),
+                                                   cut_group,
                                                    "hidden_states");
             }
 

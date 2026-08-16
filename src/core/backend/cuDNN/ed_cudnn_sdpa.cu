@@ -1,6 +1,7 @@
 #include "ed_cudnn_sdpa.h"
 
 #include "common.cuh"
+#include "ggml-cuda.h"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -766,19 +767,34 @@ static std::unique_ptr<ed_cudnn_sdpa_plan> create_plan(const ed_cudnn_sdpa_key &
         result = ED_CUDNN_SDPA_BUILD_FAILED;
         return nullptr;
     }
-    if (plan->workspace_size > 0) {
-        CUDA_CHECK(cudaMalloc(&plan->workspace, (size_t) plan->workspace_size));
+    auto allocate = [&](void ** ptr, size_t bytes) {
+        if (bytes == 0) {
+            return true;
+        }
+        if (!ggml_backend_cuda_try_malloc(key.device, ptr, bytes)) {
+            result = ED_CUDNN_SDPA_BUILD_FAILED;
+            return false;
+        }
+        return true;
+    };
+    if (!allocate(&plan->workspace, (size_t) plan->workspace_size)) {
+        return nullptr;
     }
     plan->elements = key.b * key.h * key.sq * key.d;
-    CUDA_CHECK(cudaMalloc(&plan->q_io, (size_t) plan->elements * type_size(key.io_type)));
-    if (key.dst_type != key.io_type) {
-        CUDA_CHECK(cudaMalloc(&plan->o_io, (size_t) plan->elements * type_size(key.io_type)));
+    if (!allocate(&plan->q_io, (size_t) plan->elements * type_size(key.io_type))) {
+        return nullptr;
+    }
+    if (key.dst_type != key.io_type &&
+        !allocate(&plan->o_io, (size_t) plan->elements * type_size(key.io_type))) {
+        return nullptr;
     }
     if (key.padding_mask) {
         const int32_t seq_q = (int32_t) key.sq;
         const int32_t seq_kv = (int32_t) key.sk_actual;
-        CUDA_CHECK(cudaMalloc(&plan->seq_len_q, sizeof(int32_t)));
-        CUDA_CHECK(cudaMalloc(&plan->seq_len_kv, sizeof(int32_t)));
+        if (!allocate(reinterpret_cast<void **>(&plan->seq_len_q), sizeof(int32_t)) ||
+            !allocate(reinterpret_cast<void **>(&plan->seq_len_kv), sizeof(int32_t))) {
+            return nullptr;
+        }
         CUDA_CHECK(cudaMemcpy(plan->seq_len_q, &seq_q, sizeof(int32_t), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(plan->seq_len_kv, &seq_kv, sizeof(int32_t), cudaMemcpyHostToDevice));
     }

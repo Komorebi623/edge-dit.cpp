@@ -39,7 +39,7 @@ placement, and backend selection.
   - Shared **C API, CLI, HTTP server, and Python** interfaces across every family
 
 - **Fits large models into limited VRAM**
-  - **`--auto-fit`** — one flag auto-picks DiT **quantization** (`q8_0`→`q4_K`) *and* per-component placement to meet a hard VRAM budget
+  - **`--auto-fit`** — one flag auto-picks DiT **quantization** (`q8_0`→`q4_K`) and per-component placement; on single-device CUDA, pairing it with `--max-vram` also enforces an allocation ceiling
   - **Layered offload** — streams the diffusion transformer **one block at a time** (async double-buffered on CUDA), so 20 GB+ models run on a 24 GB or smaller card
   - **Per-component offload** (`--dit-offload` / `--text-encoder-offload` / `--vae-offload`) and **VAE tiling**
   - **`ed-convert`** — offline weight quantization to a **portable pre-quantized GGUF** (skips per-load CPU quantization), with per-tensor dtype rules and activation-calibrated **imatrix**
@@ -57,7 +57,7 @@ placement, and backend selection.
 - **2026-08-14:** 🚀 Added **MiniMax-H3 FL2VA and Ref2VA video+audio generation** with image, video, embedded/paired audio, and mixed references; full or pruned BF16 DiTs, persistent Q8_0 conversion, Q4_K_M weights, and automatic VRAM fitting are supported ([usage and H200 results](docs/minimax-h3.md)).
 - **2026-08-05:** 🚀 Completed the **RTX 4090 (24 GB) benchmark** — full cross-system speed / VRAM / image-quality across text-to-image, editing, and video ([results](docs/performance-4090.md)).
 - **2026-07-30:** 🚀 Added **per-component offload** (`--dit-offload` / `--text-encoder-offload` / `--vae-offload`), unifying all offload paths on one semantics.
-- **2026-07-29:** 🚀 Added **`--auto-fit`** — one flag picks DiT quantization *and* per-component placement to fit a hard VRAM budget.
+- **2026-07-29:** 🚀 Added **`--auto-fit`** — one flag picks DiT quantization and per-component placement; `--auto-fit --max-vram <GB>` enforces the requested single-device CUDA allocation ceiling.
 - **2026-07-27:** 🚀 Added **few-step distilled** auto-detection (Turbo/Lightning/schnell → 4–8 steps) and optional **SageAttention** for SD3/Wan.
 - **2026-07-23:** 🚀 Added **`ed-convert`** for offline weight quantization to portable pre-quantized GGUF (with activation-calibrated `--imatrix`).
 - **2026-07-11:** 🚀 **edge-dit.cpp v0.1.0-alpha** enters **public preview**.

@@ -641,10 +641,12 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
                                     runtime.plan_component_offload(loader, "first_stage_model", remaining_free);
     const bool audio_vae_policy_offload = runtime.vae_offload_params_to_cpu() ||
                                           (has_audio_vae && runtime.plan_component_offload(loader, "audio_vae", remaining_free));
-    stage_diffusion_lifecycle_ = runtime.minimax_h3_stage_lifecycle() && !diffusion_policy_offload;
-    stage_text_lifecycle_ = runtime.minimax_h3_stage_lifecycle() && !text_policy_offload;
-    stage_video_vae_lifecycle_ = runtime.minimax_h3_stage_lifecycle() && !vae_policy_offload;
-    stage_audio_vae_lifecycle_ = runtime.minimax_h3_stage_lifecycle() && has_audio_vae && !audio_vae_policy_offload;
+    const bool lifecycle_requested = runtime.minimax_h3_stage_lifecycle() ||
+                                     (runtime.auto_fit() && runtime.max_vram() > 0.0f);
+    stage_diffusion_lifecycle_ = lifecycle_requested && !diffusion_policy_offload;
+    stage_text_lifecycle_ = lifecycle_requested && !text_policy_offload;
+    stage_video_vae_lifecycle_ = lifecycle_requested && !vae_policy_offload;
+    stage_audio_vae_lifecycle_ = lifecycle_requested && has_audio_vae && !audio_vae_policy_offload;
     const bool diffusion_offload = diffusion_policy_offload || stage_diffusion_lifecycle_;
     const bool text_offload = text_policy_offload || stage_text_lifecycle_;
     const bool vae_offload = vae_policy_offload || stage_video_vae_lifecycle_;
@@ -655,7 +657,7 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
                                                               loader.get_tensor_storage_map(),
                                                               "model.diffusion_model",
                                                               diffusion_offload);
-    diffusion_->set_max_graph_vram_bytes(stage_diffusion_lifecycle_ ? 0 : runtime.max_graph_vram_bytes());
+    diffusion_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
     diffusion_->set_flash_attention_enabled(runtime.flash_attention());
     if (auto process_group = runtime.graph_process_group_ref()) {
         diffusion_->set_process_group(process_group);
@@ -702,16 +704,14 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     conditioner_->model.set_flash_attention_enabled(runtime.flash_attention());
     conditioner_->alloc_params_buffer();
     conditioner_->get_param_tensors(registry.tensors(), "text_encoders.llm");
-    conditioner_->model.set_max_graph_vram_bytes(stage_text_lifecycle_
-                                                     ? 0
-                                                     : runtime.text_encoder_segment_budget(
-                                                           conditioner_->model.get_params_buffer_size(), text_offload));
+    conditioner_->model.set_max_graph_vram_bytes(
+        runtime.text_encoder_segment_budget(conditioner_->model.get_params_buffer_size(), text_offload));
 
     vae_ = std::make_unique<MiniMaxH3VAE::MiniMaxH3VideoVAERunner>(runtime.vae_backend(),
                                                                     vae_offload,
                                                                     loader.get_tensor_storage_map(),
                                                                     "first_stage_model");
-    vae_->set_max_graph_vram_bytes(stage_video_vae_lifecycle_ ? 0 : runtime.max_graph_vram_bytes());
+    vae_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
     vae_->set_flash_attention_enabled(runtime.flash_attention());
     vae_->alloc_params_buffer();
     vae_->get_param_tensors(registry.tensors(), "first_stage_model");
@@ -721,7 +721,7 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
                                                                         audio_vae_offload,
                                                                         loader.get_tensor_storage_map(),
                                                                         "audio_vae");
-        audio_vae_->set_max_graph_vram_bytes(stage_audio_vae_lifecycle_ ? 0 : runtime.max_graph_vram_bytes());
+        audio_vae_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
         audio_vae_->set_flash_attention_enabled(runtime.flash_attention());
         audio_vae_->alloc_params_buffer();
         audio_vae_->get_param_tensors(registry.tensors(), "audio_vae");

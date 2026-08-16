@@ -12,6 +12,9 @@
 #include "utils/rng_philox.hpp"
 #include "utils/util.h"
 #include "runtime/model_loader.h"
+#if defined(GGML_USE_CUDA)
+#include "ggml-cuda.h"
+#endif
 
 namespace edgedit {
 namespace {
@@ -282,6 +285,27 @@ bool ModelRuntime::init_backends(const ed_context_params_t& params, std::string*
         return fail(error, msg);
     }
     LOG_INFO("default backend: %s", ggml_backend_name(backends_.backend));
+
+#if defined(GGML_USE_CUDA)
+    if (ggml_backend_is_cuda(backends_.backend)) {
+        size_t cuda_allocation_budget = 0;
+        if (auto_fit_ && max_graph_vram_bytes_ > 0) {
+            constexpr size_t external_workspace_reserve = static_cast<size_t>(1) * 1024 * 1024 * 1024;
+            if (max_graph_vram_bytes_ <= external_workspace_reserve) {
+                return fail(error, "--auto-fit --max-vram must exceed the 1 GiB CUDA workspace reserve");
+            }
+            cuda_allocation_budget = max_graph_vram_bytes_ - external_workspace_reserve;
+        }
+        if (!ggml_backend_cuda_set_memory_budget(backends_.backend, cuda_allocation_budget)) {
+            return fail(error, "failed to configure CUDA memory budget");
+        }
+        if (cuda_allocation_budget > 0) {
+            LOG_INFO("auto-fit: CUDA allocation guard = %.2f GiB (%.2f GiB requested, 1.00 GiB reserved for external workspaces)",
+                     cuda_allocation_budget / (1024.0 * 1024.0 * 1024.0),
+                     max_graph_vram_bytes_ / (1024.0 * 1024.0 * 1024.0));
+        }
+    }
+#endif
 
     // Text encoder and VAE no longer run on a dedicated CPU backend. When their
     // offload flags are set they keep weights on CPU but stage to the GPU per

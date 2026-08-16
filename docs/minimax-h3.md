@@ -26,6 +26,23 @@ last frame. Ref2VA uses the following options:
 | Paired audio | `--ref-video-audio <wav>` | The Nth WAV is paired with the Nth video and overrides embedded audio |
 | Additional audio | `--ref-audio <wav>` | Repeatable; requires at least one image or video reference |
 
+Reference-image resize policy changes both conditioning cost and every Ref2VA
+Transformer step because the encoded reference latents are appended to the DiT
+sequence:
+
+| Implementation / mode | Reference-image geometry |
+|---|---|
+| Official Diffusers | Always scales the short edge to 2048px, including upscaling |
+| Edge-DiT.cpp `max` (default) | Same as official Diffusers |
+| Edge-DiT.cpp `match` | Never upscales; caps the image at the output pixel area |
+| Current ComfyUI `max` | Caps the short edge at 2048px but does not upscale smaller images |
+| Current ComfyUI `match` (default) | Never upscales; caps the image at the output pixel area |
+
+Performance comparisons must therefore report the selected mode and post-resize
+reference dimensions. In particular, the Edge-DiT.cpp and ComfyUI defaults are
+not equivalent: they can process substantially different sequence lengths even
+when the source images and output resolution are equal.
+
 When `--ref-video` points to a media file, the CLI decodes it at 24 fps and
 automatically extracts an embedded audio track. Explicit paired WAV files map
 positionally to videos. Additional audio is numbered after paired or embedded
@@ -54,6 +71,12 @@ from pruned and full DiTs are not directly comparable.
 | BF16 | Qwen3-VL | `text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
 | FP16 | Video VAE | `vae/minimax_h3_video_vae_fp16.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
 | FP32 | Audio VAE | `vae/minimax_h3_audio_vae_fp32.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
+
+These are also the VAE storage precisions used by the current ComfyUI model
+release. BF16 and FP16 both use 16 bits per weight, so converting the FP16 video
+VAE to BF16 would not reduce its weight memory. `--auto-fit` therefore preserves
+the supplied VAE precision and focuses automatic quantization on Qwen3-VL and
+the DiT.
 
 The official [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3)
 Diffusers shard indexes are also accepted for BF16 transformer loading. Merged
@@ -200,28 +223,26 @@ ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --video-format mp4 --output auto-fit.mp4
 ```
 
-For long Ref2VA jobs on GPUs that can hold one major component at a time, add
-`--minimax-h3-stage-lifecycle`. Qwen and the conditioning VAEs are released
-after context/reference encoding, the DiT remains resident across all denoise
-steps, and the decode VAEs are staged only after the DiT is released. The
-encoded context remains on the GPU and DiT throughput is unchanged apart from
-normal run-to-run variation.
+For long Ref2VA jobs on GPUs that can hold one major component at a time,
+`--auto-fit --max-vram` automatically uses the MiniMax-H3 staged lifecycle.
+Resident Qwen and conditioning VAE weights are staged only for context/reference
+encoding and then released; resident DiT weights are staged for denoising and
+released before decode; decode VAEs are staged last. Components that still
+cannot fit as a whole remain layer/graph-segment offloaded instead. The explicit
+`--minimax-h3-stage-lifecycle` option enables the same phase behavior without
+`--auto-fit`.
 
-`--max-vram` is a placement and graph-planning budget, not a hard CUDA process
-limit. Backend workspaces and a single graph segment's activations can exceed
-it; setting `--max-vram 24` on a larger GPU does not by itself prove that the
-same workload fits a physical 24 GiB GPU.
+On single-device CUDA, the combined `--auto-fit --max-vram 24` mode installs a guarded
+allocation ceiling below 24 GiB and reserves 1 GiB for CUDA/cuDNN workspaces.
+Automatic quantization, phase lifecycle, component placement, and graph
+segmentation are attempted first. If the workload's minimum graph segment still
+cannot fit, generation fails before crossing the requested 24 GiB ceiling.
+`--max-vram` without `--auto-fit` remains a planning input rather than this hard
+allocation guard.
 
 MiniMax-H3 always uses its fixed `16x16` video-VAE tiling path. Generic
 `--vae-tiling` and `--vae-tile-size` values do not replace this model-specific
 layout.
-
-## Ref2VA 15-second demo
-
-The [Edge-DiT.cpp / ComfyUI / Diffusers comparison](optimization/minimax-h3-ref2va-edge-comfyui-diffusers-15s-demo-2026-08-16.md)
-contains two vertically stacked 15-second videos, aligned inputs and sampling
-parameters, stage timings, peak VRAM, lifecycle validation, a 24 GiB planning
-budget experiment, and reproducible command/workflow entry points.
 
 ## H200 BF16 comparison
 
@@ -243,10 +264,11 @@ FL2VA does not use Ref2VA resize preprocessing:
 
 ### Ref2VA
 
-Current preprocessing follows Diffusers geometry: image short edge 2048;
-video short edge 768 with a pre-rounding `768x1344` area cap; preserved aspect
-ratio; dimensions rounded to multiples of 32; Lanczos resize. edge-dit.cpp is
-faster than Diffusers in all four measured Ref2VA generation paths:
+These benchmark rows use Edge-DiT.cpp `--ref-image-size max`, matching the
+official Diffusers image geometry: image short edge 2048; video short edge 768
+with a pre-rounding `768x1344` area cap; preserved aspect ratio; dimensions
+rounded to multiples of 32; Lanczos resize. Edge-DiT.cpp is faster than
+Diffusers in all four measured Ref2VA generation paths:
 
 | Current task | Generate | edge-dit.cpp speedup | Peak VRAM |
 |---|---:|---:|---:|

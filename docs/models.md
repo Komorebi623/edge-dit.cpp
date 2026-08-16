@@ -169,6 +169,27 @@ Per-tensor overrides are available with:
 --tensor-type-rules "attn=q4_0,norm=f16"
 ```
 
+Component files keep independent stored precisions when `--type auto` (the
+default) is used. A quantized DiT GGUF can therefore be combined with a
+different Qwen/text-encoder GGUF and floating-point video/audio VAEs, provided
+the files belong to the same model family. The precision policy is:
+
+| Configuration | Precision behavior |
+|---|---|
+| Separate component files + `--type auto` | Every component and tensor keeps its stored precision |
+| Explicit `--type` | Applies one requested type to every eligible tensor in every loaded component |
+| `--tensor-type-rules` | Overrides eligible tensors by name/regex, including component-prefix-specific rules |
+| `--auto-fit --max-vram` | Independently selects text-encoder and DiT quantization; VAEs keep their stored representation |
+
+Loadable precision is not the same as accelerated precision. CUDA dense linear
+layers use floating-point cuBLAS or quantized MMQ/dequantization paths according
+to tensor type and shape. F32/F16/BF16 VAE convolutions have native CUDA/cuDNN
+paths, but block-quantized VAE convolution weights do not provide native Q4/Q8
+convolution acceleration and may be converted or fall back. Biases, norms,
+embeddings, incompatible tensor shapes, and numerically protected tensors also
+remain floating point. Thus supported component precisions may be mixed freely,
+but not every theoretical mixture makes every operator faster.
+
 Memory-oriented options:
 
 ```bash
@@ -186,15 +207,16 @@ Memory-oriented options:
 `--vae-tiling` takes an explicit `on|off|auto` value. Under `--auto-allocate`
 with a `--max-vram` budget, the runtime decides per component (diffusion
 transformer, text encoder, VAE) what stays resident on the GPU and what streams
-from host memory. This is a placement and graph-planning budget rather than a
-hard process-memory limit.
+from host memory. `--auto-allocate` alone uses a placement and graph-planning
+budget rather than a hard process-memory limit.
 `--auto-fit` goes one step further — a superset of `--auto-allocate` that also
 picks the quantization to fit the budget (text encoders lowered toward `q8_0`
 without increasing already lower quantization, and the diffusion transformer
 walking a `q8_0 → q4_K` ladder), ignoring `--type`; use it
-to fit a VRAM planning budget without hand-tuning quantization and placement.
-Backend workspaces and transient allocations can still raise the measured
-process peak above this budget.
+to fit a VRAM budget without hand-tuning quantization and placement. On single-device CUDA,
+an explicit `--auto-fit --max-vram <GB>` also enables a guarded allocation
+ceiling with reserved external-library headroom. A workload whose minimum graph
+segment cannot fit fails before crossing the requested ceiling.
 
 See [Command line usage](cli.md#quantization-and-memory) for runnable examples
 and [performance (H200)](performance-H200.md) for cache, parallelism, and

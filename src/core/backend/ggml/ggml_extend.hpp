@@ -2218,6 +2218,7 @@ struct GGMLRunnerContext {
     // means "unknown" -> sage applies to all layers (stage-1 behavior).
     int sage_layer_idx    = -1;
     int sage_total_layers = -1;
+    size_t max_graph_vram_bytes = 0;
 };
 
 // Model-facing tap primitive. Called by a model's forward() at a structural
@@ -6986,6 +6987,7 @@ public:
         runner_ctx.circular_y_enabled    = circular_y_enabled;
         runner_ctx.weight_adapter        = weight_adapter;
         runner_ctx.tap_registry          = tap_registry_;
+        runner_ctx.max_graph_vram_bytes  = max_graph_vram_bytes;
         return runner_ctx;
     }
 

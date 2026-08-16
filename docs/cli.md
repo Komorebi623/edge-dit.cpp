@@ -378,9 +378,11 @@ offloads the whole model, while `--dit-offload` / `--text-encoder-offload` /
 `--vae-offload` offload just that one component. `--auto-allocate` places each
 component (DiT, text encoder, VAE) against a planning budget of
 `min(--max-vram, free)`, keeping a component resident when it fits and
-offloading (staging) it otherwise. Backend-owned CUDA/cuDNN workspaces are not
-all represented in this budget, so validate the measured process peak for the
-target model, sequence length, and resolution.
+offloading (staging) it otherwise. By itself this remains a placement-planning
+budget. On single-device CUDA, `--auto-fit --max-vram <GB>` additionally installs a guarded
+allocation ceiling below the requested value, reserving 1 GiB for external
+library workspaces. An allocation that cannot fit is rejected before the
+process crosses the requested ceiling.
 
 These options are workload dependent. Validate output quality and latency for
 the exact model and resolution you plan to run.
@@ -398,7 +400,9 @@ Two levels of automation size a run to a VRAM planning budget instead of tuning
   `q8_0 → q4_k` to the highest level that stays resident within the budget, the
   text encoder is lowered to at most `q8_0` (an already smaller quant stays unchanged), and
   placement is decided as above. `--auto-fit` **ignores `--type`** (it owns the
-  quantization) and logs that it is doing so.
+  quantization) and logs that it is doing so. With an explicit `--max-vram` on
+  single-device CUDA, it also enables the hard allocation guard; an intrinsically too-large
+  graph fails safely instead of exceeding the budget.
 
 `--auto-fit` measures each component's real compute-buffer footprint at the
 requested resolution (`-W`/`-H`, and `--frames` for video) to size the resident
@@ -418,7 +422,7 @@ the model's fixed 24 fps to the nearest legal `17k+5` frame count. Keep using
 mutually exclusive.
 
 ```bash
-# MiniMax-H3 Q8_0 under a 40 GiB hard placement budget.
+# MiniMax-H3 with automatic quantization/placement and a 40 GiB CUDA ceiling.
 ./build-cuda/bin/ed-cli --video \
   --diffusion-model /path/to/minimax_h3_fl2va-diffusers-Q8_0.gguf \
   --vae /path/to/minimax_h3_video_vae_fp16.safetensors \

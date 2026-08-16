@@ -1,6 +1,7 @@
 #include "ed_cudnn_conv2d.h"
 
 #include "common.cuh"
+#include "ggml-cuda.h"
 
 #include <cuda_runtime.h>
 #include <cudnn.h>
@@ -533,7 +534,7 @@ static void * get_workspace(int device, cudaStream_t stream, size_t workspace_si
             workspace->ptr = nullptr;
             workspace->size = 0;
         }
-        if (cudaMalloc(&workspace->ptr, workspace_size) != cudaSuccess) {
+        if (!ggml_backend_cuda_try_malloc(device, &workspace->ptr, workspace_size)) {
             cudaSetDevice(old_device);
             workspace->ptr = nullptr;
             workspace->size = 0;
@@ -573,7 +574,7 @@ static void * get_scratch(int device, cudaStream_t stream, size_t scratch_size) 
             scratch->ptr = nullptr;
             scratch->size = 0;
         }
-        if (cudaMalloc(&scratch->ptr, scratch_size) != cudaSuccess) {
+        if (!ggml_backend_cuda_try_malloc(device, &scratch->ptr, scratch_size)) {
             cudaSetDevice(old_device);
             scratch->ptr = nullptr;
             scratch->size = 0;
