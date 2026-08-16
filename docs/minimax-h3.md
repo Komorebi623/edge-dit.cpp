@@ -30,18 +30,14 @@ Reference-image resize policy changes both conditioning cost and every Ref2VA
 Transformer step because the encoded reference latents are appended to the DiT
 sequence:
 
-| Implementation / mode | Reference-image geometry |
+| Mode | Reference-image geometry |
 |---|---|
-| Official Diffusers | Always scales the short edge to 2048px, including upscaling |
-| Edge-DiT.cpp `max` (default) | Same as official Diffusers |
-| Edge-DiT.cpp `match` | Never upscales; caps the image at the output pixel area |
-| Current ComfyUI `max` | Caps the short edge at 2048px but does not upscale smaller images |
-| Current ComfyUI `match` (default) | Never upscales; caps the image at the output pixel area |
+| `max` (default) | Scales the short edge to 2048px, including upscaling |
+| `match` | Never upscales; caps the image at the output pixel area |
 
-Performance comparisons must therefore report the selected mode and post-resize
-reference dimensions. In particular, the Edge-DiT.cpp and ComfyUI defaults are
-not equivalent: they can process substantially different sequence lengths even
-when the source images and output resolution are equal.
+The selected mode and post-resize reference dimensions affect both conditioning
+cost and DiT sequence length. Use `match` when smaller reference images should
+not be enlarged.
 
 When `--ref-video` points to a media file, the CLI decodes it at 24 fps and
 automatically extracts an embedded audio track. Explicit paired WAV files map
@@ -72,9 +68,8 @@ from pruned and full DiTs are not directly comparable.
 | FP16 | Video VAE | `vae/minimax_h3_video_vae_fp16.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
 | FP32 | Audio VAE | `vae/minimax_h3_audio_vae_fp32.safetensors` | [`Comfy-Org/MiniMax-H3`](https://huggingface.co/Comfy-Org/MiniMax-H3) |
 
-These are also the VAE storage precisions used by the current ComfyUI model
-release. BF16 and FP16 both use 16 bits per weight, so converting the FP16 video
-VAE to BF16 would not reduce its weight memory. With `--type preserve`, `--auto-fit`
+BF16 and FP16 both use 16 bits per weight, so converting the FP16 video VAE to
+BF16 would not reduce its weight memory. With `--type preserve`, `--auto-fit`
 therefore preserves the supplied VAE precision and focuses automatic
 quantization on Qwen3-VL and the DiT. An explicit `--type` still applies to
 eligible VAE tensors.
@@ -101,10 +96,11 @@ hf download Comfy-Org/MiniMax-H3 \
 
 ### Persistent Q8_0 GGUF
 
-Q8_0 benchmark files are offline conversions of the full BF16 DiTs and Qwen3-VL,
-not Comfy-Org INT8 ConvRot weights. A pruned BF16 DiT can be converted with the
-same command when lower storage and memory usage are preferred. Convert once
-with `ed-convert` instead of quantizing during every model load:
+Create persistent Q8_0 GGUF files from the BF16 DiTs and Qwen3-VL. The INT8
+ConvRot safetensors use a different representation and are not interchangeable
+with GGUF Q8_0. A pruned BF16 DiT can be converted with the same command when
+lower storage and memory usage are preferred. Convert once with `ed-convert`
+instead of quantizing during every model load:
 
 ```bash
 ed-convert --model models/minimax-h3/diffusion_models/minimax_h3_fl2va_bf16.safetensors \
@@ -154,6 +150,7 @@ point them to the converted GGUF files.
 ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
   --video-duration 5 -W 864 -H 480 --steps 20 --cfg-scale 1 \
+  --sampler res_multistep --scheduler simple \
   --prompt "A cinematic sunset over layered mountain ridges with quiet natural ambience." \
   --video-format mp4 --output t2va.mp4
 
@@ -161,6 +158,7 @@ ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
 ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" --image first.png \
   --video-duration 5 -W 864 -H 480 --steps 20 --cfg-scale 1 \
+  --sampler res_multistep --scheduler simple \
   --prompt "Starting from <Picture 1>, preserve the scene and add subtle natural motion." \
   --video-format mp4 --output i2va.mp4
 
@@ -172,9 +170,8 @@ ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
 
 Use the Ref2VA DiT for all commands in this section.
 
-The ComfyUI MiniMax-H3 template uses the `res_multistep` sampler with the
-`simple` sigma schedule. Add `--sampler res_multistep --scheduler simple` when
-reproducing that workflow. The default remains `euler` with `discrete` for
+For the recommended MiniMax-H3 sampling path, use `res_multistep` with the
+`simple` sigma schedule. The default remains `euler` with `discrete` for
 compatibility with existing edge-dit.cpp commands.
 
 ```bash
@@ -182,14 +179,16 @@ compatibility with existing edge-dit.cpp commands.
 ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
   --ref-image reference.png --video-duration 5 -W 864 -H 480 --steps 20 \
-  --cfg-scale 1 --prompt "Use <Picture 1> as the strict visual reference." \
+  --cfg-scale 1 --sampler res_multistep --scheduler simple \
+  --prompt "Use <Picture 1> as the strict visual reference." \
   --video-format mp4 --output ref-image.mp4
 
 # MP4 reference; embedded audio is paired automatically when present
 ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
   --ref-video reference.mp4 --video-duration 5 -W 864 -H 480 --steps 20 \
-  --cfg-scale 1 --prompt "Preserve <Video 1> and its <Audio 1> throughout the result." \
+  --cfg-scale 1 --sampler res_multistep --scheduler simple \
+  --prompt "Preserve <Video 1> and its <Audio 1> throughout the result." \
   --video-format mp4 --output ref-video.mp4
 
 # Frame directory with explicit paired audio
@@ -197,6 +196,7 @@ ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
   --ref-video reference-frames --ref-video-audio soundtrack.wav \
   --video-duration 5 -W 864 -H 480 --steps 20 --cfg-scale 1 \
+  --sampler res_multistep --scheduler simple \
   --prompt "Preserve <Video 1> and synchronize it with <Audio 1>." \
   --video-format mp4 --output ref-video-audio.mp4
 
@@ -205,6 +205,7 @@ ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
   --ref-image reference.png --ref-video reference.mp4 --ref-audio music.wav \
   --video-duration 5 -W 864 -H 480 --steps 20 --cfg-scale 1 \
+  --sampler res_multistep --scheduler simple \
   --prompt "Use <Video 1>, <Picture 1>, and every supplied audio reference in a natural transition." \
   --video-format mp4 --output ref-mixed.mp4
 ```
@@ -220,7 +221,8 @@ Qwen3-VL, video VAE, and audio VAE while retaining CUDA compute.
 ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
   --vae "$VIDEO_VAE" --audio-vae "$AUDIO_VAE" \
   --auto-fit --max-vram 40 --video-duration 5 -W 864 -H 480 --steps 20 \
-  --cfg-scale 1 --prompt "A cinematic sunset over layered mountain ridges." \
+  --cfg-scale 1 --sampler res_multistep --scheduler simple \
+  --prompt "A cinematic sunset over layered mountain ridges." \
   --video-format mp4 --output auto-fit.mp4
 ```
 
