@@ -396,7 +396,7 @@ inline ed_dtype_t parse_weight_type(const char* text, bool* ok) {
         }
     }
 
-    if (type == "auto" || type.empty()) {
+    if (type == "preserve" || type == "auto" || type.empty()) {
         return ED_DTYPE_AUTO;
     }
     if (type == "f32" || type == "fp32") {

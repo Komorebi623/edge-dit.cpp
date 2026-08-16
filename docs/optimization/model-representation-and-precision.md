@@ -54,9 +54,10 @@ with shared scaling metadata. A quantized type can therefore only be applied to
 a tensor whose leading dimension is a multiple of the block size; other tensors
 are kept at their stored type.
 
-The default weight type is `auto`. In this mode edge-dit.cpp does not change the
-stored representation: each weight keeps the data type present in the source
-checkpoint. Selecting an explicit type opts into conversion during loading.
+The default weight type is `preserve`. In this mode edge-dit.cpp does not change
+the stored representation: each weight keeps the data type present in the source
+checkpoint. The older name `auto` remains accepted as a compatibility alias.
+Selecting an explicit type opts into conversion during loading.
 
 ---
 
@@ -199,7 +200,7 @@ and explicit `--tensor-type-rules` targeting these tensors are left untouched.
 
 | Flag | Effect |
 |---|---|
-| `--type <dtype>` (alias `--weight-type`) | Global weight type; accepts `auto`, `f32`, `f16`, `bf16`, and the `q*` types |
+| `--type <dtype>` (alias `--weight-type`) | Global weight policy; accepts `preserve`, `f32`, `f16`, `bf16`, and the `q*` types (`auto` aliases `preserve`) |
 | `--tensor-type-rules <csv>` | Comma-separated `<name-regex>=<ggml-type>` overrides |
 
 ### C API

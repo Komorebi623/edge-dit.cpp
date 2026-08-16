@@ -169,17 +169,17 @@ Per-tensor overrides are available with:
 --tensor-type-rules "attn=q4_0,norm=f16"
 ```
 
-Component files keep independent stored precisions when `--type auto` (the
-default) is used. A quantized DiT GGUF can therefore be combined with a
+Component files keep independent stored precisions when `--type preserve` (the
+default; legacy alias `auto`) is used. A quantized DiT GGUF can therefore be combined with a
 different Qwen/text-encoder GGUF and floating-point video/audio VAEs, provided
 the files belong to the same model family. The precision policy is:
 
 | Configuration | Precision behavior |
 |---|---|
-| Separate component files + `--type auto` | Every component and tensor keeps its stored precision |
+| Separate component files + `--type preserve` | Every component and tensor keeps its stored precision (`auto` is a compatibility alias) |
 | Explicit `--type` | Applies one requested type to every eligible tensor in every loaded component |
 | `--tensor-type-rules` | Overrides eligible tensors by name/regex, including component-prefix-specific rules |
-| `--auto-fit --max-vram` | Independently selects text-encoder and DiT quantization; VAEs keep their stored representation |
+| `--auto-fit --max-vram` | Independently selects text-encoder and DiT quantization without increasing lower-precision inputs; VAEs still follow `--type` (`preserve` keeps stored representation) |
 
 Loadable precision is not the same as accelerated precision. CUDA dense linear
 layers use floating-point cuBLAS or quantized MMQ/dequantization paths according
@@ -212,7 +212,8 @@ budget rather than a hard process-memory limit.
 `--auto-fit` goes one step further — a superset of `--auto-allocate` that also
 picks the quantization to fit the budget (text encoders lowered toward `q8_0`
 without increasing already lower quantization, and the diffusion transformer
-walking a `q8_0 → q4_K` ladder), ignoring `--type`; use it
+walking a `q8_0 → q4_K` ladder). This decision supersedes `--type` for the text
+encoder and DiT only; VAEs continue to follow the requested global type. Use it
 to fit a VRAM budget without hand-tuning quantization and placement. On single-device CUDA,
 an explicit `--auto-fit --max-vram <GB>` also enables a guarded allocation
 ceiling with reserved external-library headroom. A workload whose minimum graph

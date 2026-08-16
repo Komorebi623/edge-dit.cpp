@@ -545,21 +545,28 @@ void ModelRuntime::replan_dit_quant_for_budget(::ModelLoader& loader) {
         loader.override_component_wtype(kTE, GGML_TYPE_Q8_0);
         const size_t te_after = component_effective_bytes(loader, kTE);
         if (te_after != te_before) {
-            LOG_INFO("auto-fit: TE quant set to q8_0 (ignoring --type), %.2f GB -> %.2f GB",
+            LOG_INFO("auto-fit: TE quant set to q8_0 (superseding global --type for TE), %.2f GB -> %.2f GB",
                      te_before / (1024.0 * 1024.0 * 1024.0),
                      te_after / (1024.0 * 1024.0 * 1024.0));
         }
     }
 
-    // auto-fit OWNS the DiT quantization: it ignores the user's --type and drives the DiT
-    // through the ladder q8_0 -> q4_k, picking the highest level that stays resident. On a
-    // 4090 q8_0 is the best starting point (bf16 is both larger and slower due to the
-    // FP32-accumulate penalty), so we never consider bf16.
+    // auto-fit owns the DiT decision after the global --type policy is applied. It lowers
+    // eligible high-precision tensors toward q8_0 -> q4_k, but never increases an existing
+    // lower-precision tensor. On a 4090 q8_0 is the best high-quality starting point (bf16
+    // is both larger and slower due to the FP32-accumulate penalty), so we do not retain
+    // bf16 merely to satisfy the automatic budget.
     const size_t bytes_before = component_effective_bytes(loader, kDiT);
     loader.override_component_wtype(kDiT, GGML_TYPE_Q8_0);
     const size_t q8_bytes = component_effective_bytes(loader, kDiT);
+    std::vector<std::pair<std::string, ggml_type>> q8_precision_state;
+    for (const auto& item : loader.get_tensor_storage_map()) {
+        if (item.first.rfind(kDiT, 0) == 0) {
+            q8_precision_state.emplace_back(item.first, item.second.expected_type);
+        }
+    }
     if (q8_bytes != bytes_before) {
-        LOG_INFO("auto-fit: DiT quant set to q8_0 (ignoring --type), %.2f GB",
+        LOG_INFO("auto-fit: DiT quant set to q8_0 (superseding global --type for DiT), %.2f GB",
                  q8_bytes / (1024.0 * 1024.0 * 1024.0));
     }
 
@@ -576,33 +583,37 @@ void ModelRuntime::replan_dit_quant_for_budget(::ModelLoader& loader) {
     const size_t dit_budget = budget - headroom;
 
     if (q8_bytes <= dit_budget) {
-        LOG_INFO("auto-fit: DiT q8_0 %.2f GB fits %.2f GB budget -> resident",
+        LOG_INFO("auto-fit: DiT source-or-Q8 precision %.2f GB fits %.2f GB budget -> resident",
                  q8_bytes / (1024.0 * 1024.0 * 1024.0),
                  dit_budget / (1024.0 * 1024.0 * 1024.0));
         return;  // q8_0 already fits -> keep it (highest precision in the ladder)
     }
 
-    // q8_0 does not fit -> try q4_k (the floor). Keep it if it fits; else leave at q8_0
-    // and let plan_component_offload offload the DiT.
+    // The source-or-Q8 candidate does not fit -> try q4_k (the floor). Keep it if it fits;
+    // otherwise restore the candidate precision and let plan_component_offload offload it.
     loader.override_component_wtype(kDiT, GGML_TYPE_Q4_K);
     const size_t q4_bytes = component_effective_bytes(loader, kDiT);
     if (q4_bytes <= dit_budget) {
-        LOG_INFO("auto-fit: DiT q8_0 %.2f GB -> q4_K %.2f GB to fit %.2f GB budget (resident)",
+        LOG_INFO("auto-fit: DiT source-or-Q8 %.2f GB -> q4_K %.2f GB to fit %.2f GB budget (resident)",
                  q8_bytes / (1024.0 * 1024.0 * 1024.0),
                  q4_bytes / (1024.0 * 1024.0 * 1024.0),
                  dit_budget / (1024.0 * 1024.0 * 1024.0));
         return;
     }
 
-    // Even q4_k does not fit: revert to q8_0 (offloaded is better quality than a q4 that
-    // still has to offload anyway).
+    // Even q4_k does not fit: restore the post-Q8 planning state. This keeps BF16/F16
+    // sources at Q8 while preserving any user-supplied Q5/Q6/Q4-or-lower tensors instead
+    // of accidentally increasing their precision during the fallback.
     if (q8_bytes != q4_bytes) {
-        loader.override_component_wtype(kDiT, GGML_TYPE_Q8_0, true);
-        LOG_INFO("auto-fit: DiT does not fit %.2f GB budget even at q4_K (q4=%.2f GB) -> q8_0, will offload",
+        auto& storage_map = loader.get_tensor_storage_map();
+        for (const auto& state : q8_precision_state) {
+            storage_map.at(state.first).expected_type = state.second;
+        }
+        LOG_INFO("auto-fit: DiT does not fit %.2f GB budget even at q4_K (q4=%.2f GB) -> restore source-or-Q8 precision, will offload",
                  dit_budget / (1024.0 * 1024.0 * 1024.0),
                  q4_bytes / (1024.0 * 1024.0 * 1024.0));
     } else {
-        LOG_INFO("auto-fit: source DiT is already q4_K and does not fit %.2f GB budget -> keep q4_K and offload",
+        LOG_INFO("auto-fit: source DiT is already q4_K or lower and does not fit %.2f GB budget -> preserve source precision and offload",
                  dit_budget / (1024.0 * 1024.0 * 1024.0));
     }
 }

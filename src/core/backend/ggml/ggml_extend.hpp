@@ -6376,10 +6376,12 @@ protected:
         // params_already_resident: the segment loop (double-buffer prefetch) has
         // already swapped this segment's weights onto the GPU, so skip the internal
         // offload/restore entirely. Default false keeps every other caller identical.
-        const bool use_partial_param_offload = !runtime_param_tensors.empty() && !params_already_resident;
+        const bool weights_already_resident = params_already_resident || params_on_runtime_backend;
+        const bool use_partial_param_offload = !runtime_param_tensors.empty() && !weights_already_resident;
         int64_t t_offload_begin              = ggml_time_ms();
-        if (params_already_resident) {
-            // weights pre-swapped by caller; nothing to offload here
+        if (weights_already_resident) {
+            // Weights were pre-swapped by the async segment caller or pinned for the
+            // current component phase; do not stage the same tensors a second time.
         } else if (use_partial_param_offload) {
             if (!offload_partial_params(runtime_param_tensors)) {
                 LOG_ERROR("%s offload partial params to runtime backend failed", get_desc().c_str());
@@ -6584,8 +6586,10 @@ protected:
         // P0-A Phase 2-3: async double-buffered weight prefetch across segments.
         // Only engages when offloading (params on CPU) and ED_ASYNC_OFFLOAD >= 1.
         const int async_lvl = async_offload_level();
-        const bool async_prefetch_on =
-            async_lvl >= 1 && params_backend != runtime_backend && plan.segments.size() > 1;
+        const bool async_prefetch_on = async_lvl >= 1 &&
+                                       params_backend != runtime_backend &&
+                                       !params_on_runtime_backend &&
+                                       plan.segments.size() > 1;
         std::vector<std::vector<ggml_tensor*>> async_seg_params;
         if (async_prefetch_on) {
             // Precompute every segment's param list + a STABLE cpu-source map

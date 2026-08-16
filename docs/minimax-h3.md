@@ -74,9 +74,10 @@ from pruned and full DiTs are not directly comparable.
 
 These are also the VAE storage precisions used by the current ComfyUI model
 release. BF16 and FP16 both use 16 bits per weight, so converting the FP16 video
-VAE to BF16 would not reduce its weight memory. `--auto-fit` therefore preserves
-the supplied VAE precision and focuses automatic quantization on Qwen3-VL and
-the DiT.
+VAE to BF16 would not reduce its weight memory. With `--type preserve`, `--auto-fit`
+therefore preserves the supplied VAE precision and focuses automatic
+quantization on Qwen3-VL and the DiT. An explicit `--type` still applies to
+eligible VAE tensors.
 
 The official [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3)
 Diffusers shard indexes are also accepted for BF16 transformer loading. Merged
@@ -225,12 +226,14 @@ ed-cli --video --diffusion-model "$DIT" --llm "$LLM" \
 
 For long Ref2VA jobs on GPUs that can hold one major component at a time,
 `--auto-fit --max-vram` automatically uses the MiniMax-H3 staged lifecycle.
-Resident Qwen and conditioning VAE weights are staged only for context/reference
-encoding and then released; resident DiT weights are staged for denoising and
-released before decode; decode VAEs are staged last. Components that still
-cannot fit as a whole remain layer/graph-segment offloaded instead. The explicit
-`--minimax-h3-stage-lifecycle` option enables the same phase behavior without
-`--auto-fit`.
+Resident components are staged serially: Qwen is loaded only for positive and
+negative context encoding, then released before the video VAE encodes visual
+references; the video VAE is then released before the audio VAE encodes paired
+or standalone reference audio. DiT weights are staged for denoising and released
+before the video and audio VAEs are loaded again for final decode. Components
+that cannot fit as a whole remain layer/graph-segment offloaded instead. The
+explicit `--minimax-h3-stage-lifecycle` option enables the same phase behavior
+without `--auto-fit`.
 
 On single-device CUDA, the combined `--auto-fit --max-vram 24` mode installs a guarded
 allocation ceiling below 24 GiB and reserves 1 GiB for CUDA/cuDNN workspaces.

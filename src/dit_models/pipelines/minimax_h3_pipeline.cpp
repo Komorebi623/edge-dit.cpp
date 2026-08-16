@@ -1044,36 +1044,6 @@ bool MiniMaxH3Pipeline::build_text_context(const char* prompt,
     return true;
 }
 
-bool MiniMaxH3Pipeline::stage_conditioning_components(bool need_video_vae,
-                                                       bool need_audio_vae,
-                                                       std::string* error) {
-    if (stage_text_lifecycle_ && !conditioner_->model.stage_params_for_phase()) {
-        return set_minimax_error(error, "MiniMax-H3 failed to stage text encoder for conditioning");
-    }
-    if (stage_video_vae_lifecycle_ && need_video_vae && !vae_->stage_params_for_phase()) {
-        release_conditioning_components();
-        return set_minimax_error(error, "MiniMax-H3 failed to stage video VAE for conditioning");
-    }
-    if (stage_audio_vae_lifecycle_ && need_audio_vae &&
-        audio_vae_ != nullptr && !audio_vae_->stage_params_for_phase()) {
-        release_conditioning_components();
-        return set_minimax_error(error, "MiniMax-H3 failed to stage audio VAE for conditioning");
-    }
-    return true;
-}
-
-void MiniMaxH3Pipeline::release_conditioning_components() {
-    if (conditioner_ != nullptr) {
-        conditioner_->model.release_params_after_phase();
-    }
-    if (vae_ != nullptr) {
-        vae_->release_params_after_phase();
-    }
-    if (audio_vae_ != nullptr) {
-        audio_vae_->release_params_after_phase();
-    }
-}
-
 ed_status_t MiniMaxH3Pipeline::decode_video_latent(const sd::Tensor<float>& latent,
                                                     int requested_frames,
                                                     ed_video_t* out,
@@ -1286,12 +1256,15 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
     const bool need_video_vae_for_conditioning = has_keyframes ||
                                                   params->ref_image_count > 0 ||
                                                   params->ref_video_count > 0;
-    if (!stage_conditioning_components(need_video_vae_for_conditioning,
-                                       need_audio_vae_for_conditioning,
-                                       error)) {
+    if (stage_text_lifecycle_ && !conditioner_->model.stage_params_for_phase()) {
+        set_minimax_error(error, "MiniMax-H3 failed to stage text encoder for conditioning");
         return ED_STATUS_OUT_OF_MEMORY;
     }
-    ScopeExit release_conditioning([this]() { release_conditioning_components(); });
+    ScopeExit release_text_encoder([this]() {
+        if (conditioner_ != nullptr) {
+            conditioner_->model.release_params_after_phase();
+        }
+    });
     sd::Tensor<float> context;
     sd::Tensor<int32_t> token_tags;
     const int64_t cond_context_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
@@ -1340,6 +1313,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         return ED_STATUS_GENERATION_FAILED;
     }
     if (profile_ptr != nullptr && use_cfg) profile.uncond_context_ms = ggml_time_ms() - uncond_context_begin;
+    release_text_encoder.run_now();
     const int latent_frames = frames <= 5 ? 2 : ((frames - 5) / 17) * 5 + 2;
     const int audio_length = std::max(1, static_cast<int>(std::lround(static_cast<double>(frames) * 40.0 / 24.0)));
     const int latent_width = params->width / 16;
@@ -1347,6 +1321,15 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
     std::vector<sd::Tensor<float>> keyframe_latents;
     std::vector<int32_t> keyframe_indices;
     auto request_rng = std::make_shared<PhiloxRNG>(static_cast<uint64_t>(resolved_seed));
+    if (stage_video_vae_lifecycle_ && need_video_vae_for_conditioning && !vae_->stage_params_for_phase()) {
+        set_minimax_error(error, "MiniMax-H3 failed to stage video VAE for conditioning");
+        return ED_STATUS_OUT_OF_MEMORY;
+    }
+    ScopeExit release_video_vae([this, need_video_vae_for_conditioning]() {
+        if (need_video_vae_for_conditioning && vae_ != nullptr) {
+            vae_->release_params_after_phase();
+        }
+    });
     auto add_keyframe = [&](const ed_image_t* image, int32_t frame_index, const char* name) -> bool {
         if (image == nullptr || image->data == nullptr) {
             return true;
@@ -1381,6 +1364,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
     std::vector<sd::Tensor<float>> reference_latents;
     std::vector<sd::Tensor<float>> reference_audio_latents;
     std::vector<MiniMaxH3ReferenceBlock> reference_blocks;
+    std::vector<size_t> video_reference_block_indices;
     auto encode_reference_audio = [&](const ed_audio_t& source, int32_t* index) -> bool {
         if (audio_vae_ == nullptr || source.data == nullptr || source.sample_count == 0 || source.channels == 0 || source.sample_rate == 0) return false;
         const int64_t prepare_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
@@ -1490,16 +1474,38 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
                                                   h3_vae_tiling(*runtime_));
         if (profile_ptr != nullptr) profile.reference_video_vae_encode_ms += ggml_time_ms() - vae_encode_begin;
         if (vae_latent.empty()) { set_minimax_error(error, "MiniMax-H3 Ref2VA video VAE encode failed"); return ED_STATUS_GENERATION_FAILED; }
-        int32_t audio_index = -1;
-        if (reference.audio.data != nullptr && reference.audio.sample_count > 0 && !encode_reference_audio(reference.audio, &audio_index)) {
-            set_minimax_error(error, "MiniMax-H3 Ref2VA video audio encode failed"); return ED_STATUS_GENERATION_FAILED;
-        }
         auto latent = vae_->vae_to_diffusion_latents(vae_latent);
         h3_apply_condition_noise(&latent, static_cast<uint64_t>(resolved_seed));
         h3_trace_tensor(("ref_video_" + std::to_string(video_index) + "_latent").c_str(), latent);
         const int32_t encoded_video_index = static_cast<int32_t>(reference_latents.size());
         reference_latents.push_back(std::move(latent));
-        reference_blocks.push_back({audio_index >= 0 ? MiniMaxH3ReferenceKind::VIDEO_AUDIO : MiniMaxH3ReferenceKind::VIDEO, encoded_video_index, audio_index});
+        video_reference_block_indices.push_back(reference_blocks.size());
+        reference_blocks.push_back({MiniMaxH3ReferenceKind::VIDEO, encoded_video_index, -1});
+    }
+    release_video_vae.run_now();
+    if (stage_audio_vae_lifecycle_ && need_audio_vae_for_conditioning &&
+        audio_vae_ != nullptr && !audio_vae_->stage_params_for_phase()) {
+        set_minimax_error(error, "MiniMax-H3 failed to stage audio VAE for conditioning");
+        return ED_STATUS_OUT_OF_MEMORY;
+    }
+    ScopeExit release_audio_vae([this, need_audio_vae_for_conditioning]() {
+        if (need_audio_vae_for_conditioning && audio_vae_ != nullptr) {
+            audio_vae_->release_params_after_phase();
+        }
+    });
+    for (int video_index = 0; video_index < params->ref_video_count; ++video_index) {
+        const ed_audio_t& reference_audio = params->ref_videos[video_index].audio;
+        if (reference_audio.data == nullptr || reference_audio.sample_count == 0) {
+            continue;
+        }
+        int32_t encoded_index = -1;
+        if (!encode_reference_audio(reference_audio, &encoded_index)) {
+            set_minimax_error(error, "MiniMax-H3 Ref2VA video audio encode failed");
+            return ED_STATUS_GENERATION_FAILED;
+        }
+        MiniMaxH3ReferenceBlock& block = reference_blocks[video_reference_block_indices[video_index]];
+        block.kind = MiniMaxH3ReferenceKind::VIDEO_AUDIO;
+        block.audio_index = encoded_index;
     }
     for (int audio_index = 0; audio_index < params->ref_audio_count; ++audio_index) {
         int32_t encoded_index = -1;
@@ -1509,7 +1515,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         }
         reference_blocks.push_back({MiniMaxH3ReferenceKind::AUDIO, -1, encoded_index});
     }
-    release_conditioning.run_now();
+    release_audio_vae.run_now();
     if (h3_condition_debug_exit_enabled()) {
         if (profile_ptr != nullptr) {
             profile.total_ms = ggml_time_ms() - generation_begin;
@@ -1593,11 +1599,6 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
             diffusion_->release_params_after_phase();
         }
     });
-    if (sampler == ED_SAMPLER_RES_MULTISTEP) {
-        auto initial_av = diffusion_->split_av_latents(packed, audio_length);
-        initial_av.second *= video_sigma_shift / 3.0f;
-        packed = h3_pack_audio_and_video_latents(initial_av.first, initial_av.second);
-    }
     sd::Tensor<float> old_denoised;
     float old_sigma_down = 0.0f;
     bool have_old_denoised = false;

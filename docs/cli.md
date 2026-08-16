@@ -337,11 +337,20 @@ On-load weight type selection:
   --output flux-q4.png
 ```
 
+`--type` is a global loading policy: it applies to every eligible tensor in
+every loaded component (DiT, text encoder, video VAE, and audio VAE). Biases,
+norms, embeddings, protected tensors, and shapes incompatible with a block
+quant remain at their stored type.
+
 Supported `--type` values:
 
 ```text
-f32 f16 bf16 q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k
+preserve f32 f16 bf16 q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k
 ```
+
+`preserve` is the default and leaves every source tensor at its stored type.
+The older value `auto` remains accepted as a compatibility alias for
+`preserve`; it does not perform automatic quantization.
 
 > **Qwen-Image models and FP16:** the Qwen-Image family (`qwen-image`,
 > `qwen-image-edit`, and their distilled/lightning variants) is not supported in
@@ -399,8 +408,11 @@ Two levels of automation size a run to a VRAM planning budget instead of tuning
   addition, chooses the quantization itself: the DiT is driven down the ladder
   `q8_0 → q4_k` to the highest level that stays resident within the budget, the
   text encoder is lowered to at most `q8_0` (an already smaller quant stays unchanged), and
-  placement is decided as above. `--auto-fit` **ignores `--type`** (it owns the
-  quantization) and logs that it is doing so. With an explicit `--max-vram` on
+  placement is decided as above. For the text encoder and DiT, this automatic
+  decision supersedes the global `--type` without ever increasing an already
+  lower-precision source. The VAEs are not replanned: they still follow
+  `--type`, where `preserve` means keeping each source tensor's stored type.
+  With an explicit `--max-vram` on
   single-device CUDA, it also enables the hard allocation guard; an intrinsically too-large
   graph fails safely instead of exceeding the budget.
 

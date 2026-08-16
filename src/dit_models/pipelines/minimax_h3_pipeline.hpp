@@ -95,10 +95,6 @@ private:
                              ed_video_t* out,
                              MiniMaxH3Profile* profile,
                              std::string* error);
-    bool stage_conditioning_components(bool need_video_vae,
-                                       bool need_audio_vae,
-                                       std::string* error);
-    void release_conditioning_components();
 };
 
 }  // namespace edgedit
