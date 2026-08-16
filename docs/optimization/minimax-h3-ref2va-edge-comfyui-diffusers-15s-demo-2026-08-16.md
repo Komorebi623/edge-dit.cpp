@@ -4,9 +4,9 @@
 
 ## 结论
 
-- 两项任务使用相同 prompt、相同参考图片、相同分辨率、362 帧、24 FPS、20 steps 和 seed。
-- Edge-DiT.cpp 两项任务的端到端速度均快于 ComfyUI 和 Diffusers。
-- Edge-DiT.cpp 的 DiT 明显快于另外两个框架，但 Video VAE decode 约 43 秒，约为 ComfyUI/Diffusers 的 20 秒两倍。
+- 两项任务使用相同 prompt、原始参考图片、输出分辨率、362 帧、24 FPS、20 steps 参数和 seed；但参考图 resize **没有对齐**，Diffusers 实际执行的 Transformer forward 也是 19 次而非 20 次。
+- Edge-DiT.cpp 和 ComfyUI 显式使用 `match`，保留这些小参考图的原始量级；官方 Diffusers 强制将每张图的短边上采样到 2048。Diffusers 因而在每个 DiT step 中处理多得多的参考 latent token，本报告中的三框架总耗时不能作为同计算量的框架速度排名。
+- 当前数据中 Edge-DiT.cpp 的 DiT 用时更短，但由于参考序列长度和权重口径不同，不能据此计算纯框架加速比；输出 Video VAE decode 与参考 resize 无关，Edge 约 43 秒，仍约为 ComfyUI/Diffusers 的 20 秒两倍。
 - MiniMax-H3 阶段式生命周期将 Edge 双角色任务峰值从 77,377 MiB 降至 52,777 MiB，生成阶段速度基本不变。
 - `--max-vram 24 --auto-allocate` 不是进程级硬上限：该长序列完整 20-step 任务实测峰值仍为 39,505 MiB；把预算降至 8 GiB 后仍为 33,921 MiB，因此当前版本不能在 24 GiB GPU 上按此分辨率和时长运行。
 
@@ -19,7 +19,7 @@
 | 四图森林战斗，1280×736 | [Edge-DiT.cpp / ComfyUI / Diffusers](../assets/minimax-h3-ref2va-four-image-edge-comfyui-diffusers-demo.mp4) |
 | 双角色都市短剧，736×1280 | [Edge-DiT.cpp / ComfyUI / Diffusers](../assets/minimax-h3-ref2va-two-character-edge-comfyui-diffusers-demo.mp4) |
 
-## 对齐口径
+## 请求参数
 
 | 项目 | 四图森林战斗 | 双角色都市短剧 |
 |---|---:|---:|
@@ -38,6 +38,23 @@
 
 Diffusers 官方 pipeline 在传入 `num_inference_steps=20` 时实际记录到 19 次 Transformer forward；Edge-DiT.cpp 和 ComfyUI 均为 20 次。这是官方 Diffusers scheduler/pipeline 的实际执行行为，命令参数没有被改成 19 steps。
 
+### 参考图 resize 未对齐
+
+这组 Demo 的原始输入一致，但进入 Video VAE、Qwen 和 DiT 的参考图尺寸不同：
+
+| 任务 | 原图尺寸 | Edge-DiT.cpp / ComfyUI `match` | 官方 Diffusers | Diffusers 单图面积倍率 |
+|---|---|---|---|---:|
+| 四图森林战斗 | 502×319 / 567×319 / 518×291 / 519×291 | 512×320 / 576×320 / 512×288 / 512×288 | 3232×2048 / 3648×2048 / 3648×2048 / 3648×2048 | 40.40× / 40.53× / 50.67× / 50.67× |
+| 双角色都市短剧 | 403×237 / 417×237 | 416×224 / 416×224 | 3488×2048 / 3616×2048 | 76.66× / 79.47× |
+
+- Edge-DiT.cpp 和本次 ComfyUI 工作流的 `match` 都按输出像素面积等比例缩小、禁止放大，再把宽高分别对齐到 32；本次输入本来就小于输出面积，因此只发生 32 对齐。
+- 官方 Diffusers Ref2VA 不提供 `match` 请求参数。它固定把每张图片短边缩放到 2048，**包括上采样**，不设面积上限，再对齐到 32。
+- 参考图不仅影响一次性 VAE encode；其 latent 被拼入每次 Transformer forward。因此 40–79 倍的参考像素面积会显著增加每一步 DiT 的序列长度和计算量，尤其影响四图任务。
+- Edge-DiT.cpp 的默认 `--ref-image-size max` 使用 Diffusers 的 2048 短边几何，包括小图上采样；所以 Edge 可以对齐 Diffusers。当前 Demo 为了与 ComfyUI 工作流一致，显式用了 `--ref-image-size match`。
+- 当前 ComfyUI 的 `max` 实现为 `min(1, 2048 / short_edge)`，只会缩小大图而不会把小图放大，因此小图场景下仍不等同于官方 Diffusers。
+
+所以本报告保留视频供主观效果参考，也保留各框架实测数据，但不再把当前端到端差值解释为纯框架性能差异。要做严格速度对比，应让 Edge 使用 `max`，并让 ComfyUI 增加一个允许上采样到 2048 的 Diffusers-compatible 模式后重跑。
+
 ## 权重口径
 
 | 组件 | Edge-DiT.cpp | ComfyUI | Diffusers |
@@ -48,9 +65,11 @@ Diffusers 官方 pipeline 在传入 `num_inference_steps=20` 时实际记录到 
 | Audio VAE | FP32 safetensors | FP32 safetensors | 官方 FP32 pipeline 组件，不量化 |
 | 常驻策略 | 基准任务全部常驻 | 动态阶段加载/卸载 | 全部组件常驻 |
 
-因此三框架输入、prompt 和采样参数一致，但底层量化格式及 Diffusers 的完整/裁剪权重口径并不完全相同。报告不把质量差异简单归因于框架本身。
+因此三框架的原始输入、prompt 和输出采样参数一致，但参考图预处理、量化格式及 Diffusers 的完整/裁剪权重口径并不相同。报告不把速度或质量差异简单归因于框架本身。
 
 ## 性能数据
+
+> **注意：** 下表是已生成 Demo 的实测记录，不是严格同计算量 benchmark。Edge-DiT.cpp / ComfyUI 使用 `match`，Diffusers 使用 2048 短边参考图；Diffusers 还使用完整权重并实际执行 19 次 Transformer forward。只有相同输出尺寸下的 decode 阶段较少受到参考图 resize 影响。
 
 ### 四图森林战斗
 
@@ -110,7 +129,7 @@ Diffusers 官方 pipeline 在传入 `num_inference_steps=20` 时实际记录到 
 
 端到端增加主要来自 CPU pinned 权重初始化及阶段搬运；DiT 每步速度没有受到实质影响。
 
-[生命周期 metrics](../assets/minimax-h3-ref2va-demo-edge-lifecycle-metrics.json)记录了完整阶段数据。生命周期版本在基准命令上增加 `--minimax-h3-stage-lifecycle`，不改变采样参数。
+生命周期版本只在基准命令上增加 `--minimax-h3-stage-lifecycle`，不改变采样参数。
 
 ## 24 GiB 验证
 
@@ -146,7 +165,7 @@ Diffusers 官方 pipeline 在传入 `num_inference_steps=20` 时实际记录到 
 - H200 上设置 24 GiB 只能模拟预算逻辑，不能模拟 RTX 4090 算力或证明任务能在 24 GiB 物理显存上运行。
 - 该 15 秒长序列任务当前不能作为 4090 可运行 Demo；需要进一步降低单 block activation/workspace，或支持 block 内切分/CPU activation staging。
 
-[1-step 24 GiB profile metrics](../assets/minimax-h3-ref2va-demo-edge-max24-metrics.json)和[20-step 完整 metrics](../assets/minimax-h3-ref2va-demo-edge-max24-full20-metrics.json)记录了完整阶段数据。两次命令均在常驻基准上增加 `--max-vram 24 --auto-allocate`，未叠加阶段式生命周期。
+1-step 和 20-step 两次命令均在常驻基准上增加 `--max-vram 24 --auto-allocate`，未叠加阶段式生命周期。
 
 ## 回归验证
 
@@ -178,16 +197,11 @@ ed-cli --video \
 
 ### ComfyUI
 
-- 四图提交任务：[ComfyUI API JSON](../assets/minimax-h3-ref2va-demo-four-image-comfyui-api.json)
-- 双角色提交任务：[ComfyUI API JSON](../assets/minimax-h3-ref2va-demo-two-character-comfyui-api.json)
-
 两项任务均使用 `ResolutionSelector` 的 0.9 MP、32 对齐，`res_multistep` sampler、20 steps；四图选择 16:9，双角色选择 9:16。模型节点使用 Ref2VA INT8 ConvRot DiT、NVFP4 AWQ Qwen3-VL、FP16 Video VAE 和 FP32 Audio VAE。
 
 ### Diffusers
 
 - Runner：[`run_minimax_h3_ref2va_quantized_official_video.py`](../../scripts/diffusers/run_minimax_h3_ref2va_quantized_official_video.py)
-- 四图 profile：[profile.json](../assets/minimax-h3-ref2va-demo-four-image-diffusers-profile.json)
-- 双角色 profile：[profile.json](../assets/minimax-h3-ref2va-demo-two-character-diffusers-profile.json)
 
 ```bash
 python3 scripts/diffusers/run_minimax_h3_ref2va_quantized_official_video.py \

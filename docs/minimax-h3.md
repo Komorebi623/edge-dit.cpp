@@ -21,7 +21,7 @@ last frame. Ref2VA uses the following options:
 | Input | CLI option | Behavior |
 |---|---|---|
 | Image | `--ref-image <path>` | Repeatable; presented as `<Picture N>` |
-| Image sizing | `--ref-image-size match|max` | `match` only downsizes to the output pixel area; `max` uses the 2048px-short-edge path (default) |
+| Image sizing | `--ref-image-size match|max` | `match` only downsizes to the output pixel area; `max` resizes to a 2048px short edge, including upscaling, to match official Diffusers geometry (default) |
 | Video | `--ref-video <path>` | Repeatable frame directory or `mp4`/`mov`/`mkv`/`webm`/`avi`; media files require `ffmpeg` |
 | Paired audio | `--ref-video-audio <wav>` | The Nth WAV is paired with the Nth video and overrides embedded audio |
 | Additional audio | `--ref-audio <wav>` | Repeatable; requires at least one image or video reference |
