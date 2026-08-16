@@ -289,6 +289,116 @@ extract embedded audio while the Diffusers run uses decoded video frames, and th
 paired-audio prompts differ slightly. A locked-command rerun is required before
 treating the approximately 1% margins as statistically significant.
 
+#### H200 15-second multi-reference comparison
+
+The following longer Ref2VA runs are a separate benchmark from the BF16 tables
+above. They compare two reference-image-heavy prompts across edge-dit.cpp,
+ComfyUI, and Diffusers on one H200. The four-image action task uses `1280x736`;
+the two-character portrait task uses `736x1280`. Both generate 362 frames at
+24 fps (approximately 15.08 seconds), with 20 steps, CFG 1, seed
+`157368968253448`, and `res_multistep`/`simple`. Each task uses the same prompt,
+reference images in the same order, output canvas, frame count, and sampling
+parameters across all three frameworks.
+
+These dimensions are not `768x1344` and are not a MiniMax-H3 requirement. The
+experiment preserved the submitted UI workflow configuration: a 0.9-megapixel
+`ResolutionSelector`, 16:9 or 9:16 aspect ratio, and dimensions aligned to a
+multiple of 32. That configuration resolves to `1280x736` or `736x1280`. The
+parameters were retained so all three frameworks could replay the actual task;
+therefore these results must not be compared directly with an older
+`768x1344` run.
+
+Outputs:
+
+- [Four-image action three-framework comparison](assets/minimax-h3-ref2va-four-image-edge-comfyui-diffusers-demo.mp4)
+- [Two-character portrait three-framework comparison](assets/minimax-h3-ref2va-two-character-edge-comfyui-diffusers-demo.mp4)
+- [Machine-readable benchmark metrics](assets/minimax-h3-ref2va-h200-15s-metrics.json)
+
+The linked comparison videos are compressed documentation assets tracked in the
+repository. Full-resolution per-framework outputs remain benchmark artifacts
+rather than source-tree dependencies.
+
+The three frameworks use their practical quantized representations rather than
+byte-identical weights:
+
+| Framework | Ref2VA DiT | Qwen3-VL | Video / audio VAE |
+|---|---|---|---|
+| edge-dit.cpp | Pruned Q8_0 GGUF | Q4_K_M GGUF | FP16 / FP32 |
+| ComfyUI | Pruned INT8 ConvRot | NVFP4 AWQ | FP16 / FP32 |
+| Diffusers | Official full weights with TorchAO weight-only INT8 | Official weights with TorchAO weight-only INT8 | FP16 / FP32 |
+
+End-to-end wall time includes loading, conditioning, generation, decode, and
+saving. edge-dit.cpp and ComfyUI peaks are device-level samples; Diffusers only
+recorded PyTorch allocator peaks, so its allocated/reserved values are shown
+separately.
+
+| Task | Framework | End-to-end | Peak VRAM |
+|---|---|---:|---:|
+| Four-image action | edge-dit.cpp | **919.765s** | **52,667 MiB (51.43 GiB)** |
+| Four-image action | ComfyUI | 1055.354s | **49,413 MiB (48.25 GiB)** |
+| Four-image action | Diffusers | 2343.937s | 107.38 GiB allocated / 108.27 GiB reserved |
+| Two-character portrait | edge-dit.cpp | **888.636s** | 52,809 MiB (51.57 GiB) |
+| Two-character portrait | ComfyUI | 1025.864s | **49,159 MiB (48.01 GiB)** |
+| Two-character portrait | Diffusers | 1625.178s | 96.86 GiB allocated / 106.10 GiB reserved |
+
+Four-image action stage times:
+
+| Stage | edge-dit.cpp | ComfyUI | Diffusers |
+|---|---:|---:|---:|
+| Load / initialization | 17.773s | Not isolated | 32.260s |
+| Text, image, and reference-VAE conditioning | 2.641s | Not isolated | 14.924s |
+| DiT / sampling | **839.890s** | Not isolated | 2263.720s |
+| Video VAE decode | 41.842s | Not isolated | **20.679s** |
+| Audio VAE decode | 0.369s | Not isolated | **0.145s** |
+| Save / mux | 5.519s | Not isolated | **4.699s** |
+| End-to-end | **919.765s** | 1055.354s | 2343.937s |
+
+The profiled four-image ComfyUI rerun collected 3,321 device-memory samples at
+0.2-second intervals from a zero-MiB baseline and measured a 49,413 MiB peak.
+Its decoded video frames and PCM audio are bit-identical to the original
+1070.928-second run. The historical run did not retain a node-level profile, so
+unavailable stage values are intentionally not reconstructed. A separate
+constrained rerun completed in 1059.844s with an observed 22,789 MiB peak under
+a 24 GiB limit and produced the same decoded frames and audio.
+
+Two-character portrait stage times:
+
+| Stage | edge-dit.cpp | ComfyUI | Diffusers |
+|---|---:|---:|---:|
+| Load / initialization | 17.784s | Deferred; not independently comparable | 32.838s |
+| Text, image, and reference-VAE conditioning | **1.168s** | 33.140s | 7.176s |
+| DiT / sampling | **811.867s** | 965.504s | 1553.626s |
+| Video VAE decode | 41.871s | **19.947s** | 20.567s |
+| Audio VAE decode | 0.355s | 0.501s | **0.144s** |
+| Save / mux | 3.737s | 5.927s | **3.481s** |
+| End-to-end | **888.636s** | 1025.864s | 1625.178s |
+
+ComfyUI's conditioning and sampler nodes include deferred model staging and are
+not pure kernel timings. The edge-dit.cpp phase peaks were sampled at 0.2-second
+intervals:
+
+| edge-dit.cpp phase | Four-image action | Two-character portrait |
+|---|---:|---:|
+| Load | 19,481 MiB | 615 MiB |
+| Conditioning / text context | 22,675 MiB | 20,563 MiB |
+| Reference video-VAE encode | Included above | 5,827 MiB |
+| DiT / sampling | **52,667 MiB** | **52,809 MiB** |
+| Decode | 37,521 MiB | 37,521 MiB |
+| Save | 32,373 MiB | 32,515 MiB |
+
+Reference preprocessing is an important limitation of this comparison.
+edge-dit.cpp and the captured ComfyUI workflow use `ref_image_size=match`, which
+does not upscale the small source images. Diffusers uses the official
+`MiniMaxH3ImageReference` path and enlarges every reference image to a 2048px
+short edge. For the four-image task, edge-dit.cpp/ComfyUI use `512x320`,
+`576x320`, `512x288`, and `512x288`, while Diffusers uses `3232x2048`,
+`3648x2048`, `3648x2048`, and `3648x2048`. For the two-character task, the
+respective sizes are `416x224` and `416x224` versus `3488x2048` and
+`3616x2048`. Diffusers therefore processes substantially longer reference
+sequences, increasing conditioning time, every DiT step, and peak memory. The
+table is useful as an actual-workflow result and quality comparison, but it is
+not a same-compute kernel benchmark.
+
 ## Limitations
 
 - Reference adherence is prompt dependent. Name `<Picture N>`, `<Video N>`, and
