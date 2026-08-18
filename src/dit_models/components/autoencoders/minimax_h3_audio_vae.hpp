@@ -531,16 +531,17 @@ struct AudioCausalAttention : public GGMLBlock {
     static constexpr int64_t in_channels = 2048, out_channels = 32, num_head = 8, head_dim = in_channels / num_head;
     AudioCausalAttention() { blocks["qkv"] = std::make_shared<Linear>(in_channels, in_channels * 3, false); blocks["proj"] = std::make_shared<Linear>(out_channels, out_channels, true); }
     void init_params(ggml_context* ctx, const String2TensorStorage& storage = {}, const std::string prefix = "") override {
-        GGMLBlock::init_params(ctx, storage, prefix); params["q_bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels); params["v_bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels);
+        GGMLBlock::init_params(ctx, storage, prefix); params["q_bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels); params["zero_k_bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels); params["v_bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, in_channels);
     }
     ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) {
         auto qkv = ggml_ext_chunk(ctx->ggml_ctx, std::dynamic_pointer_cast<Linear>(blocks["qkv"])->forward(ctx, x), 3, 0);
         auto shape_bias = [&](ggml_tensor* value) { return ggml_reshape_4d(ctx->ggml_ctx, value, value->ne[0], 1, 1, 1); };
         auto q = ggml_add(ctx->ggml_ctx, qkv[0], shape_bias(params["q_bias"]));
+        auto k = ggml_add(ctx->ggml_ctx, qkv[1], shape_bias(params["zero_k_bias"]));
         auto v = ggml_add(ctx->ggml_ctx, qkv[2], shape_bias(params["v_bias"]));
         const int64_t sequence = x->ne[1];
         auto mask = ggml_diag_mask_inf(ctx->ggml_ctx, ggml_ext_zeros(ctx->ggml_ctx, sequence, sequence, 1, 1), 0);
-        auto out = ggml_ext_attention_ext(ctx->ggml_ctx, ctx->backend, q, qkv[1], v, num_head, mask, false, ctx->flash_attn_enabled);
+        auto out = ggml_ext_attention_ext(ctx->ggml_ctx, ctx->backend, q, k, v, num_head, mask, false, ctx->flash_attn_enabled);
         const int64_t batch = out->ne[2] * out->ne[3];
         out = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, ggml_reshape_4d(ctx->ggml_ctx, out, head_dim, num_head, sequence, batch), 1, 0, 2, 3));
         out = ggml_mean(ctx->ggml_ctx, out);
