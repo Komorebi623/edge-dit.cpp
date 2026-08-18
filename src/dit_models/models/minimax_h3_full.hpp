@@ -829,10 +829,6 @@ namespace MiniMaxH3 {
                                                       ggml_tensor* audio_slope,
                                                       const std::string& debug_target = {},
                                                       ggml_tensor** debug_output = nullptr) {
-            if (debug_output != nullptr && debug_target == "position_ids") {
-                *debug_output = ggml_ext_scale(ctx->ggml_ctx, position_ids, 1.0f);
-                return {nullptr, nullptr};
-            }
             auto video_proj = std::dynamic_pointer_cast<Linear>(blocks["video_patch_proj"]);
             auto audio_proj = std::dynamic_pointer_cast<Linear>(blocks["audio_patch_proj"]);
 
@@ -884,11 +880,6 @@ namespace MiniMaxH3 {
             std::pair<int64_t, int64_t> target_audio_range = {audio_offset, audio_offset + audio->ne[1]};
             audio_rows                                     = audio_rows == nullptr ? audio : ggml_concat(ctx->ggml_ctx, audio_rows, audio, 1);
             auto audio_embeds                              = audio_proj->forward(ctx, audio_rows);
-            if (debug_output != nullptr && debug_target == "audio_rows") {
-                *debug_output = audio_rows;
-            } else if (debug_output != nullptr && debug_target == "audio_embeds") {
-                *debug_output = audio_embeds;
-            }
             context                                        = refine_context(ctx, context);
 
             ggml_tensor* h = nullptr;

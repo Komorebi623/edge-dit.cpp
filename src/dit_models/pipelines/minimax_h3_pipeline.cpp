@@ -5,7 +5,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <fstream>
 #include <functional>
 #include <limits>
 #include <iomanip>
@@ -375,29 +374,6 @@ void h3_dump_debug_tensor_if_requested(const std::string& name, const sd::Tensor
     }
 }
 
-bool h3_load_debug_tensor_if_requested(const std::string& name, sd::Tensor<float>* tensor) {
-    const char* base_path = std::getenv("ED_MINIMAX_H3_DEBUG_LOAD");
-    if (base_path == nullptr || base_path[0] == '\0' || tensor == nullptr || tensor->empty()) {
-        return false;
-    }
-    std::ifstream input(std::string(base_path) + "." + name + ".f32.bin", std::ios::binary | std::ios::ate);
-    if (!input) {
-        return false;
-    }
-    const std::streamsize expected = static_cast<std::streamsize>(tensor->numel() * sizeof(float));
-    if (input.tellg() != expected) {
-        LOG_ERROR("MiniMax-H3 debug tensor '%s' has %lld bytes, expected %lld",
-                  name.c_str(),
-                  static_cast<long long>(input.tellg()),
-                  static_cast<long long>(expected));
-        return false;
-    }
-    input.seekg(0);
-    input.read(reinterpret_cast<char*>(tensor->data()), expected);
-    LOG_INFO("MiniMax-H3 loaded debug tensor '%s'", name.c_str());
-    return input.good();
-}
-
 sd::Tensor<float> h3_sample_vae_moments(const sd::Tensor<float>& moments,
                                         std::shared_ptr<RNG> rng) {
     if (moments.empty() || moments.shape().size() < 4 || moments.shape()[3] != 48) {
@@ -459,10 +435,8 @@ sd::Tensor<float> h3_encode_vae_condition(MiniMaxH3VAE::MiniMaxH3VideoVAERunner*
 }
 
 void h3_apply_condition_noise(sd::Tensor<float>* latent,
-                              const std::shared_ptr<RNG>& rng,
-                              const std::string& debug_name) {
+                              const std::shared_ptr<RNG>& rng) {
     auto noise = sd::randn_like<float>(*latent, rng);
-    h3_load_debug_tensor_if_requested(debug_name, &noise);
     *latent = *latent * MiniMaxH3::VISUAL_COND_TIMESTEP +
               noise * (1.0f - MiniMaxH3::VISUAL_COND_TIMESTEP);
 }
@@ -1075,12 +1049,6 @@ bool MiniMaxH3Pipeline::build_text_context(const char* prompt,
     if (tokens.empty()) {
         return set_minimax_error(error, "MiniMax-H3 prompt tokenization produced no tokens");
     }
-    if (const char* token_dump = std::getenv("ED_MINIMAX_H3_DUMP_TOKEN_IDS");
-        token_dump != nullptr && token_dump[0] != '\0') {
-        std::ofstream output(token_dump, std::ios::binary);
-        output.write(reinterpret_cast<const char*>(tokens.data()),
-                     static_cast<std::streamsize>(tokens.size() * sizeof(tokens[0])));
-    }
     std::vector<int32_t> tags(tokens.size(), 1);
     for (const auto& [index, image_embed] : image_embeds) {
         const int64_t begin = std::max<int64_t>(0, index - 1);
@@ -1120,7 +1088,6 @@ bool MiniMaxH3Pipeline::build_text_context(const char* prompt,
     const int64_t tag_count = static_cast<int64_t>(tags.size());
     *token_tags = sd::Tensor<int32_t>({tag_count}, std::move(tags));
     h3_trace_tensor("text_context", *context);
-    h3_dump_debug_tensor_if_requested("text_context", *context);
     return true;
 }
 
@@ -1407,7 +1374,6 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
     std::vector<sd::Tensor<float>> keyframe_latents;
     std::vector<int32_t> keyframe_indices;
     auto request_rng = std::make_shared<PhiloxRNG>(static_cast<uint64_t>(resolved_seed));
-    int condition_noise_index = 0;
     if (stage_video_vae_lifecycle_ && need_video_vae_for_conditioning && !vae_->stage_params_for_phase()) {
         set_minimax_error(error, "MiniMax-H3 failed to stage video VAE for conditioning");
         return ED_STATUS_OUT_OF_MEMORY;
@@ -1438,9 +1404,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
             return set_minimax_error(error, "MiniMax-H3 keyframe VAE encode failed");
         }
         sd::Tensor<float> latent = vae_->vae_to_diffusion_latents(vae_latent);
-        h3_apply_condition_noise(&latent,
-                                 request_rng,
-                                 "condition_noise_" + std::to_string(condition_noise_index++));
+        h3_apply_condition_noise(&latent, request_rng);
         h3_trace_tensor((std::string(name) + "_keyframe_latent").c_str(), latent);
         keyframe_latents.push_back(std::move(latent));
         keyframe_indices.push_back(frame_index);
@@ -1475,7 +1439,6 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         if (profile_ptr != nullptr) profile.reference_audio_vae_encode_ms += ggml_time_ms() - vae_encode_begin;
         if (encoded.empty()) return false;
         h3_trace_tensor("reference_audio_latent", encoded);
-        h3_dump_debug_tensor_if_requested("reference_audio_latent", encoded);
         *index = static_cast<int32_t>(reference_audio_latents.size());
         reference_audio_latents.push_back(std::move(encoded));
         return true;
@@ -1511,9 +1474,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
             return ED_STATUS_GENERATION_FAILED;
         }
         sd::Tensor<float> latent = vae_->vae_to_diffusion_latents(vae_latent);
-        h3_apply_condition_noise(&latent,
-                                 request_rng,
-                                 "condition_noise_" + std::to_string(condition_noise_index++));
+        h3_apply_condition_noise(&latent, request_rng);
         h3_trace_tensor(("ref_image_" + std::to_string(reference_index) + "_latent").c_str(), latent);
         const int32_t encoded_image_index = static_cast<int32_t>(reference_latents.size());
         reference_latents.push_back(std::move(latent));
@@ -1566,9 +1527,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         if (profile_ptr != nullptr) profile.reference_video_vae_encode_ms += ggml_time_ms() - vae_encode_begin;
         if (vae_latent.empty()) { set_minimax_error(error, "MiniMax-H3 Ref2VA video VAE encode failed"); return ED_STATUS_GENERATION_FAILED; }
         auto latent = vae_->vae_to_diffusion_latents(vae_latent);
-        h3_apply_condition_noise(&latent,
-                                 request_rng,
-                                 "condition_noise_" + std::to_string(condition_noise_index++));
+        h3_apply_condition_noise(&latent, request_rng);
         h3_trace_tensor(("ref_video_" + std::to_string(video_index) + "_latent").c_str(), latent);
         const int32_t encoded_video_index = static_cast<int32_t>(reference_latents.size());
         reference_latents.push_back(std::move(latent));
@@ -1628,12 +1587,9 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
     const int64_t noise_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
     video = sd::randn_like<float>(video, request_rng);
     audio = sd::randn_like<float>(audio, request_rng);
-    h3_load_debug_tensor_if_requested("target_video_noise", &video);
-    h3_load_debug_tensor_if_requested("target_audio_noise", &audio);
     sd::Tensor<float> packed = h3_pack_audio_and_video_latents(video, audio);
     if (profile_ptr != nullptr) profile.noise_init_ms = ggml_time_ms() - noise_begin;
     h3_trace_tensor("initial_packed_noise", packed);
-    h3_dump_debug_tensor_if_requested("initial_packed_noise", packed);
     if (h3_trace_enabled()) {
         auto reference_kind_name = [](MiniMaxH3ReferenceKind kind) {
             switch (kind) {
@@ -1816,7 +1772,6 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
     if (sampler == ED_SAMPLER_RES_MULTISTEP) {
         av.second /= video_sigma_shift / 3.0f;
     }
-    h3_dump_debug_tensor_if_requested("final_audio_latent", av.second);
     ed_status_t status = decode_video_latent(av.first, frames, out, profile_ptr, error);
     if (status != ED_STATUS_OK) {
         return status;
