@@ -1101,7 +1101,11 @@ namespace LLM {
                 if (deepstack_it != deepstack_visual_indexes.end()) {
                     size_t deepstack_index = static_cast<size_t>(std::distance(deepstack_visual_indexes.begin(), deepstack_it));
                     auto deepstack_merger = std::dynamic_pointer_cast<Qwen3VLDeepStackMerger>(blocks["deepstack_merger_list." + std::to_string(deepstack_index)]);
-                    deepstack_outputs.push_back(deepstack_merger->forward(ctx, x));
+                    auto deepstack_output = deepstack_merger->forward(ctx, x);
+                    if (debug_target == "deepstack" + std::to_string(deepstack_index)) {
+                        return {deepstack_output};
+                    }
+                    deepstack_outputs.push_back(deepstack_output);
                 }
                 sd::ggml_graph_cut::mark_graph_cut(x, "llm.vision.blocks." + std::to_string(i), "x");
                 if (debug_target == "block" + std::to_string(i)) {
@@ -1534,6 +1538,9 @@ namespace LLM {
                     input_embed = ggml_cast(ctx->ggml_ctx, input_embed, embed_type);
                 }
                 x = input_embed;
+                if (debug_target == "after_image_embed") {
+                    return x;
+                }
             }
 
             if (out_layers.find(0) != out_layers.end()) {
@@ -1642,9 +1649,10 @@ namespace LLM {
                                                           ggml_tensor* window_index,
                                                           ggml_tensor* window_inverse_index,
                                                           ggml_tensor* window_mask,
-                                                          ggml_tensor* pos_embeds = nullptr) {
+                                                          ggml_tensor* pos_embeds = nullptr,
+                                                          const std::string& debug_target = "") {
             GGML_ASSERT(enable_vision);
-            return vision_model()->forward_outputs(ctx, pixel_values, pe, window_index, window_inverse_index, window_mask, nullptr, pos_embeds);
+            return vision_model()->forward_outputs(ctx, pixel_values, pe, window_index, window_inverse_index, window_mask, nullptr, pos_embeds, debug_target);
         }
     };
 
@@ -2270,7 +2278,8 @@ namespace LLM {
                                                             nullptr,
                                                             nullptr,
                                                             nullptr,
-                                                            pos_embeds);
+                                                            pos_embeds,
+                                                            debug_target);
                 ggml_build_forward_expand(gf, outputs[0]);
                 return gf;
             }
@@ -2506,7 +2515,47 @@ namespace LLM {
             }
             const int64_t image_width = image.shape()[0];
             const int64_t image_height = image.shape()[1];
+            qwen_align_log_tensor_stats("vision.normalized_image", image);
             const auto pixel_values = process_image_patches_host(image);
+            qwen_align_log_tensor_stats("vision.pixel_values", pixel_values);
+            if (qwen_align_debug_enabled()) {
+                const char* dump_targets = std::getenv("ED_QWEN_ALIGN_DUMP_TARGETS");
+                const std::vector<std::string> debug_targets = {
+                    "patch_embed",
+                    "block0",
+                    "block0.input",
+                    "block0.norm1",
+                    "block0.attn.qkv",
+                    "block0.attn.q_rope",
+                    "block0.attn.out",
+                    "block0.after_attn",
+                    "block0.norm2",
+                    "block0.mlp.out",
+                    "block0.after_mlp",
+                    "block8",
+                    "block16",
+                    "block24",
+                    "block26",
+                    "deepstack0",
+                    "deepstack1",
+                    "deepstack2",
+                    "merged",
+                    "merger.input",
+                    "merger.out",
+                };
+                for (const std::string& target : debug_targets) {
+                    const std::string full_name = "vision." + target;
+                    if (!qwen_align_csv_contains(dump_targets, full_name.c_str()) &&
+                        !qwen_align_csv_contains(dump_targets, target.c_str())) {
+                        continue;
+                    }
+                    auto get_debug_graph = [&]() -> ggml_cgraph* {
+                        return build_encode_image_graph(pixel_values, image_width, image_height, target);
+                    };
+                    auto debug_tensor = take_or_empty(GGMLRunner::compute<float>(get_debug_graph, n_threads, false));
+                    qwen_align_log_tensor_stats(full_name.c_str(), debug_tensor);
+                }
+            }
             auto get_graph = [&]() -> ggml_cgraph* {
                 ggml_cgraph* graph = new_graph_custom(LLM_GRAPH_SIZE);
                 auto pixels = make_input(pixel_values);

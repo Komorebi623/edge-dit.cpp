@@ -610,15 +610,22 @@ struct AudioVAE : public GGMLBlock {
     }
     ggml_tensor* encode(GGMLRunnerContext* ctx, ggml_tensor* waveform) {
         GGML_ASSERT(waveform->ne[1] == 2);
-        waveform = ggml_reshape_3d(ctx->ggml_ctx, waveform, waveform->ne[0], 1, waveform->ne[1]);
-        auto x = std::dynamic_pointer_cast<AudioEncoder>(blocks["encoder"])->forward(ctx, waveform);
-        x = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 1, 0, 2, 3));
-        x = std::dynamic_pointer_cast<AudioAttentionProjection>(blocks["pre_block"])->forward(ctx, x);
-        x = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 1, 0, 2, 3));
-        auto z = std::dynamic_pointer_cast<Ops::Conv1D>(blocks["mean_proj"])->forward(ctx, x);
         auto mean = ggml_reshape_4d(ctx->ggml_ctx, params["latents_mean"], 1, kLatentChannels, 1, 1);
         auto std = ggml_reshape_4d(ctx->ggml_ctx, params["latents_std"], 1, kLatentChannels, 1, 1);
-        return ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, ggml_div(ctx->ggml_ctx, ggml_sub(ctx->ggml_ctx, z, mean), std), 0, 2, 1, 3));
+        ggml_tensor* encoded = nullptr;
+        for (int64_t channel = 0; channel < waveform->ne[1]; ++channel) {
+            auto x = ggml_ext_slice(ctx->ggml_ctx, waveform, 1, channel, channel + 1);
+            x = ggml_reshape_3d(ctx->ggml_ctx, x, x->ne[0], 1, 1);
+            x = std::dynamic_pointer_cast<AudioEncoder>(blocks["encoder"])->forward(ctx, x);
+            x = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 1, 0, 2, 3));
+            x = std::dynamic_pointer_cast<AudioAttentionProjection>(blocks["pre_block"])->forward(ctx, x);
+            x = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 1, 0, 2, 3));
+            x = std::dynamic_pointer_cast<Ops::Conv1D>(blocks["mean_proj"])->forward(ctx, x);
+            x = ggml_div(ctx->ggml_ctx, ggml_sub(ctx->ggml_ctx, x, mean), std);
+            x = ggml_cont(ctx->ggml_ctx, ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3));
+            encoded = encoded == nullptr ? x : ggml_concat(ctx->ggml_ctx, encoded, x, 1);
+        }
+        return encoded;
     }
     ggml_tensor* decode(GGMLRunnerContext* ctx, ggml_tensor* latent) {
         GGML_ASSERT(latent->ne[1] == 2 && latent->ne[2] == kLatentChannels);
