@@ -1124,9 +1124,6 @@ static bool run_sage(ggml_tensor* dst, const ed_cuda_sage_attn_scratch* scratch,
 } // namespace
 
 bool ed_cuda_sage_attn_custom_supported(const ggml_tensor* dst) {
-    if (!edgedit::ggml_ext::sage_attn_enabled()) {
-        return false;
-    }
     if (dst == nullptr || dst->op != GGML_OP_CUSTOM) {
         return false;
     }
@@ -1134,7 +1131,27 @@ bool ed_cuda_sage_attn_custom_supported(const ggml_tensor* dst) {
         return false;
     }
     const SageAttnCustomParams params = decode_params(dst);
-    if (!edgedit::ggml_ext::sage_attn_params_valid(params)) {
+    if (edgedit::ggml_ext::sage_attn_h3_params_valid(params)) {
+        // H3SA itself is the graph/request-scoped opt-in: no environment gate.
+        // run_sage<T> reads K/V as Q's T, so H3's adapter normalizes all inputs
+        // to F32. Reject mixed types, BF16, non-H3 dimensions and unsupported
+        // layouts here even if the general Sage shape predicate accepts them.
+        const ggml_tensor* h3_q = dst->src[0];
+        const ggml_tensor* h3_k = dst->src[1];
+        const ggml_tensor* h3_v = dst->src[2];
+        if (h3_q->ne[0] != 128 || h3_q->type != GGML_TYPE_F32 ||
+            h3_k->type != GGML_TYPE_F32 || h3_v->type != GGML_TYPE_F32 ||
+            h3_q->nb[0] != sizeof(float) || h3_k->nb[0] != sizeof(float) ||
+            h3_v->nb[0] != sizeof(float) ||
+            h3_q->ne[3] != 1 || h3_k->ne[3] != 1 ||
+            h3_q->ne[1] != h3_k->ne[1] || h3_q->ne[1] > INT32_MAX - 127 ||
+            h3_q->ne[1] > UINT32_MAX / 128u || h3_q->ne[2] > 65535) {
+            return false;
+        }
+    } else if (!edgedit::ggml_ext::sage_attn_params_valid(params) ||
+               !edgedit::ggml_ext::sage_attn_enabled()) {
+        // SAGQ preserves its original global gate, including global-off.
+        // Unknown tags fail closed, regardless of the environment.
         return false;
     }
     const ggml_tensor* q = dst->src[0];

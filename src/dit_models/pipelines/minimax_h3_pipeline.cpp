@@ -1,4 +1,9 @@
 #include "dit_models/pipelines/minimax_h3_pipeline.hpp"
+#include "dit_models/models/minimax_h3_cuda_options.hpp"
+#include "dit_models/models/minimax_h3_sha256.hpp"
+#include <filesystem>
+#include <fstream>
+#include "json.hpp"
 
 #include <cstdlib>
 #include <algorithm>
@@ -642,12 +647,99 @@ MiniMaxH3Pipeline::~MiniMaxH3Pipeline() {
     }
 }
 
+// Validate an explicitly opted-in offline Turbo artifact. Filenames or an
+// arbitrary step reduction are never accepted as proof of distillation.
+static bool h3_load_turbo_recipe(const ModelLoader& loader,
+                                 MiniMaxH3::TurboRecipe* recipe, std::string* error) {
+    namespace fs = std::filesystem;
+    for (const auto& input : loader.file_paths()) {
+        const fs::path parent = fs::path(input).parent_path();
+        const fs::path manifest = parent / "edge-dit-h3-turbo.json";
+        if (!fs::is_regular_file(manifest)) continue;
+        try {
+            std::ifstream stream(manifest);
+            const auto doc = nlohmann::json::parse(stream);
+            if (doc.value("schema_version", 0) != 1 || doc.value("kind", "") != "minimax-h3-turbo")
+                return set_minimax_error(error, "MiniMax-H3 Turbo manifest has an invalid schema");
+            const auto& shards = doc.at("shards");
+            if (!shards.is_object() || shards.empty())
+                return set_minimax_error(error, "MiniMax-H3 Turbo manifest has no merged shards");
+            std::set<std::filesystem::path> verified_shards;
+            for (auto it = shards.begin(); it != shards.end(); ++it) {
+                const fs::path filename = it.key();
+                if (filename.filename() != filename || filename.extension() != ".safetensors")
+                    return set_minimax_error(error, "MiniMax-H3 Turbo shard path is unsafe");
+                const fs::path shard = parent / filename;
+                const std::string expected = it.value().at("output_sha256").get<std::string>();
+                if (expected.size() != 64 || MiniMaxH3::sha256_file(shard.string()) != expected)
+                    return set_minimax_error(error, "MiniMax-H3 Turbo merged shard checksum mismatch");
+                verified_shards.insert(fs::weakly_canonical(shard));
+            }
+            std::set<size_t> selected_sources;
+            for (const auto& item : loader.get_tensor_storage_map())
+                if (starts_with(item.first, "model.diffusion_model.")) selected_sources.insert(item.second.file_index);
+            if (selected_sources.empty())
+                return set_minimax_error(error, "MiniMax-H3 Turbo loaded DiT has no verifiable source");
+            for (size_t index : selected_sources)
+                if (index >= loader.file_paths().size() ||
+                    !verified_shards.count(fs::weakly_canonical(loader.file_paths()[index])))
+                    return set_minimax_error(error, "MiniMax-H3 Turbo manifest must verify every selected DiT source");
+            *recipe = {doc.at("steps").get<int>(), doc.at("video_shift").get<float>(),
+                       doc.at("audio_shift").get<float>(), doc.at("cfg_scale").get<float>(),
+                       doc.at("sampler").get<std::string>(), doc.at("scheduler").get<std::string>(), true};
+            return recipe->valid(error);
+        } catch (const std::exception& e) {
+            const std::string message = std::string("MiniMax-H3 Turbo validation failed: ") + e.what();
+            return set_minimax_error(error, message.c_str());
+        }
+    }
+    return set_minimax_error(error, "ED_H3_TURBO requires a hash-verified offline merged checkpoint and adjacent manifest");
+}
+
 bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
                                 ModelRuntime& runtime,
                                 const ModelLoader& loader,
                                 PipelineTensorRegistry& registry,
-                                std::string* error) {
+                                std::string* error) try {
     (void)params;
+    turbo_enabled_ = false;
+    turbo_recipe_ = {};
+    MiniMaxH3::CudaOptimizationOptions cuda_options;
+    if (!MiniMaxH3::parse_cuda_optimization_options(
+            MiniMaxH3::cuda_optimization_process_environment(), &cuda_options, error)) {
+        return false;
+    }
+    // Backend identity is checked before allocation. CUDA-specific configuration
+    // is not propagated into the LLM/VAE runners or any other model pipeline.
+    const char* backend_name = runtime.backend() != nullptr ? ggml_backend_name(runtime.backend()) : "";
+    const bool is_cuda = MiniMaxH3::h3_cuda_backend(runtime.backend());
+    (void)backend_name;
+    auto capabilities = MiniMaxH3::MiniMaxH3Runner::cuda_optimization_capabilities();
+    capabilities.turbo = true;
+#if defined(ED_ENABLE_CUDA_MODULATION)
+    capabilities.fused_ops = true;
+#endif
+    if (!MiniMaxH3::validate_cuda_optimization_options(cuda_options, is_cuda, capabilities, error)) {
+        return false;
+    }
+    if (cuda_options.turbo && !h3_load_turbo_recipe(loader, &turbo_recipe_, error)) return false;
+    turbo_enabled_ = cuda_options.turbo;
+    adaln_weights_identity_.clear();
+    if (cuda_options.adaln_cache) {
+        // Hash only DiT shards (not 32B text encoder or VAEs) once at load.
+        // Content identity never substitutes a path or header-only checksum.
+        std::set<size_t> file_indices;
+        for (const auto& item : loader.get_tensor_storage_map())
+            if (starts_with(item.first, "model.diffusion_model.")) file_indices.insert(item.second.file_index);
+        MiniMaxH3::Sha256 digest;
+        for (size_t index : file_indices) {
+            if (index >= loader.file_paths().size()) return set_minimax_error(error, "H3 DiT file identity invalid");
+            const auto hash = MiniMaxH3::sha256_file(loader.file_paths()[index]);
+            digest.update(hash.data(), hash.size());
+        }
+        if (file_indices.empty()) return set_minimax_error(error, "H3 exact AdaLN missing full DiT identity");
+        adaln_weights_identity_ = digest.finish();
+    }
     runtime_ = &runtime;
     registry.clear();
     const MiniMaxH3DetectedConfig config = detect_minimax_config(loader.get_tensor_storage_map());
@@ -713,12 +805,22 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
                                                               loader.get_tensor_storage_map(),
                                                               "model.diffusion_model",
                                                               diffusion_offload);
+    // Turbo is a verified pipeline/model recipe, not a transformer custom op.
+    auto runner_options = cuda_options;
+    runner_options.turbo = false;
+
+    LOG_INFO("minimax-h3 cuda optimizations: fused=%d cache_dit=%d adaln=%d sage=%d sparse=%d turbo=%d (experimental; quality not yet GPU-validated)",
+             cuda_options.fused_ops, cuda_options.cache_dit, cuda_options.adaln_cache,
+             cuda_options.sage_attn, cuda_options.sparse_attn, cuda_options.turbo);
     diffusion_->set_max_graph_vram_bytes(runtime.max_graph_vram_bytes());
     diffusion_->set_flash_attention_enabled(runtime.flash_attention());
     if (auto process_group = runtime.graph_process_group_ref()) {
         diffusion_->set_process_group(process_group);
     }
 
+    // Validate execution restrictions after placement and process-group settings
+    // are known, before allocating or staging any model parameters.
+    diffusion_->configure_cuda_optimizations(runner_options);
     diffusion_->alloc_params_buffer();
     diffusion_->get_param_tensors(registry.tensors(), "model.diffusion_model");
 
@@ -816,7 +918,10 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
              (long long)config.text_dim,
              (long long)config.adaln_curve_grid);
     return true;
-}
+    } catch (const std::exception& e) {
+        try { set_minimax_error(error, e.what()); } catch (...) {}
+        return false;
+    }
 
 void MiniMaxH3Pipeline::mark_ready() {
     ready_ = true;
@@ -1237,7 +1342,8 @@ bool MiniMaxH3Pipeline::decode_audio_latent(const sd::Tensor<float>& latent,
 
 ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t* params,
                                               ed_video_t* out,
-                                              std::string* error) {
+                                              std::string* error) try {
+    if (diffusion_ != nullptr) diffusion_->reset_cuda_optimization_state();
     MiniMaxH3Profile profile;
     MiniMaxH3Profile* profile_ptr = h3_profile_enabled() ? &profile : nullptr;
     const int64_t generation_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
@@ -1309,7 +1415,15 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
     const bool need_video_vae_for_conditioning = has_keyframes ||
                                                   params->ref_image_count > 0 ||
                                                   params->ref_video_count > 0;
-    const int steps = params->sample.steps > 0 ? params->sample.steps : 20;
+    if (turbo_enabled_ && ((params->sample.steps > 0 && params->sample.steps != turbo_recipe_.steps) ||
+        (params->sample.flow_shift > 0.f && params->sample.flow_shift != turbo_recipe_.video_shift) ||
+        (params->sample.sampler != ED_SAMPLER_AUTO && params->sample.sampler != ED_SAMPLER_EULER) ||
+        (params->sample.scheduler != ED_SCHEDULER_AUTO && params->sample.scheduler != ED_SCHEDULER_SIMPLE) ||
+        params->sample.cfg_scale != 1.f)) {
+        set_minimax_error(error, "MiniMax-H3 Turbo parameters must match the verified recipe");
+        return ED_STATUS_INVALID_ARGUMENT;
+    }
+    const int steps = turbo_enabled_ ? turbo_recipe_.steps : (params->sample.steps > 0 ? params->sample.steps : 20);
     GenerationControl* control = runtime_->generation_control();
     if (control != nullptr) {
         control->start(steps);
@@ -1621,7 +1735,8 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
                  reference_blocks.size(),
                  blocks.str().c_str());
     }
-    const float video_sigma_shift = params->sample.flow_shift > 0.0f ? params->sample.flow_shift : 12.0f;
+    const float video_sigma_shift = turbo_enabled_ ? turbo_recipe_.video_shift : (params->sample.flow_shift > 0.0f ? params->sample.flow_shift : 12.0f);
+    const float audio_sigma_shift = turbo_enabled_ ? turbo_recipe_.audio_shift : 3.0f;
     const ed_sampler_t sampler = params->sample.sampler == ED_SAMPLER_AUTO
                                      ? default_sample_method()
                                      : params->sample.sampler;
@@ -1641,6 +1756,14 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
                    ? h3_simple_flow_sigma(step, steps, video_sigma_shift)
                    : h3_discrete_flow_sigma(step, steps, video_sigma_shift);
     };
+    if (!adaln_weights_identity_.empty()) {
+        std::vector<float> fixed_sigmas;
+        fixed_sigmas.reserve(static_cast<size_t>(steps + 1));
+        for (int i = 0; i <= steps; ++i) fixed_sigmas.push_back(sigma_at(i));
+        diffusion_->prepare_cuda_schedule(fixed_sigmas,
+            std::string(scheduler == ED_SCHEDULER_SIMPLE ? "simple" : "discrete") +
+                (sampler == ED_SAMPLER_EULER ? ":euler:v1" : ":res_multistep:v1"), adaln_weights_identity_);
+    }
     LOG_INFO("MiniMax-H3 sampling: sampler=%s scheduler=%s steps=%d flow-shift=%.6g",
              sampler == ED_SAMPLER_RES_MULTISTEP ? "res_multistep" : "euler",
              scheduler == ED_SCHEDULER_SIMPLE ? "simple" : "discrete",
@@ -1670,12 +1793,12 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         const float sigma = sigma_at(step);
         const float sigma_next = sigma_at(step + 1);
         sd::Tensor<float> model_packed = packed;
-        const float audio_sigma = MiniMaxH3::time_shift_sigma(sigma, video_sigma_shift, 3.0f);
-        const float audio_sigma_next = MiniMaxH3::time_shift_sigma(sigma_next, video_sigma_shift, 3.0f);
-        const float audio_slope = MiniMaxH3::time_shift_slope(sigma, video_sigma_shift, 3.0f);
+        const float audio_sigma = MiniMaxH3::time_shift_sigma(sigma, video_sigma_shift, audio_sigma_shift);
+        const float audio_sigma_next = MiniMaxH3::time_shift_sigma(sigma_next, video_sigma_shift, audio_sigma_shift);
+        const float audio_slope = MiniMaxH3::time_shift_slope(sigma, video_sigma_shift, audio_sigma_shift);
         float audio_scale = 1.0f;
-        if (sampler == ED_SAMPLER_RES_MULTISTEP) {
-            audio_scale = video_sigma_shift / 3.0f;
+        if (sampler == ED_SAMPLER_RES_MULTISTEP || turbo_enabled_) {
+            audio_scale = video_sigma_shift / audio_sigma_shift;
             auto model_av = diffusion_->split_av_latents(packed, audio_length);
             model_av.second *= audio_sigma / sigma;
             model_packed = h3_pack_audio_and_video_latents(model_av.first, model_av.second);
@@ -1697,9 +1820,10 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         }
         diffusion_params.minimax_audio_length = audio_length;
         diffusion_params.minimax_video_sigma_shift = video_sigma_shift;
-        diffusion_params.minimax_audio_sigma_shift = 3.0f;
+        diffusion_params.minimax_audio_sigma_shift = audio_sigma_shift;
         const int64_t cond_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
         ScopedEnvVar current_step_env("ED_MINIMAX_H3_CURRENT_STEP", std::to_string(step));
+        diffusion_->begin_cuda_step(step, steps, true);
         sd::Tensor<float> velocity = diffusion_->compute(runtime_->n_threads(), diffusion_params);
         if (profile_ptr != nullptr) {
             profile.diffusion_cond_ms += ggml_time_ms() - cond_begin;
@@ -1707,6 +1831,13 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         }
         if (velocity.empty()) {
             set_minimax_error(error, "MiniMax-H3 diffusion compute failed");
+            return ED_STATUS_GENERATION_FAILED;
+        }
+        const bool check_optimized_output = !adaln_weights_identity_.empty() || turbo_enabled_ ||
+            diffusion_->model.cuda_optimizations.any_enabled();
+        if (check_optimized_output && std::any_of(velocity.data(), velocity.data() + velocity.numel(),
+                                                [](float value) { return !std::isfinite(value); })) {
+            set_minimax_error(error, "MiniMax-H3 optimized velocity contains non-finite values");
             return ED_STATUS_GENERATION_FAILED;
         }
         if (!h3_dit_debug_target().empty()) {
@@ -1720,6 +1851,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
             diffusion_params.context = &uncond_context;
             diffusion_params.minimax_text_token_tags = &uncond_token_tags;
             const int64_t uncond_begin = profile_ptr != nullptr ? ggml_time_ms() : 0;
+            diffusion_->begin_cuda_step(step, steps, false);
             sd::Tensor<float> uncond_velocity = diffusion_->compute(runtime_->n_threads(), diffusion_params);
             if (profile_ptr != nullptr) {
                 profile.diffusion_uncond_ms += ggml_time_ms() - uncond_begin;
@@ -1733,7 +1865,7 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
             velocity = uncond_velocity + (velocity - uncond_velocity) * cfg_scale;
             if (profile_ptr != nullptr) profile.cfg_combine_ms += ggml_time_ms() - cfg_combine_begin;
         }
-        if (sampler == ED_SAMPLER_RES_MULTISTEP) {
+        if (sampler == ED_SAMPLER_RES_MULTISTEP || turbo_enabled_) {
             auto model_av = diffusion_->split_av_latents(model_packed, audio_length);
             auto velocity_av = diffusion_->split_av_latents(velocity, audio_length);
             velocity_av.second = (1.0f - audio_scale) * model_av.second +
@@ -1767,6 +1899,10 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
             old_denoised = std::move(denoised);
             old_sigma_down = sigma_next;
             have_old_denoised = true;
+        } else if (turbo_enabled_) {
+            // Turbo audio velocity already differentiates the scaled latent in
+            // VIDEO sigma coordinates; do not apply the audio slope a second time.
+            packed += velocity * (sigma_next - sigma);
         } else {
             auto packed_av = diffusion_->split_av_latents(packed, audio_length);
             auto velocity_av = diffusion_->split_av_latents(velocity, audio_length);
@@ -1783,8 +1919,8 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
     }
     release_diffusion.run_now();
     auto av = diffusion_->split_av_latents(packed, audio_length);
-    if (sampler == ED_SAMPLER_RES_MULTISTEP) {
-        av.second /= video_sigma_shift / 3.0f;
+    if (sampler == ED_SAMPLER_RES_MULTISTEP || turbo_enabled_) {
+        av.second /= video_sigma_shift / audio_sigma_shift;
     }
     ed_status_t status = decode_video_latent(av.first, frames, out, profile_ptr, error);
     if (status != ED_STATUS_OK) {
@@ -1799,10 +1935,20 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         profile.log();
     }
     return ED_STATUS_OK;
-}
+    } catch (const std::exception& e) {
+        if (out != nullptr) ed_free_video(out);
+        if (diffusion_ != nullptr) diffusion_->reset_cuda_optimization_state();
+        try { set_minimax_error(error, e.what()); } catch (...) {}
+        return ED_STATUS_GENERATION_FAILED;
+    } catch (...) {
+        if (out != nullptr) ed_free_video(out);
+        if (diffusion_ != nullptr) diffusion_->reset_cuda_optimization_state();
+        try { set_minimax_error(error, "MiniMax-H3 unexpected optimization failure"); } catch (...) {}
+        return ED_STATUS_GENERATION_FAILED;
+    }
 
 ed_scheduler_t MiniMaxH3Pipeline::default_scheduler(ed_sampler_t) const {
-    return ED_SCHEDULER_DISCRETE;
+    return turbo_enabled_ ? ED_SCHEDULER_SIMPLE : ED_SCHEDULER_DISCRETE;
 }
 
 }  // namespace edgedit

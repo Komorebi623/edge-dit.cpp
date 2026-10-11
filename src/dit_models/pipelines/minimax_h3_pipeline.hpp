@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "dit_models/pipelines/dit_pipeline.hpp"
+#include "dit_models/models/minimax_h3_turbo.hpp"
 
 namespace MiniMaxH3 {
 struct MiniMaxH3Runner;
@@ -56,6 +57,9 @@ public:
     ed_scheduler_t default_scheduler(ed_sampler_t method) const override;
 
 private:
+    MiniMaxH3::TurboRecipe turbo_recipe_;
+    bool turbo_enabled_ = false;
+    std::string adaln_weights_identity_;
     bool ready_ = false;
     ModelRuntime* runtime_ = nullptr;
     SDVersion version_ = VERSION_MINIMAX_H3;

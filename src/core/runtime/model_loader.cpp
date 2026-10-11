@@ -345,20 +345,23 @@ static SDVersion infer_transformer_file_version(const std::string& file_path) {
     if (contains(lower_normalized, "kontext")) {
         return VERSION_FLUX_KONTEXT;
     }
-    if (!contains(normalized, "/transformer/") &&
-        !contains(normalized, "/transformer_ref/")) {
-        return VERSION_COUNT;
-    }
+    // H3 offline merged shards may live outside the standard component names.
+    // Do not broaden inference for other model families or arbitrary configs.
+    const bool conventional_transformer = contains(normalized, "/transformer/") ||
+                                          contains(normalized, "/transformer_ref/");
 
     const std::string config_path = path_join(parent_path(file_path), "config.json");
     std::string error;
     nlohmann::json config;
     if (!file_exists(config_path) || !read_json_file(config_path, &config, &error)) {
-        return is_sd3_diffusers_transformer_file(file_path) ? VERSION_SD3 : VERSION_COUNT;
+        return conventional_transformer && is_sd3_diffusers_transformer_file(file_path) ? VERSION_SD3 : VERSION_COUNT;
     }
 
     if (config.contains("_class_name") && config["_class_name"].is_string()) {
         const std::string klass = config["_class_name"].get<std::string>();
+        if (!conventional_transformer && klass != "MiniMaxH3Transformer3DModel") {
+            return VERSION_COUNT;
+        }
         if (contains(klass, "QwenImageEdit") || contains(klass, "Qwen Image Edit")) {
             return VERSION_QWEN_IMAGE_EDIT;
         }

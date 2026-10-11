@@ -24,6 +24,7 @@ add_compile_definitions(GGML_MAX_NAME=128)
 find_package(Threads REQUIRED)
 
 option(ED_BUILD_EXAMPLES "Build examples" ON)
+option(ED_BUILD_H3_CUDA_TESTS "Build isolated MiniMax-H3 CUDA policy tests (no GPU required)" OFF)
 option(ED_BUILD_SHARED_LIBS "Build edge-dit as a shared library" OFF)
 option(ED_ENABLE_CUDNN_SDPA "Enable experimental cuDNN SDPA backend for CUDA flash attention" OFF)
 option(ED_ENABLE_CUDA_NORM "Enable edge CUDA norm fast paths for ggml CUDA backend" ON)
@@ -395,6 +396,10 @@ target_compile_definitions(edgedit
         ED_VERSION_PATCH=${PROJECT_VERSION_PATCH}
 )
 
+if(ED_ENABLE_CUDA_SAGE_ATTN AND ED_GGML_CUDA)
+    target_compile_definitions(edgedit PRIVATE ED_ENABLE_CUDA_SAGE_ATTN)
+endif()
+
 if(ED_ENABLE_CUDNN_SDPA)
     target_compile_definitions(edgedit PRIVATE ED_ENABLE_CUDNN_SDPA ED_ENABLE_CUDNN_CONV2D ED_ENABLE_CUDNN_CONV3D ED_ENABLE_CUDNN_CONV_TRANSPOSE_1D)
 endif()
@@ -518,6 +523,7 @@ ed_enable_cudnn_sdpa=${ED_ENABLE_CUDNN_SDPA}
 ed_enable_cuda_norm=${ED_ENABLE_CUDA_NORM}
 ed_enable_cuda_rope=${ED_ENABLE_CUDA_ROPE}
 ed_enable_cuda_modulation=${ED_ENABLE_CUDA_MODULATION}
+ed_enable_cuda_sage_attn=${ED_ENABLE_CUDA_SAGE_ATTN}
 ed_enable_parallel=${ED_ENABLE_PARALLEL}
 ed_debug_sp_comm=${ED_DEBUG_SP_COMM}
 ed_benchmark_markers=${ED_BENCHMARK_MARKERS}
@@ -535,4 +541,46 @@ install(TARGETS edgedit
 
 if(ED_BUILD_EXAMPLES)
     install(TARGETS ed-cli ed-sample ed-server ed-convert RUNTIME DESTINATION bin)
+endif()
+
+# Standalone opt-in tests do not alter production targets or other backends.
+if(ED_BUILD_H3_CUDA_TESTS)
+    enable_testing()
+    foreach(_H3_TEST options cache sparse sage adaln fusion)
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/h3_cuda_${_H3_TEST}_test.cpp")
+            add_executable(h3-cuda-${_H3_TEST}-test tests/h3_cuda_${_H3_TEST}_test.cpp)
+            target_include_directories(h3-cuda-${_H3_TEST}-test PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+                "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/include" "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
+            target_compile_features(h3-cuda-${_H3_TEST}-test PRIVATE cxx_std_17)
+            if(_H3_TEST STREQUAL "adaln")
+                target_compile_definitions(h3-cuda-${_H3_TEST}-test PRIVATE H3_ADALN_TEST_REAL_RUNNER)
+            endif()
+            target_compile_options(h3-cuda-${_H3_TEST}-test PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
+            target_link_libraries(h3-cuda-${_H3_TEST}-test PRIVATE edgedit ggml ggml-cpu)
+            add_test(NAME h3-cuda-${_H3_TEST} COMMAND h3-cuda-${_H3_TEST}-test)
+        endif()
+    endforeach()
+    foreach(_H3_TEST turbo sha256 vdn vsa)
+        add_executable(h3-${_H3_TEST}-test tests/h3_${_H3_TEST}_test.cpp)
+        target_include_directories(h3-${_H3_TEST}-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_compile_features(h3-${_H3_TEST}-test PRIVATE cxx_std_17)
+        target_compile_options(h3-${_H3_TEST}-test PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
+        add_test(NAME h3-${_H3_TEST} COMMAND h3-${_H3_TEST}-test)
+    endforeach()
+endif()
+
+if(ED_BUILD_H3_CUDA_TESTS)
+    foreach(_H3_TEST runtime_optimization vdn_graph)
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/h3_${_H3_TEST}_test.cpp")
+            add_executable(h3-${_H3_TEST}-test tests/h3_${_H3_TEST}_test.cpp)
+            target_include_directories(h3-${_H3_TEST}-test PRIVATE
+                "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
+                "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
+            target_compile_features(h3-${_H3_TEST}-test PRIVATE cxx_std_17)
+            target_compile_options(h3-${_H3_TEST}-test PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
+            target_link_libraries(h3-${_H3_TEST}-test PRIVATE edgedit ggml ggml-cpu)
+            add_test(NAME h3-${_H3_TEST} COMMAND h3-${_H3_TEST}-test)
+        endif()
+    endforeach()
 endif()

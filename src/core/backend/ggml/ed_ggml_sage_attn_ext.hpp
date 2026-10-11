@@ -17,6 +17,9 @@
 namespace edgedit::ggml_ext {
 
 constexpr uint32_t kSageAttnCustomMagic = 0x53414751u; // "SAGQ"
+// Explicit opt-in node emitted only by the H3 graph adapter. Unlike SAGQ,
+// acceptance of this tag is independent of the global ED_SAGE_ATTN gate.
+constexpr uint32_t kSageAttnH3CustomMagic = 0x48335341u; // "H3SA"
 
 struct SageAttnCustomParams {
     uint32_t magic  = kSageAttnCustomMagic;
@@ -174,6 +177,12 @@ inline SageAttnCustomParams sage_attn_params_from_userdata(void* userdata) {
 
 inline bool sage_attn_params_valid(const SageAttnCustomParams& params) {
     return params.magic == kSageAttnCustomMagic && params.n_head > 0;
+}
+
+// Keep the original SAGQ validator unchanged: legacy callers cannot gain an
+// explicit opt-in by using the old tag with the global gate disabled.
+inline bool sage_attn_h3_params_valid(const SageAttnCustomParams& params) {
+    return params.magic == kSageAttnH3CustomMagic && params.n_head > 0;
 }
 
 // Shape contract at the injection point (build_kqv in ggml_extend.hpp):
