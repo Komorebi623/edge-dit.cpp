@@ -1,0 +1,58 @@
+{
+  "date": "2026-10-11",
+  "timezone": "Asia/Shanghai",
+  "status": "cpu_software_validated_cuda_build_only",
+  "gpu_inference_executed": false,
+  "gpu_processes_modified": false,
+  "baseline_source": "97cc585d9dbd9ac5e30b78ef2e2c4a0d8bfbe9f2",
+  "cpu_ctest": {
+    "passed": 12,
+    "total": 12
+  },
+  "workflow_tests": {
+    "passed": 48,
+    "total": 48
+  },
+  "source_fetch_tests": {
+    "passed": 18,
+    "total": 18
+  },
+  "lora_cpu_tests": {
+    "passed": 5,
+    "total": 5
+  },
+  "actual_tiny_h3": {
+    "comparisons": 24,
+    "bitexact_comparisons": 24,
+    "scope": "synthetic CPU H3, TimeEmbedder and curve modes; not a production-weight inference"
+  },
+  "full_weight_sha256_verified": true,
+  "cuda_baseline_build": "passed",
+  "cuda_candidate_build": "passed_including_h3_sage_cuda_translation_unit",
+  "binary_sha256": {
+    "baseline": "4ae663782a3ee9fed5100262ad6d95f119b746cae54c099f6a78feac13812ed8",
+    "candidate": "03afe0c3a5ebceea36fdc565e3fcb08f8067828d9bf491521f1f532b42c90ba8",
+    "cpu": "fb246b93fb35e65edd0b0b81313caaacd1d8fa2be16e1a2742c8fb29ff36fe63"
+  },
+  "performance_results": null,
+  "production_quality_results": null,
+  "limitations": [
+    "VDN original exact solve/short-conv/anchor/checkpoint integration is incomplete; production switch rejected",
+    "FastH3 VSA is CPU reference and gate/geometry validation, not native CUDA model deployment",
+    "Turbo needs independently verified matching public merged checkpoint and separate precision baseline",
+    "Cache and attention rollout currently requires resident single-device CUDA parameters and graph reuse disabled",
+    "full production model/modal GPU quality and performance not executed"
+  ],
+  "logs": [
+    "/export/home/wangtianyang.21/code1/edge-dit.cpp/_scratch/h3-logs/all-cpu-regression-final.log",
+    "/export/home/wangtianyang.21/code1/edge-dit.cpp/_scratch/h3-logs/baseline-build-20261011.log",
+    "/export/home/wangtianyang.21/code1/edge-dit.cpp/_scratch/h3-logs/candidate-build-20261011.log",
+    "/export/home/wangtianyang.21/code1/edge-dit.cpp/_scratch/h3-logs/candidate-build-final.log"
+  ],
+  "fusion_cpu_comparisons": {
+    "count": 56,
+    "worst_max_absolute_error": 0.0,
+    "cuda_validated": false
+  },
+  "candidate_source_tree_sha256": "36a7edf68d313bae84291f543b987b078fd5a3cce294bece9e8f920ac30e6f4a"
+}

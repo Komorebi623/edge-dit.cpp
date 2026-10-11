@@ -1,0 +1,389 @@
+{
+  "schema_version": 1,
+  "baseline_revision": "97cc585d9dbd9ac5e30b78ef2e2c4a0d8bfbe9f2",
+  "submodules": {
+    "ggml": "f270346d688c7bec7c56bae2ae73343aba6817ad",
+    "onednn": "5e9224036021433d2577548ed0539fe9a53256bc"
+  },
+  "weight_variant": "full_h3_existing_persistent_Q4_GGUF_not_pruned_not_distilled",
+  "precision_lock": "docs/research/h3-precision-lock.json",
+  "status": "single_method_plan_gpu_unmeasured",
+  "note": "Full existing Q4 DiTs/Q4 Qwen/F16 video/F32 audio only. No pruned weights, conversion, auto-fit, changing steps or invented performance. Run fixtures then lock; null hashes cannot execute real runs/imports.",
+  "locations": {
+    "host": {
+      "repo_root": "/export/home/wangtianyang.21/code1/edge-dit.cpp",
+      "model_root": "/mnt/cfs/9n-das-admin/llm_models/MiniMax-H3-GGUF",
+      "asset_root": "{repo_root}/assets/minimax-h3-workflow-fixtures"
+    },
+    "container": {
+      "repo_root": "/workspace/edge-dit.cpp",
+      "model_root": "/models/MiniMax-H3-GGUF",
+      "asset_root": "{repo_root}/assets/minimax-h3-workflow-fixtures"
+    }
+  },
+  "binaries": {
+    "baseline": {
+      "path": "{repo_root}/build-h3-baseline-97cc585/bin/ed-cli",
+      "optimization_env": {
+        "ED_H3_FUSED_OPS": "0",
+        "ED_H3_CACHE_DIT": "0",
+        "ED_H3_ADALN_CACHE": "0",
+        "ED_H3_SAGE_ATTN": "0",
+        "ED_H3_SPARSE_ATTN": "0",
+        "ED_H3_VDN": "0",
+        "ED_H3_TURBO": "0",
+        "ED_H3_VSA": "0"
+      }
+    },
+    "candidate": {
+      "path": "{repo_root}/build-h3-candidate/bin/ed-cli",
+      "optimization_env": {
+        "ED_H3_FUSED_OPS": "0",
+        "ED_H3_CACHE_DIT": "0",
+        "ED_H3_ADALN_CACHE": "0",
+        "ED_H3_SAGE_ATTN": "1",
+        "ED_H3_SPARSE_ATTN": "0",
+        "ED_H3_VDN": "0",
+        "ED_H3_TURBO": "0",
+        "ED_H3_VSA": "0"
+      }
+    }
+  },
+  "required_build": {
+    "CMAKE_CUDA_ARCHITECTURES": "90",
+    "ED_ENABLE_CUDNN_SDPA": "ON",
+    "ED_ENABLE_CUDA_SAGE_ATTN": "OFF"
+  },
+  "models": {
+    "fl2va": {
+      "path": "{model_root}/minimax_h3_fl2va-Q4_K_M.gguf",
+      "bytes": 18779848448,
+      "sha256": null,
+      "tensor_types": {
+        "F32": 13,
+        "BF16": 264,
+        "Q4_0": 50,
+        "Q4_K": 208
+      },
+      "source_header_sha256": "b4aebf1a52aa869c99ba7fd33c7e343200342404e07d1eb03260f7beebd02c7f"
+    },
+    "ref2va": {
+      "path": "{model_root}/minimax_h3_ref2va-Q4_K_M.gguf",
+      "bytes": 18779848448,
+      "sha256": null,
+      "tensor_types": {
+        "F32": 13,
+        "BF16": 264,
+        "Q4_0": 50,
+        "Q4_K": 208
+      },
+      "source_header_sha256": "b4aebf1a52aa869c99ba7fd33c7e343200342404e07d1eb03260f7beebd02c7f"
+    },
+    "llm": {
+      "path": "{model_root}/qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+      "bytes": 18218065024,
+      "sha256": null,
+      "tensor_types": {
+        "BF16": 552,
+        "Q6_K": 100,
+        "Q4_K": 250
+      },
+      "source_header_sha256": "0c6bc5ded133ae026c992654de37dbd600fa70b50573a6ed3ac1f54ea29ddc59"
+    },
+    "video_vae": {
+      "path": "{model_root}/minimax_h3_video_vae_fp16.safetensors",
+      "bytes": 5207808496,
+      "sha256": null,
+      "tensor_types": {
+        "F16": 562
+      },
+      "source_header_sha256": "7bd6afbb1b2cfbf7c19901869eb224ec1b3e2a8cdbd8516d18f515c60f157c26"
+    },
+    "audio_vae": {
+      "path": "{model_root}/minimax_h3_audio_vae_fp32.safetensors",
+      "bytes": 605254808,
+      "sha256": null,
+      "tensor_types": {
+        "F32": 917
+      },
+      "source_header_sha256": "23fb27ab02c45d7c6f5dfe5c3255ef956a5a13853c869b784bf8de4a1537d06b"
+    }
+  },
+  "assets": {
+    "first": {
+      "path": "{asset_root}/first.png",
+      "kind": "image",
+      "sha256": null
+    },
+    "last": {
+      "path": "{asset_root}/last.png",
+      "kind": "image",
+      "sha256": null
+    },
+    "reference_image": {
+      "path": "{asset_root}/first.png",
+      "kind": "image",
+      "sha256": null
+    },
+    "reference_video": {
+      "path": "{asset_root}/reference.mp4",
+      "kind": "video",
+      "embedded_audio_required": true,
+      "sha256": null
+    },
+    "reference_frames": {
+      "path": "{asset_root}/frames",
+      "kind": "frames",
+      "sha256": null
+    },
+    "paired_audio": {
+      "path": "{asset_root}/paired.wav",
+      "kind": "audio",
+      "sha256": null
+    },
+    "extra_audio": {
+      "path": "{asset_root}/extra.wav",
+      "kind": "audio",
+      "sha256": null
+    }
+  },
+  "sampling": {
+    "width": 512,
+    "height": 512,
+    "frames": 124,
+    "fps": 24,
+    "steps": 20,
+    "seed": 42,
+    "cfg_scale": 1,
+    "sampler": "res_multistep",
+    "scheduler": "simple",
+    "ref_image_size": "match",
+    "audio_sample_rate": 32000,
+    "audio_channels": 2
+  },
+  "placement": {
+    "dit_offload": false,
+    "text_encoder_offload": false,
+    "vae_offload": false
+  },
+  "run": {
+    "warmup": 1,
+    "repeats": 3,
+    "timeout_seconds": 7200,
+    "media_timeout_seconds": 180,
+    "gpu_index": 0,
+    "min_free_mib": 65536,
+    "max_utilization_percent": 0
+  },
+  "modes": {
+    "ref_mixed": {
+      "dit": "ref2va",
+      "prompt": "Use <Video 1>, <Picture 1>, <Audio 1> and <Audio 2> in a natural transition, preserving reference identity and synchronized sound.",
+      "inputs": {
+        "ref-image": [
+          "reference_image"
+        ],
+        "ref-video": [
+          "reference_video"
+        ],
+        "ref-video-audio": [
+          "paired_audio"
+        ],
+        "ref-audio": [
+          "extra_audio"
+        ]
+      }
+    },
+    "ref_paired_audio": {
+      "dit": "ref2va",
+      "prompt": "Preserve <Video 1> and synchronize motion with <Audio 1>.",
+      "inputs": {
+        "ref-video": [
+          "reference_frames"
+        ],
+        "ref-video-audio": [
+          "paired_audio"
+        ]
+      }
+    },
+    "ref_video": {
+      "dit": "ref2va",
+      "prompt": "Preserve <Video 1> and its embedded <Audio 1>.",
+      "inputs": {
+        "ref-video": [
+          "reference_video"
+        ]
+      }
+    },
+    "ref_image": {
+      "dit": "ref2va",
+      "prompt": "Use <Picture 1> as a strict visual reference with gentle natural motion and sound.",
+      "inputs": {
+        "ref-image": [
+          "reference_image"
+        ]
+      }
+    },
+    "first_last": {
+      "dit": "fl2va",
+      "prompt": "Transition naturally from <Picture 1> to <Picture 2> with synchronized ambient sound.",
+      "inputs": {
+        "image": [
+          "first"
+        ],
+        "end-img": [
+          "last"
+        ]
+      }
+    },
+    "first_frame": {
+      "dit": "fl2va",
+      "prompt": "Start from <Picture 1> and add subtle motion with natural ambience.",
+      "inputs": {
+        "image": [
+          "first"
+        ]
+      }
+    },
+    "last_frame": {
+      "dit": "fl2va",
+      "prompt": "Finish at <Picture 1> after a smooth natural camera movement.",
+      "inputs": {
+        "end-img": [
+          "last"
+        ]
+      }
+    },
+    "t2va": {
+      "dit": "fl2va",
+      "prompt": "A cinematic sunset over mountain ridges with quiet natural ambience.",
+      "inputs": {}
+    }
+  },
+  "performance_results": null,
+  "method_catalog": {
+    "ED_H3_FUSED_OPS": {
+      "status": "implemented",
+      "modes": [
+        "ref_mixed",
+        "ref_paired_audio",
+        "ref_video",
+        "ref_image",
+        "first_last",
+        "first_frame",
+        "last_frame",
+        "t2va"
+      ],
+      "required_build": {
+        "ED_ENABLE_CUDA_MODULATION": "ON"
+      }
+    },
+    "ED_H3_CACHE_DIT": {
+      "status": "implemented",
+      "modes": [
+        "ref_mixed",
+        "ref_paired_audio",
+        "ref_video",
+        "ref_image",
+        "first_last",
+        "first_frame",
+        "last_frame",
+        "t2va"
+      ],
+      "required_build": {},
+      "gpu_validated": false
+    },
+    "ED_H3_ADALN_CACHE": {
+      "status": "implemented",
+      "modes": [
+        "ref_mixed",
+        "ref_paired_audio",
+        "ref_video",
+        "ref_image",
+        "first_last",
+        "first_frame",
+        "last_frame",
+        "t2va"
+      ],
+      "required_build": {},
+      "gpu_validated": false
+    },
+    "ED_H3_SAGE_ATTN": {
+      "status": "implemented",
+      "modes": [
+        "ref_mixed",
+        "ref_paired_audio",
+        "ref_video",
+        "ref_image",
+        "first_last",
+        "first_frame",
+        "last_frame",
+        "t2va"
+      ],
+      "required_build": {
+        "ED_ENABLE_CUDA_SAGE_ATTN": "ON"
+      },
+      "gpu_validated": false
+    },
+    "ED_H3_SPARSE_ATTN": {
+      "status": "implemented",
+      "modes": [
+        "ref_mixed",
+        "ref_paired_audio",
+        "ref_video",
+        "ref_image",
+        "first_last",
+        "first_frame",
+        "last_frame",
+        "t2va"
+      ],
+      "required_build": {},
+      "gpu_validated": false
+    },
+    "ED_H3_VDN": {
+      "status": "unsupported",
+      "modes": [
+        "ref_mixed",
+        "ref_paired_audio",
+        "ref_video",
+        "ref_image",
+        "first_last",
+        "first_frame",
+        "last_frame",
+        "t2va"
+      ],
+      "required_build": {}
+    },
+    "ED_H3_TURBO": {
+      "status": "unsupported",
+      "modes": [
+        "ref_mixed",
+        "ref_paired_audio",
+        "ref_video",
+        "ref_image",
+        "first_last",
+        "first_frame",
+        "last_frame",
+        "t2va"
+      ],
+      "required_build": {},
+      "requires_separate_manifest": true
+    },
+    "ED_H3_VSA": {
+      "status": "unsupported",
+      "modes": [
+        "ref_mixed",
+        "ref_paired_audio",
+        "ref_video",
+        "ref_image",
+        "first_last",
+        "first_frame",
+        "last_frame",
+        "t2va"
+      ],
+      "required_build": {},
+      "requires_separate_manifest": true
+    }
+  },
+  "method_catalog_note": "Pending methods may dry-run. Actual enablement requires h3-build-provenance.txt implemented_methods=ED_H3_CACHE_DIT,... or catalog status=implemented; still check binary policy/build settings. No runtime activation claim without evidence. Turbo needs a separately reviewed precision manifest and baseline."
+}

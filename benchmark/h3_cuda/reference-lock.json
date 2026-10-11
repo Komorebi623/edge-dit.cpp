@@ -1,0 +1,990 @@
+{
+  "schema_version": 1,
+  "recorded_date": "2026-10-11",
+  "default_destination": "_scratch/h3-reference-src",
+  "default_max_bytes": 67108864,
+  "default_max_file_bytes": 2097152,
+  "source_policy": "public official GitHub repositories; immutable commits; selected source/text files only; no source execution, install, git hooks, private access, submodules or model weights",
+  "local_turbo_reference_commit": "a2cc96b9ebbb94706903094aed2ced2e98796654",
+  "sources": [
+    {
+      "name": "sglang",
+      "repository": "sgl-project/sglang",
+      "commit": "53295c697255a5e8ddb263f98ab7e047e2700ad2",
+      "commit_date": "2026-10-11T09:25:43Z",
+      "license": {
+        "spdx": "Apache-2.0",
+        "path": "LICENSE",
+        "scope": "repository code; per-file third-party notices and model-weight terms are separate"
+      },
+      "scope": "Python/Triton/JIT CUDA H3 dense, cache and hybrid reference",
+      "selection": "selected-files",
+      "tree_api": "https://api.github.com/repos/sgl-project/sglang/git/trees/53295c697255a5e8ddb263f98ab7e047e2700ad2?recursive=1",
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 11346,
+          "git_blob_sha1": "9c422689c8f5c317c7c65153b1209349ec57007e"
+        },
+        {
+          "path": "README.md",
+          "size": 8824,
+          "git_blob_sha1": "65387977af985b5904c3d81b14a534bb18de298a"
+        },
+        {
+          "path": "docs/cookbook/diffusion/MiniMax/MiniMax-H3.mdx",
+          "size": 115562,
+          "git_blob_sha1": "80516c27c659b90dec97309952215d2441d8758b"
+        },
+        {
+          "path": "docs/docs/sglang-diffusion/cache_dit.mdx",
+          "size": 36539,
+          "git_blob_sha1": "9ca452450db1da1b672d2f6ba548376c51d82e4f"
+        },
+        {
+          "path": "python/pyproject.toml",
+          "size": 6999,
+          "git_blob_sha1": "aeec99f6953f12adf7a63c4b461ad487789f3842"
+        },
+        {
+          "path": "python/sglang/kernels/jit/csrc/diffusion/qknorm_rope.cuh",
+          "size": 46010,
+          "git_blob_sha1": "b1d682b3866f1cc6e4aa7f694f46ae32f5f0c4a2"
+        },
+        {
+          "path": "python/sglang/kernels/ops/attention/subblock_sage_fp8_sm90.py",
+          "size": 9019,
+          "git_blob_sha1": "e4087163ca3d43714fb06cbfa2ad823f1b640c54"
+        },
+        {
+          "path": "python/sglang/kernels/ops/diffusion/sites/minimax_h3_norm_modulate_site.py",
+          "size": 1304,
+          "git_blob_sha1": "8d3e01f0a5c4af26525cc9b9bb7cb491e7321e7d"
+        },
+        {
+          "path": "python/sglang/multimodal_gen/configs/models/dits/minimax_h3.py",
+          "size": 9153,
+          "git_blob_sha1": "4c932bb2c498979a15d207c7b78f6ece462d7703"
+        },
+        {
+          "path": "python/sglang/multimodal_gen/runtime/cache/cache_dit_integration.py",
+          "size": 37018,
+          "git_blob_sha1": "e1e8b1ef3e8f5716934c0b64904bfc8eac154a49"
+        },
+        {
+          "path": "python/sglang/multimodal_gen/runtime/layers/attention/backends/subblock_sparse/README.md",
+          "size": 10729,
+          "git_blob_sha1": "61639571c2a3d9b9361c1e39f32560b2b8f340a3"
+        },
+        {
+          "path": "python/sglang/multimodal_gen/runtime/layers/attention/backends/subblock_sparse/__init__.py",
+          "size": 828,
+          "git_blob_sha1": "5a3838e3b72dc752adecdc921b094de002e4d5bf"
+        },
+        {
+          "path": "python/sglang/multimodal_gen/runtime/layers/attention/backends/subblock_sparse/kernels.py",
+          "size": 10799,
+          "git_blob_sha1": "8de3d732f3e1ae2b9c5c24df50228f83cdaf821c"
+        },
+        {
+          "path": "python/sglang/multimodal_gen/runtime/layers/attention/backends/subblock_sparse/router.py",
+          "size": 14264,
+          "git_blob_sha1": "cedc1e655a68b675f39c4c03d8189fef386cc3ad"
+        },
+        {
+          "path": "python/sglang/multimodal_gen/runtime/layers/attention/backends/subblock_sparse_attn.py",
+          "size": 29659,
+          "git_blob_sha1": "58b791f456b2e941f53abd1190d6186aef9f42c6"
+        },
+        {
+          "path": "python/sglang/multimodal_gen/runtime/loader/minimax_h3_weights.py",
+          "size": 4667,
+          "git_blob_sha1": "4decec47873d3826da52deb4cba0906a0216ddc6"
+        },
+        {
+          "path": "python/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py",
+          "size": 121425,
+          "git_blob_sha1": "01002aefd6ee42dcb1baef0a03805afad2193752"
+        },
+        {
+          "path": "python/sglang/multimodal_gen/runtime/models/dits/minimax_h3_adaln_cache.py",
+          "size": 35007,
+          "git_blob_sha1": "ffa9163f1c18acf8c90f6262d7ba61bcb299e022"
+        },
+        {
+          "path": "python/sglang/multimodal_gen/runtime/models/dits/minimax_h3_vdn.py",
+          "size": 40392,
+          "git_blob_sha1": "9b6d5f8f60de8ccde70ad6748469d1e3eaf84cfc"
+        },
+        {
+          "path": "python/sglang/multimodal_gen/runtime/models/dits/minimax_h3_vdn_attention.py",
+          "size": 22355,
+          "git_blob_sha1": "3413084fff66dc2bc34722b83f10b336b07d5b51"
+        },
+        {
+          "path": "python/sglang/multimodal_gen/runtime/pipelines/minimax_h3_vdn_pipeline.py",
+          "size": 483,
+          "git_blob_sha1": "0587a1df8b02306157bb65d00c75c2ecd1a3f2b3"
+        }
+      ]
+    },
+    {
+      "name": "cache-dit",
+      "repository": "vipshop/cache-dit",
+      "commit": "a7898aaf1ba2c2aabdd94a9526fb5fb82ddc900e",
+      "commit_date": "2026-09-29T04:40:40Z",
+      "license": {
+        "spdx": "Apache-2.0",
+        "path": "LICENSE",
+        "scope": "repository code; per-file third-party notices and model-weight terms are separate"
+      },
+      "scope": "DBCache Fn/Mn/Bn residual reuse and invalidation",
+      "selection": "selected-files",
+      "tree_api": "https://api.github.com/repos/vipshop/cache-dit/git/trees/a7898aaf1ba2c2aabdd94a9526fb5fb82ddc900e?recursive=1",
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 11434,
+          "git_blob_sha1": "e27f99d89cc9e2f4fe8c64dc544f9bf40c4747c1"
+        },
+        {
+          "path": "README.md",
+          "size": 14173,
+          "git_blob_sha1": "58235be4f58e41b8229cace10e64b72c94e6fe50"
+        },
+        {
+          "path": "pyproject.toml",
+          "size": 2856,
+          "git_blob_sha1": "7d3b4713e6cd7b91c0add078886bcf485e96c5dc"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_blocks/__init__.py",
+          "size": 8326,
+          "git_blob_sha1": "738096250aee5e2a8ad75980c8f544954e9213ac"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_blocks/offload_utils.py",
+          "size": 3017,
+          "git_blob_sha1": "e87e5726bc3d29d191514643c43f53187f226188"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_blocks/pattern_0_1_2.py",
+          "size": 577,
+          "git_blob_sha1": "285ae758b4d69de2cec034070e946a2b897eb5d4"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_blocks/pattern_3_4_5.py",
+          "size": 15902,
+          "git_blob_sha1": "bb3537fa46ae6f73c4ed9158685b3ff5d127c1a3"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_blocks/pattern_base.py",
+          "size": 24788,
+          "git_blob_sha1": "44ca9bf7a4587d1376e933339ebee7b6360067dc"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_blocks/pattern_utils.py",
+          "size": 3661,
+          "git_blob_sha1": "d0d686f9dbf82be11e6574adb392a2f8f49bc1d5"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_contexts/__init__.py",
+          "size": 546,
+          "git_blob_sha1": "a9e547fb06c766aa4186a2c85909e244106389d3"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_contexts/cache_config.py",
+          "size": 10614,
+          "git_blob_sha1": "c63f76461744c47b6c2c2a0727c2cb6ca503e0e1"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_contexts/cache_context.py",
+          "size": 13189,
+          "git_blob_sha1": "c38d8fb816bd7c84a48279e5a11cf0224ad595a5"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_contexts/cache_manager.py",
+          "size": 39298,
+          "git_blob_sha1": "d9bde7d71c50a45d4c1584fb6e38c501661ad829"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_contexts/calibrators/__init__.py",
+          "size": 12211,
+          "git_blob_sha1": "71922af4f0f65306ba3873e42488ac247d6b927d"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_contexts/calibrators/base.py",
+          "size": 1868,
+          "git_blob_sha1": "120c3045a6d68a8f04900d45cdc6a10c4a3db897"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_contexts/calibrators/dmd.py",
+          "size": 20511,
+          "git_blob_sha1": "fbf4af07cae6278d43eb4b266dad975a24bf89ab"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_contexts/calibrators/foca.py",
+          "size": 12111,
+          "git_blob_sha1": "3952bfb952e780a461b89479a41d093ce5cac0b0"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_contexts/calibrators/taylorseer.py",
+          "size": 8678,
+          "git_blob_sha1": "b2e7d37138149a6c349e7379753d0dc832d33d0b"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_contexts/context_manager.py",
+          "size": 848,
+          "git_blob_sha1": "5957ff06214904dd5556b71f967b44395e56b72e"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_contexts/prune_config.py",
+          "size": 3507,
+          "git_blob_sha1": "0062390283860f001c9c6146b475f2911941293d"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_contexts/prune_context.py",
+          "size": 5974,
+          "git_blob_sha1": "04cc4f1e9e85b5b182bede08aa85ba3722ab8558"
+        },
+        {
+          "path": "src/cache_dit/caching/cache_contexts/prune_manager.py",
+          "size": 5584,
+          "git_blob_sha1": "b058acb19db05d7d75c38d81a374b4ce33774889"
+        },
+        {
+          "path": "src/cache_dit/caching/forward_pattern.py",
+          "size": 2332,
+          "git_blob_sha1": "f3e1df409cfd9f387e8d37e55197387e75c63684"
+        }
+      ]
+    },
+    {
+      "name": "fastvideo",
+      "repository": "hao-ai-lab/FastVideo",
+      "commit": "d5253fd71055927f12aa6c4aa679b93a00238851",
+      "commit_date": "2026-10-09T22:49:08Z",
+      "license": {
+        "spdx": "Apache-2.0",
+        "path": "LICENSE",
+        "scope": "repository code; per-file third-party notices and model-weight terms are separate"
+      },
+      "scope": "FastH3 trained VSA, full-query output, exact fusions and trained schedule",
+      "selection": "selected-files",
+      "tree_api": "https://api.github.com/repos/hao-ai-lab/FastVideo/git/trees/d5253fd71055927f12aa6c4aa679b93a00238851?recursive=1",
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 10757,
+          "git_blob_sha1": "a7b8b5e6a6dc555ad43165aa5b8f65c120032468"
+        },
+        {
+          "path": "README.md",
+          "size": 16012,
+          "git_blob_sha1": "a737e1907502eb0d1ba49d44a9f2dde630a25270"
+        },
+        {
+          "path": "docs/cookbook/minimax-h3.md",
+          "size": 20403,
+          "git_blob_sha1": "265a508d6d09987f6eea44858b743619933dc9b8"
+        },
+        {
+          "path": "docs/inference/fasth3-distilled.md",
+          "size": 10755,
+          "git_blob_sha1": "d77f68bd5a97c18e87d49e1a2a5799081c91f1db"
+        },
+        {
+          "path": "fastvideo/attention/backends/video_sparse_attn.py",
+          "size": 17392,
+          "git_blob_sha1": "cf77e13d7eaad80ac2dbfd1314860dc8b7aa0e50"
+        },
+        {
+          "path": "fastvideo/attention/backends/video_sparse_attn_h3.py",
+          "size": 52662,
+          "git_blob_sha1": "10741e394e10ad523a11c0d1e1321b86c14be4a5"
+        },
+        {
+          "path": "fastvideo/configs/models/dits/minimax_h3.py",
+          "size": 4263,
+          "git_blob_sha1": "b67f2993f5e8b0344c8f722a2c03d84277689c84"
+        },
+        {
+          "path": "fastvideo/models/dits/minimax_h3.py",
+          "size": 59930,
+          "git_blob_sha1": "070d13637841c9668a3ae0bf86daf94a6a0574d0"
+        },
+        {
+          "path": "fastvideo/models/dits/minimax_h3_fusions/__init__.py",
+          "size": 547,
+          "git_blob_sha1": "d534e01dfb12ea1e0fe612e64ddc3b93326b2fde"
+        },
+        {
+          "path": "fastvideo/models/dits/minimax_h3_fusions/exact.py",
+          "size": 12025,
+          "git_blob_sha1": "d860e7fc7b61d6b5faa3bc70350c40e893df53dc"
+        },
+        {
+          "path": "fastvideo/models/dits/minimax_h3_fusions/modulation.py",
+          "size": 14003,
+          "git_blob_sha1": "961250edb48fc9d5659d5de3bc19e6f9762d4d3e"
+        },
+        {
+          "path": "fastvideo/models/dits/minimax_h3_fusions/qknorm_rope.py",
+          "size": 8057,
+          "git_blob_sha1": "1575cbf579adcf758623ef5b887841764798f0d5"
+        },
+        {
+          "path": "fastvideo/models/dits/minimax_h3_fusions/swiglu.py",
+          "size": 4189,
+          "git_blob_sha1": "9c703ce1675fac8a26bc7796ddef92cda54aff46"
+        },
+        {
+          "path": "fastvideo/pipelines/basic/minimax_h3/vsa_guard.py",
+          "size": 1795,
+          "git_blob_sha1": "5820252acdd3ed65a86d24f15937ad7aec21c209"
+        },
+        {
+          "path": "fastvideo/tests/stages/test_minimax_h3_vsa_guard.py",
+          "size": 3118,
+          "git_blob_sha1": "655909f3402931863a32497f4540cea5f65e57a9"
+        },
+        {
+          "path": "pyproject.toml",
+          "size": 12235,
+          "git_blob_sha1": "dbe0fa6082254828c90abd31ce5eb535a1132446"
+        }
+      ]
+    },
+    {
+      "name": "runninghub",
+      "repository": "RH-RunningHub/MiniMax-H3-MultiGPU-Lightning",
+      "commit": "e8f860bb71bc7793e2614e471bbb7e375a8acde7",
+      "commit_date": "2026-09-26T19:48:54Z",
+      "license": {
+        "spdx": "Apache-2.0",
+        "path": "LICENSE",
+        "scope": "repository code; per-file third-party notices and model-weight terms are separate"
+      },
+      "scope": "Published recipe and vendored pin; no RH private weights",
+      "selection": "selected-files",
+      "tree_api": "https://api.github.com/repos/RH-RunningHub/MiniMax-H3-MultiGPU-Lightning/git/trees/e8f860bb71bc7793e2614e471bbb7e375a8acde7?recursive=1",
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 11346,
+          "git_blob_sha1": "9c422689c8f5c317c7c65153b1209349ec57007e"
+        },
+        {
+          "path": "README.md",
+          "size": 22239,
+          "git_blob_sha1": "e1df46e09e36a4d1fa8af51a73eef7297d81d28e"
+        },
+        {
+          "path": "README_CN.md",
+          "size": 21060,
+          "git_blob_sha1": "d2a62145d89f50f9ed8ec55245698e6638960e18"
+        },
+        {
+          "path": "sglang/RH-PIN.md",
+          "size": 1881,
+          "git_blob_sha1": "f7ba883b263bf820440f8a8bdd9052a7c2aa3844"
+        },
+        {
+          "path": "sglang/python/sglang/multimodal_gen/runtime/cache/cache_dit_integration.py",
+          "size": 35849,
+          "git_blob_sha1": "d200e6f8685fcb575679595e352a60394cd90c17"
+        },
+        {
+          "path": "sglang/python/sglang/multimodal_gen/runtime/models/dits/minimax_h3.py",
+          "size": 107621,
+          "git_blob_sha1": "276baf52815ba94e966508898c096ac59bbb5db7"
+        }
+      ]
+    },
+    {
+      "name": "vdn",
+      "repository": "OpenVDN/vdn-minimax-h3",
+      "commit": "e262cb5770b3dc992d4f44f251cd17bbfe0c4d8b",
+      "commit_date": "2026-10-05T04:44:57Z",
+      "license": {
+        "spdx": "Apache-2.0",
+        "path": "LICENSE",
+        "scope": "repository code; per-file third-party notices and model-weight terms are separate"
+      },
+      "scope": "Trained hybrid window and bidirectional Delta branch, LoRA and distillation configs",
+      "selection": "selected-files",
+      "tree_api": "https://api.github.com/repos/OpenVDN/vdn-minimax-h3/git/trees/e262cb5770b3dc992d4f44f251cd17bbfe0c4d8b?recursive=1",
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 11358,
+          "git_blob_sha1": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+        },
+        {
+          "path": "README.md",
+          "size": 19900,
+          "git_blob_sha1": "5416e7652ac6726000c7dfa4f2ae87abae78cb23"
+        },
+        {
+          "path": "configs/inference/8nfe_tuned.yaml",
+          "size": 707,
+          "git_blob_sha1": "5a5ac3f79cabe6c335e2d075c014ab686d00adac"
+        },
+        {
+          "path": "configs/inference/8nfe_tuned_fp8_ulysses_b200.yaml",
+          "size": 1044,
+          "git_blob_sha1": "25c924216adc7faa9b8cd641e42ce496caac30be"
+        },
+        {
+          "path": "configs/training/stage_a1_c1_vdn_anchor.yaml",
+          "size": 2164,
+          "git_blob_sha1": "17c1f2755599ef815381af2df8d199e6830970d2"
+        },
+        {
+          "path": "configs/training/stage_a2_c1_vdn_anchor.yaml",
+          "size": 1324,
+          "git_blob_sha1": "21a414e9b45ecfea74b7aa18fd1b28738a4b283a"
+        },
+        {
+          "path": "configs/training/stage_b_c1_vdn_anchor.yaml",
+          "size": 2060,
+          "git_blob_sha1": "e766521877aef55ee8d1ff01cea6b0acf0375137"
+        },
+        {
+          "path": "configs/training/stage_dmd_vdn.yaml",
+          "size": 1868,
+          "git_blob_sha1": "8c9b45f731748f321798309b282dcddb9480c695"
+        },
+        {
+          "path": "licenses/MiniMax-H3-Community-License-Agreement.txt",
+          "size": 17604,
+          "git_blob_sha1": "c389b45855337ccec8ddeb389f4fe902abcd0b19"
+        },
+        {
+          "path": "src/inference/utils/lora.py",
+          "size": 5274,
+          "git_blob_sha1": "9caa1253261ee807568f1f7570426d6579078f25"
+        },
+        {
+          "path": "src/models/attention_gates.py",
+          "size": 3032,
+          "git_blob_sha1": "20c39ff27a11014ee9847bb183095a8723897e8a"
+        },
+        {
+          "path": "src/models/hybrid_attention.py",
+          "size": 14503,
+          "git_blob_sha1": "2bb5cdd347cb5ff51b011d887033722ec86b03f7"
+        },
+        {
+          "path": "src/models/hybrid_transform.py",
+          "size": 6982,
+          "git_blob_sha1": "e72081ff4a5b0c58bf7b03bd970524bb7bdbb1c3"
+        },
+        {
+          "path": "src/models/linear_attention/__init__.py",
+          "size": 577,
+          "git_blob_sha1": "74bad8c101a0ec46f87a4cfc33abc039eeaba28e"
+        },
+        {
+          "path": "src/models/linear_attention/branch.py",
+          "size": 28295,
+          "git_blob_sha1": "89a15f97955ef65c5d999cb4005b7c1ce0d5659f"
+        },
+        {
+          "path": "src/models/linear_attention/delta_rule.py",
+          "size": 4554,
+          "git_blob_sha1": "5595a849c2acdc3488e3221c29265ede35801eda"
+        },
+        {
+          "path": "src/models/linear_attention/features.py",
+          "size": 9930,
+          "git_blob_sha1": "72a748c1c83dee8d0e71f5c1ffcfbddabdd4db94"
+        },
+        {
+          "path": "src/models/linear_attention/kernels.py",
+          "size": 2844,
+          "git_blob_sha1": "5917dfda80b03fed0f8f5858e4b2885a99aec8a4"
+        },
+        {
+          "path": "src/models/linear_attention/layers.py",
+          "size": 4065,
+          "git_blob_sha1": "e21133d3972cf367329606554dbf0ff2e92e608d"
+        },
+        {
+          "path": "src/models/linear_attention/scan.py",
+          "size": 20458,
+          "git_blob_sha1": "ff6f0165c532496e3d9ccacfefee8aac26eeb10c"
+        },
+        {
+          "path": "src/models/softmax_attention/__init__.py",
+          "size": 401,
+          "git_blob_sha1": "fb4697c6e2b8c1c8b2ac73a9afc9631fe9e96b28"
+        },
+        {
+          "path": "src/models/softmax_attention/decomposed.py",
+          "size": 10022,
+          "git_blob_sha1": "3f96da4fdfac40dd76c9b2316b05e47d720a77c4"
+        },
+        {
+          "path": "src/models/softmax_attention/dense_processor.py",
+          "size": 2075,
+          "git_blob_sha1": "88a456d1445f2c05df0b3457012b216cdba9f273"
+        },
+        {
+          "path": "src/models/softmax_attention/flex_attention.py",
+          "size": 14884,
+          "git_blob_sha1": "fe0382f92e7f179fd0a044f350f74114aa16fb0e"
+        },
+        {
+          "path": "src/models/softmax_attention/kernels.py",
+          "size": 2645,
+          "git_blob_sha1": "a2dfd7195192371a31ce86bc351cc0eaba4012fd"
+        },
+        {
+          "path": "src/models/softmax_attention/window.py",
+          "size": 5634,
+          "git_blob_sha1": "cd0999897f84b6bd5afad44b3e9b15c5abe622ce"
+        },
+        {
+          "path": "src/training/train_stage_dmd.py",
+          "size": 26840,
+          "git_blob_sha1": "8dd3aa65de5e569850a603eb3ebfdcf52918e9bd"
+        }
+      ]
+    },
+    {
+      "name": "sageattention",
+      "repository": "thu-ml/SageAttention",
+      "commit": "d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5",
+      "commit_date": "2026-01-17T17:43:28Z",
+      "license": {
+        "spdx": "Apache-2.0",
+        "path": "LICENSE",
+        "scope": "repository code; per-file third-party notices and model-weight terms are separate"
+      },
+      "scope": "INT8-QK/FP8-PV dispatch, quantization and native SM80/89/90 CUDA source",
+      "selection": "selected-files",
+      "tree_api": "https://api.github.com/repos/thu-ml/SageAttention/git/trees/d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5?recursive=1",
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 11357,
+          "git_blob_sha1": "927221d60ead6d111f4083b06c39a1be702dbb08"
+        },
+        {
+          "path": "README.md",
+          "size": 11335,
+          "git_blob_sha1": "88a3fb78f881eb8253d842a31be91912dd5ede9b"
+        },
+        {
+          "path": "csrc/cp_async.cuh",
+          "size": 5101,
+          "git_blob_sha1": "c877c16e20e0adb5058eb90368010066052e50cd"
+        },
+        {
+          "path": "csrc/dispatch_utils.h",
+          "size": 6233,
+          "git_blob_sha1": "6d798e681751a4cb379abcb24317669a50f431c6"
+        },
+        {
+          "path": "csrc/fused/fused.cu",
+          "size": 35567,
+          "git_blob_sha1": "fb8b9f15c4106a911861f3eff30d7a21bc665762"
+        },
+        {
+          "path": "csrc/fused/fused.h",
+          "size": 2445,
+          "git_blob_sha1": "268b283513792d29ac0a7efe8505b9cac395cb8e"
+        },
+        {
+          "path": "csrc/fused/pybind.cpp",
+          "size": 2107,
+          "git_blob_sha1": "bffdb06008fb3e20cf506aece6d56dc94fd9572f"
+        },
+        {
+          "path": "csrc/math.cuh",
+          "size": 4624,
+          "git_blob_sha1": "0a60c08365557d31a2092ad87d24f6dede8e3cfd"
+        },
+        {
+          "path": "csrc/mma.cuh",
+          "size": 26952,
+          "git_blob_sha1": "7cda7a5e09b725aa18ff2f8c1b08fe9604dd3761"
+        },
+        {
+          "path": "csrc/numeric_conversion.cuh",
+          "size": 4685,
+          "git_blob_sha1": "88f80f501e64af9377efbe1d996ee4b06cd97682"
+        },
+        {
+          "path": "csrc/permuted_smem.cuh",
+          "size": 7915,
+          "git_blob_sha1": "e831b9390c6cba15c56430805cbea72dcd06efe9"
+        },
+        {
+          "path": "csrc/qattn/attn_cuda_sm80.h",
+          "size": 2568,
+          "git_blob_sha1": "83e830de5243958e468b3d8290efdf99eb8cb638"
+        },
+        {
+          "path": "csrc/qattn/attn_cuda_sm89.h",
+          "size": 4225,
+          "git_blob_sha1": "f45f8d7ca61858768a1cdd56c8e311bff7283242"
+        },
+        {
+          "path": "csrc/qattn/attn_cuda_sm90.h",
+          "size": 1687,
+          "git_blob_sha1": "822ab7f43f54ab3a49d2b09479288dd4e269546c"
+        },
+        {
+          "path": "csrc/qattn/attn_utils.cuh",
+          "size": 36500,
+          "git_blob_sha1": "6f8b87c87288ae341ffbce718f0e3b4ba869938c"
+        },
+        {
+          "path": "csrc/qattn/pybind_sm80.cpp",
+          "size": 1261,
+          "git_blob_sha1": "0d5e71ce9e1196a2c775b8488234e949842c4d1c"
+        },
+        {
+          "path": "csrc/qattn/pybind_sm89.cpp",
+          "size": 1771,
+          "git_blob_sha1": "559179ceba53826116d0f67e2c1d2859fb0e7bf0"
+        },
+        {
+          "path": "csrc/qattn/pybind_sm90.cpp",
+          "size": 948,
+          "git_blob_sha1": "8900b641dd4a7ff1e0833a515007c0a7eb416633"
+        },
+        {
+          "path": "csrc/qattn/qk_int_sv_f16_cuda_sm80.cu",
+          "size": 56016,
+          "git_blob_sha1": "bdedaf66d873aa38a51ef36c0a0342426df1ebaa"
+        },
+        {
+          "path": "csrc/qattn/qk_int_sv_f8_cuda_sm89.cuh",
+          "size": 30457,
+          "git_blob_sha1": "f39719f97ab8999b2c247bd3fb2fa8d51fdb372a"
+        },
+        {
+          "path": "csrc/qattn/qk_int_sv_f8_cuda_sm90.cu",
+          "size": 33350,
+          "git_blob_sha1": "e9e5ccf55a72a90ab2da886339f49846d1f4c9cb"
+        },
+        {
+          "path": "csrc/qattn/sm89_qk_int8_sv_f8_accum_f16_attn_inst_buf.cu",
+          "size": 6918,
+          "git_blob_sha1": "c66a81f16ac8c8320d3594d119f61c0062f32f39"
+        },
+        {
+          "path": "csrc/qattn/sm89_qk_int8_sv_f8_accum_f16_fuse_v_scale_attn_inst_buf.cu",
+          "size": 7242,
+          "git_blob_sha1": "727030fd9e5a14c85749fa56c08ce70cf65ea76e"
+        },
+        {
+          "path": "csrc/qattn/sm89_qk_int8_sv_f8_accum_f32_attn.cu",
+          "size": 6911,
+          "git_blob_sha1": "d99d1aa8d6cd0c3e8a0c17e58d5755a7f827b796"
+        },
+        {
+          "path": "csrc/qattn/sm89_qk_int8_sv_f8_accum_f32_attn_inst_buf.cu",
+          "size": 6918,
+          "git_blob_sha1": "14b9b03a2e78cbf25eed43fa5d9894d1a5152d7d"
+        },
+        {
+          "path": "csrc/qattn/sm89_qk_int8_sv_f8_accum_f32_fuse_v_scale_attn.cu",
+          "size": 7235,
+          "git_blob_sha1": "918b15640095309eac7676dfd6e2f9f2176d6eff"
+        },
+        {
+          "path": "csrc/qattn/sm89_qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf.cu",
+          "size": 7243,
+          "git_blob_sha1": "cc1a85c544849652883bfe5989a2a5b847f59192"
+        },
+        {
+          "path": "csrc/qattn/sm89_qk_int8_sv_f8_accum_f32_fuse_v_scale_fuse_v_mean_attn.cu",
+          "size": 7536,
+          "git_blob_sha1": "fb3db8b970b85982c3872a56ae0b5ff547855933"
+        },
+        {
+          "path": "csrc/reduction_utils.cuh",
+          "size": 5578,
+          "git_blob_sha1": "f6f74c456fe11876778de7f130b3d6ddf807132c"
+        },
+        {
+          "path": "csrc/utils.cuh",
+          "size": 1618,
+          "git_blob_sha1": "ca83d2ceca07a145ca52ef52f232d7889724e5be"
+        },
+        {
+          "path": "csrc/wgmma.cuh",
+          "size": 16764,
+          "git_blob_sha1": "f25d6c8755e5d6cdcf5b8d1fdb38f3b9b2f1e0c9"
+        },
+        {
+          "path": "pyproject.toml",
+          "size": 140,
+          "git_blob_sha1": "8ae70544c50f4f48f4a9c9ab31ed2b2981a94966"
+        },
+        {
+          "path": "sageattention/core.py",
+          "size": 43949,
+          "git_blob_sha1": "96da4c02a3c40ba3802191de51f3e45638d64646"
+        },
+        {
+          "path": "sageattention/quant.py",
+          "size": 11870,
+          "git_blob_sha1": "e0208b0b607acfbf202c6b2480fe8e278dba15b9"
+        },
+        {
+          "path": "sageattention/triton/__init__.py",
+          "size": 0,
+          "git_blob_sha1": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+        },
+        {
+          "path": "sageattention/triton/attn_qk_int8_block_varlen.py",
+          "size": 5852,
+          "git_blob_sha1": "724c411a9621639f6a547e94902f62395943314d"
+        },
+        {
+          "path": "sageattention/triton/attn_qk_int8_per_block.py",
+          "size": 8031,
+          "git_blob_sha1": "401ac3c06abca675484923d43b18231aaf7d886c"
+        },
+        {
+          "path": "sageattention/triton/attn_qk_int8_per_block_causal.py",
+          "size": 7227,
+          "git_blob_sha1": "06621f0cb0a8956b49f7bfc55887114821055ed5"
+        },
+        {
+          "path": "sageattention/triton/attn_qk_int8_per_block_causal_varlen.py",
+          "size": 6520,
+          "git_blob_sha1": "79eec97edc5203ca862a129aff777583a3542635"
+        },
+        {
+          "path": "sageattention/triton/quant_per_block.py",
+          "size": 4117,
+          "git_blob_sha1": "19a9c36bd594c3a96fd20938b2e72c392d1002ff"
+        },
+        {
+          "path": "sageattention/triton/quant_per_block_varlen.py",
+          "size": 3914,
+          "git_blob_sha1": "0294a67bea14dec4189012154a0da41f6d5702ab"
+        },
+        {
+          "path": "sageattention/triton/quant_per_thread.py",
+          "size": 9383,
+          "git_blob_sha1": "ab81f57c3e6dd9df89946ba54c4e2c3844c94d34"
+        },
+        {
+          "path": "setup.py",
+          "size": 10642,
+          "git_blob_sha1": "6b2c5b43efd134d045ebb12b373ab7843b4e9755"
+        }
+      ]
+    },
+    {
+      "name": "vllm-omni",
+      "repository": "vllm-project/vllm-omni",
+      "commit": "213a1c835ed595d6a51d4f918e3920f4159dd7ed",
+      "commit_date": "2026-10-11T10:40:44Z",
+      "license": {
+        "spdx": "Apache-2.0",
+        "path": "LICENSE",
+        "scope": "repository code; per-file third-party notices and model-weight terms are separate"
+      },
+      "scope": "Mainline exact AdaLN projection cache and strict sidecar contract",
+      "selection": "selected-files",
+      "tree_api": "https://api.github.com/repos/vllm-project/vllm-omni/git/trees/213a1c835ed595d6a51d4f918e3920f4159dd7ed?recursive=1",
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 11357,
+          "git_blob_sha1": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64"
+        },
+        {
+          "path": "README.md",
+          "size": 9662,
+          "git_blob_sha1": "ca155cd425a944ff8857c420bfefe6ab0e6ec4b7"
+        },
+        {
+          "path": "pyproject.toml",
+          "size": 16011,
+          "git_blob_sha1": "86f6ebe7c755c7a3bbaaa58c7c4f769c7a356f8d"
+        },
+        {
+          "path": "tests/diffusion/models/minimax_h3/test_adaln_cache.py",
+          "size": 26131,
+          "git_blob_sha1": "3a3204631768a0335ed80213fba8a98238b66e44"
+        },
+        {
+          "path": "tools/minimax_h3/build_adaln_cache.py",
+          "size": 5904,
+          "git_blob_sha1": "653332355e1df535a5e56b6b158dffc14890ab99"
+        },
+        {
+          "path": "vllm_omni/diffusion/cache/exact_projection_cache.py",
+          "size": 8045,
+          "git_blob_sha1": "896dbc4dd4be9b1fa87cd3ba6f1759af63950d78"
+        },
+        {
+          "path": "vllm_omni/diffusion/models/minimax_h3/adaln_cache.py",
+          "size": 21457,
+          "git_blob_sha1": "572381788f9748b832520f7959c934604e19ffb5"
+        },
+        {
+          "path": "vllm_omni/diffusion/models/minimax_h3/attention/fastvideo_h3.py",
+          "size": 9236,
+          "git_blob_sha1": "c74eaee2d7fa0102961a5602e7ac15f9641291bb"
+        },
+        {
+          "path": "vllm_omni/diffusion/models/minimax_h3/minimax_h3_transformer.py",
+          "size": 77405,
+          "git_blob_sha1": "a2e7eb2928bbef786f5843f7c6e3ac0cbaa97d29"
+        }
+      ]
+    },
+    {
+      "name": "lightx2v",
+      "repository": "ModelTC/LightX2V",
+      "commit": "4fe984c07b1610338e97f8c7a268dceef8fd9966",
+      "commit_date": "2026-10-10T12:14:02Z",
+      "license": {
+        "spdx": "Apache-2.0",
+        "path": "LICENSE",
+        "scope": "repository code; per-file third-party notices and model-weight terms are separate"
+      },
+      "scope": "H3 PEFT loading, separate audio/video scheduler and public 768p Turbo recipe",
+      "selection": "selected-files",
+      "tree_api": "https://api.github.com/repos/ModelTC/LightX2V/git/trees/4fe984c07b1610338e97f8c7a268dceef8fd9966?recursive=1",
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 11357,
+          "git_blob_sha1": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64"
+        },
+        {
+          "path": "README.md",
+          "size": 26691,
+          "git_blob_sha1": "658b116427b2ffa74b668f05d59f53cbe89f4010"
+        },
+        {
+          "path": "configs/minimax_h3/dmd/minimax_h3_bf16_4step.json",
+          "size": 845,
+          "git_blob_sha1": "b652e60e383c577fc35e106e62adb6a9f848e031"
+        },
+        {
+          "path": "configs/minimax_h3/dmd/minimax_h3_fp8_8step.json",
+          "size": 1062,
+          "git_blob_sha1": "d9b44a9a978c5a6130f377be79863679f867c4a0"
+        },
+        {
+          "path": "configs/minimax_h3/dmd/minimax_h3_ref2av_4step.json",
+          "size": 924,
+          "git_blob_sha1": "4c90677cb89501ba13bfeca573f3cb9053c06f39"
+        },
+        {
+          "path": "examples/minimax_h3/minimax_h3_t2av_dmd.py",
+          "size": 1287,
+          "git_blob_sha1": "161ae4116514536c4abab36439f8c70a8af4bcae"
+        },
+        {
+          "path": "lightx2v/models/networks/minimax_h3/adaln_cache.py",
+          "size": 9626,
+          "git_blob_sha1": "ba129d32534a606fb43325bcb007e7d84a03c15a"
+        },
+        {
+          "path": "lightx2v/models/networks/minimax_h3/infer/fused_qkv.py",
+          "size": 8021,
+          "git_blob_sha1": "8684544e28af5a4ab61416ecedcda48837269cb9"
+        },
+        {
+          "path": "lightx2v/models/networks/minimax_h3/infer/transformer_infer.py",
+          "size": 11358,
+          "git_blob_sha1": "6670102a9dba798a1b8457bdbc1d6be632baac05"
+        },
+        {
+          "path": "lightx2v/models/networks/minimax_h3/lora.py",
+          "size": 9943,
+          "git_blob_sha1": "5bff7bb247a068ea0e60e693efe9bb9e80af316d"
+        },
+        {
+          "path": "lightx2v/models/networks/minimax_h3/model.py",
+          "size": 37679,
+          "git_blob_sha1": "90f62b1308c529b6b0c4a0bbe96e748fd1ada2b2"
+        },
+        {
+          "path": "lightx2v/models/networks/minimax_h3/weights/transformer_weights.py",
+          "size": 10348,
+          "git_blob_sha1": "602f7c7fdd49099e10f2e8c4599011637cb3adc8"
+        },
+        {
+          "path": "lightx2v/models/runners/minimax_h3/minimax_h3_runner.py",
+          "size": 38365,
+          "git_blob_sha1": "f226f4ff27d86f9cbc9929fafb5a03ecae3e6c66"
+        },
+        {
+          "path": "lightx2v/models/schedulers/minimax_h3/scheduler.py",
+          "size": 9629,
+          "git_blob_sha1": "00e5caaa964176c11325f1a5080267c459e2614e"
+        },
+        {
+          "path": "pyproject.toml",
+          "size": 2479,
+          "git_blob_sha1": "6b3233d65b09b1ba2e01e74290e7a4c03b4a5007"
+        }
+      ]
+    },
+    {
+      "name": "lightx2v-turbo",
+      "repository": "ModelTC/Minimax-H3-Turbo",
+      "commit": "02e26d591f7a04d5d1a074c9566d5dd4f22f6225",
+      "commit_date": "2026-08-27T11:04:13Z",
+      "license": {
+        "spdx": "Apache-2.0",
+        "path": "LICENSE",
+        "scope": "repository code; per-file third-party notices and model-weight terms are separate"
+      },
+      "scope": "Official LightX2V Turbo companion inference and public adapter specifications",
+      "selection": "selected-files",
+      "tree_api": "https://api.github.com/repos/ModelTC/Minimax-H3-Turbo/git/trees/02e26d591f7a04d5d1a074c9566d5dd4f22f6225?recursive=1",
+      "files": [
+        {
+          "path": "COMFYUI_SETUP_AND_INFERENCE.md",
+          "size": 2966,
+          "git_blob_sha1": "20eca32a10e2ec399234fee242ee344ee52992f3"
+        },
+        {
+          "path": "DIFFUSERS_SETUP_AND_INFERENCE.md",
+          "size": 4121,
+          "git_blob_sha1": "48393d5ce36da68360f6abde4b8d57792c5b7d2d"
+        },
+        {
+          "path": "LICENSE",
+          "size": 11357,
+          "git_blob_sha1": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64"
+        },
+        {
+          "path": "README.md",
+          "size": 9330,
+          "git_blob_sha1": "76a79e939e6a1353d293e2fdfb691976dc32dc90"
+        },
+        {
+          "path": "inference_minimax_h3.py",
+          "size": 44355,
+          "git_blob_sha1": "4d4c97e075061c1a00a050d97fb9d543fd04d919"
+        },
+        {
+          "path": "minimax_h3_ref2va_pipeline.py",
+          "size": 10562,
+          "git_blob_sha1": "32b9a0202545fb6944776123569c52bc4b263666"
+        },
+        {
+          "path": "resolution_util.py",
+          "size": 3290,
+          "git_blob_sha1": "88948b25c6804ee29d1cf79a79792c861720f951"
+        }
+      ]
+    }
+  ]
+}

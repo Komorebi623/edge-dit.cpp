@@ -36,3 +36,16 @@ as SD3/SD3.5, FLUX, Qwen-Image, Qwen-Image-Edit, FLUX-Kontext, and Wan are
 distributed by their respective owners under separate terms. Users are
 responsible for reviewing and complying with those model licenses and usage
 policies.
+
+## MiniMax-H3 Optimization References
+
+The H3-only optimization implementations and CPU mathematical oracles reference
+Apache-2.0 code in SGLang, Cache-DiT, FastVideo, OpenVDN and SageAttention.
+Fixed revisions and upstream license locations are recorded in
+`benchmark/h3_cuda/reference-lock.json` and
+`docs/research/minimax-h3-optimization-sources.md`. The optional local selected
+source snapshots retain upstream LICENSE files; they are not runtime model
+weights or a complete redistributable upstream installation. Preserve per-file
+notices when redistributing derived code. MiniMax-H3, FastH3, Turbo adapters and
+VDN model weights have separate model-card/license requirements; a code license
+does not establish permission to use or redistribute a weight artifact.
