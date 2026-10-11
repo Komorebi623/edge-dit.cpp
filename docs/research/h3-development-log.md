@@ -63,3 +63,11 @@
 
 - 补充融合算子actual CPU图56次对照最大绝对误差0；最终总计12/12 CTest。所有子智能体已关闭，不留后台推理任务。
 - 最终CUDA候选重新链接（含8个独立开关，VDN/VSA显式未支持）；source-tree digest与binary digest进入build provenance，构建期间未运行GPU。
+
+### 分阶段Git记录
+
+- `5a4be52`：固定官方来源、精度锁、基准和媒体工作流。
+- `097bd01`：H3-only CUDA开关、CacheDiT/AdaLN/SubBlock/Sage/Turbo与CPU回归。
+- `3dced15`：VDN/VSA的数学参考及原生基础组件（未完成生产部署）。
+- 未合并main、未推送远端；用户原有未跟踪文件与stash均保留。
+- 已编译候选的source manifest逐文件核对与提交后生产代码一致，源树hash/二进制hash可复核。

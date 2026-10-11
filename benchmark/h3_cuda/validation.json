@@ -54,5 +54,7 @@
     "worst_max_absolute_error": 0.0,
     "cuda_validated": false
   },
-  "candidate_source_tree_sha256": "36a7edf68d313bae84291f543b987b078fd5a3cce294bece9e8f920ac30e6f4a"
+  "candidate_source_tree_sha256": "36a7edf68d313bae84291f543b987b078fd5a3cce294bece9e8f920ac30e6f4a",
+  "tested_source_checkpoint": "3dced15",
+  "build_source_provenance_note": "Compiled from dirty baseline checkout; source_tree_sha256 matches the committed production sources. Binary was not executed on GPU."
 }
