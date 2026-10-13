@@ -71,3 +71,11 @@
 - `3dced15`：VDN/VSA的数学参考及原生基础组件（未完成生产部署）。
 - 未合并main、未推送远端；用户原有未跟踪文件与stash均保留。
 - 已编译候选的source manifest逐文件核对与提交后生产代码一致，源树hash/二进制hash可复核。
+
+## 2026-10-13：交接到另一台服务器
+
+- 用户授权提交全部本任务改动并推送个人origin研究分支，不合并main、不上传原有未跟踪文件。
+- 重写 `h3-coordination-handoff.md` 为当前完整接续说明，消除早期暂停／缺workflow／未hash的过时描述，明确新机器路径与SM90构建限制。
+- 检查当前安装CLI与生成协议：已有resume/fork，原始聊天rollout存在但history_mode为paginated。没有把单JSONL复制称为完整跨服务器恢复；官方文档访问403，未核实App原生跨host交接。
+- 未安装／更新Codex，不启动第二个会话，不复制凭据，不运行GPU。私密会话迁移与代码Git推送分开处理。
+- 当前已完成算法／12项CTest／48workflow／18sourcefetch／5tinyLoRA等结果保持不变；生产GPU多模态质量与性能仍为空。
