@@ -1,5 +1,7 @@
 # MiniMax-H3 CUDA 优化：环境、基线与逐项验证
 
+> **4090接续更新（2026-10-13）**：已完成固定SM89构建、5/5整文件hash、真实CUDA tiny52/52，以及T2VA/Ref2VA mixed卸载baseline。单次fusion为回退而非加速；详细实测/范围见 `h3-4090-results.md`。下文H200“未推理”是历史记录，不代表本机状态。
+
 ## 环境与基线
 
 - 开发分支：`codex/minimax-h3-cuda-optimizations`；原始源码：`97cc585`。

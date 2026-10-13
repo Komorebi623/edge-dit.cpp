@@ -2,6 +2,8 @@
 
 更新：2026-10-13（Asia/Shanghai）。当前选择：在 Mac 的 Codex 中连接另一台服务器，优先空闲 RTX 4090。**本文件是恢复进度入口；不需要重新从头研究，也不依赖旧聊天迁移。**
 
+> **2026-10-13 RTX4090 已接续**：本机独立worktree `_scratch/h3-cuda-continuation`，生产源码提交 `d81041f`。最新实测和下一步看 `h3-4090-results.md` 与 `validation.json.rtx4090_continuation`；不要重新hash下载前已验证记录替代未来新机整文件核验。原始baseline/精度锁不变，AdaLN卸载仍未生产放行。
+
 ## 1. 分支、baseline 与代码状态
 
 - 个人远端：`git@github.com:Komorebi623/edge-dit.cpp.git`；研究分支：`codex/minimax-h3-cuda-optimizations`。

@@ -167,5 +167,188 @@
     "target_gpu_inference_executed": false,
     "target_vram_verified": false,
     "performance_results": null
+  },
+  "rtx4090_continuation": {
+    "date": "2026-10-13",
+    "timezone": "Asia/Shanghai",
+    "handoff_commit": "71cc80d6235dfb5c7326cce1613ebda54dd263b4",
+    "gpu": "NVIDIA GeForce RTX 4090, SM89; one device per inference",
+    "driver": "580.95.05",
+    "cuda_toolkit": "12.2.140",
+    "gcc": "12.4.0",
+    "cudnn": "9.24.0",
+    "full_production_inference_executed": true,
+    "gpu_processes_modified": false,
+    "baseline_source": "97cc585d9dbd9ac5e30b78ef2e2c4a0d8bfbe9f2",
+    "cuda_baseline_build": "passed_sm89_not_yet_production_executed",
+    "baseline_binary_sha256": "e718410a1c84161f5a215a995535c1c42b7babcb681bd1a80aceb2d7c13c9ac7",
+    "model_full_sha256": {
+      "matched": 5,
+      "required_total": 5,
+      "ref2va_full_sha256": "fdaecd3e73cf70a866184e49958c7f17055c5294252921ceac7dc459ce6be11e",
+      "download_repository_revision": "d9c4c6312b4728a68a15a35626d84775a6523783"
+    },
+    "cuda_tiny_parity": {
+      "passed": 52,
+      "total": 52,
+      "elements": 17252,
+      "worst_scaled_error": 0.177624,
+      "f32_modulation_and_gating": true,
+      "f32_f16_swiglu": true,
+      "cpu_fallback": false,
+      "full_model_or_offload_validation": false,
+      "performance_measurement": false,
+      "log": "logs/gpu-parity.log"
+    },
+    "workflow_4090_tests": {
+      "passed": 14,
+      "total": 14
+    },
+    "memory_monitor_tests": {
+      "passed": 7,
+      "total": 7
+    },
+    "gpu_parity_guard_tests": {
+      "passed": 5,
+      "total": 5,
+      "scope": "mocked telemetry only"
+    },
+    "performance_results": {
+      "scope": "first single T2VA pair only; repeated measurement pending",
+      "baseline_cli_ms": 256371.76337488927,
+      "fusion_cli_ms": 299447.0578110777,
+      "speedup": 0.8561505504476695,
+      "latency_change_percent": 16.80188717709912
+    },
+    "production_quality_results": null,
+    "evidence_root": "_scratch/rtx4090-20261013",
+    "comparison_table": "docs/research/h3-4090-results.md",
+    "cuda_candidate_build": "passed_sm89_including_sage",
+    "cpu_ctest": {
+      "passed": 12,
+      "total": 12
+    },
+    "workflow_media_tests": {
+      "passed": 53,
+      "total": 53,
+      "skipped": 0
+    },
+    "cuda_build_config_tests": {
+      "passed": 29,
+      "total": 29
+    },
+    "server_preflight_tests": {
+      "passed": 56,
+      "total": 56
+    },
+    "request_cleanup_tests": {
+      "passed": 29,
+      "total": 29
+    },
+    "capacity_baseline": {
+      "mode": "t2va",
+      "width": 864,
+      "height": 480,
+      "frames": 124,
+      "fps": 24,
+      "steps": 20,
+      "warmup": 0,
+      "repeats": 1,
+      "cli_wall_ms": 256371.76337488927,
+      "native_profile": {
+        "calls": 20,
+        "conditioning_ms": 1387,
+        "decode_ms": 10613,
+        "diffusion_ms": 212910,
+        "noise_ms": 561,
+        "steps": 20,
+        "total_ms": 226286
+      },
+      "memory_sampling": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 944,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 16035.0,
+        "max_sample_gap_seconds": 0.5056797829456627
+      },
+      "media_shape": {
+        "audio_channels": 2,
+        "audio_sample_rate": 32000,
+        "audio_samples_per_channel": 165888,
+        "fps": "24",
+        "frames": 124,
+        "height": 480,
+        "width": 864
+      },
+      "media_validated": true,
+      "semantic_quality_accepted": false,
+      "report": "t2va-capacity/baseline/report.json",
+      "performance_comparison": false
+    },
+    "candidate_binary_sha256": "13724078f8bb5e2e830f43d5901c2e512131bf4f118c4409a5e81a06f6c812d8",
+    "candidate_source_tree_sha256": "cc6f87a2164501114d94602c88fad7830df89887c891093235de9b8f14776332",
+    "production_source_matches_commit": "d81041fbe6621597492b403be663ffa6b8f7d7b9",
+    "fusion_first_pair": {
+      "warmup": 0,
+      "repeats": 1,
+      "mode": "t2va",
+      "status": "valid_single_pair_not_stable_performance_acceptance",
+      "cli_wall_ms": 299447.0578110777,
+      "diffusion_ms": 256339,
+      "memory_sampling": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 1044,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 16351.0,
+        "max_sample_gap_seconds": 0.5540293960366398
+      },
+      "video_mean_ssim": 0.9935092016129032,
+      "video_mean_psnr_db": 48.06459677419355,
+      "audio_rmse": 0.0,
+      "runtime_log": "fused=1 cache_dit=0 adaln=0 sage=0 sparse=0 turbo=0",
+      "report": "t2va-first-comparison/report.json",
+      "adopt_as_default": false
+    },
+    "mixed_capacity_baseline": {
+      "mode": "ref_mixed",
+      "warmup": 0,
+      "repeats": 1,
+      "cli_wall_ms": 627543.2855749968,
+      "native_profile": {
+        "calls": 20,
+        "conditioning_ms": 23848,
+        "decode_ms": 10367,
+        "diffusion_ms": 547711,
+        "noise_ms": 528,
+        "steps": 20,
+        "total_ms": 597285
+      },
+      "memory_sampling": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 1992,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 18751.0,
+        "max_sample_gap_seconds": 0.569167542969808
+      },
+      "media_shape": {
+        "audio_channels": 2,
+        "audio_sample_rate": 32000,
+        "audio_samples_per_channel": 165888,
+        "fps": "24",
+        "frames": 124,
+        "height": 480,
+        "width": 864
+      },
+      "media_validated": true,
+      "semantic_quality_accepted": false,
+      "reference_source": "derived from locked T2VA baseline; image + embedded-audio video + explicit audio, fixed order/hash",
+      "report": "ref-mixed-capacity/baseline/report.json"
+    }
   }
 }
