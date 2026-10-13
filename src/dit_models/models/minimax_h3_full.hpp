@@ -1557,6 +1557,8 @@ namespace MiniMaxH3 {
         }
 
         void validate_cuda_research_execution_mode(const CudaOptimizationOptions& options) const {
+            // Segmented projection prefill has a CPU-tested lifecycle helper,
+            // not a validated CUDA denoiser graph-cut path. Keep offload closed.
             if (options.adaln_cache && (params_backend != runtime_backend ||
                 can_attempt_graph_cut_segmented_compute() || weight_adapter ||
                 h3_env_flag_enabled("ED_MINIMAX_H3_REUSE_GRAPH")))
@@ -1725,8 +1727,10 @@ namespace MiniMaxH3 {
         }
 
         ggml_cgraph* build_adaln_projection_graph(ExactAdaLN::Cache& cache,
-                                                      ExactAdaLN::Cache::StepToken token,
-                                                      const ExactAdaLN::StepPlan& plan) {
+                                                 ExactAdaLN::Cache::StepToken token,
+                                                 const ExactAdaLN::StepPlan& plan,
+                                                 size_t first_projection = 0,
+                                                 size_t projection_count = std::numeric_limits<size_t>::max()) {
             ggml_tensor* features = nullptr;
             ggml_tensor* lower = nullptr;
             ggml_tensor* upper = nullptr;
@@ -1755,7 +1759,7 @@ namespace MiniMaxH3 {
             return ExactAdaLN::build_projection_graph(compute_ctx, cache, token, H3_GRAPH_SIZE,
                 [&](size_t index) {
                     return model.project_adaln(&ctx, embedding, index);
-                });
+                }, first_projection, projection_count);
         }
 
         void prepare_adaln_branch(int n_threads, const DiffusionParams& params) {

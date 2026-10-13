@@ -126,6 +126,12 @@ struct TinyRunner : MiniMaxH3::MiniMaxH3Runner {
               config.attention_head_dim == 128 && config.num_attention_heads == 1,
               "tiny graph must keep H3 head128 and four real blocks");
     }
+    void use_test_host_parameters() {
+        // A second CPU backend tests placement guards without GPU enumeration.
+        check(params_backend == runtime_backend && !params_buffer, "test placement must precede allocation");
+        params_backend = h3_test_cpu_init();
+        check(params_backend != nullptr, "test host backend initialization");
+    }
     void enable(int mib = 8) {
         MiniMaxH3::CudaOptimizationOptions options;
         options.adaln_cache = true;
@@ -198,8 +204,19 @@ struct TinyRunner : MiniMaxH3::MiniMaxH3Runner {
             [&](size_t i, auto token) {
                 return build_adaln_projection_graph(direct, token, state.contract.plans[i]);
             }), EA::Status::Stored, "independent real projection compute/readback");
+        EA::Cache segmented({true, 8u * 1024u * 1024u, 16384});
+        expect(segmented.begin_request(state.contract), EA::Status::Stored, "segmented H3 contract");
+        size_t builds = 0;
+        expect(EA::prefill_request_segmented(*this, segmented, state.contract, 1,
+            [&](size_t i, size_t j, auto token) {
+                ++builds;
+                return build_adaln_projection_graph(segmented, token, state.contract.plans[i], j, 1);
+            }), EA::Status::Stored, "real H3 ranged projection prefill");
+        check(builds == state.contract.plans.size() * 5, "real H3 prefill must split every projection");
         for (size_t i = 0; i < state.contract.plans.size(); ++i) {
-            EA::Cache::StepToken a, b;
+            EA::Cache::StepToken a, b, segmented_token;
+            expect(segmented.bind_step(state.contract, i, state.contract.plans[i], &segmented_token),
+                   EA::Status::Hit, "segmented H3 bind");
             expect(direct.bind_step(state.contract, i, state.contract.plans[i], &a), EA::Status::Hit, "direct bind");
             expect(state.cache->bind_step(state.contract, i, state.contract.plans[i], &b), EA::Status::Hit, "cached bind");
             for (size_t j = 0; j < 5; ++j) {
@@ -210,6 +227,11 @@ struct TinyRunner : MiniMaxH3::MiniMaxH3Runner {
                 expect(state.cache->lookup(b, j, shape, &bv), EA::Status::Hit, "cached readback");
                 check(std::memcmp(av, bv, static_cast<size_t>(shape[0] * shape[1]) * sizeof(float)) == 0,
                       "prefilled projection is not bitexact native F32 readback");
+                const float* segmented_values = nullptr;
+                expect(segmented.lookup(segmented_token, j, shape, &segmented_values), EA::Status::Hit,
+                       "segmented H3 native readback");
+                check(std::memcmp(av, segmented_values, static_cast<size_t>(shape[0] * shape[1]) * sizeof(float)) == 0,
+                      "segmented H3 builder changed the real projection");
             }
         }
     }
@@ -447,7 +469,8 @@ struct NegativeTestGroup : edgedit::parallel::ProcessGroup {
     void broadcast(const edgedit::parallel::Buffer&, int) override {}
 };
 void runtime_mode_test(ggml_backend_t backend) {
-    TinyRunner runner(backend, tiny_weights());
+    TinyRunner runner(backend, tiny_weights()), host_placed(backend, tiny_weights());
+    host_placed.use_test_host_parameters();
     Inputs inputs;
     auto p = inputs.params();
     const char* previous = std::getenv("ED_MINIMAX_H3_REUSE_GRAPH");
@@ -460,6 +483,14 @@ void runtime_mode_test(ggml_backend_t backend) {
         options.sage_attn = method == 2;
         unsetenv("ED_MINIMAX_H3_REUSE_GRAPH");
         runner.validate_cuda_research_execution_mode(options);
+        host_placed.model.cuda_optimizations = options; // negative placement test only
+        rejects_with([&] { host_placed.validate_cuda_research_execution_mode(options); }, "resident immutable",
+                     "CPU lifecycle helpers accidentally enabled production offload");
+        rejects_with([&] { host_placed.compute(1, p); }, "resident immutable",
+                     "offload reached prefill/build despite production guard");
+        check(!host_placed.adaln_branches[0].cache && !host_placed.adaln_branches[1].cache &&
+              !host_placed.model.adaln_cache && !host_placed.model.adaln_graph_inputs,
+              "rejected offload created request cache state");
         runner.model.cuda_optimizations = options; // CPU-only negative test bypass
         setenv("ED_MINIMAX_H3_REUSE_GRAPH", "1", 1);
         rejects_with([&] { runner.compute(1, p); }, "graph reuse disabled",
@@ -487,6 +518,7 @@ void runtime_mode_test(ggml_backend_t backend) {
     runner.model.cuda_optimizations = {};
     setenv("ED_MINIMAX_H3_REUSE_GRAPH", "1", 1);
     runner.validate_cuda_research_execution_mode({}); // baseline unchanged
+    host_placed.validate_cuda_research_execution_mode({}); // baseline placement unchanged
     if (existed) setenv("ED_MINIMAX_H3_REUSE_GRAPH", old.c_str(), 1);
     else unsetenv("ED_MINIMAX_H3_REUSE_GRAPH");
     std::cout << "PASS late AdaLN/SubBlock/Sage reuse/adapter/process-group mutations rejected before prefill; baseline unchanged\n";

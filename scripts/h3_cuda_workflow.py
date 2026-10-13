@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MiniMax-H3 CUDA: freeze inputs, baseline -> candidate -> compare.
+"""MiniMax-H3 CUDA: freeze inputs, baseline-only or baseline -> candidate -> compare.
 
 Stdlib only; ed-cli (not ed-sample) is invoked once per warmup/repeat. Wall
 latency includes process startup, model load and mux, but excludes validation.
@@ -24,6 +24,7 @@ import struct
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from typing import Any
 
 sys.dont_write_bytecode = True
@@ -44,6 +45,7 @@ INPUTS = {
 }
 COMPONENTS = ("fl2va", "ref2va", "llm", "video_vae", "audio_vae")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+GPU_UUID_RE = re.compile(r"^GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 PROFILE_RE = re.compile(r"(?:\[MiniMax-H3\]|minimax-h3)\s+profile(?P<section>[^:\n]*):(?P<body>[^\n]*)", re.I)
 SUMMARY_RE = re.compile(
     r"total=(\d+)\s*ms\s*\|\s*conditioning=(\d+)\s*ms\s*\|\s*"
@@ -151,7 +153,12 @@ def validate_manifest(manifest: dict) -> None:
             "only the locked existing full Q4 weights are eligible; no pruned/distilled/conversion A/B")
     for group in ("models", "assets", "binaries", "sampling", "run", "modes", "locations", "placement"):
         require(isinstance(manifest.get(group), dict), f"missing object: {group}")
-    require(set(manifest["models"]) == set(COMPONENTS), "provide FL2VA, Ref2VA, Qwen and both VAEs")
+    # Single-mode manifests need only that DiT, but every declared component
+    # remains subject to the unchanged full precision/hash lock.
+    required_models = {"llm", "video_vae", "audio_vae"} | {
+        "ref2va" if mode.startswith("ref_") else "fl2va" for mode in manifest["modes"]}
+    require(required_models <= set(manifest["models"]) <= set(COMPONENTS),
+            "provide the selected modes' DiTs, Qwen and both VAEs; unknown models are forbidden")
     for group in ("models", "assets"):
         for name, item in manifest[group].items():
             require(isinstance(item, dict) and isinstance(item.get("path"), str) and item["path"],
@@ -161,8 +168,8 @@ def validate_manifest(manifest: dict) -> None:
                     f"{group}.{name}: sha256 must be a full 64-digit digest or null before lock")
             if "bytes" in item:
                 integer(item["bytes"], f"{group}.{name}.bytes")
-    for key, pinned in zip(COMPONENTS, precision["components"]):
-        item = manifest["models"][key]
+    for key, item in manifest["models"].items():
+        pinned = precision["components"][COMPONENTS.index(key)]
         require(Path(item["path"]).name == pinned["component"] and
                 item.get("bytes") == pinned["bytes"] and item.get("tensor_types") == pinned["tensor_types"] and
                 item.get("source_header_sha256") == pinned["header_sha256"],
@@ -191,16 +198,27 @@ def validate_manifest(manifest: dict) -> None:
     require(sampling["audio_sample_rate"] == 32000 and sampling["audio_channels"] == 2,
             "H3 generated audio must be 32000 Hz stereo")
     settings = manifest["run"]
-    for key in ("warmup", "repeats", "min_free_mib"):
+    integer(settings.get("warmup"), "warmup", 0)
+    for key in ("repeats", "min_free_mib"):
         integer(settings.get(key), key)
+    require(settings.get("phase", "all") in ("all", "baseline-only"), "invalid workflow phase")
     integer(settings.get("gpu_index"), "gpu_index", 0)
+    if "gpu_uuid" in settings:
+        require(isinstance(settings["gpu_uuid"], str) and bool(GPU_UUID_RE.fullmatch(settings["gpu_uuid"])),
+                "gpu_uuid must be one full GPU UUID, not an index or device list")
     positive(settings.get("timeout_seconds"), "timeout_seconds")
     positive(settings.get("media_timeout_seconds"), "media_timeout_seconds")
     positive(settings.get("max_utilization_percent"), "max_utilization_percent", True)
     require(settings["max_utilization_percent"] <= 5, "idle check utilization ceiling must be <=5%")
-    require(set(manifest["placement"]) == {"dit_offload", "text_encoder_offload", "vae_offload"},
+    placement = manifest["placement"]
+    offload_keys = {"dit_offload", "text_encoder_offload", "vae_offload"}
+    require(offload_keys <= set(placement) <= offload_keys | {"max_vram_gib", "cpu_threads"},
             "explicit fixed placement required; auto-fit/quantization changes are not allowed")
-    require(all(type(v) is bool for v in manifest["placement"].values()), "placement values must be boolean")
+    require(all(type(placement[k]) is bool for k in offload_keys), "offload placement values must be boolean")
+    if "max_vram_gib" in placement:
+        positive(placement["max_vram_gib"], "max_vram_gib")
+    if "cpu_threads" in placement:
+        integer(placement["cpu_threads"], "cpu_threads")
     require(set(manifest["binaries"]) == {"baseline", "candidate"}, "exactly baseline/candidate binaries required")
     for phase in ("baseline", "candidate"):
         binary = manifest["binaries"].get(phase, {})
@@ -504,6 +522,8 @@ def gpu_precheck(settings: dict) -> dict:
     selected = next((gpu for gpu in gpus if gpu["index"] == settings["gpu_index"]), None)
     chosen = dict(selected) if selected is not None else None
     require(chosen is not None, "selected GPU not found")
+    if "gpu_uuid" in settings:
+        require(chosen["uuid"] == settings["gpu_uuid"], "selected GPU UUID differs from pinned gpu_uuid")
     processes = invoke(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory,process_name",
                         "--format=csv,noheader,nounits"], 15).stdout
     for line in processes.splitlines():
@@ -525,6 +545,22 @@ def gpu_precheck(settings: dict) -> dict:
         (chosen["utilization_percent"] <= settings["max_utilization_percent"], "GPU is not idle")):
         if not condition:
             raise WorkflowError(message, details=chosen)
+    if "gpu_uuid" in settings:
+        # Compute-apps alone misses graphics contexts. UUID-pinned runs require
+        # an explicit empty all-process section, never an unavailable reading.
+        xml = invoke(["nvidia-smi", "-q", "-x", "-i", chosen["uuid"]], 15).stdout
+        try:
+            devices = ET.fromstring(xml).findall("gpu")
+        except ET.ParseError as exc:
+            raise WorkflowError("unparseable GPU all-process telemetry") from exc
+        require(len(devices) == 1 and devices[0].findtext("uuid") == chosen["uuid"],
+                "GPU all-process telemetry identity mismatch")
+        processes_node = devices[0].find("processes")
+        require(processes_node is not None and not (processes_node.text or "").strip(),
+                "unavailable GPU all-process telemetry")
+        chosen["all_processes"] = [ET.tostring(node, encoding="unicode") for node in processes_node]
+        if chosen["all_processes"]:
+            raise WorkflowError("GPU is occupied (compute/graphics); no process will be terminated", details=chosen)
     return chosen
 
 
@@ -543,7 +579,12 @@ def command_for(manifest: dict, phase: str, mode: str, output: Path) -> list[str
                "--scheduler", sampling["scheduler"], "--ref-image-size", sampling["ref_image_size"],
                "--video-format", "mp4", "--output", str(output)]
     for key, enabled in manifest["placement"].items():
-        if enabled:
+        if key == "max_vram_gib":
+            # CLI parses a bare float and multiplies by 1024**3, not a unit string.
+            command += ["--max-vram", str(enabled)]
+        elif key == "cpu_threads":
+            command += ["--threads", str(enabled)]
+        elif enabled:
             command.append("--" + key.replace("_", "-"))
     for flag, keys in task["inputs"].items():
         for key in keys:
@@ -1050,7 +1091,7 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="action", required=True)
     for action in ("fixtures", "lock", "baseline", "candidate", "workflow", "compare"):
         c = sub.add_parser(action, help={"fixtures": "create CPU-only local media fixtures", "lock": "freeze full weight/asset SHA256 (no GPU)",
-            "baseline": "run/import an immutable all-options-off baseline", "candidate": "run against a fixed baseline", "workflow": "baseline (or reuse) -> candidate -> compare", "compare": "strict decoded comparison, no GPU"}[action])
+            "baseline": "run/import an immutable all-options-off baseline", "candidate": "run against a fixed baseline", "workflow": "baseline-only or baseline (or reuse) -> candidate -> compare", "compare": "strict decoded comparison, no GPU"}[action])
         if action != "compare":
             c.add_argument("--manifest", type=Path, required=True)
             c.add_argument("--profile", choices=("host", "container"), default="host")
@@ -1063,9 +1104,12 @@ def parser() -> argparse.ArgumentParser:
         if action in ("baseline", "candidate", "workflow"):
             c.add_argument("--dry-run", action="store_true", help="plan only; skip GPU/full hashing; no performance values")
             c.add_argument("--mode", action="append", choices=MODE_ORDER, help="repeatable; default full matrix, mixed first")
-            c.add_argument("--warmup", type=int, help=">=1 separate-process warmups")
+            c.add_argument("--warmup", type=int, help=">=0 separate-process warmups (0 for first capacity baseline)")
             c.add_argument("--repeats", type=int, help=">=1 measured repeats")
-            c.add_argument("--binary", type=Path, help="override this phase binary (workflow: candidate)")
+            c.add_argument("--binary", type=Path, help="override this phase binary (workflow: candidate unless baseline-only)")
+        if action == "workflow":
+            c.add_argument("--phase", choices=("all", "baseline-only"),
+                           help="override run.phase (default all); baseline-only never runs candidate/compare")
         if action in ("candidate", "workflow", "compare"):
             c.add_argument("--baseline", type=Path, required=action in ("candidate", "compare"), help="validated immutable baseline report, not a dry-run")
         if action == "baseline":
@@ -1093,27 +1137,41 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 for key in ("warmup", "repeats"):
                     if getattr(args, key) is not None:
-                        manifest["run"][key] = integer(getattr(args, key), key)
+                        manifest["run"][key] = integer(getattr(args, key), key, 0 if key == "warmup" else 1)
+                workflow_phase = getattr(args, "phase", None) or manifest["run"].get("phase", "all")
+                if args.action == "workflow":
+                    require(workflow_phase != "baseline-only" or args.baseline is None,
+                            "--baseline reuse requires --phase all; baseline-only creates a new baseline")
+                    manifest["run"]["phase"] = workflow_phase
                 if args.binary:
-                    phase = "baseline" if args.action == "baseline" else "candidate"
+                    phase = "baseline" if args.action == "baseline" or (
+                        args.action == "workflow" and workflow_phase == "baseline-only") else "candidate"
                     manifest["binaries"][phase]["path"] = str(args.binary.resolve())
                 modes = selected_modes(manifest, args.mode)
                 if args.action == "workflow":
                     root = args.output_dir.resolve()
                     root.mkdir(parents=True, exist_ok=False)
                     result = root / "workflow.json"
-                    workflow_report = {"status": "pending", "performance_measured": False, "quality_warning": WARNING}
+                    workflow_report = {"status": "pending", "phase": workflow_phase,
+                                       "baseline": None, "candidate": None, "compare": None,
+                                       "baseline_performance_measured": False,
+                                       "performance_measured": False, "quality_warning": WARNING}
                     write_json(result, workflow_report, exclusive=True)
                     try:
                         base = args.baseline.resolve() if args.baseline else run_phase(manifest, "baseline", root / "baseline", modes, dry_run=args.dry_run)
                         workflow_report["baseline"] = str(base)
-                        cand = run_phase(manifest, "candidate", root / "candidate", modes, dry_run=args.dry_run,
-                                         baseline_path=base if not args.dry_run or args.baseline else None)
-                        workflow_report["candidate"] = str(cand)
-                        cmp = None if args.dry_run else compare(base, cand, root / "compare")
-                        workflow_report.update(status="dry_run" if args.dry_run else "validated_numerical_comparison_not_semantic_acceptance",
-                            compare=str(cmp) if cmp else None,
-                            performance_measured=not args.dry_run and h3_performance_pair(base, cand))
+                        workflow_report["baseline_performance_measured"] = not args.dry_run and bool(read_json(base).get("performance_measured"))
+                        if workflow_phase == "baseline-only":
+                            # A measured baseline is not a measured A/B comparison.
+                            workflow_report["status"] = "dry_run" if args.dry_run else "baseline_only_validated"
+                        else:
+                            cand = run_phase(manifest, "candidate", root / "candidate", modes, dry_run=args.dry_run,
+                                             baseline_path=base if not args.dry_run or args.baseline else None)
+                            workflow_report["candidate"] = str(cand)
+                            cmp = None if args.dry_run else compare(base, cand, root / "compare")
+                            workflow_report.update(status="dry_run" if args.dry_run else "validated_numerical_comparison_not_semantic_acceptance",
+                                compare=str(cmp) if cmp else None,
+                                performance_measured=not args.dry_run and h3_performance_pair(base, cand))
                     except (WorkflowError, OSError, ValueError, KeyError, TypeError) as exc:
                         workflow_report.update(status="failed", error=str(exc), performance_measured=False)
                         write_json(result, workflow_report)

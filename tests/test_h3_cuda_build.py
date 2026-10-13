@@ -275,7 +275,8 @@ class IntegrityTest(unittest.TestCase):
         fake_stream = MagicMock()
         with patch.object(Path, "mkdir"), patch.object(Path, "open", return_value=fake_stream), \
                 patch.object(m, "dependency_state", return_value={}), patch.object(m, "snapshot_baseline"), \
-                patch.object(m, "check_cache"), patch.object(m, "write_provenance") as provenance, \
+                patch.object(m, "check_cache"), patch.object(m, "source_manifest", return_value=([], "fixed-source")), \
+                patch.object(m, "write_provenance") as provenance, \
                 patch.object(m.subprocess, "run") as run:
             m.build(cfg, {})
         self.assertEqual(run.call_count, 4)

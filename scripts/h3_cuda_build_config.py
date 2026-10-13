@@ -283,6 +283,14 @@ def check_cache(config, destination, sage):
             raise ValueError("CMake configuration drift: " + key + " expected " + value + ", got " + str(actual))
 
 
+def source_manifest(source):
+    source = Path(source)
+    entries = [{"path": p.relative_to(source).as_posix(), "sha256": file_hash(p)}
+               for folder in ("src", "include") for p in sorted((source / folder).rglob("*")) if p.is_file()]
+    entries.append({"path": "CMakeLists.txt", "sha256": file_hash(source / "CMakeLists.txt")})
+    identity = hashlib.sha256(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return entries, identity
+
 def write_provenance(config, state, phase):
     source, destination = Path(phase["source"]), Path(phase["destination"])
     revision = BASELINE if phase["phase"] == "baseline" else state["candidate_revision"]
@@ -291,10 +299,7 @@ def write_provenance(config, state, phase):
     lines = build_config.read_text().splitlines()
     build_config.write_text("\n".join(line.split("=", 1)[0] + "=" + values[line.split("=", 1)[0]]
                                      if line.split("=", 1)[0] in values else line for line in lines) + "\n")
-    entries = [{"path": p.relative_to(source).as_posix(), "sha256": file_hash(p)}
-               for folder in ("src", "include") for p in sorted((source / folder).rglob("*")) if p.is_file()]
-    entries.append({"path": "CMakeLists.txt", "sha256": file_hash(source / "CMakeLists.txt")})
-    identity = hashlib.sha256(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    entries, identity = source_manifest(source)
     with (destination / "h3-source-manifest.json").open("x") as stream:
         json.dump({"source_tree_sha256": identity, "files": entries}, stream, indent=2)
         stream.write("\n")
@@ -335,11 +340,15 @@ def build(config, state):
             snapshot_baseline(root, Path(phase["source"]))
         destination = Path(phase["destination"])
         destination.mkdir()
+        _, before_source = source_manifest(Path(phase["source"]))
         subprocess.run(phase["configure"], cwd=root, env=env, check=True)
         check_cache(config, destination, phase["sage_attention"])
         subprocess.run(phase["build"], cwd=root, env=env, check=True)
         if dependency_state(config) != state:
             raise ValueError("Dependency/toolchain/revision changed during build; do not use this output")
+        _, after_source = source_manifest(Path(phase["source"]))
+        if after_source != before_source:
+            raise ValueError("Production source changed during build; retained output is NOT a validated binary")
         write_provenance(config, state, phase)
 
 

@@ -386,10 +386,22 @@ public:
         ggml_set_name(tensor, name);
         ggml_set_output(tensor); s->pending = tensor; return Status::Miss;
     }
+    bool pending_only(StepToken token, size_t projection) {
+        auto* target = slot(token, projection);
+        if (!target || !target->pending || target->data) return false;
+        for (size_t j = 0; j < projection_count_; ++j)
+            if (j != projection && slot(token, j)->pending) return false;
+        return true;
+    }
     void discard_pending(StepToken token) {
         for (size_t j = 0; j < projection_count_; ++j) {
             auto* s = slot(token, j); if (s) s->pending = nullptr;
         }
+    }
+    // Abort only the request that owns this token. A late failure must not
+    // invalidate a newer request (reset/begin_request already changed generation).
+    void abort(StepToken token) {
+        if (slot(token, 0)) reset();
     }
     // Invoke immediately after successful graph compute, BEFORE buffer/context
     // free or graph-cut reset. Never after compute failure. Copies backend-native
@@ -503,9 +515,20 @@ ggml_tensor* projection_or_compute(Cache& cache, Cache::StepToken token, size_t 
 // not an independently implemented GEMM. No transformer/attention needed.
 template<class Produce>
 ggml_cgraph* build_projection_graph(ggml_context* ctx, Cache& cache,
-                                    Cache::StepToken token, size_t graph_size, Produce produce) {
+                                    Cache::StepToken token, size_t graph_size, Produce produce,
+                                    size_t first = 0,
+                                    size_t count = std::numeric_limits<size_t>::max()) {
+    // An explicit range bounds the projection weights live in one prefill
+    // segment. The default retains the existing resident all-projection graph.
+    const size_t total = cache.projection_count();
+    if (count == std::numeric_limits<size_t>::max()) count = first <= total ? total - first : 0;
+    Shape shape{};
+    if (!ctx || !graph_size || first >= total || !count || count > total - first ||
+        cache.expected_shape(token, first, &shape) != Status::Hit) {
+        cache.discard_pending(token); return nullptr;
+    }
     auto* graph = ggml_new_graph_custom(ctx, graph_size, false);
-    for (size_t i = 0; i < cache.projection_count(); ++i) {
+    for (size_t i = first; i < first + count; ++i) {
         auto* output = produce(i);
         if (!output) { cache.discard_pending(token); return nullptr; }
         Status status = cache.intercept(token, i, output);
@@ -533,6 +556,28 @@ public:
     ggml_cgraph* exact_empty_graph() { return this->new_graph_custom(16); }
     ggml_context* exact_params_context() { return this->params_ctx; }
     ggml_backend_t exact_runtime_backend() { return this->runtime_backend; }
+    // Projection-only execution owns its compute graph until synchronous
+    // readback. In particular, a throwing callback must restore the CPU tensor
+    // buffer/data/extra triples BEFORE the next segment is built. Never release
+    // params_ctx/params_buffer: those belong to the model, not this prefill.
+    void exact_release_projection_graph() {
+        if (this->runtime_backend) ggml_backend_synchronize(this->runtime_backend);
+        this->free_compute_buffer(); // also restores partial parameter swaps
+        this->free_compute_ctx();    // drops bindings that point into this graph
+    }
+    bool exact_projection_params_supported(const std::vector<ggml_tensor*>& params) const {
+        // An empty list makes execute_graph stage ALL model weights. Never use
+        // that fallback for a projection segment or a malformed producer.
+        if (params.empty() || !this->runtime_backend || this->weight_adapter ||
+            (this->process_group_ && this->process_group_->enabled())) return false;
+        const bool transfer = this->params_backend != this->runtime_backend;
+        if (transfer && this->params_on_runtime_backend) return false;
+        for (auto* t : params) {
+            if (!t || t->view_src || !t->buffer || !t->data ||
+                (transfer && !ggml_backend_buffer_is_host(t->buffer))) return false;
+        }
+        return true;
+    }
     bool exact_execute_graph(ggml_cgraph* graph, int threads,
                              const std::vector<ggml_tensor*>& params,
                              std::function<bool(ggml_cgraph*)> post) {
@@ -547,13 +592,20 @@ public:
 // Instantiate with GGMLRunner after including backend/ggml/ggml_extend.hpp.
 template<class Runner, class Build>
 Status run_projection_warmup(Runner& runner, Cache& cache, Cache::StepToken token,
-                             int n_threads, Build build) {
-    struct PendingGuard {
-        Cache& cache; Cache::StepToken token;
-        ~PendingGuard() { cache.discard_pending(token); }
-    } guard{cache, token};
+                             int n_threads, Build build,
+                             size_t expected_projection = std::numeric_limits<size_t>::max()) {
     Shape first{};
     if (cache.expected_shape(token, 0, &first) != Status::Hit || n_threads <= 0) return Status::InvalidPlan;
+    struct ExecutionGuard {
+        Runner& runner; Cache& cache; Cache::StepToken token;
+        bool success = false;
+        ~ExecutionGuard() {
+            cache.discard_pending(token); // before graph/context teardown
+            if (!success) cache.abort(token); // also drops earlier segments
+            runner.exact_release_projection_graph();
+        }
+    } guard{runner, cache, token};
+    runner.exact_release_projection_graph();
     ggml_cgraph* graph = nullptr;
     bool built = true;
     // GGMLRunner::get_compute_graph dereferences the callback result before
@@ -566,6 +618,8 @@ Status run_projection_warmup(Runner& runner, Cache& cache, Cache::StepToken toke
     };
     if (!runner.exact_prepare_graph(safe_build, &graph) || !graph || !built)
         return Status::InvalidPlan;
+    if (expected_projection != std::numeric_limits<size_t>::max() &&
+        !cache.pending_only(token, expected_projection)) return Status::InvalidPlan;
     std::unordered_set<ggml_tensor*> params, visited;
     for (auto* p = ggml_get_first_tensor(runner.exact_params_context()); p;
          p = ggml_get_next_tensor(runner.exact_params_context(), p)) params.insert(p);
@@ -576,7 +630,9 @@ Status run_projection_warmup(Runner& runner, Cache& cache, Cache::StepToken toke
         if (!t || !visited.insert(t).second) continue;
         if (params.count(t)) selected.push_back(t);
         for (auto* src : t->src) if (src) todo.push_back(src);
+        if (t->view_src) todo.push_back(t->view_src);
     }
+    if (!runner.exact_projection_params_supported(selected)) return Status::InvalidPlan;
     Status captured = Status::Miss;
     auto post = [&](ggml_cgraph*) {
         captured = cache.capture_pending(token, runner.exact_runtime_backend());
@@ -584,9 +640,22 @@ Status run_projection_warmup(Runner& runner, Cache& cache, Cache::StepToken toke
     };
     // no_return=true: don't also copy the last large projection as a model output.
     const bool result = runner.exact_execute_graph(graph, n_threads, selected, post);
-    if (!result && captured == Status::Miss) return Status::InvalidPlan;
+    // The runner can still fail AFTER post-compute readback (e.g. its own
+    // cache-copy stage). Stored bytes are not evidence of successful execution.
+    if (!result) return captured == Status::Stored || captured == Status::Miss
+                            ? Status::InvalidPlan : captured;
+    guard.success = captured == Status::Stored;
     return captured;
 }
+
+namespace detail {
+struct PrefillRollback {
+    Cache& cache;
+    Cache::StepToken token;
+    bool success = false;
+    ~PrefillRollback() { if (!success) cache.abort(token); }
+};
+} // namespace detail
 
 // Request-start all-sigma prefill, not a lazy first-denoise miss cache. Build
 // must return a projection-only graph for contract.plans[plan_index]. The same
@@ -596,6 +665,12 @@ Status run_projection_warmup(Runner& runner, Cache& cache, Cache::StepToken toke
 template<class Runner, class Build>
 Status prefill_request(Runner& runner, Cache& cache, const RequestContract& contract,
                        int n_threads, Build build) {
+    Cache::StepToken anchor;
+    if (contract.plans.empty()) { cache.reset(); return Status::InvalidPlan; }
+    Status initial = cache.bind_step(contract, 0, contract.plans[0], &anchor);
+    if (initial != Status::Hit) { cache.reset(); return initial; }
+    detail::PrefillRollback rollback{cache, anchor};
+    if (n_threads <= 0) return Status::InvalidPlan;
     for (size_t i = 0; i < contract.plans.size(); ++i) {
         Cache::StepToken token;
         Status status = cache.bind_step(contract, i, contract.plans[i], &token);
@@ -605,6 +680,49 @@ Status prefill_request(Runner& runner, Cache& cache, const RequestContract& cont
         if (status != Status::Stored) return status;
         if (!cache.complete(token)) return Status::Miss;
     }
+    rollback.success = true;
+    return Status::Stored;
+}
+
+// Lifecycle foundation, NOT a production offload capability. Build constructs
+// exactly ONE real H3 projection (+ its real time embedder/table) per segment:
+// build(plan_index, projection_index, token). Each synchronous segment stages
+// only reachable CPU weights, copies F32 output to Cache-owned host storage,
+// restores weights and frees its compute graph before constructing the next.
+// GraphInputs owns separate copies for later consumer graphs/graph cuts.
+// This is bounded by one projection, NOT by a device VRAM budget: CUDA budget
+// planning and denoiser graph-cut consumption still need independent acceptance.
+// Identity/schedule/CFG contracts are unchanged; no neighbouring-step reuse.
+template<class Runner, class Build>
+Status prefill_request_segmented(Runner& runner, Cache& cache, const RequestContract& contract,
+                                 int n_threads, Build build) {
+    Cache::StepToken anchor;
+    if (contract.plans.empty()) { cache.reset(); return Status::InvalidPlan; }
+    Status initial = cache.bind_step(contract, 0, contract.plans[0], &anchor);
+    if (initial != Status::Hit) { cache.reset(); return initial; }
+    detail::PrefillRollback rollback{cache, anchor};
+    if (n_threads <= 0) return Status::InvalidPlan;
+    for (size_t i = 0; i < contract.plans.size(); ++i) {
+        for (size_t j = 0; j < contract.projections.size(); ++j) {
+            Cache::StepToken token;
+            Status status = cache.bind_step(contract, i, contract.plans[i], &token);
+            if (status != Status::Hit) return status;
+            Shape shape{};
+            status = cache.expected_shape(token, j, &shape);
+            if (status != Status::Hit) return status;
+            const float* values = nullptr;
+            status = cache.lookup(token, j, shape, &values);
+            if (status == Status::Hit) continue; // repeated prefill is idempotent
+            if (status != Status::Miss) return status;
+            status = run_projection_warmup(runner, cache, token, n_threads,
+                                           [&]() { return build(i, j, token); }, j);
+            if (status != Status::Stored) return status;
+            // A producer returning an empty/wrong graph must not report success.
+            status = cache.lookup(token, j, shape, &values);
+            if (status != Status::Hit) return status;
+        }
+    }
+    rollback.success = true;
     return Status::Stored;
 }
 

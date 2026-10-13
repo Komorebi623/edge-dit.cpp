@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "baseline_revision": "97cc585d9dbd9ac5e30b78ef2e2c4a0d8bfbe9f2",
+  "submodules": {
+    "ggml": "f270346d688c7bec7c56bae2ae73343aba6817ad",
+    "onednn": "5e9224036021433d2577548ed0539fe9a53256bc"
+  },
+  "weight_variant": "full_h3_existing_persistent_Q4_GGUF_not_pruned_not_distilled",
+  "precision_lock": "docs/research/h3-precision-lock.json",
+  "status": "offloaded_baseline_plan_gpu_unmeasured",
+  "note": "Independent RTX 4090 offloaded experiment, not comparable to resident/H200 results. Default workflow is baseline-only, warmup 0, repeat 1. Later use warmup 1/repeats 3 with a NEW baseline before fusion-only A/B. Full original mixed-Q4 precision preserved; SHA256 values below are expected pins, not proof of local verification. Replace run.gpu_uuid (zero UUID placeholder) and gpu_index with an exclusively scheduled idle GPU. The 22 GiB graph planning budget is not a hard peak-memory cap. No measured latency, quality, capacity or fusion speedup is claimed.",
+  "locations": {
+    "host": {
+      "repo_root": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation",
+      "model_root": "/home/public/models/minimax-h3",
+      "asset_root": "{repo_root}/_scratch/h3-4090-assets/t2va"
+    }
+  },
+  "binaries": {
+    "baseline": {
+      "path": "{repo_root}/_scratch/build-h3-4090-baseline-97cc585/bin/ed-cli",
+      "optimization_env": {
+        "ED_H3_FUSED_OPS": "0",
+        "ED_H3_CACHE_DIT": "0",
+        "ED_H3_ADALN_CACHE": "0",
+        "ED_H3_SAGE_ATTN": "0",
+        "ED_H3_SPARSE_ATTN": "0",
+        "ED_H3_VDN": "0",
+        "ED_H3_TURBO": "0",
+        "ED_H3_VSA": "0"
+      }
+    },
+    "candidate": {
+      "path": "{repo_root}/_scratch/build-h3-4090-fusion/bin/ed-cli",
+      "optimization_env": {
+        "ED_H3_FUSED_OPS": "1",
+        "ED_H3_CACHE_DIT": "0",
+        "ED_H3_ADALN_CACHE": "0",
+        "ED_H3_SAGE_ATTN": "0",
+        "ED_H3_SPARSE_ATTN": "0",
+        "ED_H3_VDN": "0",
+        "ED_H3_TURBO": "0",
+        "ED_H3_VSA": "0"
+      }
+    }
+  },
+  "required_build": {
+    "CMAKE_CUDA_ARCHITECTURES": "89",
+    "ED_ENABLE_CUDNN_SDPA": "ON",
+    "ED_ENABLE_CUDA_SAGE_ATTN": "OFF"
+  },
+  "models": {
+    "fl2va": {
+      "path": "{model_root}/diffusion_models/minimax_h3_fl2va-Q4_K_M.gguf",
+      "bytes": 18779848448,
+      "sha256": "a25ee3184dd56e7fc5c8db1508d2e48a7e3c92919b516935c6059e4228e16107",
+      "tensor_types": {
+        "F32": 13,
+        "BF16": 264,
+        "Q4_0": 50,
+        "Q4_K": 208
+      },
+      "source_header_sha256": "b4aebf1a52aa869c99ba7fd33c7e343200342404e07d1eb03260f7beebd02c7f"
+    },
+    "llm": {
+      "path": "{model_root}/text_encoders/qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+      "bytes": 18218065024,
+      "sha256": "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc",
+      "tensor_types": {
+        "BF16": 552,
+        "Q6_K": 100,
+        "Q4_K": 250
+      },
+      "source_header_sha256": "0c6bc5ded133ae026c992654de37dbd600fa70b50573a6ed3ac1f54ea29ddc59"
+    },
+    "video_vae": {
+      "path": "{model_root}/vae/minimax_h3_video_vae_fp16.safetensors",
+      "bytes": 5207808496,
+      "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+      "tensor_types": {
+        "F16": 562
+      },
+      "source_header_sha256": "7bd6afbb1b2cfbf7c19901869eb224ec1b3e2a8cdbd8516d18f515c60f157c26"
+    },
+    "audio_vae": {
+      "path": "{model_root}/vae/minimax_h3_audio_vae_fp32.safetensors",
+      "bytes": 605254808,
+      "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+      "tensor_types": {
+        "F32": 917
+      },
+      "source_header_sha256": "23fb27ab02c45d7c6f5dfe5c3255ef956a5a13853c869b784bf8de4a1537d06b"
+    }
+  },
+  "assets": {},
+  "sampling": {
+    "width": 864,
+    "height": 480,
+    "frames": 124,
+    "fps": 24,
+    "steps": 20,
+    "seed": 42,
+    "cfg_scale": 1,
+    "sampler": "res_multistep",
+    "scheduler": "simple",
+    "ref_image_size": "match",
+    "audio_sample_rate": 32000,
+    "audio_channels": 2
+  },
+  "placement": {
+    "dit_offload": true,
+    "text_encoder_offload": true,
+    "vae_offload": true,
+    "max_vram_gib": 22,
+    "cpu_threads": 6
+  },
+  "run": {
+    "warmup": 0,
+    "repeats": 1,
+    "timeout_seconds": 7200,
+    "media_timeout_seconds": 180,
+    "gpu_index": 0,
+    "min_free_mib": 22528,
+    "max_utilization_percent": 0,
+    "phase": "baseline-only",
+    "gpu_uuid": "GPU-00000000-0000-0000-0000-000000000000"
+  },
+  "modes": {
+    "t2va": {
+      "dit": "fl2va",
+      "prompt": "A cinematic sunset over mountain ridges with quiet natural ambience.",
+      "inputs": {}
+    }
+  },
+  "performance_results": null,
+  "method_catalog": {
+    "ED_H3_FUSED_OPS": {
+      "status": "implemented",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {
+        "ED_ENABLE_CUDA_MODULATION": "ON"
+      },
+      "gpu_validated": false
+    },
+    "ED_H3_CACHE_DIT": {
+      "status": "unsupported",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {},
+      "gpu_validated": false,
+      "note": "Not eligible in this fusion-only offloaded experiment; retain production compatibility guards."
+    },
+    "ED_H3_ADALN_CACHE": {
+      "status": "unsupported",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {},
+      "gpu_validated": false,
+      "note": "Not eligible in this fusion-only offloaded experiment; retain production compatibility guards."
+    },
+    "ED_H3_SAGE_ATTN": {
+      "status": "unsupported",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {
+        "ED_ENABLE_CUDA_SAGE_ATTN": "ON"
+      },
+      "gpu_validated": false,
+      "note": "Not eligible in this fusion-only offloaded experiment; retain production compatibility guards."
+    },
+    "ED_H3_SPARSE_ATTN": {
+      "status": "unsupported",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {},
+      "gpu_validated": false,
+      "note": "Not eligible in this fusion-only offloaded experiment; retain production compatibility guards."
+    },
+    "ED_H3_VDN": {
+      "status": "unsupported",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {},
+      "gpu_validated": false,
+      "note": "Not eligible in this fusion-only offloaded experiment; retain production compatibility guards."
+    },
+    "ED_H3_TURBO": {
+      "status": "unsupported",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {},
+      "requires_separate_manifest": true,
+      "gpu_validated": false,
+      "note": "Not eligible in this fusion-only offloaded experiment; retain production compatibility guards."
+    },
+    "ED_H3_VSA": {
+      "status": "unsupported",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {},
+      "requires_separate_manifest": true,
+      "gpu_validated": false,
+      "note": "Not eligible in this fusion-only offloaded experiment; retain production compatibility guards."
+    }
+  },
+  "method_catalog_note": "Pending methods may dry-run. Actual enablement requires h3-build-provenance.txt implemented_methods=ED_H3_CACHE_DIT,... or catalog status=implemented; still check binary policy/build settings. No runtime activation claim without evidence. Turbo needs a separately reviewed precision manifest and baseline.",
+  "hash_status": "expected_full_sha256_pins_not_locally_verified"
+}

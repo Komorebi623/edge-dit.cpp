@@ -25,6 +25,22 @@ int main() {
         env = {{"ED_H3_FUSED_OPS", "1"}};
         caps.fused_ops = true;
         check(parse_cuda_optimization_options(lookup, &opts, &error) && validate_cuda_optimization_options(opts, true, caps, &error), "supported fusion rejected");
+        env = {{"ED_H3_ADALN_CACHE", "1"}, {"ED_H3_ADALN_MAX_MIB", "8"}};
+        caps.adaln_cache = true;
+        check(parse_cuda_optimization_options(lookup, &opts, &error) && opts.adaln_cache && opts.adaln_max_mib == 8,
+              "AdaLN independent switch/budget parse failed");
+        check(!opts.fused_ops && !opts.cache_dit && !opts.sparse_attn && !opts.sage_attn,
+              "AdaLN switch enabled another optimization");
+        check(!validate_cuda_optimization_options(opts, false, caps, &error),
+              "CPU lifecycle components enabled production CPU AdaLN");
+        check(validate_cuda_optimization_options(opts, true, caps, &error), "resident AdaLN capability rejected");
+        for (const auto* budget : {"0", "16385", "8x", "-1"}) {
+            env["ED_H3_ADALN_MAX_MIB"] = budget;
+            check(!parse_cuda_optimization_options(lookup, &opts, &error), "invalid AdaLN budget accepted");
+        }
+        env = {{"ED_H3_ADALN_MAX_MIB", "inactive-invalid"}};
+        check(parse_cuda_optimization_options(lookup, &opts, &error) && !opts.any_enabled(),
+              "AdaLN lifecycle helper changed opt-in default");
         env = {{"ED_H3_CACHE_DIT", "1"}, {"ED_H3_CACHE_THRESHOLD", "nan"}};
         check(!parse_cuda_optimization_options(lookup, &opts, &error), "NaN accepted");
         env["ED_H3_CACHE_THRESHOLD"] = "0.04";

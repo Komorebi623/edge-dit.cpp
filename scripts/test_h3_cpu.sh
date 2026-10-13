@@ -16,3 +16,7 @@ python3 tests/test_h3_lora_merge.py
 python3 -m unittest discover -s tests -p 'test_h3_cuda_build.py' -v
 python3 -m unittest discover -s tests -p 'test_h3_server_preflight.py' -v
 python3 -m unittest discover -s tests -p 'test_h3_request_cleanup.py' -v
+python3 -m unittest discover -s tests -p 'test_h3_4090_workflow.py' -v
+python3 -m unittest discover -s tests -p 'test_h3_gpu_memory_monitor.py' -v
+python3 -m unittest discover -s tests -p 'test_h3_gpu_parity_guard.py' -v
+python3 -m unittest discover -s tests -p 'test_h3_build_source_stability.py' -v

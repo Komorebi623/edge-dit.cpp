@@ -3,8 +3,19 @@
 #ifdef H3_ADALN_TEST_REAL_RUNNER
 #include "dit_models/diffusion_model.hpp"
 #include "dit_models/models/minimax_h3_full.hpp"
+// Bypass discovery wrappers: link the CPU symbols directly, even in a future
+// multi-backend test build. No load_all/device enumeration in this regression.
+#if defined(__GNUC__) || defined(__clang__)
+extern "C" ggml_backend_reg_t h3_adaln_cpu_reg() __asm__("ggml_backend_cpu_reg");
+extern "C" ggml_backend_t h3_adaln_cpu_init() __asm__("ggml_backend_cpu_init");
+extern "C" void h3_adaln_cpu_threads(ggml_backend_t, int) __asm__("ggml_backend_cpu_set_n_threads");
+#else
+#error "This CPU regression requires GNU-compatible symbol aliases"
+#endif
 #else
 #include "ggml-cpu.h"
+#define h3_adaln_cpu_init ggml_backend_cpu_init
+#define h3_adaln_cpu_threads ggml_backend_cpu_set_n_threads
 #endif
 #include <iostream>
 #include <map>
@@ -201,10 +212,10 @@ static void import_budget_test() {
     std::cout<<"PASS import budget: graph staging payload ceiling fails closed\n";
 }
 struct CpuFixture {
-    ggml_backend_t backend=ggml_backend_cpu_init();
+    ggml_backend_t backend=h3_adaln_cpu_init();
     ggml_context* params=nullptr;
     ggml_backend_buffer_t buffer=nullptr;
-    CpuFixture() { check(backend,"CPU backend init");ggml_backend_cpu_set_n_threads(backend,1); }
+    CpuFixture() { check(backend,"CPU backend init");h3_adaln_cpu_threads(backend,1); }
     ~CpuFixture() {if(buffer)ggml_backend_buffer_free(buffer);if(params)ggml_free(params);ggml_backend_free(backend);}
 };
 static ggml_context* context() { return ggml_init({2u*1024u*1024u,nullptr,true}); }
@@ -301,8 +312,23 @@ struct TinyH3Runner : RunnerBridge<GGMLRunner> {
     ggml_tensor* table=nullptr;
     sd::Tensor<int32_t> lower,upper;
     sd::Tensor<float> fraction;
-    explicit TinyH3Runner(ggml_backend_t backend,bool use_curves=false)
+    struct ParamBinding {
+        ggml_tensor* tensor;
+        ggml_backend_buffer_t buffer;
+        void* data;
+        void* extra;
+        std::vector<float> values;
+    };
+    std::vector<ParamBinding> original_params;
+    size_t executions = 0, transferred = 0, fail_on = 0;
+    enum class Failure { None, BeforeCompute, AfterReadback, ThrowAfterReadback, NonFinite };
+    Failure failure = Failure::None;
+    ggml_tensor* projection_output = nullptr;
+    explicit TinyH3Runner(ggml_backend_t backend,bool use_curves=false,bool transfer=false)
         : RunnerBridge<GGMLRunner>(backend), time(4,6,4), curves(use_curves) {
+        // Test-only: distinct CPU handles exercise the REAL partial-offload
+        // copy/swap/restore path, with no CUDA backend/device enumeration.
+        if (transfer) { params_backend = h3_adaln_cpu_init(); check(params_backend, "host backend"); }
         time.init(params_ctx,{},"time_embedder");
         for(int i=0;i<3;++i){auto p=std::make_shared<MiniMaxH3::AdaLayerNormModulation>(4,4,i==2?2:6,i==2?1:3,true,false);
             p->apply_silu=!curves;
@@ -310,10 +336,70 @@ struct TinyH3Runner : RunnerBridge<GGMLRunner> {
         if(curves)table=ggml_new_tensor_2d(params_ctx,GGML_TYPE_F32,4,5);
         check(alloc_params_buffer(),"real H3 runner params allocation");
         for(auto* t=ggml_get_first_tensor(params_ctx);t;t=ggml_get_next_tensor(params_ctx,t)){
-            auto v=payload({ggml_nelements(t),1,1,1});ggml_backend_tensor_set(t,v.data(),0,ggml_nbytes(t));}
+            auto v=payload({ggml_nelements(t),1,1,1});ggml_backend_tensor_set(t,v.data(),0,ggml_nbytes(t));
+            original_params.push_back({t,t->buffer,t->data,t->extra,std::move(v)});}
     }
     std::string get_desc() override {return "H3-AdaLN-CPU-tiny";}
-    ggml_cgraph* build(Cache& cache,Cache::StepToken token,const StepPlan& p){
+    void check_restored() {
+        check(!partial_runtime_params_buffer && !partial_offload_ctx && partial_offload_pairs.empty(),
+              "partial parameter staging survived a segment");
+        check(!compute_ctx && !compute_allocr && backend_tensor_data_map.empty(),
+              "projection graph/bindings survived execution teardown");
+        check_host_params_restored();
+    }
+    void check_host_params_restored() {
+        for (const auto& p : original_params) {
+            check(p.tensor->buffer == p.buffer && p.tensor->data == p.data && p.tensor->extra == p.extra,
+                  "CPU parameter binding was not restored");
+            std::vector<float> values(p.values.size());
+            ggml_backend_tensor_get(p.tensor,values.data(),0,values.size()*sizeof(float));
+            check(values == p.values, "CPU source weights mutated");
+        }
+    }
+    bool exact_execute_graph(ggml_cgraph* graph,int threads,const std::vector<ggml_tensor*>& params,
+                             std::function<bool(ggml_cgraph*)> post) {
+        ++executions;
+        const auto injected = executions == fail_on ? failure : Failure::None;
+        auto verify_transfer = [&]() {
+            if (params_backend == runtime_backend) return;
+            size_t changed = 0;
+            for (const auto& p : original_params) {
+                const bool selected = std::find(params.begin(),params.end(),p.tensor) != params.end();
+                check((p.tensor->data != p.data) == selected && (p.tensor->buffer != p.buffer) == selected,
+                      "offload did not copy exactly the reachable parameters");
+                if (selected) ++changed;
+            }
+            check(changed == (curves ? 3u : 6u), "segment contains more than one real projection's weights");
+            transferred += changed;
+        };
+        if (injected == Failure::BeforeCompute) {
+            check(offload_partial_params(params), "test pre-compute staging");
+            verify_transfer();
+            return false; // run_projection_warmup must restore these live swaps
+        }
+        const bool result = RunnerBridge<GGMLRunner>::exact_execute_graph(graph,threads,params,[&](auto* g) {
+            verify_transfer();
+            if (injected == Failure::NonFinite) {
+                const float bad = std::numeric_limits<float>::quiet_NaN();
+                ggml_backend_tensor_set(projection_output,&bad,0,sizeof(bad));
+            }
+            const bool captured = post(g);
+            if (injected == Failure::ThrowAfterReadback) throw std::runtime_error("injected post-readback exception");
+            return captured;
+        });
+        return injected == Failure::AfterReadback ? false : result;
+    }
+    std::optional<sd::Tensor<float>> consume_cuts(ggml_cgraph* graph, const sd::ggml_graph_cut::Plan& plan) {
+        return compute_with_graph_cuts<float>(graph,plan,1,true);
+    }
+    ggml_cgraph* parameterless_graph(Cache& cache,Cache::StepToken token,size_t projection) {
+        Shape shape;cache.expected_shape(token,projection,&shape);
+        return build_projection_graph(compute_ctx,cache,token,64,[&](size_t) {
+            return ggml_new_tensor(compute_ctx,GGML_TYPE_F32,GGML_MAX_DIMS,shape.data());
+        },projection,1);
+    }
+    ggml_cgraph* build(Cache& cache,Cache::StepToken token,const StepPlan& p,
+                       size_t first=0,size_t count=std::numeric_limits<size_t>::max()){
         features=sd::Tensor<float>({4,static_cast<int64_t>(p.timesteps.size())},
                                  timestep_embedding(p.timesteps,4,10000,true,1.f));
         auto ctx=get_context();ggml_tensor* emb=nullptr;
@@ -327,7 +413,9 @@ struct TinyH3Runner : RunnerBridge<GGMLRunner> {
             auto* l=ggml_get_rows(compute_ctx,table,li);auto* u=ggml_get_rows(compute_ctx,table,ui);
             emb=ggml_add(compute_ctx,l,ggml_mul(compute_ctx,ggml_sub(compute_ctx,u,l),fi));
         }else{auto* input=make_input(features);emb=time.forward(&ctx,input);}
-        return build_projection_graph(compute_ctx,cache,token,4096,[&](size_t i){return projections[i]->forward(&ctx,emb);});
+        return build_projection_graph(compute_ctx,cache,token,4096,[&](size_t i){
+            projection_output=projections[i]->forward(&ctx,emb);return projection_output;
+        },first,count);
     }
 };
 static void real_runner_test(bool curves){
@@ -341,18 +429,169 @@ static void real_runner_test(bool curves){
             expect(cache.lookup(t,j,shape,&data),Status::Hit,"real H3 cache projection hit");
             for(size_t k=0;k<static_cast<size_t>(shape[0]*shape[1]);++k)check(std::isfinite(data[k]),"real H3 finite projection");}}
     // Verify a builder failure neither executes a null graph nor inserts stale pointers.
-    expect(run_projection_warmup(runner,cache,bind(cache,c),1,[]()->ggml_cgraph*{return nullptr;}),
+    auto stale=bind(cache,c);
+    expect(run_projection_warmup(runner,cache,stale,1,[]()->ggml_cgraph*{return nullptr;}),
            Status::InvalidPlan,"real runner null builder safe");
-    auto stale=bind(cache,c);cache.reset();
+    check(cache.used_bytes()==0,"failed standalone warmup discards partial request");
+    runner.check_restored();
     expect(run_projection_warmup(runner,cache,stale,1,[]()->ggml_cgraph*{return nullptr;}),Status::InvalidPlan,"stale warmup fails closed");
     std::cout << "PASS REAL H3 " << (curves?"curve table/no SiLU":"TimeEmbedder/SiLU")
               << " AdaLayerNormModulation + GGMLRunner all-sigma prefill (CPU tiny)\n";
 }
+
+// This consumer runs the existing graph-cut executor, not a mock graph. It is
+// deliberately resident CPU: it validates imported leaf lifetime across cuts,
+// NOT CUDA planner budgets, asynchronous prefetch, or production offload support.
+static void graph_cut_consumer(TinyH3Runner& runner, Cache& cache, const RequestContract& c,
+                                size_t projection, bool reset_after_build) {
+    const auto token = bind(cache,c);
+    Shape shape; expect(cache.expected_shape(token,projection,&shape),Status::Hit,"consumer shape");
+    const float* values=nullptr;
+    expect(cache.lookup(token,projection,shape,&values),Status::Hit,"consumer projection");
+    std::vector<float> expected(values,values+shape[0]*shape[1]);
+    for (auto& v : expected) v = v*2.f+v;
+    const size_t initial_bytes=cache.used_bytes();
+    {
+        GraphInputs inputs(cache,1);
+        ggml_cgraph* graph=nullptr;
+        check(runner.exact_prepare_graph([&]() {
+            auto ctx=runner.get_context();
+            ctx.bind_backend_tensor_data=[&](auto* t,const void* data){runner.set_backend_tensor_data(t,data);};
+            ggml_tensor* imported=nullptr;
+            expect(inputs.import(&ctx,token,projection,shape,&imported),Status::Hit,"cut import");
+            ggml_set_name(imported,"h3_adaln_test.imported");
+            auto* first=ggml_scale(ctx.ggml_ctx,imported,2.f);
+            sd::ggml_graph_cut::mark_graph_cut(first,"h3_adaln_test.first","activation");
+            auto* output=ggml_add(ctx.ggml_ctx,first,imported); // reuse same leaf after the cut
+            auto* g=ggml_new_graph_custom(ctx.ggml_ctx,128,false);
+            ggml_build_forward_expand(g,output);
+            return g;
+        },&graph),"consumer graph preparation");
+        const auto plan=sd::ggml_graph_cut::build_plan(runner.exact_runtime_backend(),graph,{},"H3-AdaLN-cut-tiny");
+        check(plan.valid && plan.available && plan.segments.size()>1,"consumer must really split into multiple cuts");
+        if(reset_after_build) cache.reset(); // imported storage must be independent
+        const auto output=runner.consume_cuts(graph,plan);
+        check(output.has_value() && output->numel()==static_cast<int64_t>(expected.size()),"cut consumer compute");
+        check(std::memcmp(output->data(),expected.data(),expected.size()*sizeof(float))==0,
+              "cut consumer differs from cached native projection");
+        runner.exact_release_projection_graph();
+    }
+    check(cache.used_bytes()==(reset_after_build?0:initial_bytes),"consumer staging accounting leak");
+}
+
+static void segmented_runner_test(bool curves) {
+    auto c=contract(); if(curves)c.curve_grid=5;
+    // Include a repeated sigma with a distinct CFG role and timestep row order.
+    auto repeat=c.plans[0]; repeat.cfg_role=CfgRole::Unconditional;
+    std::swap(repeat.timesteps[0],repeat.timesteps[1]); c.plans.push_back(repeat);
+    CpuFixture f;
+    TinyH3Runner direct(f.backend,curves), staged(f.backend,curves,true);
+    Cache reference({true,1u<<20,100}), cache({true,1u<<20,100});
+    expect(reference.begin_request(c),Status::Stored,"reference begin");
+    expect(prefill_request(direct,reference,c,1,[&](size_t i,auto t){return direct.build(reference,t,c.plans[i]);}),
+           Status::Stored,"resident real H3 projection reference");
+    auto build=[&](size_t i,size_t j,auto t){
+        staged.check_host_params_restored();
+        return staged.build(cache,t,c.plans[i],j,1);
+    };
+    for(int request=0;request<2;++request) {
+        expect(cache.begin_request(c),Status::Stored,"segmented begin");
+        const size_t before=staged.executions;
+        expect(prefill_request_segmented(staged,cache,c,1,build),Status::Stored,"segmented real H3 prefill");
+        check(staged.executions-before==c.plans.size()*c.projections.size(),"one synchronous execution per projection/sigma/CFG");
+        staged.check_restored();
+        for(size_t i=0;i<c.plans.size();++i) {
+            auto a=bind(reference,c,i),b=bind(cache,c,i);
+            check(cache.complete(b),"all real projections present");
+            for(size_t j=0;j<c.projections.size();++j) {
+                Shape shape;cache.expected_shape(b,j,&shape);const float *av=nullptr,*bv=nullptr;
+                expect(reference.lookup(a,j,shape,&av),Status::Hit,"resident result");
+                expect(cache.lookup(b,j,shape,&bv),Status::Hit,"segmented result");
+                check(std::memcmp(av,bv,static_cast<size_t>(shape[0]*shape[1])*sizeof(float))==0,
+                      "segmented transferred real H3 projection not bitexact");
+            }
+        }
+        const size_t executions=staged.executions,used=cache.used_bytes(),copies=staged.transferred;
+        expect(prefill_request_segmented(staged,cache,c,1,build),Status::Stored,"repeat prefill");
+        check(staged.executions==executions && staged.transferred==copies && cache.used_bytes()==used,
+              "repeat prefill recomputed/transferred/allocated");
+        graph_cut_consumer(direct,cache,c,0,false);
+        graph_cut_consumer(direct,cache,c,0,false); // graph destruction/rebuild
+        graph_cut_consumer(direct,cache,c,2,true); // final projection + reset-safe copies
+    }
+    check(staged.transferred>0,"test never actually transferred weights");
+    std::cout << "PASS segmented real H3 " << (curves?"curve table":"time embedder")
+              << ": actual CPU parameter copy/swap/restore, resident bitexact, repeated sigma/CFG/request, real consumer graph cuts\n";
+}
+
+static void segmented_failure_test() {
+    auto c=contract(); CpuFixture f; TinyH3Runner runner(f.backend,false,true);
+    Cache cache({true,1u<<20,100});
+    auto build=[&](size_t i,size_t j,auto t){return runner.build(cache,t,c.plans[i],j,1);};
+    for(auto failure : {TinyH3Runner::Failure::BeforeCompute,TinyH3Runner::Failure::AfterReadback,
+                       TinyH3Runner::Failure::ThrowAfterReadback,TinyH3Runner::Failure::NonFinite}) {
+        expect(cache.begin_request(c),Status::Stored,"failure begin");const auto stale=bind(cache,c);
+        runner.failure=failure;runner.fail_on=runner.executions+3; // fail AFTER two good segments
+        bool threw=false; Status status=Status::Miss;
+        try { status=prefill_request_segmented(runner,cache,c,1,build); }
+        catch(const std::runtime_error& e) {
+            check(std::string(e.what())=="injected post-readback exception","unexpected exception");threw=true;
+        }
+        if(failure==TinyH3Runner::Failure::ThrowAfterReadback) check(threw,"exception swallowed");
+        else expect(status,failure==TinyH3Runner::Failure::NonFinite?Status::NonFinite:Status::InvalidPlan,"failure propagated");
+        check(cache.used_bytes()==0 && !cache.complete(stale),"failure retained earlier/captured segments");
+        runner.check_restored();
+        expect(cache.capture_pending(stale,f.backend),Status::Stale,"failure pending pointer survived");
+        runner.failure=TinyH3Runner::Failure::None;
+        expect(cache.begin_request(c),Status::Stored,"failure recovery begin");
+        expect(prefill_request_segmented(runner,cache,c,1,build),Status::Stored,"same runner failure recovery");
+        runner.check_restored();
+    }
+    // Throw after intercept but before execution: no pending tensor may outlive its graph.
+    cache.begin_request(c); const size_t executions=runner.executions;
+    bool threw=false;
+    try { prefill_request_segmented(runner,cache,c,1,[&](size_t i,size_t j,auto t)->ggml_cgraph* {
+        build(i,j,t); throw std::runtime_error("injected builder exception");
+    }); } catch(const std::runtime_error& e) {threw=std::string(e.what())=="injected builder exception";}
+    check(threw && cache.used_bytes()==0 && runner.executions==executions,"builder exception cleanup");
+    runner.check_restored();
+    for(int invalid=0;invalid<3;++invalid) {
+        cache.begin_request(c);
+        expect(prefill_request_segmented(runner,cache,c,1,[&](size_t i,size_t j,auto t)->ggml_cgraph* {
+            if(invalid==0) {build(i,j,t);return nullptr;}
+            if(invalid==1) return runner.build(cache,t,c.plans[i],(j+1)%3,1);
+            return runner.parameterless_graph(cache,t,j);
+        }),Status::InvalidPlan,"null/wrong/parameterless segment rejected before transfer");
+        check(cache.used_bytes()==0 && runner.executions==executions,"invalid graph staged weights or retained cache");
+        runner.check_restored();
+    }
+    cache.begin_request(c);
+    auto changed=c;changed.schedule_identity+="-changed";
+    expect(prefill_request_segmented(runner,cache,changed,1,build),Status::Miss,"schedule mutation fails closed");
+    check(cache.used_bytes()==0,"identity mismatch retains request");
+    cache.begin_request(c); const auto old=bind(cache,c);cache.begin_request(c);
+    const size_t new_bytes=cache.used_bytes();cache.abort(old);
+    check(cache.used_bytes()==new_bytes,"late failure aborted a newer request");
+    // Force a late payload-budget failure, not just descriptor allocation failure.
+    Shape shape;cache.expected_shape(bind(cache,c),0,&shape);
+    Cache limited({true,new_bytes+2*static_cast<size_t>(shape[0]*shape[1])*sizeof(float)-1,100});
+    expect(limited.begin_request(c),Status::Stored,"limited begin");
+    expect(prefill_request_segmented(runner,limited,c,1,[&](size_t i,size_t j,auto t){
+        return runner.build(limited,t,c.plans[i],j,1);
+    }),Status::InvalidPlan,"late projection budget rejected");
+    check(limited.used_bytes()==0,"late budget failure retained earlier segment");runner.check_restored();
+    std::cout << "PASS segmented failures: staged/builder/readback/late-return/nonfinite/budget, atomic reset and same-runner recovery\n";
+}
+
 #endif
 int main(){try{
+#ifdef H3_ADALN_TEST_REAL_RUNNER
+    ggml_backend_register(h3_adaln_cpu_reg());
+#endif
     identity_tests();validation_budget_tests();layout_and_staging_tests();import_budget_test();tensor_rejection_tests();graph_tests(false);graph_tests(true);
 #ifdef H3_ADALN_TEST_REAL_RUNNER
     real_runner_test(false);real_runner_test(true);
+    segmented_runner_test(false);segmented_runner_test(true);segmented_failure_test();
 #endif
     std::cout<<"H3 exact AdaLN tests passed ("<<checks<<" checks; CPU only, no weights downloaded)\n";
 }catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<'\n';return 1;}}

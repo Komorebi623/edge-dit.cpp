@@ -96,7 +96,7 @@ class WorkflowTests(unittest.TestCase):
                 h3.validate_manifest(data)
 
     def test_invalid_run_arguments_and_cli(self):
-        for key, value in (("warmup", 0), ("repeats", 0), ("timeout_seconds", 0),
+        for key, value in (("warmup", -1), ("warmup", True), ("warmup", 0.0), ("repeats", 0), ("timeout_seconds", 0),
                            ("gpu_index", -1), ("min_free_mib", 0), ("max_utilization_percent", 100)):
             data = copy.deepcopy(self.manifest)
             data["run"][key] = value
@@ -106,7 +106,7 @@ class WorkflowTests(unittest.TestCase):
             h3.parser().parse_args(["candidate", "--manifest", "x", "--output-dir", "y"])
         with patch("sys.stderr"):
             self.assertEqual(h3.main(["baseline", "--manifest", str(ROOT / "benchmark/h3_cuda/example.json"),
-                "--dry-run", "--warmup", "0", "--output-dir", str(self.tmp / "bad")]), 2)
+                "--dry-run", "--warmup", "-1", "--output-dir", str(self.tmp / "bad")]), 2)
 
     def test_host_container_path_overrides(self):
         data = h3.resolve_manifest(ROOT / "benchmark/h3_cuda/example.json", "container")
@@ -197,6 +197,68 @@ class WorkflowTests(unittest.TestCase):
         candidate = h3.read_json(self.tmp / "workflow/candidate/report.json")
         self.assertEqual(candidate["environment"]["optimization_env"]["ED_H3_FUSED_OPS"], "1")
 
+
+    def test_zero_warmup_cli_baseline(self):
+        with patch.object(h3, "gpu_precheck", side_effect=AssertionError("no GPU")), \
+             patch.object(h3, "git_provenance", return_value={}):
+            result = h3.main(["baseline", "--manifest", str(ROOT / "benchmark/h3_cuda/example.json"),
+                              "--dry-run", "--mode", "t2va", "--warmup", "0", "--repeats", "1",
+                              "--output-dir", str(self.tmp / "zero-warmup")])
+        self.assertEqual(result, 0)
+        report = h3.read_json(self.tmp / "zero-warmup/report.json")
+        self.assertEqual(len(report["modes"]["t2va"]), 1)
+        self.assertFalse(report["modes"]["t2va"][0]["warmup"])
+        self.assertIsNone(report["statistics"])
+        self.assertFalse(report["performance_measured"])
+
+    def test_workflow_baseline_only_binary_override_and_no_candidate(self):
+        binary = self.tmp / "baseline-ed-cli"
+        with patch.object(h3, "gpu_precheck", side_effect=AssertionError("no GPU")), \
+             patch.object(h3, "verify_inputs", side_effect=AssertionError("no hashing")), \
+             patch.object(h3, "compare", side_effect=AssertionError("no comparison")), \
+             patch.object(h3, "run_phase", wraps=h3.run_phase) as run, \
+             patch.object(h3, "git_provenance", return_value={}):
+            result = h3.main(["workflow", "--manifest", str(ROOT / "benchmark/h3_cuda/example.json"),
+                              "--phase", "baseline-only", "--dry-run", "--mode", "t2va",
+                              "--warmup", "0", "--repeats", "1", "--binary", str(binary),
+                              "--output-dir", str(self.tmp / "baseline-only")])
+        self.assertEqual(result, 0)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[1], "baseline")
+        summary = h3.read_json(self.tmp / "baseline-only/workflow.json")
+        self.assertEqual(summary["phase"], "baseline-only")
+        self.assertIsNone(summary["candidate"])
+        self.assertIsNone(summary["compare"])
+        self.assertFalse(summary["performance_measured"])
+        self.assertFalse(summary["baseline_performance_measured"])
+        self.assertFalse((self.tmp / "baseline-only/candidate").exists())
+        report = h3.read_json(self.tmp / "baseline-only/baseline/report.json")
+        self.assertEqual(report["modes"]["t2va"][0]["command"][0], str(binary))
+        self.assertEqual(set(report["environment"]["optimization_env"].values()), {"0"})
+        self.assertEqual(report["manifest"]["binaries"]["candidate"]["path"],
+                         self.manifest["binaries"]["candidate"]["path"])
+
+    def test_baseline_only_refuses_ambiguous_reuse(self):
+        with patch.object(h3, "run_phase", side_effect=AssertionError("no launch")), patch("sys.stderr"):
+            result = h3.main(["workflow", "--manifest", str(ROOT / "benchmark/h3_cuda/example.json"),
+                              "--phase", "baseline-only", "--baseline", str(self.tmp / "previous.json"),
+                              "--output-dir", str(self.tmp / "ambiguous")])
+        self.assertEqual(result, 2)
+        self.assertFalse((self.tmp / "ambiguous").exists())
+
+    def test_baseline_only_failure_never_starts_candidate(self):
+        with patch.object(h3, "run_phase", side_effect=h3.WorkflowError("baseline failed")) as run, \
+             patch.object(h3, "compare", side_effect=AssertionError("no comparison")), patch("sys.stderr"):
+            result = h3.main(["workflow", "--manifest", str(ROOT / "benchmark/h3_cuda/example.json"),
+                              "--phase", "baseline-only", "--output-dir", str(self.tmp / "failed-only")])
+        self.assertEqual(result, 2)
+        self.assertEqual(run.call_count, 1)
+        summary = h3.read_json(self.tmp / "failed-only/workflow.json")
+        self.assertEqual(summary["status"], "failed")
+        self.assertFalse(summary["performance_measured"])
+        self.assertFalse(summary["baseline_performance_measured"])
+        self.assertIsNone(summary["candidate"])
+        self.assertIsNone(summary["compare"])
 
     def test_locked_manifest_paths_remap_without_hash_changes(self):
         manifest = copy.deepcopy(self.manifest)
