@@ -1,0 +1,894 @@
+{
+  "schema_version": 1,
+  "measured_interval": "2026-10-13 evening to 2026-10-14 early morning, Asia/Shanghai; exact UTC run timestamps in evidence",
+  "status": "real_single_gpu_offloaded_measurements_not_all_methods_implemented",
+  "gpu": {
+    "index": 0,
+    "uuid": "GPU-95eb7a54-3471-4542-5a4d-894df955a273",
+    "name": "NVIDIA GeForce RTX 4090",
+    "total_mib": 24564
+  },
+  "baseline_revision": "97cc585d9dbd9ac5e30b78ef2e2c4a0d8bfbe9f2",
+  "candidate_production_commit": "d81041fbe6621597492b403be663ffa6b8f7d7b9",
+  "precision_lock_sha256": "3693093031aae70c05f8148943e975bf5cb0920cf046a5f9ba669c8f22f3219d",
+  "models_verified": 5,
+  "sampling": {
+    "audio_channels": 2,
+    "audio_sample_rate": 32000,
+    "cfg_scale": 1,
+    "fps": 24,
+    "frames": 124,
+    "height": 480,
+    "ref_image_size": "match",
+    "sampler": "res_multistep",
+    "scheduler": "simple",
+    "seed": 42,
+    "steps": 20,
+    "width": 864
+  },
+  "placement": {
+    "cpu_threads": 6,
+    "dit_offload": true,
+    "max_vram_gib": 22,
+    "text_encoder_offload": true,
+    "vae_offload": true
+  },
+  "t2va_contract": {
+    "assets": {},
+    "models": {
+      "audio_vae": {
+        "bytes": 605254808,
+        "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+        "source_header_sha256": "23fb27ab02c45d7c6f5dfe5c3255ef956a5a13853c869b784bf8de4a1537d06b",
+        "tensor_types": {
+          "F32": 917
+        }
+      },
+      "fl2va": {
+        "bytes": 18779848448,
+        "sha256": "a25ee3184dd56e7fc5c8db1508d2e48a7e3c92919b516935c6059e4228e16107",
+        "source_header_sha256": "b4aebf1a52aa869c99ba7fd33c7e343200342404e07d1eb03260f7beebd02c7f",
+        "tensor_types": {
+          "BF16": 264,
+          "F32": 13,
+          "Q4_0": 50,
+          "Q4_K": 208
+        }
+      },
+      "llm": {
+        "bytes": 18218065024,
+        "sha256": "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc",
+        "source_header_sha256": "0c6bc5ded133ae026c992654de37dbd600fa70b50573a6ed3ac1f54ea29ddc59",
+        "tensor_types": {
+          "BF16": 552,
+          "Q4_K": 250,
+          "Q6_K": 100
+        }
+      },
+      "video_vae": {
+        "bytes": 5207808496,
+        "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+        "source_header_sha256": "7bd6afbb1b2cfbf7c19901869eb224ec1b3e2a8cdbd8516d18f515c60f157c26",
+        "tensor_types": {
+          "F16": 562
+        }
+      }
+    },
+    "modes": {
+      "t2va": {
+        "dit": "fl2va",
+        "inputs": {},
+        "prompt": "A locked-off cinematic wide shot of a sunlit mountain stream. Clear water ripples continuously over small stones, pine branches sway gently in a light breeze, and distant mountains remain stable. Natural synchronized audio: softly flowing water, a gentle breeze, and occasional distant birds. No music, no dialogue, no captions, no scene cuts."
+      }
+    },
+    "placement": {
+      "cpu_threads": 6,
+      "dit_offload": true,
+      "max_vram_gib": 22,
+      "text_encoder_offload": true,
+      "vae_offload": true
+    },
+    "sampling": {
+      "audio_channels": 2,
+      "audio_sample_rate": 32000,
+      "cfg_scale": 1,
+      "fps": 24,
+      "frames": 124,
+      "height": 480,
+      "ref_image_size": "match",
+      "sampler": "res_multistep",
+      "scheduler": "simple",
+      "seed": 42,
+      "steps": 20,
+      "width": 864
+    },
+    "weight_variant": "full_h3_existing_persistent_Q4_GGUF_not_pruned_not_distilled"
+  },
+  "baseline": {
+    "source": {
+      "binary_sha256": "e718410a1c84161f5a215a995535c1c42b7babcb681bd1a80aceb2d7c13c9ac7",
+      "cuda_architectures": "89",
+      "cuda_sage_attention": "OFF",
+      "cudnn_frontend_revision": "07b368a2696f5fd0fc2207d4635c51cea4c0bf71",
+      "ggml_revision": "f270346d688c7bec7c56bae2ae73343aba6817ad",
+      "onednn_revision": "5e9224036021433d2577548ed0539fe9a53256bc",
+      "shared_config_sha256": "a4e248b7288204027b5151cc2a2a1542f3069d59958dca218faea34d2542870b",
+      "source_revision": "97cc585d9dbd9ac5e30b78ef2e2c4a0d8bfbe9f2",
+      "source_tree_sha256": "723671bd022b1dde3507a941c88051ee4431024a9850c33d908baa3eb6a2f787",
+      "tracked_diff_sha256": "91ac289d54711b1e686d27fb0bf8b98606e5ca544a7853ba499062f2b190d3c8"
+    },
+    "optimization_env": {
+      "ED_H3_ADALN_CACHE": "0",
+      "ED_H3_CACHE_DIT": "0",
+      "ED_H3_FUSED_OPS": "0",
+      "ED_H3_SAGE_ATTN": "0",
+      "ED_H3_SPARSE_ATTN": "0",
+      "ED_H3_TURBO": "0",
+      "ED_H3_VDN": "0",
+      "ED_H3_VSA": "0"
+    },
+    "warmup": 1,
+    "repeats": 3,
+    "statistics_ms": {
+      "cli_wall_ms": {
+        "count": 3,
+        "max": 254734.67835993506,
+        "mean": 254542.39098370695,
+        "median": 254489.6726179868,
+        "min": 254402.82197319902,
+        "stdev": 172.0946975287963
+      },
+      "conditioning_ms": {
+        "count": 3,
+        "max": 1335,
+        "mean": 1330.3333333333333,
+        "median": 1329,
+        "min": 1327,
+        "stdev": 4.163331998932265
+      },
+      "decode_ms": {
+        "count": 3,
+        "max": 10534,
+        "mean": 10491.666666666666,
+        "median": 10502,
+        "min": 10439,
+        "stdev": 48.33563212924119
+      },
+      "diffusion_ms": {
+        "count": 3,
+        "max": 211615,
+        "mean": 211553.66666666666,
+        "median": 211551,
+        "min": 211495,
+        "stdev": 60.04442799572108
+      },
+      "noise_ms": {
+        "count": 3,
+        "max": 546,
+        "mean": 535.6666666666666,
+        "median": 533,
+        "min": 528,
+        "stdev": 9.29157324317757
+      },
+      "total_ms": {
+        "count": 3,
+        "max": 224786,
+        "mean": 224725.66666666666,
+        "median": 224770,
+        "min": 224621,
+        "stdev": 90.99633692261098
+      }
+    },
+    "runs": [
+      {
+        "warmup": true,
+        "cli_wall_ms": 254581.98994514532,
+        "profile": {
+          "calls": 20,
+          "conditioning_ms": 1326,
+          "decode_ms": 10437,
+          "diffusion_ms": 211697,
+          "noise_ms": 529,
+          "steps": 20,
+          "total_ms": 224787
+        },
+        "media_sha256": "6d7c59869a046e88248d8bc2ecc78ac5c5ba81ae0de9700076939ea2cb88f462",
+        "audio_pcm_sha256": "3b61f14825668064a59285b152ffc559cfe362e8ef77539ba14bbc899f45bf79",
+        "shape": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "audio_samples_per_channel": 165888,
+          "fps": "24",
+          "frames": 124,
+          "height": 480,
+          "width": 864
+        },
+        "status": "validated"
+      },
+      {
+        "warmup": false,
+        "cli_wall_ms": 254734.67835993506,
+        "profile": {
+          "calls": 20,
+          "conditioning_ms": 1329,
+          "decode_ms": 10502,
+          "diffusion_ms": 211615,
+          "noise_ms": 528,
+          "steps": 20,
+          "total_ms": 224770
+        },
+        "media_sha256": "6d7c59869a046e88248d8bc2ecc78ac5c5ba81ae0de9700076939ea2cb88f462",
+        "audio_pcm_sha256": "3b61f14825668064a59285b152ffc559cfe362e8ef77539ba14bbc899f45bf79",
+        "shape": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "audio_samples_per_channel": 165888,
+          "fps": "24",
+          "frames": 124,
+          "height": 480,
+          "width": 864
+        },
+        "status": "validated"
+      },
+      {
+        "warmup": false,
+        "cli_wall_ms": 254402.82197319902,
+        "profile": {
+          "calls": 20,
+          "conditioning_ms": 1335,
+          "decode_ms": 10439,
+          "diffusion_ms": 211495,
+          "noise_ms": 533,
+          "steps": 20,
+          "total_ms": 224621
+        },
+        "media_sha256": "6d7c59869a046e88248d8bc2ecc78ac5c5ba81ae0de9700076939ea2cb88f462",
+        "audio_pcm_sha256": "3b61f14825668064a59285b152ffc559cfe362e8ef77539ba14bbc899f45bf79",
+        "shape": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "audio_samples_per_channel": 165888,
+          "fps": "24",
+          "frames": 124,
+          "height": 480,
+          "width": 864
+        },
+        "status": "validated"
+      },
+      {
+        "warmup": false,
+        "cli_wall_ms": 254489.6726179868,
+        "profile": {
+          "calls": 20,
+          "conditioning_ms": 1327,
+          "decode_ms": 10534,
+          "diffusion_ms": 211551,
+          "noise_ms": 546,
+          "steps": 20,
+          "total_ms": 224786
+        },
+        "media_sha256": "6d7c59869a046e88248d8bc2ecc78ac5c5ba81ae0de9700076939ea2cb88f462",
+        "audio_pcm_sha256": "3b61f14825668064a59285b152ffc559cfe362e8ef77539ba14bbc899f45bf79",
+        "shape": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "audio_samples_per_channel": 165888,
+          "fps": "24",
+          "frames": 124,
+          "height": 480,
+          "width": 864
+        },
+        "status": "validated"
+      }
+    ],
+    "memory_sampling": {
+      "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+      "requested_interval_seconds": 0.25,
+      "samples": 3269,
+      "telemetry_errors": 0,
+      "telemetry_complete": true,
+      "sampled_peak_used_mib": 16035.0,
+      "max_sample_gap_seconds": 0.5094166358467191
+    }
+  },
+  "fusion": {
+    "source": {
+      "binary_sha256": "13724078f8bb5e2e830f43d5901c2e512131bf4f118c4409a5e81a06f6c812d8",
+      "cuda_architectures": "89",
+      "cuda_sage_attention": "ON",
+      "cudnn_frontend_revision": "07b368a2696f5fd0fc2207d4635c51cea4c0bf71",
+      "ggml_revision": "f270346d688c7bec7c56bae2ae73343aba6817ad",
+      "implemented_methods": "ED_H3_FUSED_OPS,ED_H3_CACHE_DIT,ED_H3_ADALN_CACHE,ED_H3_SAGE_ATTN,ED_H3_SPARSE_ATTN",
+      "onednn_revision": "5e9224036021433d2577548ed0539fe9a53256bc",
+      "shared_config_sha256": "a4e248b7288204027b5151cc2a2a1542f3069d59958dca218faea34d2542870b",
+      "source_revision": "71cc80d6235dfb5c7326cce1613ebda54dd263b4",
+      "source_tree_sha256": "cc6f87a2164501114d94602c88fad7830df89887c891093235de9b8f14776332",
+      "tracked_diff_sha256": "91ac289d54711b1e686d27fb0bf8b98606e5ca544a7853ba499062f2b190d3c8"
+    },
+    "optimization_env": {
+      "ED_H3_ADALN_CACHE": "0",
+      "ED_H3_CACHE_DIT": "0",
+      "ED_H3_FUSED_OPS": "1",
+      "ED_H3_SAGE_ATTN": "0",
+      "ED_H3_SPARSE_ATTN": "0",
+      "ED_H3_TURBO": "0",
+      "ED_H3_VDN": "0",
+      "ED_H3_VSA": "0"
+    },
+    "warmup": 1,
+    "repeats": 3,
+    "statistics_ms": {
+      "cli_wall_ms": {
+        "count": 3,
+        "max": 300192.78015499003,
+        "mean": 299621.47047797526,
+        "median": 299498.436141992,
+        "min": 299173.19513694383,
+        "stdev": 520.8084946784236
+      },
+      "conditioning_ms": {
+        "count": 3,
+        "max": 1336,
+        "mean": 1327.6666666666667,
+        "median": 1329,
+        "min": 1318,
+        "stdev": 9.073771725877465
+      },
+      "decode_ms": {
+        "count": 3,
+        "max": 10558,
+        "mean": 10521,
+        "median": 10538,
+        "min": 10467,
+        "stdev": 47.82258880487337
+      },
+      "diffusion_ms": {
+        "count": 3,
+        "max": 256436,
+        "mean": 256379.66666666666,
+        "median": 256384,
+        "min": 256319,
+        "stdev": 58.62024678669763
+      },
+      "noise_ms": {
+        "count": 3,
+        "max": 532,
+        "mean": 528.3333333333334,
+        "median": 527,
+        "min": 526,
+        "stdev": 3.2145502536643185
+      },
+      "total_ms": {
+        "count": 3,
+        "max": 269550,
+        "mean": 269527.6666666667,
+        "median": 269540,
+        "min": 269493,
+        "stdev": 30.43572462310259
+      }
+    },
+    "runs": [
+      {
+        "warmup": true,
+        "cli_wall_ms": 299542.74463607,
+        "profile": {
+          "calls": 20,
+          "conditioning_ms": 1334,
+          "decode_ms": 10515,
+          "diffusion_ms": 256267,
+          "noise_ms": 550,
+          "steps": 20,
+          "total_ms": 269491
+        },
+        "media_sha256": "6d7c59869a046e88248d8bc2ecc78ac5c5ba81ae0de9700076939ea2cb88f462",
+        "audio_pcm_sha256": "3b61f14825668064a59285b152ffc559cfe362e8ef77539ba14bbc899f45bf79",
+        "shape": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "audio_samples_per_channel": 165888,
+          "fps": "24",
+          "frames": 124,
+          "height": 480,
+          "width": 864
+        },
+        "status": "validated"
+      },
+      {
+        "warmup": false,
+        "cli_wall_ms": 299498.436141992,
+        "profile": {
+          "calls": 20,
+          "conditioning_ms": 1329,
+          "decode_ms": 10467,
+          "diffusion_ms": 256436,
+          "noise_ms": 527,
+          "steps": 20,
+          "total_ms": 269540
+        },
+        "media_sha256": "6d7c59869a046e88248d8bc2ecc78ac5c5ba81ae0de9700076939ea2cb88f462",
+        "audio_pcm_sha256": "3b61f14825668064a59285b152ffc559cfe362e8ef77539ba14bbc899f45bf79",
+        "shape": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "audio_samples_per_channel": 165888,
+          "fps": "24",
+          "frames": 124,
+          "height": 480,
+          "width": 864
+        },
+        "status": "validated"
+      },
+      {
+        "warmup": false,
+        "cli_wall_ms": 299173.19513694383,
+        "profile": {
+          "calls": 20,
+          "conditioning_ms": 1336,
+          "decode_ms": 10538,
+          "diffusion_ms": 256319,
+          "noise_ms": 532,
+          "steps": 20,
+          "total_ms": 269493
+        },
+        "media_sha256": "6d7c59869a046e88248d8bc2ecc78ac5c5ba81ae0de9700076939ea2cb88f462",
+        "audio_pcm_sha256": "3b61f14825668064a59285b152ffc559cfe362e8ef77539ba14bbc899f45bf79",
+        "shape": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "audio_samples_per_channel": 165888,
+          "fps": "24",
+          "frames": 124,
+          "height": 480,
+          "width": 864
+        },
+        "status": "validated"
+      },
+      {
+        "warmup": false,
+        "cli_wall_ms": 300192.78015499003,
+        "profile": {
+          "calls": 20,
+          "conditioning_ms": 1318,
+          "decode_ms": 10558,
+          "diffusion_ms": 256384,
+          "noise_ms": 526,
+          "steps": 20,
+          "total_ms": 269550
+        },
+        "media_sha256": "6d7c59869a046e88248d8bc2ecc78ac5c5ba81ae0de9700076939ea2cb88f462",
+        "audio_pcm_sha256": "3b61f14825668064a59285b152ffc559cfe362e8ef77539ba14bbc899f45bf79",
+        "shape": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "audio_samples_per_channel": 165888,
+          "fps": "24",
+          "frames": 124,
+          "height": 480,
+          "width": 864
+        },
+        "status": "validated"
+      }
+    ],
+    "memory_sampling": {
+      "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+      "requested_interval_seconds": 0.25,
+      "samples": 3694,
+      "telemetry_errors": 0,
+      "telemetry_complete": true,
+      "sampled_peak_used_mib": 16351.0,
+      "max_sample_gap_seconds": 0.5427958038635552
+    }
+  },
+  "candidate_all_off_control": {
+    "source": {
+      "binary_sha256": "13724078f8bb5e2e830f43d5901c2e512131bf4f118c4409a5e81a06f6c812d8",
+      "cuda_architectures": "89",
+      "cuda_sage_attention": "ON",
+      "cudnn_frontend_revision": "07b368a2696f5fd0fc2207d4635c51cea4c0bf71",
+      "ggml_revision": "f270346d688c7bec7c56bae2ae73343aba6817ad",
+      "implemented_methods": "ED_H3_FUSED_OPS,ED_H3_CACHE_DIT,ED_H3_ADALN_CACHE,ED_H3_SAGE_ATTN,ED_H3_SPARSE_ATTN",
+      "onednn_revision": "5e9224036021433d2577548ed0539fe9a53256bc",
+      "shared_config_sha256": "a4e248b7288204027b5151cc2a2a1542f3069d59958dca218faea34d2542870b",
+      "source_revision": "71cc80d6235dfb5c7326cce1613ebda54dd263b4",
+      "source_tree_sha256": "cc6f87a2164501114d94602c88fad7830df89887c891093235de9b8f14776332",
+      "tracked_diff_sha256": "91ac289d54711b1e686d27fb0bf8b98606e5ca544a7853ba499062f2b190d3c8"
+    },
+    "optimization_env": {
+      "ED_H3_ADALN_CACHE": "0",
+      "ED_H3_CACHE_DIT": "0",
+      "ED_H3_FUSED_OPS": "0",
+      "ED_H3_SAGE_ATTN": "0",
+      "ED_H3_SPARSE_ATTN": "0",
+      "ED_H3_TURBO": "0",
+      "ED_H3_VDN": "0",
+      "ED_H3_VSA": "0"
+    },
+    "warmup": 0,
+    "repeats": 1,
+    "statistics_ms": {
+      "cli_wall_ms": {
+        "count": 1,
+        "max": 255355.9002201073,
+        "mean": 255355.9002201073,
+        "median": 255355.9002201073,
+        "min": 255355.9002201073,
+        "stdev": 0.0
+      },
+      "conditioning_ms": {
+        "count": 1,
+        "max": 1325,
+        "mean": 1325,
+        "median": 1325,
+        "min": 1325,
+        "stdev": 0.0
+      },
+      "decode_ms": {
+        "count": 1,
+        "max": 10546,
+        "mean": 10546,
+        "median": 10546,
+        "min": 10546,
+        "stdev": 0.0
+      },
+      "diffusion_ms": {
+        "count": 1,
+        "max": 211570,
+        "mean": 211570,
+        "median": 211570,
+        "min": 211570,
+        "stdev": 0.0
+      },
+      "noise_ms": {
+        "count": 1,
+        "max": 538,
+        "mean": 538,
+        "median": 538,
+        "min": 538,
+        "stdev": 0.0
+      },
+      "total_ms": {
+        "count": 1,
+        "max": 224777,
+        "mean": 224777,
+        "median": 224777,
+        "min": 224777,
+        "stdev": 0.0
+      }
+    },
+    "runs": [
+      {
+        "warmup": false,
+        "cli_wall_ms": 255355.9002201073,
+        "profile": {
+          "calls": 20,
+          "conditioning_ms": 1325,
+          "decode_ms": 10546,
+          "diffusion_ms": 211570,
+          "noise_ms": 538,
+          "steps": 20,
+          "total_ms": 224777
+        },
+        "media_sha256": "6d7c59869a046e88248d8bc2ecc78ac5c5ba81ae0de9700076939ea2cb88f462",
+        "audio_pcm_sha256": "3b61f14825668064a59285b152ffc559cfe362e8ef77539ba14bbc899f45bf79",
+        "shape": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "audio_samples_per_channel": 165888,
+          "fps": "24",
+          "frames": 124,
+          "height": 480,
+          "width": 864
+        },
+        "status": "validated"
+      }
+    ],
+    "memory_sampling": {
+      "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+      "requested_interval_seconds": 0.25,
+      "samples": 935,
+      "telemetry_errors": 0,
+      "telemetry_complete": true,
+      "sampled_peak_used_mib": 16035.0,
+      "max_sample_gap_seconds": 0.5166363839525729
+    }
+  },
+  "ref_mixed_baseline": {
+    "source": {
+      "binary_sha256": "e718410a1c84161f5a215a995535c1c42b7babcb681bd1a80aceb2d7c13c9ac7",
+      "cuda_architectures": "89",
+      "cuda_sage_attention": "OFF",
+      "cudnn_frontend_revision": "07b368a2696f5fd0fc2207d4635c51cea4c0bf71",
+      "ggml_revision": "f270346d688c7bec7c56bae2ae73343aba6817ad",
+      "onednn_revision": "5e9224036021433d2577548ed0539fe9a53256bc",
+      "shared_config_sha256": "a4e248b7288204027b5151cc2a2a1542f3069d59958dca218faea34d2542870b",
+      "source_revision": "97cc585d9dbd9ac5e30b78ef2e2c4a0d8bfbe9f2",
+      "source_tree_sha256": "723671bd022b1dde3507a941c88051ee4431024a9850c33d908baa3eb6a2f787",
+      "tracked_diff_sha256": "91ac289d54711b1e686d27fb0bf8b98606e5ca544a7853ba499062f2b190d3c8"
+    },
+    "optimization_env": {
+      "ED_H3_ADALN_CACHE": "0",
+      "ED_H3_CACHE_DIT": "0",
+      "ED_H3_FUSED_OPS": "0",
+      "ED_H3_SAGE_ATTN": "0",
+      "ED_H3_SPARSE_ATTN": "0",
+      "ED_H3_TURBO": "0",
+      "ED_H3_VDN": "0",
+      "ED_H3_VSA": "0"
+    },
+    "warmup": 0,
+    "repeats": 1,
+    "statistics_ms": {
+      "cli_wall_ms": {
+        "count": 1,
+        "max": 627543.2855749968,
+        "mean": 627543.2855749968,
+        "median": 627543.2855749968,
+        "min": 627543.2855749968,
+        "stdev": 0.0
+      },
+      "conditioning_ms": {
+        "count": 1,
+        "max": 23848,
+        "mean": 23848,
+        "median": 23848,
+        "min": 23848,
+        "stdev": 0.0
+      },
+      "decode_ms": {
+        "count": 1,
+        "max": 10367,
+        "mean": 10367,
+        "median": 10367,
+        "min": 10367,
+        "stdev": 0.0
+      },
+      "diffusion_ms": {
+        "count": 1,
+        "max": 547711,
+        "mean": 547711,
+        "median": 547711,
+        "min": 547711,
+        "stdev": 0.0
+      },
+      "noise_ms": {
+        "count": 1,
+        "max": 528,
+        "mean": 528,
+        "median": 528,
+        "min": 528,
+        "stdev": 0.0
+      },
+      "total_ms": {
+        "count": 1,
+        "max": 597285,
+        "mean": 597285,
+        "median": 597285,
+        "min": 597285,
+        "stdev": 0.0
+      }
+    },
+    "runs": [
+      {
+        "warmup": false,
+        "cli_wall_ms": 627543.2855749968,
+        "profile": {
+          "calls": 20,
+          "conditioning_ms": 23848,
+          "decode_ms": 10367,
+          "diffusion_ms": 547711,
+          "noise_ms": 528,
+          "steps": 20,
+          "total_ms": 597285
+        },
+        "media_sha256": "f5269b06d378d109868256e282920c3bddcf426a024ae930d5e9b40582ea130b",
+        "audio_pcm_sha256": "cc8422aab65b66ae86b107c6f5c204c13d56c5b7fcc6326a82ecc2dd2e405be1",
+        "shape": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "audio_samples_per_channel": 165888,
+          "fps": "24",
+          "frames": 124,
+          "height": 480,
+          "width": 864
+        },
+        "status": "validated"
+      }
+    ],
+    "memory_sampling": {
+      "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+      "requested_interval_seconds": 0.25,
+      "samples": 1992,
+      "telemetry_errors": 0,
+      "telemetry_complete": true,
+      "sampled_peak_used_mib": 18751.0,
+      "max_sample_gap_seconds": 0.569167542969808
+    }
+  },
+  "ref_mixed_contract": {
+    "assets": {
+      "extra_audio": {
+        "bytes": null,
+        "embedded_audio_required": null,
+        "kind": "audio",
+        "sha256": "b5b8230e6cdb35150cddfb10105126b0a9bf30a8cefadd890efa12c43316ebc2"
+      },
+      "paired_audio": {
+        "bytes": null,
+        "embedded_audio_required": null,
+        "kind": "audio",
+        "sha256": "b5b8230e6cdb35150cddfb10105126b0a9bf30a8cefadd890efa12c43316ebc2"
+      },
+      "reference_image": {
+        "bytes": null,
+        "embedded_audio_required": null,
+        "kind": "image",
+        "sha256": "3185ab2b1b07cc5adc544a57001584a9cf2a205475de72ffb0a52e9689447a70"
+      },
+      "reference_video": {
+        "bytes": null,
+        "embedded_audio_required": true,
+        "kind": "video",
+        "sha256": "a870d784225b37badab8acddb70e3dab152a5357ef2e3e59862f1acd6ed4bcf1"
+      }
+    },
+    "models": {
+      "audio_vae": {
+        "bytes": 605254808,
+        "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+        "source_header_sha256": "23fb27ab02c45d7c6f5dfe5c3255ef956a5a13853c869b784bf8de4a1537d06b",
+        "tensor_types": {
+          "F32": 917
+        }
+      },
+      "llm": {
+        "bytes": 18218065024,
+        "sha256": "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc",
+        "source_header_sha256": "0c6bc5ded133ae026c992654de37dbd600fa70b50573a6ed3ac1f54ea29ddc59",
+        "tensor_types": {
+          "BF16": 552,
+          "Q4_K": 250,
+          "Q6_K": 100
+        }
+      },
+      "ref2va": {
+        "bytes": 18779848448,
+        "sha256": "fdaecd3e73cf70a866184e49958c7f17055c5294252921ceac7dc459ce6be11e",
+        "source_header_sha256": "b4aebf1a52aa869c99ba7fd33c7e343200342404e07d1eb03260f7beebd02c7f",
+        "tensor_types": {
+          "BF16": 264,
+          "F32": 13,
+          "Q4_0": 50,
+          "Q4_K": 208
+        }
+      },
+      "video_vae": {
+        "bytes": 5207808496,
+        "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+        "source_header_sha256": "7bd6afbb1b2cfbf7c19901869eb224ec1b3e2a8cdbd8516d18f515c60f157c26",
+        "tensor_types": {
+          "F16": 562
+        }
+      }
+    },
+    "modes": {
+      "ref_mixed": {
+        "dit": "ref2va",
+        "inputs": {
+          "ref-audio": [
+            "extra_audio"
+          ],
+          "ref-image": [
+            "reference_image"
+          ],
+          "ref-video": [
+            "reference_video"
+          ],
+          "ref-video-audio": [
+            "paired_audio"
+          ]
+        },
+        "prompt": "Continue the same sunlit mountain stream shown in <Picture 1> and <Video 1>. Preserve the mountain silhouette, pine trees, rocks, and stable camera composition. Water flows naturally throughout, with gentle pine-branch movement. Use <Audio 1> and the supplied audio reference for natural flowing-water ambience, light wind, and distant birds. No music, no dialogue, no text, no scene cuts."
+      }
+    },
+    "placement": {
+      "cpu_threads": 6,
+      "dit_offload": true,
+      "max_vram_gib": 22,
+      "text_encoder_offload": true,
+      "vae_offload": true
+    },
+    "sampling": {
+      "audio_channels": 2,
+      "audio_sample_rate": 32000,
+      "cfg_scale": 1,
+      "fps": 24,
+      "frames": 124,
+      "height": 480,
+      "ref_image_size": "match",
+      "sampler": "res_multistep",
+      "scheduler": "simple",
+      "seed": 42,
+      "steps": 20,
+      "width": 864
+    },
+    "weight_variant": "full_h3_existing_persistent_Q4_GGUF_not_pruned_not_distilled"
+  },
+  "ref_mixed_asset_provenance": {
+    "type": "generated_by_locked_t2va_baseline",
+    "parent_media_sha256": "efde8bcf0d3b6237f873dc4e7e53e066264a36c0a6431f4b24df6be75e8624a1",
+    "parent_report": "t2va-capacity/baseline/report.json",
+    "transform": "frame0 PNG, frame123 PNG, first2s H264 CRF16/AAC32k stereo, decoded PCM s16 stereo"
+  },
+  "quality_comparison": [
+    {
+      "ssim": 1.0,
+      "exact_video_frames": 124,
+      "psnr_db": null,
+      "psnr_null_reason": "positive infinity for exact match",
+      "audio_rmse": 0.0,
+      "semantic_quality": "not_evaluated"
+    },
+    {
+      "ssim": 1.0,
+      "exact_video_frames": 124,
+      "psnr_db": null,
+      "psnr_null_reason": "positive infinity for exact match",
+      "audio_rmse": 0.0,
+      "semantic_quality": "not_evaluated"
+    },
+    {
+      "ssim": 1.0,
+      "exact_video_frames": 124,
+      "psnr_db": null,
+      "psnr_null_reason": "positive infinity for exact match",
+      "audio_rmse": 0.0,
+      "semantic_quality": "not_evaluated"
+    }
+  ],
+  "evidence_root": "_scratch/rtx4090-20261013",
+  "evidence": [
+    {
+      "path": "t2va-baseline-repeat/baseline/report.json",
+      "sha256": "d661b35145824f75a92551f1d5d021ab814298ae5753e01fcd547af6faecb9d2"
+    },
+    {
+      "path": "t2va-fusion-repeat/report.json",
+      "sha256": "45a831582fb02c250fc029de4782df7cd5eac64bf39b6fe200e5683919f28d77"
+    },
+    {
+      "path": "t2va-repeat-comparison/report.json",
+      "sha256": "cb475903ab372eaa311b2e5ca36ab1a4d3dd8af211a03c4fdd62736693669d43"
+    },
+    {
+      "path": "t2va-candidate-off/report.json",
+      "sha256": "bd70dcde9b295f8baf3600ee3f7e5e34b17ad4a8fbd350071ee7cdf57b9c7811"
+    },
+    {
+      "path": "ref-mixed-capacity/baseline/report.json",
+      "sha256": "cbd9285b2cbab3ccaa830815af498cbf6ee8abb215cb0cf6bfacc3a1b0b90d26"
+    },
+    {
+      "path": "logs/gpu-parity.log",
+      "sha256": "0d44eacc52e3a9e75be75e3d08b6a3d1323c7e59aa4662af3cf00d05f8949531"
+    },
+    {
+      "path": "logs/adaln-offload-gpu-v2.log",
+      "sha256": "02c42300bdfeeb85ef44dc970f8edff3c4a2395867bb0348b2496e0fde2281c8"
+    },
+    {
+      "path": "model-verification.json",
+      "sha256": "b6bccb8f757d89f2829494155c7cede534a58595e4fb379a589a24f9cb9571a3"
+    },
+    {
+      "path": "logs/adaln-offload-gpu-v3.log",
+      "sha256": "02c42300bdfeeb85ef44dc970f8edff3c4a2395867bb0348b2496e0fde2281c8"
+    }
+  ],
+  "fusion_relative_to_baseline": {
+    "speedup": 0.8495465647960565,
+    "latency_change_percent": 17.709851518269826,
+    "recommendation": "keep disabled; regression confirmed for this task",
+    "scope": "single 4090 / T2VA / full original precision / identical offload / one separate-process warmup then three cold-process measurements"
+  },
+  "generated_at": "2026-10-14T00:21:21.116957+08:00"
+}

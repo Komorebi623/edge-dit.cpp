@@ -214,11 +214,10 @@
       "scope": "mocked telemetry only"
     },
     "performance_results": {
-      "scope": "first single T2VA pair only; repeated measurement pending",
-      "baseline_cli_ms": 256371.76337488927,
-      "fusion_cli_ms": 299447.0578110777,
-      "speedup": 0.8561505504476695,
-      "latency_change_percent": 16.80188717709912
+      "speedup": 0.8495465647960565,
+      "latency_change_percent": 17.709851518269826,
+      "recommendation": "keep disabled; regression confirmed for this task",
+      "scope": "single 4090 / T2VA / full original precision / identical offload / one separate-process warmup then three cold-process measurements"
     },
     "production_quality_results": null,
     "evidence_root": "_scratch/rtx4090-20261013",
@@ -349,6 +348,157 @@
       "semantic_quality_accepted": false,
       "reference_source": "derived from locked T2VA baseline; image + embedded-audio video + explicit audio, fixed order/hash",
       "report": "ref-mixed-capacity/baseline/report.json"
+    },
+    "candidate_all_off_control": {
+      "warmup": 0,
+      "repeats": 1,
+      "cli_wall_ms": 255355.9002201073,
+      "diffusion_ms": 211570,
+      "sha256": "6d7c59869a046e88248d8bc2ecc78ac5c5ba81ae0de9700076939ea2cb88f462",
+      "byte_identical_to_fusion_video": true,
+      "vs_fixed_baseline_ssim": 0.9935092016129032,
+      "vs_fixed_baseline_psnr_db": 48.06459677419355,
+      "report": "t2va-candidate-off/report.json",
+      "note": "candidate-off and fusion outputs byte-identical; baseline/candidate small video difference is not caused by fusion. Single-run speed difference not yet stable."
+    },
+    "completed_at": "2026-10-14T00:21:21.116957+08:00",
+    "repeated_benchmark": {
+      "baseline": {
+        "cli_wall_ms": {
+          "count": 3,
+          "max": 254734.67835993506,
+          "mean": 254542.39098370695,
+          "median": 254489.6726179868,
+          "min": 254402.82197319902,
+          "stdev": 172.0946975287963
+        },
+        "conditioning_ms": {
+          "count": 3,
+          "max": 1335,
+          "mean": 1330.3333333333333,
+          "median": 1329,
+          "min": 1327,
+          "stdev": 4.163331998932265
+        },
+        "decode_ms": {
+          "count": 3,
+          "max": 10534,
+          "mean": 10491.666666666666,
+          "median": 10502,
+          "min": 10439,
+          "stdev": 48.33563212924119
+        },
+        "diffusion_ms": {
+          "count": 3,
+          "max": 211615,
+          "mean": 211553.66666666666,
+          "median": 211551,
+          "min": 211495,
+          "stdev": 60.04442799572108
+        },
+        "noise_ms": {
+          "count": 3,
+          "max": 546,
+          "mean": 535.6666666666666,
+          "median": 533,
+          "min": 528,
+          "stdev": 9.29157324317757
+        },
+        "total_ms": {
+          "count": 3,
+          "max": 224786,
+          "mean": 224725.66666666666,
+          "median": 224770,
+          "min": 224621,
+          "stdev": 90.99633692261098
+        }
+      },
+      "fusion": {
+        "cli_wall_ms": {
+          "count": 3,
+          "max": 300192.78015499003,
+          "mean": 299621.47047797526,
+          "median": 299498.436141992,
+          "min": 299173.19513694383,
+          "stdev": 520.8084946784236
+        },
+        "conditioning_ms": {
+          "count": 3,
+          "max": 1336,
+          "mean": 1327.6666666666667,
+          "median": 1329,
+          "min": 1318,
+          "stdev": 9.073771725877465
+        },
+        "decode_ms": {
+          "count": 3,
+          "max": 10558,
+          "mean": 10521,
+          "median": 10538,
+          "min": 10467,
+          "stdev": 47.82258880487337
+        },
+        "diffusion_ms": {
+          "count": 3,
+          "max": 256436,
+          "mean": 256379.66666666666,
+          "median": 256384,
+          "min": 256319,
+          "stdev": 58.62024678669763
+        },
+        "noise_ms": {
+          "count": 3,
+          "max": 532,
+          "mean": 528.3333333333334,
+          "median": 527,
+          "min": 526,
+          "stdev": 3.2145502536643185
+        },
+        "total_ms": {
+          "count": 3,
+          "max": 269550,
+          "mean": 269527.6666666667,
+          "median": 269540,
+          "min": 269493,
+          "stdev": 30.43572462310259
+        }
+      },
+      "all_measured_video_files_identical": true,
+      "audio_pcm_identical": true,
+      "report": "benchmark/h3_cuda/rtx4090-results.json"
+    },
+    "cuda_adaln_offload_helper": {
+      "passed_comparisons": 104,
+      "graph_cut_segments": 784,
+      "audited_graphs": 1768,
+      "audited_nodes": 347500,
+      "production_offload_enabled": false,
+      "synthetic_precision": "F32",
+      "tested": "real CUDA cached/uncached tiny H3 and CPU reference; embed/curve, mixed/keyframe, CFG roles, repeat/reset, injected failure/recovery",
+      "not_tested": "production dispatch, full Q4 models, VRAM-budget bound, async prefetch",
+      "log": "logs/adaln-offload-gpu-v3.log",
+      "final_rebuild_source_files_verified": 232,
+      "final_rebuild_retested": true
+    },
+    "source_fetch_tests": {
+      "passed": 18,
+      "total": 18
+    },
+    "lora_tests": {
+      "passed": 5,
+      "total": 5
+    },
+    "source_stability_tests": {
+      "passed": 2,
+      "total": 2
+    },
+    "sequential_queue_status": "complete",
+    "final_gpu_state": {
+      "uuid": "GPU-95eb7a54-3471-4542-5a4d-894df955a273",
+      "memory_used_mib": 3,
+      "utilization_percent": 0,
+      "compute_processes": [],
+      "observed_after_final_test": true
     }
   }
 }
