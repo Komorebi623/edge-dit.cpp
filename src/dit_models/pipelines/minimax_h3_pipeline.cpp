@@ -117,15 +117,16 @@ public:
     explicit ScopeExit(std::function<void()> callback)
         : callback_(std::move(callback)) {}
 
-    ~ScopeExit() {
-        run_now();
+    ~ScopeExit() noexcept {
+        // Cleanup must not replace an in-flight generation exception.
+        try { run_now(); } catch (...) {}
     }
 
     void run_now() {
-        if (callback_) {
-            callback_();
-            callback_ = nullptr;
-        }
+        // Disarm before invoking: even a throwing callback is never retried.
+        auto callback = std::move(callback_);
+        callback_ = nullptr;
+        if (callback) callback();
     }
 
 private:
@@ -1343,6 +1344,13 @@ bool MiniMaxH3Pipeline::decode_audio_latent(const sd::Tensor<float>& latent,
 ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t* params,
                                               ed_video_t* out,
                                               std::string* error) try {
+    // Request state must survive every denoiser/CFG call, but no request exit.
+    // Install before validation/schedule preparation so early returns also reset.
+    ScopeExit reset_diffusion_request([this]() noexcept {
+        if (diffusion_ != nullptr && diffusion_->model.cuda_optimizations.any_enabled()) {
+            diffusion_->reset_cuda_optimization_state();
+        }
+    });
     if (diffusion_ != nullptr) diffusion_->reset_cuda_optimization_state();
     MiniMaxH3Profile profile;
     MiniMaxH3Profile* profile_ptr = h3_profile_enabled() ? &profile : nullptr;
@@ -1773,7 +1781,10 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
         set_minimax_error(error, "MiniMax-H3 failed to stage diffusion model for denoising");
         return ED_STATUS_OUT_OF_MEMORY;
     }
-    ScopeExit release_diffusion([this]() {
+    ScopeExit release_diffusion([this, &reset_diffusion_request]() {
+        // Drop Cache-DiT/AdaLN/attention request buffers before VAE decode (or
+        // phase offload on cancellation/failure), without releasing weights.
+        reset_diffusion_request.run_now();
         if (diffusion_ != nullptr) {
             diffusion_->release_params_after_phase();
         }

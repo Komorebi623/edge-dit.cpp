@@ -79,3 +79,21 @@
 - 检查当前安装CLI与生成协议：已有resume/fork，原始聊天rollout存在但history_mode为paginated。没有把单JSONL复制称为完整跨服务器恢复；官方文档访问403，未核实App原生跨host交接。
 - 未安装／更新Codex，不启动第二个会话，不复制凭据，不运行GPU。私密会话迁移与代码Git推送分开处理。
 - 当前已完成算法／12项CTest／48workflow／18sourcefetch／5tinyLoRA等结果保持不变；生产GPU多模态质量与性能仍为空。
+
+## 2026-10-13 新 H200 服务器恢复
+
+- `31ac721`接续；子模块及cuDNN frontend固定commit，无升级。模型完整SHA256 5/5一致，不改变混合精度／主任务。8卡99–100%忙，未运行GPU，不停止进程、不删除文件。
+- 修复 clean-clone 丢失解析器及GPU报告循环引用；锁定payload必须对精度锁，异常遥测拒绝，逐launch检输入变化。构建改显式架构／路径／toolchain，输出全新且隔离TMPDIR。
+- CPU 12 CTest＋49 workflow/media＋18 sourcefetch＋5 LoRA＋29 build config＋56 preflight全部通过；双CUDA版本机重建中。9仓库167份固定官方源码恢复，原PPT只作参考。
+- 新合成多模态素材另锁为新dataset；生产GPU质量／性能仍为空。证据 `_scratch/h3-server-20261013/`，计划 `h3-server-continuation-plan.md`。
+
+- 定向生产审查修复：SubBlock主任务逐head/Q64展开超图容量→compute/attention前保守拒绝、不加大容量；AdaLN/Sparse/Sage初始化后reuse/adapter/process-group→compute/prefill前复查；成功/取消/失败→请求scope清理且VAE decode前reset。12CTest＋49media/workflow＋18source＋5LoRA＋29build＋56preflight＋29cleanup再次通过。实际GGUF头验证QKV5376×21504、head128（56heads），不把tiny结果当生产能力。
+- baseline CUDA13/SM90新机编译链接通过；候选含Sage和生产修复构建中。新输入锁和4个逐开关manifest、dry-run已准备。GPU门禁真实只读测试拒绝占用并能保存JSON，无推理。
+
+- 18:55 CUDA13/SM90 baseline与candidate编译链接通过；公共配置SHA一致、候选source manifest与当前production源码匹配，4个单开关build gates通过。最新GPU快照每卡free约3.85GiB且占用，不启动生产实验。所有性能/质量结果继续空。
+
+## 2026-10-13 最终跨服务器交接
+
+- 用户要求使用最近身份Komorebi623保存代码和下一步计划，推个人origin研究分支，不推上游、不强推；Mac新Codex仅需SSH到新机读Git交接，不迁私密聊天。
+- 新目标4090独占、864×480/124帧/20步；原精度保留。先新offloaded baseline，fused增量验证，再缓存/attention卸载兼容。时延约5–10min是56帧历史外推，目标显存／速度未测。
+- 权威文档`h3-coordination-handoff.md`＋`h3-4090-continuation.md`，验证摘要保留旧与新机区分。模型/媒体/二进制/原始日志/凭据不随Git。

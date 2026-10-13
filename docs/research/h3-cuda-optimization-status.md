@@ -65,3 +65,17 @@ python3 scripts/h3_cuda_workflow.py workflow --manifest benchmark/h3_cuda/cache_
 以上是软件正确性与构建检查，不提供真实性能提升或“GPU已验证”结论。
 
 多卡 TP/Ulysses 是独立通信/分片工程；当前 H3 研究入口拒绝并行 graph cuts，未将其他模型的多卡路径宣称可直接用于 H3。RunningHub 私有蒸馏权重未公开，无法复现其 headline。torch.compile 是 Python 图编译，不作为 C++ 下的伪开关。
+
+## 2026-10-13 新服务器接续
+
+接续 `31ac721`，不是从头研究。五个共享权重完整 SHA256 全部重新核验一致；8×H200 均被占用且利用率 99–100%，未运行 GPU 推理。CPU 12/12 CTest、49/49 工作流（含媒体）、18/18 来源、5/5 LoRA、29/29 构建配置、56/56 安全门禁通过。
+
+修复未推送日志解析器、GPU报告循环引用、空hash锁定错误payload、异常遥测拒绝及逐次输入变化检查；构建脚本参数化并固定依赖／toolchain、全新输出且不覆盖。CUDA13 本机双版构建进行中，旧机器的编译通过结论不当作新机结果。新合成素材仅为独立 wiring dataset，真实质量和性能仍未测。续做顺序与容量边界见 `h3-server-continuation-plan.md`。
+
+生产审查补充：SubBlock 在主任务尺寸的逐head/Q64展开超过图容量，已加建图前保守拒绝；当前不能进入生产 SubBlock 性能实验，后续需要有界批量化／原生CUDA实现。AdaLN/SubBlock/Sage的动态reuse/adapter/process-group已补compute前复查，CPU负例通过。新机baseline CUDA13编译链接已通过，candidate仍在构建；无GPU推理。
+
+18:55 本机双CUDA版（含候选Sage及本轮生产修复）编译链接通过，公共配置一致、candidate源文件指纹与当前源码匹配；4个逐开关manifest的build gates通过。CPU全回归12/49/18/5/29/56/29全部通过。生产GPU仍未执行；SubBlock主任务仍拒绝，VDN/VSA仍未完成。
+
+## 最终交接：4090路线
+
+用户选择在Mac侧Codex连接另一服务器。接续入口`h3-coordination-handoff.md`、行动计划`h3-4090-continuation.md`。目标864×480/124帧/20步，完整混合Q4精度锁不变，GPU/几何/offload改变另baseline。4090短56帧历史实测不能当目标实测；5–10min仅计划估计。当前Cache/AdaLN/Sage拒绝DiT offload，先基准＋融合，再补卸载兼容；不把关闭拒绝当支持。GPU质量／性能仍未执行，VDN/VSA仍不完整。

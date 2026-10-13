@@ -1101,6 +1101,10 @@ namespace MiniMaxH3 {
                             ? SparseTokenKind::Audio : SparseTokenKind::Reference;
                     sparse_layout.spans.push_back({span.start, span.end, kind});
                 }
+                std::string reason;
+                if (!h3_subblock_graph_budget(sparse_layout, config.num_attention_heads,
+                                             config.num_layers, H3_GRAPH_SIZE, &reason))
+                    throw std::invalid_argument(reason);
             }
             const bool optimized_step = cuda_step >= cuda_optimizations.sparse_warmup_steps &&
                                         cuda_step + 1 < cuda_total_steps;
@@ -1513,14 +1517,7 @@ namespace MiniMaxH3 {
                 throw std::invalid_argument(error);
             }
             if (options.cache_dit) validate_cuda_cache_execution_mode();
-            if (options.adaln_cache && (params_backend != runtime_backend ||
-                can_attempt_graph_cut_segmented_compute() || weight_adapter ||
-                h3_env_flag_enabled("ED_MINIMAX_H3_REUSE_GRAPH")))
-                throw std::invalid_argument("MiniMax-H3 exact AdaLN requires resident immutable single-device parameters and graph reuse disabled");
-            if ((options.sparse_attn || options.sage_attn) &&
-                (params_backend != runtime_backend || can_attempt_graph_cut_segmented_compute() ||
-                 h3_env_flag_enabled("ED_MINIMAX_H3_REUSE_GRAPH")))
-                throw std::invalid_argument("MiniMax-H3 attention research requires resident single-device parameters and graph reuse disabled");
+            validate_cuda_research_execution_mode(options);
             cuda_cache_policy.configure(options, config.num_layers);
             // Changing graph-affecting fusion invalidates even when turning it
             // off. Identical default-off configure/reset leaves baseline reuse
@@ -1557,6 +1554,42 @@ namespace MiniMaxH3 {
                 throw std::invalid_argument("MiniMax-H3: dual-block cache cannot use a debug-target output");
             if (weight_adapter)
                 throw std::invalid_argument("MiniMax-H3: dual-block cache does not support mutable weight adapters");
+        }
+
+        void validate_cuda_research_execution_mode(const CudaOptimizationOptions& options) const {
+            if (options.adaln_cache && (params_backend != runtime_backend ||
+                can_attempt_graph_cut_segmented_compute() || weight_adapter ||
+                h3_env_flag_enabled("ED_MINIMAX_H3_REUSE_GRAPH")))
+                throw std::invalid_argument("MiniMax-H3 exact AdaLN requires resident immutable single-device parameters and graph reuse disabled");
+            if ((options.sparse_attn || options.sage_attn) &&
+                (params_backend != runtime_backend || can_attempt_graph_cut_segmented_compute() || weight_adapter ||
+                 h3_env_flag_enabled("ED_MINIMAX_H3_REUSE_GRAPH")))
+                throw std::invalid_argument("MiniMax-H3 attention research requires resident immutable single-device parameters and graph reuse disabled");
+        }
+
+        void validate_cuda_sparse_capacity(const DiffusionParams& params) {
+            if (!model.cuda_optimizations.sparse_attn) return;
+            // Packed A/V retains the target-video spatial geometry; do not
+            // copy large latent buffers merely to reject an expanded graph.
+            const auto& shape = params.x->shape();
+            static const std::vector<sd::Tensor<float>> empty;
+            static const std::vector<MiniMaxH3ReferenceBlock> empty_refs;
+            static const sd::Tensor<int32_t> empty_int;
+            const auto layout = build_layout(params.context->shape()[1], shape[2], shape[1], shape[0],
+                                            params.minimax_audio_length,
+                                            params.ref_latents ? *params.ref_latents : empty,
+                                            params.minimax_reference_audio_latents ? *params.minimax_reference_audio_latents : empty,
+                                            params.minimax_keyframe_indices ? *params.minimax_keyframe_indices : empty_int,
+                                            params.minimax_reference_blocks ? *params.minimax_reference_blocks : empty_refs,
+                                            params.minimax_text_token_tags ? *params.minimax_text_token_tags : empty_int,
+                                            0.f, 0.f);
+            SparseAttentionLayout sparse;
+            for (const auto& span : layout.sequence_segments)
+                sparse.spans.push_back({span.start, span.end,
+                    span.kind == SequenceKind::TARGET_VIDEO ? SparseTokenKind::TargetVideo : SparseTokenKind::Reference});
+            std::string reason;
+            if (!h3_subblock_graph_budget(sparse, config.num_attention_heads, config.num_layers, H3_GRAPH_SIZE, &reason))
+                throw std::invalid_argument(reason);
         }
 
         void reset_cuda_optimization_state() noexcept {
@@ -2092,6 +2125,11 @@ namespace MiniMaxH3 {
         sd::Tensor<float> compute(int n_threads,
                                   const DiffusionParams& params) {
             GGML_ASSERT(params.x != nullptr && params.timesteps != nullptr && params.context != nullptr);
+            // Recheck dynamic state before prefill/build/replay; configure-time
+            // checks cannot protect later environment/adapter/group changes.
+            validate_cuda_research_execution_mode(model.cuda_optimizations);
+            if (model.cuda_optimizations.cache_dit) validate_cuda_cache_execution_mode();
+            validate_cuda_sparse_capacity(params);
             prepare_adaln_branch(n_threads, params);
             static const std::vector<sd::Tensor<float>> empty_conditions;
             static const std::vector<MiniMaxH3ReferenceBlock> empty_reference_blocks;

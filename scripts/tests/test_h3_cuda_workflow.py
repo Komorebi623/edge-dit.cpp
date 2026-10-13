@@ -316,6 +316,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(parsed["cpu_stage_profiles"][0]["stage"], "vae")
         self.assertEqual(parsed["cpu_stage_profiles"][0]["total"], 12.0)
 
+    def test_tracked_cpu_stage_parser_multiple_graphs(self):
+        parser = h3.helper("h3_test_stage_parser", ROOT / "benchmark/scripts/parse_cpu_stage_profile.py")
+        log = self.tmp / "cpu-multiple.log"
+        log.write_text("=== edge-dit CPU op profile (per graph_compute) ===\n"
+                       "MUL_MAT 8.00 2 4000.0 66.7% 0.100 12.5\nTOTAL 12.00 0.100\n"
+                       "=== edge-dit CPU op profile [stage=diffusion] (per graph_compute) ===\n"
+                       "MUL_MAT nan 1 0.0 0.0% 0.0 0.0\nTOTAL 24.00\n"
+                       "CUSTOM 999 1 0 0% 0 0\n")
+        rows = parser.parse(str(log))
+        self.assertEqual([r["stage"] for r in rows], ["unlabelled", "diffusion"])
+        self.assertEqual([r["total"] for r in rows], [12.0, 24.0])
+        self.assertEqual(rows[0]["ops"], [{"op": "MUL_MAT", "total_ms": 8.0, "calls": 2}])
+        self.assertEqual(rows[1]["ops"], [])
+
     def test_report_mean_median_excludes_warmup_failure(self):
         profile = h3.parse_profiles(PROFILE)
         records = [{"warmup": warmup, "status": status, "wall_ms": ms, "profile": profile}
@@ -407,7 +421,7 @@ class WorkflowTests(unittest.TestCase):
             h3.validate_build(self.manifest, "baseline", provenance)
 
     def mocked_generation(self, result=None, exception=None, media_error=None):
-        mocks = [patch.object(h3, "verify_inputs", return_value={}), patch.object(h3, "validate_assets"),
+        mocks = [patch.object(h3, "verify_inputs", return_value={}), patch.object(h3, "input_stat_signatures", return_value={}), patch.object(h3, "validate_assets"),
                  patch.object(h3, "build_provenance", return_value={}), patch.object(h3, "validate_build", return_value={}),
                  patch.object(h3, "git_provenance", return_value={}), patch.object(h3, "gpu_precheck", return_value={"uuid": "GPU-mock"}),
                  patch.object(h3, "invoke", return_value=subprocess.CompletedProcess([], 0, "mock media tool version", "")),
@@ -516,7 +530,15 @@ class WorkflowTests(unittest.TestCase):
                 path.write_bytes(b"small CPU fixture")
                 item.update(path=str(path), bytes=path.stat().st_size)
         target = self.tmp / "locked.json"
-        with patch.object(h3, "verify_precision_header"), patch.object(h3, "gpu_precheck", side_effect=AssertionError("no GPU")):
+        precision = json.loads((ROOT / "docs/research/h3-precision-lock.json").read_text())
+        for component in precision["components"]:
+            component["full_sha256"] = h3.sha256(self.tmp / "models-fl2va")
+        def tiny_precision(path):
+            if Path(path).resolve() == (ROOT / "docs/research/h3-precision-lock.json").resolve():
+                return copy.deepcopy(precision)
+            return _REAL_READ_JSON(path)
+        with patch.object(h3, "verify_precision_header"), patch.object(h3, "read_json", side_effect=tiny_precision), \
+             patch.object(h3, "gpu_precheck", side_effect=AssertionError("no GPU")):
             h3.lock_manifest(data, target)
             locked = h3.read_json(target)
             self.assertTrue(all(h3.SHA_RE.fullmatch(item["sha256"]) for item in locked["models"].values()))
@@ -603,7 +625,7 @@ class CPUMediaTests(unittest.TestCase):
         for group in ("models", "assets"):
             for item in data[group].values():
                 item["sha256"] = "1" * 64
-        with patch.object(h3, "verify_inputs", return_value={}), patch.object(h3, "validate_assets"), \
+        with patch.object(h3, "verify_inputs", return_value={}), patch.object(h3, "input_stat_signatures", return_value={}), patch.object(h3, "validate_assets"), \
              patch.object(h3, "gpu_precheck", side_effect=AssertionError("no GPU import")), patch.object(h3, "git_provenance", return_value={}):
             base = h3.run_phase(data, "baseline", self.tmp / (suffix + "-baseline"), ["t2va"], artifacts={"t2va": str(self.video)})
         return data, base
@@ -614,7 +636,7 @@ class CPUMediaTests(unittest.TestCase):
             for item in data[group].values():
                 item["sha256"] = "1" * 64
         modes = ["t2va", "first_frame"]
-        with patch.object(h3, "verify_inputs", return_value={}), patch.object(h3, "validate_assets"), \
+        with patch.object(h3, "verify_inputs", return_value={}), patch.object(h3, "input_stat_signatures", return_value={}), patch.object(h3, "validate_assets"), \
              patch.object(h3, "gpu_precheck", side_effect=AssertionError("no GPU")), patch.object(h3, "git_provenance", return_value={}):
             path = h3.run_phase(data, "baseline", self.tmp / "repeat-artifact", modes,
                                 artifacts={mode: str(self.video) for mode in modes})

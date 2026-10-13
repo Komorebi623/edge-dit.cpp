@@ -56,5 +56,116 @@
   },
   "candidate_source_tree_sha256": "36a7edf68d313bae84291f543b987b078fd5a3cce294bece9e8f920ac30e6f4a",
   "tested_source_checkpoint": "3dced15",
-  "build_source_provenance_note": "Compiled from dirty baseline checkout; source_tree_sha256 matches the committed production sources. Binary was not executed on GPU."
+  "build_source_provenance_note": "Compiled from dirty baseline checkout; source_tree_sha256 matches the committed production sources. Binary was not executed on GPU.",
+  "new_server_validation": {
+    "date": "2026-10-13",
+    "timezone": "Asia/Shanghai",
+    "handoff_commit": "31ac721acadd000b0e712d09d17553661e29748c",
+    "gpu": "8x NVIDIA H200, SM90",
+    "driver": "580.105.08",
+    "cuda_toolkit": "13.0.88",
+    "gcc": "12.3.1",
+    "gpu_inference_executed": false,
+    "gpu_processes_modified": false,
+    "gpu_availability": "all occupied, 99-100 percent utilization at initial snapshot; no inference",
+    "model_full_sha256": "all five components match original precision lock on this server",
+    "model_verification_report": "_scratch/h3-server-20261013/model-verification.json",
+    "cpu_ctest": {
+      "passed": 12,
+      "total": 12
+    },
+    "workflow_tests": {
+      "passed": 49,
+      "total": 49,
+      "skipped": 0
+    },
+    "source_fetch_tests": {
+      "passed": 18,
+      "total": 18
+    },
+    "lora_cpu_tests": {
+      "passed": 5,
+      "total": 5
+    },
+    "cuda_build_config_tests": {
+      "passed": 29,
+      "total": 29
+    },
+    "server_preflight_tests": {
+      "passed": 56,
+      "total": 56,
+      "expected_failures": 0
+    },
+    "cuda_baseline_build": "passed_cuda13_sm90_not_gpu_executed",
+    "cuda_candidate_build": "passed_cuda13_sm90_including_sage_and_production_fixes_not_gpu_executed",
+    "fixture_continuity": "new synthetic CPU wiring dataset; not old exact fixture continuation",
+    "performance_results": null,
+    "production_quality_results": null,
+    "logs": [
+      "logs/cpu-regression-production-final.log",
+      "logs/cuda-build-01.log",
+      "logs/tiny-runtime-final.log"
+    ],
+    "evidence_root": "_scratch/h3-server-20261013",
+    "plan": "docs/research/h3-server-continuation-plan.md",
+    "baseline_binary_sha256": "e8f2b8d207c1059fc31e556c58e784478cd9d8fa0bcdb4fd270f057890931ba4",
+    "new_fixture_manifest_sha256": "05b02dd401025985e834b18454277ea8cf9252c6aa94d46f07793778ec5a99e9",
+    "production_audit": {
+      "subblock": "main-task expanded graph rejected before build; bounded execution still required",
+      "dynamic_modes": "compute-time reuse/adapter/process-group gate tested on CPU",
+      "request_cleanup": "request-scoped reset including success before VAE decode, cancellation and errors; CPU tests passed"
+    },
+    "request_cleanup_tests": {
+      "passed": 29,
+      "total": 29,
+      "scope": "8 source assertions plus 21 compiled tiny CPU ScopeExit scenarios; not full pipeline/GPU inference"
+    },
+    "gpu_precheck_live_report": "_scratch/h3-server-20261013/gpu-precheck-live.json",
+    "gpu_precheck_live_result": "occupied rejected; valid serialized telemetry; no inference",
+    "gpu_recheck": {
+      "approximate_local_time": "2026-10-13 18:48 Asia/Shanghai",
+      "free_mib_range": [
+        3939,
+        3941
+      ],
+      "utilization_percent_range": [
+        89,
+        100
+      ],
+      "status": "occupied; rejected without inference"
+    },
+    "candidate_binary_sha256": "ce7108f07d31e3dd8b7546ffd44438c68519daca3ec314b7c346bc699094bafc",
+    "candidate_source_tree_sha256": "99b8f9e42401059bd4b9d4a9d122fe0881577bd374c8d2100c6dfe781455d6f8",
+    "shared_build_config_sha256": "8226491de8c89cb752a51271e8f569588ffa545724aa4982cb131f75474869b7",
+    "candidate_source_provenance": "built from 31ac721 plus tracked production diff; source manifest matches current production files",
+    "build_gates": "four single-method baseline/candidate manifests pass validate_build; no inference"
+  },
+  "continuation_plan": {
+    "date": "2026-10-13",
+    "target": "Mac-coordinated connection to another server, preferably idle RTX 4090",
+    "branch": "codex/minimax-h3-cuda-optimizations",
+    "handoff_document": "docs/research/h3-coordination-handoff.md",
+    "action_plan": "docs/research/h3-4090-continuation.md",
+    "new_task": {
+      "width": 864,
+      "height": 480,
+      "frames": 124,
+      "fps": 24,
+      "steps": 20,
+      "seed": 42,
+      "cfg": 1,
+      "sampler": "res_multistep",
+      "scheduler": "simple"
+    },
+    "precision": "unchanged original full mixed Q4 lock; verify full hashes on next server",
+    "placement": "new offloaded baseline required; resident-only cache/attention candidates need compatibility engineering",
+    "estimated_cold_t2va_minutes": [
+      5,
+      10
+    ],
+    "estimate_not_measurement": true,
+    "target_gpu_inference_executed": false,
+    "target_vram_verified": false,
+    "performance_results": null
+  }
 }

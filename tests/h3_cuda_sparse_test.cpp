@@ -84,6 +84,14 @@ void test_reference() {
     SparseAttentionConfig config;
     check(config.sparse_block_tokens == 64 && config.sparse_keep_ratio == .5f &&
           config.sparse_warmup_steps == 2, "option defaults changed");
+    std::string budget_reason;
+    check(!h3_subblock_graph_budget({{{0, 9472, SparseTokenKind::TargetVideo}}},
+                                  56, 50, 131072, &budget_reason), "production expansion accepted");
+    check(budget_reason.find("bounded execution") != std::string::npos, "capacity error lost");
+    check(h3_subblock_graph_budget({{{0, 146, SparseTokenKind::TargetVideo}}},
+                                 2, 1, 131072), "tiny expansion incorrectly rejected");
+    check(!h3_subblock_graph_budget({{{0, std::numeric_limits<int64_t>::max(), SparseTokenKind::TargetVideo}}},
+                                  std::numeric_limits<int64_t>::max(), 50, 131072), "overflow budget accepted");
     Input x(146,2);
     auto layout = mixed_layout();
     config.sparse_keep_ratio = 1;

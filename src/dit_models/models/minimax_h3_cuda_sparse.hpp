@@ -29,6 +29,43 @@ struct SparseAttentionLayout {
     std::vector<SparseTokenSpan> spans;
 };
 
+// Conservative metadata/node budget for the current per-head/per-Q-block
+// expanded graph. This is a rejection gate, NOT a proven VRAM bound; do not
+// increase it to force production clips through. Batched/native execution is
+// needed for large clips. Checked arithmetic avoids overflow on bad geometry.
+inline bool h3_subblock_graph_budget(const SparseAttentionLayout& layout,
+                                     int64_t heads, int64_t layers, int64_t capacity,
+                                     std::string* reason = nullptr) {
+    auto fail = [&]() {
+        if (reason) *reason = "MiniMax-H3 SubBlock expanded graph exceeds conservative capacity; bounded execution required";
+        return false;
+    };
+    if (heads <= 0 || layers <= 0 || capacity <= 8192) return fail();
+    int64_t blocks = 0, spans = 0;
+    for (const auto& span : layout.spans) {
+        if (span.begin < 0 || span.end <= span.begin) return fail();
+        ++spans;
+        if (span.kind == SparseTokenKind::TargetVideo) {
+            const int64_t count = (span.end - span.begin) / 64 + ((span.end - span.begin) % 64 != 0);
+            if (count > capacity - blocks) return fail();
+            blocks += count;
+        }
+    }
+    if (blocks == 0 || spans > (capacity - 128) / 64) return fail();
+    // Includes router/pooling/gathers, protected-span concatenation, attention
+    // prep/probes, output concatenations and baseline transformer overhead.
+    const int64_t block_cost = 128 + 16 * spans;
+    const int64_t span_cost = 64 * spans;
+    if (blocks > (capacity - span_cost) / block_cost) return fail();
+    const int64_t per_head = blocks * block_cost + span_cost;
+    int64_t remaining = capacity - 8192;
+    if (layers > remaining / 512) return fail();
+    remaining -= layers * 512;
+    if (heads > remaining / layers || per_head > remaining / layers / heads) return fail();
+    if (reason) reason->clear();
+    return true;
+}
+
 // The runner's bind_backend_tensor_data registers a pointer, not a copy. Keep
 // this owner alive until the graph has finished executing (including replays).
 // One owner per graph; release it with that graph, not on every denoise step.
@@ -352,7 +389,7 @@ inline ggml_tensor* h3_subblock_attention(GGMLRunnerContext* runner,
     using namespace h3_sparse_detail;
     Plan plan;
     if (!runner || !runner->ggml_ctx || !runner->backend || !q || !k || !v ||
-        !options.graph_inputs ||
+        !options.graph_inputs || !h3_subblock_graph_budget(layout, heads, 1, 65536) ||
         (!runner->bind_backend_tensor_data && ggml_get_no_alloc(runner->ggml_ctx)) ||
         q->ne[3] != 1 || k->ne[3] != 1 || v->ne[3] != 1 ||
         q->ne[0] != head_dim || k->ne[0] != head_dim || v->ne[0] != head_dim ||

@@ -428,6 +428,69 @@ void failure_test(ggml_backend_t backend) {
     check(!runner.compute(1, p).empty(), "runner did not recover after prefill failure/reset");
     std::cout << "PASS invalid schedule/sigma/shape, stale token, real runner small-budget failure/recovery\n";
 }
+struct NegativeTestAdapter : WeightAdapter {
+    ggml_tensor* patch_weight(ggml_context*, ggml_backend_t, ggml_tensor* w, const std::string&) override { return w; }
+    ggml_tensor* forward_with_lora(ggml_context*, ggml_backend_t, ggml_tensor*, ggml_tensor*, ggml_tensor*,
+                                    const std::string&, ForwardParams) override { throw std::runtime_error("adapter must not execute"); }
+    size_t get_extra_graph_size() override { return 0; }
+};
+struct NegativeTestGroup : edgedit::parallel::ProcessGroup {
+    edgedit::parallel::Backend backend() const override { return edgedit::parallel::Backend::kCpu; }
+    int rank() const override { return 0; }
+    int size() const override { return 2; }
+    int local_rank() const override { return 0; }
+    bool enabled() const override { return true; }
+    void barrier() override { throw std::runtime_error("group must not execute"); }
+    void all_reduce(const edgedit::parallel::Buffer&, const edgedit::parallel::Buffer&, edgedit::parallel::ReduceOp) override {}
+    void all_gather(const edgedit::parallel::Buffer&, const edgedit::parallel::Buffer&) override {}
+    void all_to_all(const edgedit::parallel::Buffer&, const edgedit::parallel::Buffer&, size_t) override {}
+    void broadcast(const edgedit::parallel::Buffer&, int) override {}
+};
+void runtime_mode_test(ggml_backend_t backend) {
+    TinyRunner runner(backend, tiny_weights());
+    Inputs inputs;
+    auto p = inputs.params();
+    const char* previous = std::getenv("ED_MINIMAX_H3_REUSE_GRAPH");
+    const bool existed = previous != nullptr;
+    const std::string old = previous ? previous : "";
+    for (int method = 0; method < 3; ++method) {
+        MiniMaxH3::CudaOptimizationOptions options;
+        options.adaln_cache = method == 0;
+        options.sparse_attn = method == 1;
+        options.sage_attn = method == 2;
+        unsetenv("ED_MINIMAX_H3_REUSE_GRAPH");
+        runner.validate_cuda_research_execution_mode(options);
+        runner.model.cuda_optimizations = options; // CPU-only negative test bypass
+        setenv("ED_MINIMAX_H3_REUSE_GRAPH", "1", 1);
+        rejects_with([&] { runner.compute(1, p); }, "graph reuse disabled",
+                     "late reuse mutation reached prefill/build");
+        unsetenv("ED_MINIMAX_H3_REUSE_GRAPH");
+        runner.set_weight_adapter(std::make_shared<NegativeTestAdapter>());
+        rejects_with([&] { runner.compute(1, p); }, "immutable single-device",
+                     "late adapter mutation reached prefill/build");
+        runner.set_weight_adapter(nullptr);
+        runner.set_process_group(std::make_shared<NegativeTestGroup>());
+        rejects_with([&] { runner.compute(1, p); }, "single-device",
+                     "late process-group mutation reached prefill/build");
+        runner.set_process_group(nullptr);
+    }
+    if (existed) setenv("ED_MINIMAX_H3_REUSE_GRAPH", old.c_str(), 1);
+    else unsetenv("ED_MINIMAX_H3_REUSE_GRAPH");
+    runner.model.cuda_optimizations = {};
+    runner.model.cuda_optimizations.sparse_attn = true;
+    runner.config.num_attention_heads = 56;
+    runner.config.num_layers = 50;
+    sd::Tensor<float> primary_geometry({32, 32, 37, 2});
+    p.x = &primary_geometry;
+    rejects_with([&] { runner.compute(1, p); }, "bounded execution required",
+                 "primary SubBlock request reached graph construction");
+    runner.model.cuda_optimizations = {};
+    setenv("ED_MINIMAX_H3_REUSE_GRAPH", "1", 1);
+    runner.validate_cuda_research_execution_mode({}); // baseline unchanged
+    if (existed) setenv("ED_MINIMAX_H3_REUSE_GRAPH", old.c_str(), 1);
+    else unsetenv("ED_MINIMAX_H3_REUSE_GRAPH");
+    std::cout << "PASS late AdaLN/SubBlock/Sage reuse/adapter/process-group mutations rejected before prefill; baseline unchanged\n";
+}
 } // namespace
 
 int main() {
@@ -442,6 +505,7 @@ int main() {
         schedule_test(backend, true);
         branch_layout_test(backend);
         failure_test(backend);
+        runtime_mode_test(backend);
         ggml_backend_free(backend);
         std::cout << "H3 integrated runtime optimization tests passed (" << checks << " checks; "
                   << comparisons << " actual fullgraph comparisons, " << exact_comparisons

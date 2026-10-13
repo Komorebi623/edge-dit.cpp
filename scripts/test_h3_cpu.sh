@@ -12,3 +12,7 @@ python3 -m unittest discover -s scripts/tests -p 'test_h3_cuda_workflow.py' -v
 python3 scripts/fetch_h3_references.py --self-test
 # Uses tiny CPU tensors only; available in the established dev container.
 python3 tests/test_h3_lora_merge.py
+# New-server/build configuration safety regressions; tiny fake inputs only.
+python3 -m unittest discover -s tests -p 'test_h3_cuda_build.py' -v
+python3 -m unittest discover -s tests -p 'test_h3_server_preflight.py' -v
+python3 -m unittest discover -s tests -p 'test_h3_request_cleanup.py' -v

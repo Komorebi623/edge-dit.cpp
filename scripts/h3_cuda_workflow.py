@@ -110,6 +110,28 @@ def fingerprint(path: Path) -> dict:
             "bytes": sum(p["bytes"] for p in entries), "files": entries}
 
 
+def input_stat_signatures(manifest: dict) -> dict:
+    """Cheap per-launch mutation guard after full hashing; not a storage lock.
+
+    Includes ctime/device/inode as well as size/mtime and frame membership. A
+    read-only guard cannot protect against concurrent writes after the check;
+    weights and assets must remain immutable for the whole scheduled run.
+    """
+    result = {}
+    for group in ("models", "assets"):
+        for key, item in manifest[group].items():
+            root = Path(item["path"])
+            require(root.exists(), f"input changed/missing before launch: {root}")
+            paths = [root] + sorted(root.rglob("*")) if root.is_dir() else [root]
+            rows = []
+            for path in paths:
+                require(not path.is_symlink() or path == root, f"input frame symlink changed: {path}")
+                stat = path.stat()
+                rows.append((str(path), stat.st_dev, stat.st_ino, stat.st_size,
+                             stat.st_mtime_ns, stat.st_ctime_ns))
+            result[group + "." + key] = rows
+    return result
+
 def integer(value: Any, name: str, minimum: int = 1) -> int:
     require(type(value) is int and value >= minimum, f"{name} must be an integer >= {minimum}")
     return value
@@ -314,8 +336,8 @@ def parse_profiles(text: str, log_path: Path | None = None) -> dict:
     result = {"source": "native_minimax_h3_profile", "summaries": summaries, "details": details,
               "phase_component_ms": components, "stage_boundaries": boundaries,
               "actual_placement": existing.parse_auto_placement(text)}
-    if log_path is not None and "CPU op profile [stage=" in text:
-        parser = helper("h3_existing_stage_parser", ROOT / "scripts/parse_stage_profile.py")
+    if log_path is not None and "CPU op profile" in text:
+        parser = helper("h3_existing_stage_parser", ROOT / "benchmark/scripts/parse_cpu_stage_profile.py")
         result["cpu_stage_profiles"] = parser.parse(str(log_path))
     return result
 
@@ -470,12 +492,30 @@ def gpu_precheck(settings: dict) -> dict:
                                  (int(fields[0]), fields[1], fields[2], *map(int, fields[3:])))))
         except ValueError as exc:
             raise WorkflowError("unavailable GPU memory/utilization telemetry") from exc
-    chosen = next((gpu for gpu in gpus if gpu["index"] == settings["gpu_index"]), None)
+    require(bool(gpus), "empty GPU telemetry")
+    require(len({g["index"] for g in gpus}) == len(gpus) and
+            len({g["uuid"] for g in gpus}) == len(gpus), "duplicate GPU identity telemetry")
+    for gpu in gpus:
+        require(gpu["index"] >= 0 and gpu["uuid"].startswith("GPU-") and
+                len(gpu["uuid"]) > 4 and bool(gpu["name"]), "invalid GPU identity telemetry")
+        require(gpu["total_mib"] > 0 and 0 <= gpu["free_mib"] <= gpu["total_mib"] and
+                0 <= gpu["used_mib"] <= gpu["total_mib"] and
+                0 <= gpu["utilization_percent"] <= 100, "invalid GPU memory/utilization telemetry")
+    selected = next((gpu for gpu in gpus if gpu["index"] == settings["gpu_index"]), None)
+    chosen = dict(selected) if selected is not None else None
     require(chosen is not None, "selected GPU not found")
     processes = invoke(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory,process_name",
                         "--format=csv,noheader,nounits"], 15).stdout
-    require(all(len(line.split(",")) == 4 for line in processes.splitlines() if line.strip()),
-            "unparseable compute-process telemetry")
+    for line in processes.splitlines():
+        if not line.strip():
+            continue
+        fields = [v.strip() for v in line.split(",")]
+        require(len(fields) == 4, "unparseable compute-process telemetry")
+        require(fields[0] in {gpu["uuid"] for gpu in gpus}, "unattributable compute-process telemetry")
+        require(fields[1].isdigit() and int(fields[1]) > 0 and bool(fields[3]),
+                "invalid compute-process telemetry")
+        require(fields[2] in ("N/A", "[N/A]") or fields[2].isdigit(),
+                "invalid compute-process memory telemetry")
     chosen["compute_processes"] = [line.strip() for line in processes.splitlines()
                                     if line.split(",", 1)[0].strip() == chosen["uuid"]]
     chosen["all_gpus"] = gpus
@@ -742,7 +782,10 @@ def run_phase(manifest: dict, phase: str, output_dir: Path, modes: list[str], *,
                 for key, value in env.items() if key in OPTIONS}
             write_json(report_path, report)
             return report_path
+        before_hash = input_stat_signatures(manifest)
         report["identities"] = verify_inputs(manifest)
+        frozen_inputs = input_stat_signatures(manifest)
+        require(before_hash == frozen_inputs, "input changed during full-file verification")
         report["media_tools"] = {tool: invoke([tool, "-version"], 15).stdout.splitlines()[0]
                                  for tool in ("ffmpeg", "ffprobe")}
         validate_assets(manifest, modes)
@@ -780,6 +823,8 @@ def run_phase(manifest: dict, phase: str, output_dir: Path, modes: list[str], *,
                 # not a reservation; operators still need exclusive scheduling.
                 available = gpu_precheck(manifest["run"])
                 require(available["uuid"] == report["gpu"]["uuid"], "GPU identity changed")
+                require(input_stat_signatures(manifest) == frozen_inputs,
+                        "input changed since full-file verification; refusing remaining launches")
                 path = output_dir / f"{mode}-{n:03d}.mp4"
                 require(not path.exists(), f"refuse overwriting existing output: {path}")
                 record = {"warmup": n < manifest["run"]["warmup"], "status": "running", "output": str(path),
@@ -951,6 +996,10 @@ def lock_manifest(manifest: dict, output: Path) -> Path:
             actual = fingerprint(Path(item["path"]))
             require(item.get("bytes", actual["bytes"]) == actual["bytes"], f"{key}: precision-lock size mismatch")
             require(item.get("sha256") in (None, actual["sha256"]), f"{key}: existing full hash mismatch")
+            if group == "models":
+                precision = read_json(ROOT / "docs/research/h3-precision-lock.json")
+                pinned = precision["components"][COMPONENTS.index(key)]
+                require(actual["sha256"] == pinned["full_sha256"], f"{key}: pinned full-file SHA256 mismatch")
             item.update(actual)
     manifest["hash_status"] = "full_file_sha256_locked"
     output.parent.mkdir(parents=True, exist_ok=True)

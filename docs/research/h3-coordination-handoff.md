@@ -1,84 +1,79 @@
-# MiniMax-H3：新服务器接续说明
+# MiniMax-H3：跨服务器接续交接
 
-更新：2026-10-13（Asia/Shanghai）。本文件取代之前的暂停／Mac协调方案；用户选择在另一台服务器上继续开发。代码与实验状态以此文件及验证摘要为准，原始聊天迁移是独立事项。
+更新：2026-10-13（Asia/Shanghai）。当前选择：在 Mac 的 Codex 中连接另一台服务器，优先空闲 RTX 4090。**本文件是恢复进度入口；不需要重新从头研究，也不依赖旧聊天迁移。**
 
-## 1. 获取同一研究分支
+## 1. 分支、baseline 与代码状态
 
-个人远端：`Komorebi623/edge-dit.cpp`；开发分支：`codex/minimax-h3-cuda-optimizations`。原始基线固定 `97cc585d9dbd9ac5e30b78ef2e2c4a0d8bfbe9f2`。已实现代码检查点 `aa3eaeb3f71bbe7621b7aef7295f360c1119196d`，后续交接文档提交不改变算法。
+- 个人远端：`git@github.com:Komorebi623/edge-dit.cpp.git`；研究分支：`codex/minimax-h3-cuda-optimizations`。
+- 本轮从 `31ac721acadd000b0e712d09d17553661e29748c` 接续；新的交接点为包含本文件及本轮修复的提交，接手时记录实际 `HEAD`，以用户给出的完整 hash 核对。
+- 原始 baseline 固定 `97cc585d9dbd9ac5e30b78ef2e2c4a0d8bfbe9f2`。它已经包含原项目 CUDA norm/RoPE/modulation 路径和默认 SwiGLU 融合。全 `ED_H3_*` 关闭仅关闭新增研究方法，**不撤掉用户既有优化；不重复计功**。
+- 固定子模块：ggml `f270346d688c7bec7c56bae2ae73343aba6817ad`；oneDNN `5e9224036021433d2577548ed0539fe9a53256bc`；cuDNN frontend `07b368a2696f5fd0fc2207d4635c51cea4c0bf71`。
+- 不更新依赖、不合并 main、不强推；保留 `origin` 为个人仓库。已有目录先检查未提交内容，不覆盖或强制重置。只有一个集成者；旧服务器交接后不并行修改研究分支。
 
-在新目录克隆该研究分支并初始化子模块；若已有项目，先检查未提交内容，不覆盖、不强制重置。保留 `origin` 为个人推送目标，`thu` 指向 THU-MIG 上游；不合并main、不强推。初次接手记录 `git rev-parse HEAD` 和子模块版本。
+## 2. 用户要求
 
-固定子模块：ggml `f270346d688c7bec7c56bae2ae73343aba6817ad`；oneDNN `5e9224036021433d2577548ed0539fe9a53256bc`。不要顺手更新依赖后沿用旧baseline数据。
+八种独立默认关闭开关：融合、Cache-DiT、AdaLN、SubBlock、Sage、Turbo、VDN、VSA。新优化仅 H3、仅 CUDA 生效，不改变其他模型／后端。允许多个智能体在不重叠文件范围内并行。
 
-## 2. 用户目标与不可违反的约束
+**禁止停止／杀死任何他人的进程，禁止删除用户文件，不抢占 GPU。** 空闲显存和瞬时利用率不是资源预留。GPU 不可用时继续 CPU 开发；需要用户提供的地址／权限才询问。先 baseline 再逐开关，固定精度／输入／solver／步数／placement；不能把模型换成 pruned／distilled／LoRA 或改量化后沿用旧 baseline。
 
-- 融合 SGLang / Cache-DiT、RunningHub / Turbo、FastVideo / VSA、VDN 等H3优化，每种独立总控，默认关闭。
-- 新优化仅H3、仅CUDA生效，不改变其他模型／后端；CPU tiny tests是数学验证入口，不是对其他后端启用优化。
-- **禁止停止／杀死任何GPU或他人的进程；不删除用户文件，不抢占资源。**先读GPU状态，忙则继续CPU开发，推理等待许可及资源。
-- 先固定模型、输入和baseline，再逐开关比较；不能更换量化、pruned、LoRA、步数、solver、placement后仍与旧baseline算加速。
-- 可并行委派不同写入范围；只有一个代码集成者。简洁记录环境、基线、算法、结果与故障。
+## 3. 已完成与真实缺口
 
-## 3. 当前真实完成状态
+| 开关 | 当前真实状态 |
+|---|---|
+| `ED_H3_FUSED_OPS` | H3 分段调制／门控残差、视图和 SwiGLU 路径已接入；部分与原已有融合重合；GPU收益未测 |
+| `ED_H3_CACHE_DIT` | 当前真实前段 probe、逐模态 RF guard、同锚 middle delta＋真实后段；CFG分离／请求失效；生产GPU未测 |
+| `ED_H3_ADALN_CACHE` | 全固定sigma真实投影预填、分支及模型／输入身份检查；tiny CPU逐位一致；**未释放投影权重**，不宣称显存节省 |
+| `ED_H3_SPARSE_ATTN` | per-head Q64/K64 TopK/gather＋全部Q更新；保护非目标video模态；**主任务图展开超容量，现建图前明确拒绝**，需要有界／批量化实现 |
+| `ED_H3_SAGE_ATTN` | H3SA专用tag、INT8 QK＋F16 PV；首末层／refiner保dense，SubBlock不能叠加；CUDA编译通过，GPU未测 |
+| `ED_H3_TURBO` | CPU离线LoRA合并／完整hash／recipe入口；真实匹配adapter未验证，需独立模型baseline |
+| `ED_H3_VDN` | 数学参考及部分原生ggml组件；exact solve、short-conv、anchor、完整权重和CUDA部署未完成；生产入口拒绝 |
+| `ED_H3_VSA` | tile routing、fine＋learned gated compression的CPU参考和gate检查；真实权重／原生CUDA／生产集成未完成；生产入口拒绝 |
 
-已完成并默认关闭：`ED_H3_FUSED_OPS`、`ED_H3_CACHE_DIT`、`ED_H3_ADALN_CACHE`、`ED_H3_SPARSE_ATTN`、`ED_H3_SAGE_ATTN`。
+TP/Ulysses尚未迁移H3；torch.compile不是C++算法开关。RunningHub私有权重未公开，不能承诺复现其headline。已读两份原PPT和固定官方关键源码；9仓库167份精选源码有hash锁，不代表读过所有仓库每一行。VSA不是“删除90%的Q token”，不能按PPT简述实现。
 
-- Cache-DiT：真实前段probe、逐模态RF guard、同锚middle delta、真实后段，CFG分离与请求失效。
-- AdaLN：全部固定sigma的真实投影预填、逐分支缓存、角色／schedule／weights身份与预算验证；未释放权重，不承诺显存节省。
-- SubBlock：逐head路由与TopK/gather；全部真实Q更新，保护text/audio/reference；初期F32/batch1。
-- Sage：H3SA专用tag，既有SAGQ全局开关保持原行为；首末层／refiner保dense，不能与SubBlock一起启用。
-- `ED_H3_TURBO`：CPU-only offline LoRA合并、全选中DiT分片SHA256验证及采样recipe入口已实现；没有实际公开adapter验证，需要独立模型实验。
-- `ED_H3_VDN` / `ED_H3_VSA`：已做数学参考、部分原生组件及CPU测试；**完整CUDA部署未完成，生产请求拒绝**。VDN还需真实精确solve、short-conv、anchor和完整权重加载；VSA需匹配FastH3 gate及原生CUDA tile/compression，不能把SubBlock冒充VSA。
-- TP/Ulysses尚未迁移到H3；torch.compile不是C++下的算法开关。RunningHub私有权重不能复现为公开模型收益。
+本轮修复：clean clone缺失CPU日志解析器；GPU报告循环引用；null hash锁定错误payload；异常遥测与逐launch输入变化门禁；SubBlock容量拒绝；compute/prefill前重验reuse/offload/adapter/process-group；请求成功、取消、早返回、异常清理，并在VAE decode前释放请求缓存，不释放模型权重。
 
-构建：CPU全工程、固定CUDAbaseline与CUDAcandidate均编译链接通过。软件回归：12/12 CTest、48/48 workflow、18/18 sourcefetch、5/5 tinyLoRA通过。actual tiny H3的24次AdaLN完整图对照逐位一致，融合56次CPU对照最大绝对误差0。**未运行生产H3 GPU推理，无真实GPU质量／性能数据。**见 `benchmark/h3_cuda/validation.json`。
+## 4. 本轮验证与服务器环境
 
-## 4. 必须保持的模型精度与输入
+旧H200服务器：8×H200，CUDA13.0.88／驱动580.105.08／GCC12.3.1；固定CUDA baseline及candidate（含Sage及生产修复）编译链接通过，公共配置及源文件指纹核对一致。**没有生产GPU推理，无质量／性能／加速比。**
 
-主实验使用现有完整 FL2VA/Ref2VA Q4系列GGUF、Qwen Q4系列GGUF、video VAE FP16、audio VAE FP32。它们实际是混合张量类型，具体文件、大小、整文件SHA256在 `docs/research/h3-precision-lock.json`。不能仅按文件名认为全张量Q4。
+CPU全工程＋一键回归：12/12 CTest、49/49 workflow/media、18/18 sourcefetch、5/5 tinyLoRA、29/29 build config、56/56 preflight、29/29 request cleanup，全部通过，无跳过／预期失败。tiny H3 24/24逐位一致；fusion 56次CPU实际图对照误差0。生命周期测试有结构＋编译tiny场景，不是完整pipeline/GPU证明。
 
-原机器模型根：`/mnt/cfs/9n-das-admin/llm_models/MiniMax-H3-GGUF`；容器根：`/models/MiniMax-H3-GGUF`。新服务器优先查共享存储；无共享时只复制对应五个文件并核对完整hash，不重新量化。
+2026-10-13 19:21：每卡free约3939–3941MiB，全部被VLLM worker占用，即使util为0也不可用；没有停止服务。
 
-固定主任务：Ref2VA mixed、512×512、124帧、24fps、20步、seed42、CFG1、RES multistep/simple。覆盖T2VA、首帧／末帧／首尾、参考图／视频／视频配对音频／混合。另做CFG、重复请求、错误输入与取消／失败清理验证。模态标签、输入顺序、图像几何和音频参数必须保持一致。
+## 5. 精度与输入
 
-## 5. 哪些东西没有随Git推送
+先读 `docs/research/h3-precision-lock.json`。五个模型本轮在共享存储重新读取**整文件SHA256，5/5匹配**；新机必须重新核验，不能沿用旧机“已验证”的结论。
 
-Git提供源码、测试、简洁日志、精度锁、示例manifest、官方source lock，不提供：模型权重、旧构建目录／二进制、原始附件、`_scratch`内容、完整私密聊天历史或用户原有未跟踪文件。
+原共享根：`/mnt/cfs/9n-das-admin/llm_models/MiniMax-H3-GGUF`。完整FL2VA/Ref2VA混合Q4_K/Q4_0/BF16/F32；Qwen混合Q4_K/Q6_K/BF16；video VAE FP16，audio VAE FP32。使用preserve，不自动再量化；单任务组件文件39.8708GiB，**不是运行峰值显存**。
 
-若能从旧服务器复制，优先迁移：
+旧主任务：Ref2VA mixed，512×512、124帧、24fps、20步、seed42、CFG1、res_multistep/simple。迁4090的新目标：**864×480、124帧、20步**，同seed／CFG／solver和权重；几何＋GPU＋placement均改变，必须新baseline。
 
-- `_scratch/h3-fixtures-20261011/`：约1MiB的固定CPU媒体素材与locked manifest；路径可重映射。
-- `_scratch/h3-reference-src/`：9仓库167份精选官方源码；也可用 `scripts/fetch_h3_references.py --fetch` 按固定commit重取，默认dry-run。
-- `_scratch/h3-logs/` 与 `_scratch/h3-local-logs/`：软件测试和构建原始日志。
-- 固定cuDNN frontend `07b368a2696f5fd0fc2207d4635c51cea4c0bf71` 源码；旧路径 `build-h200-current-20260814/_deps/cudnn_frontend-src`。
+覆盖mixed、paired audio、ref video/image、首尾／首帧／末帧、T2VA，以及CFG／重复请求／输入顺序标签变更／错误恢复。旧exact fixture未迁移；本轮生成独立合成wiring dataset，不冒充旧素材续跑；生产语义质量另需合法真实参考媒体。
 
-不能复制素材时，使用 `fixtures`生成新的合法素材并`lock`，对该新数据集重新建立baseline；它不是原数据集的直接续跑。生产画质另需优质合法真实输入，CPU合成素材仅验证流程。
+## 6. 4090接续的首要任务
 
-## 6. 新服务器执行顺序
+详细方案：`docs/research/h3-4090-continuation.md`。
 
-1. 只读检查硬件、GPU空闲、磁盘、CUDA/cuDNN、编译器、ffmpeg/ffprobe、Python依赖与模型hash；不要启动GPU推理或停止服务。
-2. `bash scripts/test_h3_cpu.sh` 做CPU回归（需要CMake/C++工具链和CPU测试用torch/safetensors，媒体测试需ffmpeg/ffprobe）。尚缺依赖时复用现有容器或安装到隔离环境，不覆盖系统。
-3. 原开发容器为 `wty-edgedit-dev`，GCC13.3/CUDA12.8/cuDNN，项目挂载 `/workspace/edge-dit.cpp`；新机器不要假设存在同名容器。
-4. 重新构建baseline及candidate。**`scripts/build_h3_cuda.sh`当前固定SM90和旧cuDNN源码路径**：H200可设置 `H3_CUDNN_FRONTEND_SOURCE` 到实际位置；其他GPU先将架构参数化，对两个构建用同一目标架构，不盲用旧二进制。manifest的架构要求同步修改并保留独立记录。
-5. `python3 scripts/h3_cuda_workflow.py --help`；使用 `--repo-root` / `--model-root` / `--asset-root`重映射路径。先dry-run，再锁hash。输出目录必须新建，不覆盖已有结果。
-6. 有可用GPU后，固定同一GPU UUID／精度／placement，先跑mixed baseline，再逐项candidate。逐项计划在 `benchmark/h3_cuda/{fused_ops,cache_dit,adaln_cache,sparse_attn,sage_attn}.json`，初期不要叠加。
-7. 当前cache/attention rollout拒绝offload、并行graph cuts、H3 persistent graph reuse、可变adapter等未验证组合。资源不够时不能偷偷改变placement；需独立支持实现及该placement自己的baseline。
-8. 比较视频帧数／尺寸／fps、全部PCM长度／声道／采样率／finite、SSIM/PSNR及音频误差。再人工或独立评审prompt、参考身份、动作、语音／音乐、音画同步；数值指标不能代替语义质量。
-9. 记录首次prefill、模型加载、各stage、端到端和显存边界；跨不同GPU不直接比较加速比。失败保留参数、stdout/stderr、退出码、commit、全weights/assets/binary hash。
-10. GPU仍忙则优先补VDN/VSA完整实现、Turbo真实权重验证及错误路径回归。不能把无权重的小模型通过写成生产优化已完成。
+**当前Cache-DiT/AdaLN/SubBlock/Sage要求DiT resident，拒绝DiT卸载，不能在4090直接打开做实验。** 原项目有按组件／图段卸载及固定VAE分块，24GiB短任务已跑通；先恢复默认关闭的offloaded baseline，再实现研究优化与卸载的兼容，不能删掉保护条件冒充支持。
 
-## 7. 原始聊天迁移与Thread Handoff边界
+4090的864×480/124帧/20步Q4任务先按5–10分钟/冷进程、保守12分钟规划；这是56帧历史记录外推，**目标任务未测、显存是否足够也未测**。混合参考输入仅粗略预留10–15分钟；不要写成保证。
 
-2026-10-13检查：此服务器已经装有Codex CLI `0.162.0-alpha.17.2`，CLI帮助提供 `resume` / `fork`，协议提供 `thread/resume` / `thread/fork`。没有从此客户端导出的schema发现独立 `thread/handoff`，当前聊天也未提供App的`handoff_thread`工具。不能通过安装普通skill直接向当前会话注入App内部工具。
+## 7. 新机执行顺序
 
-原聊天ID `01a12a7a-c737-7b13-8750-cfc804e14382`；旧服务器rollout路径：
-`/export/home/wangtianyang.21/.codex/sessions/2026/10/11/rollout-2026-10-11T18-20-51-01a12a7a-c737-7b13-8750-cfc804e14382.jsonl`。
+1. 只读环境／GPU／磁盘／依赖检查，核对HEAD与全部固定依赖；找五个模型并整文件hash。不假设有同名容器或旧本地路径。
+2. `bash scripts/test_h3_cpu.sh`；媒体测试需ffmpeg/ffprobe，LoRA需CPU torch/safetensors。隔离依赖，不覆盖系统。合理限制CPU线程。
+3. `scripts/build_h3_cuda.sh`已参数化：4090显式`H3_CUDA_ARCHITECTURES=89`，H200=90；显式本机CUDA/cuDNN/frontend路径及编译器，两版一致。先`all --dry-run`，再`all --validate`，最后全新目录构建；不下载、不覆盖、不跑GPU。**旧脚本SM90/旧路径提醒已过时。**
+4. 复用`h3_cuda_workflow.py`的fixtures→lock→baseline→candidate→compare。新路径/新几何/新placement单独manifest；现有manifest不是4090即用配方。显式offload不代表CPU计算；不盲用auto-fit（会改量化）。输出全新，不覆盖结果。
+5. 合法独占空闲GPU后测目标baseline，记录首次加载/prefill、TE/DiT/VAE、CLI冷进程E2E及真实峰值。预算不是万能硬cap，CPU/cuDNN工作区和最小graph segment要实测。
+6. 优先增量融合→卸载兼容工程→AdaLN／Cache-DiT／Sage逐开关，未经单项验收不叠加；SubBlock另做有界实现；VDN/VSA/Turbo按独立模型路线推进。CPU可继续参考/错误回归，不能替代CUDA性能或数值验收。
 
-**该会话标记为paginated history**。只复制此JSONL不保证完整恢复；需要检查分页历史存储／索引／客户端版本及App专用tool记录。官方协议的手工history/path注入标为unstable，不能承诺跨机器App迁移。`migrate-rollouts`用于旧会话到分页格式，不是服务器迁移工具。
+## 8. 不随Git迁移的内容与日志
 
-若要保留原始对话，优先用App实际可用的原生交接；否则单独授权下准备兼容的私密会话迁移材料并实测CLI续接。**不得把聊天、认证文件、私钥、整个`.codex`数据库推入Git**。新Codex没有原聊天时可读此文件接续，无需用户重新整理研究内容。
+Git包含源码、tests、简洁docs、精度锁、参考source lock和示例manifest；**不含模型、旧构建/二进制、媒体、`_scratch`原始日志、附件、聊天、认证文件或私钥**。
 
-## 8. 日志与下一步文档
+可另行安全复制约1MiB本轮素材`_scratch/h3-server-20261013/fixtures/`及`locked-manifest.json`（路径通过asset-root重映射）；否则新机fixtures重新生成并锁定，重新baseline。源快照可用`fetch_h3_references.py --fetch`按锁重取，不执行第三方源码、不下载未知权重。
 
-最先读本文件；后读 `h3-cuda-optimization-status.md`、`h3-development-log.md`、`h3-precision-lock.json`、`minimax-h3-optimization-sources.md`。各算法详细测试和缺口在 `tests/h3-*-progress.md`。
+本轮证据旧机路径：`_scratch/h3-server-20261013/`；最新软件状态在`benchmark/h3_cuda/validation.json`的`new_server_validation`，旧顶层结果为历史。CPU可行性probe在`_scratch/h3-cpu-feasibility-20261013/`，8核synthetic算子外推不当生产时间。
 
-旧日志按时间保存，早期“暂停／workflow尚不存在／仅部分构建／权重hash未完成”是历史记录，**不代表当前状态**。本次交接后旧会话不并行修改同一研究分支。
+日志只记环境、baseline、算法、数据差异与故障；不得把模型/素材哈希通过或编译通过写成GPU画质／性能通过。新Codex读本文件即可接续，不必尝试注入旧私密聊天。
