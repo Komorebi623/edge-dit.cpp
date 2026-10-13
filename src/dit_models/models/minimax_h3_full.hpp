@@ -19,6 +19,7 @@
 #include "dit_models/components/common/rope.hpp"
 #include "dit_models/models/minimax_h3_cuda_options.hpp"
 #include "dit_models/models/minimax_h3_cuda_cache.hpp"
+#include "dit_models/models/minimax_h3_cuda_cache_offload.hpp"
 #include "dit_models/models/minimax_h3_cuda_sparse.hpp"
 #include "dit_models/models/minimax_h3_cuda_sage.hpp"
 #include "dit_models/models/minimax_h3_cuda_adaln_cache.hpp"
@@ -434,7 +435,7 @@ namespace MiniMaxH3 {
                 v = ggml_cast(ctx->ggml_ctx, v, GGML_TYPE_BF16);
             }
             ggml_tensor* out = nullptr;
-            if (options && h3_cuda_backend(ctx->backend) && optimized_step &&
+            if (options && h3_cuda_backend(ctx->backend) && (optimized_step || options->sage_attn) &&
                 layer_idx > 0 && layer_idx + 1 < total_layers) {
                 if (options->sparse_attn) {
                     if (!sparse_layout || !sparse_config)
@@ -1449,7 +1450,8 @@ namespace MiniMaxH3 {
         return layout;
     }
 
-    struct MiniMaxH3Runner : public ExactAdaLN::RunnerBridge<GGMLRunner> {
+    struct MiniMaxH3Runner : public CacheOffload::RunnerBridge<ExactAdaLN::RunnerBridge<GGMLRunner>> {
+        using ResearchRunnerBase = CacheOffload::RunnerBridge<ExactAdaLN::RunnerBridge<GGMLRunner>>;
         Config config;
         MiniMaxH3Transformer3DModel model;
         struct AdaLNBranch {
@@ -1463,6 +1465,7 @@ namespace MiniMaxH3 {
         uint64_t adaln_request_generation = 0;
         CudaDualBlockCachePolicy cuda_cache_policy;
         std::unique_ptr<RunnerCacheDeviceStore> cuda_cache_store;
+        std::unique_ptr<CacheOffload::State> cuda_cache_offload_state;
         edgedit::cache::CacheOperatorRegistry cuda_cache_operators;
         struct CudaCacheBranchTensors {
             ggml_tensor* rf = nullptr;
@@ -1482,7 +1485,7 @@ namespace MiniMaxH3 {
                         const String2TensorStorage& tensors,
                         const std::string& prefix                           = "model.diffusion_model",
                         bool offload_params_to_cpu = false)
-            : ExactAdaLN::RunnerBridge<GGMLRunner>(backend, offload_params_to_cpu),
+            : ResearchRunnerBase(backend, offload_params_to_cpu),
               config(Config::detect_from_weights(tensors, prefix)),
               model(config) {
             model.init(params_ctx, tensors, prefix);
@@ -1543,11 +1546,31 @@ namespace MiniMaxH3 {
             if (model.cuda_optimizations.cache_dit) cuda_cache_policy.begin_step(step, total_steps, conditional);
         }
 
+        bool serial_cuda_offload_mode() const {
+            if (!h3_cuda_backend(runtime_backend) || !ggml_backend_is_cpu(params_backend) ||
+                params_backend == runtime_backend || params_on_runtime_backend || phase_params_pinned_ ||
+                !max_graph_vram_bytes || weight_adapter || (process_group_ && process_group_->enabled()) ||
+                h3_env_flag_enabled("ED_MINIMAX_H3_REUSE_GRAPH") ||
+                std::getenv("ED_MINIMAX_H3_DEBUG_TARGET") != nullptr || h3_env_flag_enabled("ED_ASYNC_OFFLOAD")) return false;
+#if defined(ED_ENABLE_ASYNC_OFFLOAD)
+            if (async_offload_level() != 0) return false;
+#endif
+            auto* device = ggml_backend_get_device(runtime_backend);
+            auto* registry = device ? ggml_backend_dev_backend_reg(device) : nullptr;
+            return registry && std::string(ggml_backend_reg_name(registry)) == "CUDA" &&
+                   ggml_backend_reg_dev_count(registry) == 1 &&
+                   ggml_backend_reg_dev_get(registry, 0) == device;
+        }
+
         void validate_cuda_cache_execution_mode() const {
             if (!h3_cuda_backend(runtime_backend))
                 throw std::invalid_argument("MiniMax-H3: dual-block cache requires CUDA");
-            if (params_backend != runtime_backend || can_attempt_graph_cut_segmented_compute())
-                throw std::invalid_argument("MiniMax-H3: dual-block cache does not support parameter offload or parallel graph cuts");
+            if (params_backend != runtime_backend) {
+                if (!serial_cuda_offload_mode())
+                    throw std::invalid_argument("MiniMax-H3: dual-block offload requires immutable CPU parameters, single CUDA, explicit budget, no async/adapter/reuse");
+            } else if (can_attempt_graph_cut_segmented_compute()) {
+                throw std::invalid_argument("MiniMax-H3: dual-block cache cannot use parallel graph cuts");
+            }
             if (h3_env_flag_enabled("ED_MINIMAX_H3_REUSE_GRAPH"))
                 throw std::invalid_argument("MiniMax-H3: dual-block cache cannot use ED_MINIMAX_H3_REUSE_GRAPH");
             if (std::getenv("ED_MINIMAX_H3_DEBUG_TARGET") != nullptr)
@@ -1557,16 +1580,41 @@ namespace MiniMaxH3 {
         }
 
         void validate_cuda_research_execution_mode(const CudaOptimizationOptions& options) const {
-            // Segmented projection prefill has a CPU-tested lifecycle helper,
-            // not a validated CUDA denoiser graph-cut path. Keep offload closed.
-            if (options.adaln_cache && (params_backend != runtime_backend ||
-                can_attempt_graph_cut_segmented_compute() || weight_adapter ||
-                h3_env_flag_enabled("ED_MINIMAX_H3_REUSE_GRAPH")))
-                throw std::invalid_argument("MiniMax-H3 exact AdaLN requires resident immutable single-device parameters and graph reuse disabled");
-            if ((options.sparse_attn || options.sage_attn) &&
-                (params_backend != runtime_backend || can_attempt_graph_cut_segmented_compute() || weight_adapter ||
-                 h3_env_flag_enabled("ED_MINIMAX_H3_REUSE_GRAPH")))
-                throw std::invalid_argument("MiniMax-H3 attention research requires resident immutable single-device parameters and graph reuse disabled");
+            if (options.adaln_cache) {
+                if (params_backend != runtime_backend && (options.cache_dit || options.sage_attn || options.sparse_attn))
+                    throw std::invalid_argument("MiniMax-H3 AdaLN offload requires independent single-method validation");
+                if (weight_adapter || (process_group_ && process_group_->enabled()) ||
+                    h3_env_flag_enabled("ED_MINIMAX_H3_REUSE_GRAPH"))
+                    throw std::invalid_argument("MiniMax-H3 exact AdaLN requires immutable single-device parameters and graph reuse disabled");
+                if (params_backend != runtime_backend) {
+                    // Explicit engineering contract, not deletion of the resident guard:
+                    // layer-major prefill + request-owned imports + serial graph cuts.
+                    if (!serial_cuda_offload_mode())
+                        throw std::invalid_argument("MiniMax-H3 exact AdaLN offload requires resident immutable CPU weights, single CUDA runtime, explicit segment budget, no async/reuse/debug");
+                } else if (can_attempt_graph_cut_segmented_compute()) {
+                    throw std::invalid_argument("MiniMax-H3 exact AdaLN requires immutable single-device parameters");
+                }
+            }
+            if (options.sparse_attn || options.sage_attn) {
+                if (weight_adapter || (process_group_ && process_group_->enabled()) ||
+                    h3_env_flag_enabled("ED_MINIMAX_H3_REUSE_GRAPH"))
+                    throw std::invalid_argument("MiniMax-H3 attention requires resident immutable single-device parameters and graph reuse disabled");
+                if (params_backend != runtime_backend) {
+                    if (!serial_cuda_offload_mode() || options.adaln_cache || options.cache_dit ||
+                        (options.sage_attn && options.sparse_attn))
+                        throw std::invalid_argument("MiniMax-H3 attention offload requires resident immutable CPU weights, single CUDA and one method, no async/reuse");
+#ifndef ED_ENABLE_CUDA_H3_SUBBLOCK
+                    if (options.sparse_attn)
+                        throw std::invalid_argument("MiniMax-H3 SubBlock offload requires bounded native CUDA build");
+#endif
+                } else if (can_attempt_graph_cut_segmented_compute()) {
+                    throw std::invalid_argument("MiniMax-H3 attention requires immutable single-device execution");
+                }
+            }
+            if (options.cache_dit && params_backend != runtime_backend &&
+                (options.adaln_cache || options.sage_attn || options.sparse_attn))
+                throw std::invalid_argument("MiniMax-H3 Cache-DiT offload requires independent single-method validation");
+
         }
 
         void validate_cuda_sparse_capacity(const DiffusionParams& params) {
@@ -1611,6 +1659,7 @@ namespace MiniMaxH3 {
             cuda_cache_policy.reset();
             cuda_cache_branches = {};
             cuda_cache_store.reset();
+            if (cuda_cache_offload_state) cuda_cache_offload_state->reset();
             model.adaln_cache = nullptr; model.adaln_graph_inputs = nullptr; model.adaln_token = {};
             adaln_inputs.reset(); adaln_branches = {}; adaln_sigmas.clear();
             ++adaln_request_generation;
@@ -1756,10 +1805,88 @@ namespace MiniMaxH3 {
             }
             auto ctx = get_context();
             auto* embedding = model.time_embedding(&ctx, features, lower, upper, fraction);
-            return ExactAdaLN::build_projection_graph(compute_ctx, cache, token, H3_GRAPH_SIZE,
+            return ExactAdaLN::build_projection_graph(compute_ctx, cache, token,
+                projection_count == 1 ? 256 : H3_GRAPH_SIZE,
                 [&](size_t index) {
                     return model.project_adaln(&ctx, embedding, index);
                 }, first_projection, projection_count);
+        }
+
+        ExactAdaLN::Status prefill_adaln_layer_major(ExactAdaLN::Cache& cache,
+                                                       const ExactAdaLN::RequestContract& contract,
+                                                       int n_threads) {
+                    std::vector<sd::Tensor<float>> owned_features, owned_fractions;
+                    std::vector<sd::Tensor<int32_t>> owned_lower, owned_upper;
+                    const int64_t start = ggml_time_ms();
+                    auto status = ExactAdaLN::prefill_request_layer_major(*this, cache, contract, n_threads,
+                        [&](size_t projection, const std::vector<size_t>& plans,
+                            const std::vector<ExactAdaLN::Cache::StepToken>& tokens) -> ggml_cgraph* {
+                            owned_features.clear(); owned_fractions.clear(); owned_lower.clear(); owned_upper.clear();
+                            if (plans.empty() || plans.size() > (H3_GRAPH_SIZE - 1) / 256)
+                                throw std::invalid_argument("MiniMax-H3 AdaLN prefill schedule exceeds graph budget");
+                            auto* merged = new_graph_custom(plans.size() * 256);
+                            for (size_t i : plans) {
+                                auto* graph = build_adaln_projection_graph(cache, tokens[i],
+                                                                         contract.plans[i], projection, 1);
+                                if (!graph || ggml_graph_n_nodes(graph) == 0) return nullptr;
+                                ggml_build_forward_expand(merged, ggml_graph_node(graph, -1));
+                                // make_input registered raw data pointers. Moves keep their
+                                // allocations alive for ALL timestep graphs in this segment.
+                                owned_features.push_back(std::move(timestep_feature_input_cache));
+                                owned_fractions.push_back(std::move(curve_fraction_input_cache));
+                                owned_lower.push_back(std::move(curve_index_input_cache));
+                                owned_upper.push_back(std::move(curve_upper_index_input_cache));
+                            }
+                            return merged;
+                        });
+                    LOG_INFO("minimax-h3 AdaLN layer-major prefill: projections=%zu plans=%zu time=%lldms host-cache=%zu bytes; weights preserved",
+                             contract.projections.size(), contract.plans.size(),
+                             (long long)(ggml_time_ms() - start), cache.used_bytes());
+                    return status;
+        }
+
+        bool exact_projection_params_supported(const std::vector<ggml_tensor*>& params) const {
+            if (!ExactAdaLN::RunnerBridge<GGMLRunner>::exact_projection_params_supported(params)) return false;
+            if (params_backend == runtime_backend) return true;
+            size_t bytes = 0;
+            for (auto* tensor : params) {
+                const size_t n = ggml_nbytes(tensor);
+                if (n > max_graph_vram_bytes || bytes > max_graph_vram_bytes - n) return false;
+                bytes += n;
+            }
+            // This is the explicit weight planning bound; CUDA workspace/peak is
+            // measured separately, never represented as a hard max-VRAM cap.
+            return bytes > 0 && bytes <= max_graph_vram_bytes;
+        }
+
+        sd::Tensor<float> compute_adaln_offloaded(get_graph_cb_t build, int threads,
+                                                 const DiffusionParams& params) {
+            validate_cuda_research_execution_mode(model.cuda_optimizations);
+            ggml_cgraph* graph = nullptr;
+            try {
+                if (!prepare_compute_graph(build, &graph) || !graph)
+                    throw std::runtime_error("MiniMax-H3 AdaLN offload graph build failed");
+                GraphCutPlan plan;
+                if (!resolve_graph_cut_plan(graph, &plan) || !plan.valid || plan.segments.empty())
+                    throw std::runtime_error("MiniMax-H3 AdaLN offload graph plan failed");
+                sd::ggml_graph_cut::clear_comm_marks();
+                for (const auto& segment : plan.segments) {
+                    if (!segment.comm_ops.empty())
+                        throw std::invalid_argument("MiniMax-H3 AdaLN offload cannot use parallel graph cuts");
+                    auto weights = sd::ggml_graph_cut::runtime_param_tensors(graph, segment, get_desc().c_str());
+                    // Existing executor treats empty selection as ALL model weights.
+                    // Reject before any stage instead of silently triggering that path.
+                    if (weights.empty())
+                        throw std::invalid_argument("MiniMax-H3 AdaLN offload empty-weight segment would stage the entire model");
+                }
+                auto output = compute_with_graph_cuts<float>(graph, plan, threads, true, false);
+                if (!output) throw std::runtime_error("MiniMax-H3 AdaLN offload segment execution failed");
+                return restore_trailing_singleton_dims(std::move(*output), params.x->dim());
+            } catch (...) {
+                exact_release_projection_graph();
+                reset_cuda_optimization_state();
+                throw;
+            }
         }
 
         void prepare_adaln_branch(int n_threads, const DiffusionParams& params) {
@@ -1816,8 +1943,12 @@ namespace MiniMaxH3 {
                 state.contract = actual;
                 status = state.cache->begin_request(actual);
                 if (status != ExactAdaLN::Status::Stored) throw std::runtime_error("MiniMax-H3 exact AdaLN contract/budget rejected");
-                status = ExactAdaLN::prefill_request(*this, *state.cache, state.contract, n_threads,
-                    [&](size_t i, auto current) { return build_adaln_projection_graph(*state.cache, current, state.contract.plans[i]); });
+                if (params_backend != runtime_backend) {
+                    status = prefill_adaln_layer_major(*state.cache, state.contract, n_threads);
+                } else {
+                    status = ExactAdaLN::prefill_request(*this, *state.cache, state.contract, n_threads,
+                        [&](size_t i, auto current) { return build_adaln_projection_graph(*state.cache, current, state.contract.plans[i]); });
+                }
                 if (status != ExactAdaLN::Status::Stored) throw std::runtime_error("MiniMax-H3 exact AdaLN prefill failed");
                 status = state.cache->bind_step(actual, index, actual.plans[index], &token);
             }
@@ -2062,6 +2193,24 @@ namespace MiniMaxH3 {
                                                         const get_graph_cb_t& get_graph) {
             cuda_cache_policy.require_step();
             cuda_cache_policy.bind_identity(cuda_cache_identity(params));
+            if (params_backend != runtime_backend) {
+                // Reserve independently owned front/RF/delta snapshots within the
+                // explicit planning budget; it is not a hard total VRAM ceiling.
+                const size_t reserve = std::min<size_t>(max_graph_vram_bytes / 3, size_t(4) << 30);
+                if (!reserve) throw std::invalid_argument("MiniMax-H3 Cache-DiT needs a nonzero snapshot budget");
+                if (!cuda_cache_offload_state)
+                    cuda_cache_offload_state = std::make_unique<CacheOffload::State>(runtime_backend, reserve);
+                CacheOffload::Options execution; execution.enabled = true;
+                CacheOffload::Statistics stats;
+                auto result = CacheOffload::compute(*this, *cuda_cache_offload_state, cuda_cache_policy,
+                    model.cuda_optimizations, cuda_cache_operators, get_graph,
+                    [&](auto* pass) { model.cuda_cache_pass = pass; }, n_threads, execution, &stats);
+                LOG_INFO("minimax-h3 Cache-DiT offload: step=%d branch=%d hit=%d probe_segments=%zu remainder_segments=%zu H2D_weights=%zu bytes cache_peak=%zu bytes RF_spans=%zu",
+                    model.cuda_step, cuda_cache_policy.branch_index(), stats.hit, stats.probe_segments,
+                    stats.remainder_segments, stats.parameter_bytes, cuda_cache_offload_state->arena.peak_bytes(),
+                    stats.per_span_relative_l1.size());
+                return restore_trailing_singleton_dims(std::move(result), params.x->dim());
+            }
             if (!cuda_cache_store) cuda_cache_store = std::make_unique<RunnerCacheDeviceStore>(runtime_backend);
             const int branch = cuda_cache_policy.branch_index();
             auto& state = cuda_cache_branches[branch];
@@ -2158,6 +2307,11 @@ namespace MiniMaxH3 {
                                    params.minimax_video_sigma_shift,
                                    params.minimax_audio_sigma_shift);
             };
+            if (model.cuda_optimizations.adaln_cache && params_backend != runtime_backend) {
+                if (model.cuda_optimizations.cache_dit || model.cuda_optimizations.sage_attn || model.cuda_optimizations.sparse_attn)
+                    throw std::invalid_argument("MiniMax-H3 AdaLN offload is single-method until combined-path validation");
+                return compute_adaln_offloaded(get_graph, n_threads, params);
+            }
             if (model.cuda_optimizations.cache_dit) {
                 validate_cuda_cache_execution_mode();
                 return compute_cuda_dual_block_cache(n_threads, params, get_graph);

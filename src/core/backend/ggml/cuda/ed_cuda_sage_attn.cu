@@ -3,7 +3,12 @@
 // (Apache-2.0); the quantization / smooth-K kernels and the raw-pointer host
 // launcher below are written for the ggml tensor ABI (no torch dependency).
 //
-// Stage 1 scope: head_dim == 64, no mask, no GQA, CUDA/SM89, F16-PV (float
+// H3SA selects only the upstream per-warp INT8-QK + F16-PV/FP32-accum
+// variant (SageAttention d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5,
+// sageattention/core.py::sageattn_qk_int8_pv_fp16_cuda). It is NOT the
+// upstream SM89 auto-dispatched FP8-PV or all SageAttention2 variants.
+// Legacy SAGQ keeps its pre-existing optional smooth-Q/FP8/fallback behavior.
+// Scope: head_dim == 64 or 128, no mask, no GQA, CUDA SM80+, F16-PV (float
 // accumulation). INT8 QK^T runs on the IMMA tensor core; PV runs on the F16
 // tensor core with FP32 accumulation.
 
@@ -15,6 +20,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -28,6 +34,7 @@
 namespace {
 
 using edgedit::ggml_ext::SageAttnCustomParams;
+std::atomic<uint64_t> h3_dispatch_submissions{0};
 
 // Kernel tiling constants must match the sage kernel launch (CTA_Q=128,
 // CTA_K=64, WARP_Q=32, WARP_K=64).
@@ -710,7 +717,7 @@ static bool compute_dims(const ggml_tensor* dst, int n_head, sage_dims* out) {
 // f16 O. All buffers are contiguous head-major (see layout comments above).
 // When smooth_q is true, qk_bias ([HN, L_k], row-major) supplies the rank-1
 // per-key compensation term added back into each score row before softmax.
-template <int HEAD_DIM, bool SMOOTH_Q>
+template <int HEAD_DIM, bool SMOOTH_Q, bool H3_ZERO_FILL_TAIL = false>
 static void launch_sage_kernel(const int8_t* q_int8, const int8_t* k_int8, const half* v_f16,
                                half* o_half, const float* q_scale, const float* k_scale,
                                int L_q, int L_k, int HN,
@@ -748,7 +755,7 @@ static void launch_sage_kernel(const int8_t* q_int8, const int8_t* k_int8, const
         QuantGranularity::kPerWarp, QuantGranularity::kPerBlock,
         /*DTypeSVAccum=*/float, /*use_inst_buffer=*/false, /*DTypeOut=*/half,
         ComputeUnit::kTensorCore, MaskMode::kNone, /*return_lse=*/false,
-        /*fuse_v_mean=*/false, /*smooth_q=*/SMOOTH_Q>;
+        /*fuse_v_mean=*/false, /*smooth_q=*/SMOOTH_Q, /*h3_zero_fill_tail=*/H3_ZERO_FILL_TAIL>;
 
     size_t smem_max = std::max(
         (size_t)kCtaQ * HEAD_DIM * sizeof(int8_t) + (size_t)kCtaK * HEAD_DIM * sizeof(int8_t) + (size_t)kCtaK * HEAD_DIM * sizeof(half),
@@ -862,7 +869,8 @@ static bool run_sage(ggml_tensor* dst, const ed_cuda_sage_attn_scratch* scratch,
     half*   o_half  = static_cast<half*>(scratch->o_half);
     int8_t* v_fp8   = static_cast<int8_t*>(scratch->v_fp8);
     float*  v_scale = static_cast<float*>(scratch->v_scale);
-    const bool use_pv_fp8 = edgedit::ggml_ext::sage_pv_fp8_enabled();
+    const bool is_h3 = edgedit::ggml_ext::sage_attn_h3_params_valid(decode_params(dst));
+    const bool use_pv_fp8 = !is_h3 && edgedit::ggml_ext::sage_pv_fp8_enabled();
     if (!q_int8 || !k_int8 || !q_scale || !k_scale || !km || !o_half) {
         return false;
     }
@@ -874,7 +882,9 @@ static bool run_sage(ggml_tensor* dst, const ed_cuda_sage_attn_scratch* scratch,
     // Smooth-Q needs the F16-PV score-bias path (not implemented for FP8-PV) and
     // its own scratch. It also requires BOTH the Q-mean subtraction AND the
     // rank-1 add-back together (dropping the add-back is worse than neither).
-    const bool use_smooth_q = edgedit::ggml_ext::sage_smooth_q_enabled(HEAD_DIM) &&
+    // The pinned upstream FP16-PV variant smooths K only. Keep the local
+    // smooth-Q rank-one extension for SAGQ; do not silently mix it into H3.
+    const bool use_smooth_q = !is_h3 && edgedit::ggml_ext::sage_smooth_q_enabled(HEAD_DIM) &&
                               !use_pv_fp8 && qm != nullptr && qk_bias != nullptr;
     static bool logged_sq = false;
     if (std::getenv("ED_SAGE_ATTN_DEBUG") && !logged_sq) {
@@ -888,7 +898,7 @@ static bool run_sage(ggml_tensor* dst, const ed_cuda_sage_attn_scratch* scratch,
     const T* v_ptr = static_cast<const T*>(v->data);
 
     // 1) per-channel K mean (smooth-K). Can be disabled for A/B via env.
-    const bool use_smooth_k = (std::getenv("ED_SAGE_NO_SMOOTHK") == nullptr);
+    const bool use_smooth_k = is_h3 || (std::getenv("ED_SAGE_NO_SMOOTHK") == nullptr);
     if (use_smooth_k) {
         sage_k_mean_kernel<T, HEAD_DIM><<<HN, HEAD_DIM, 0, stream>>>(
             k_ptr, km, L_k, k_s_seq, k_s_h);
@@ -967,7 +977,13 @@ static bool run_sage(ggml_tensor* dst, const ed_cuda_sage_attn_scratch* scratch,
                 v_ptr, v_f16, L_k, n_head, N, v_sd, v_sh, v_st, v_sb);
         }
         // 5b) F16-PV sage kernel: o_half [d_head, L_q, HN]
-        if (use_smooth_q) {
+        if (is_h3) {
+            // Full-tile MMA still consumes masked V lanes. Define those lanes
+            // instead of letting prior shared-memory NaNs contaminate 0 * V.
+            // Keep the same INT8 QK / FP16 PV / FP32 denominator and accumulator.
+            launch_sage_kernel<HEAD_DIM, false, true>(q_int8, k_int8, v_f16, o_half, q_scale, k_scale,
+                               L_q, L_k, HN, sm_scale, stream, nullptr);
+        } else if (use_smooth_q) {
             launch_sage_kernel<HEAD_DIM, true>(q_int8, k_int8, v_f16, o_half, q_scale, k_scale,
                                L_q, L_k, HN, sm_scale, stream, qk_bias);
         } else {
@@ -991,7 +1007,7 @@ static bool run_sage(ggml_tensor* dst, const ed_cuda_sage_attn_scratch* scratch,
     // device-side on `stream` (no host sync) so it is CUDA-graph safe. Gated on
     // HEAD_DIM==128 at compile time -> SD3 (d64) never enters this path.
     int* uniform_flag = static_cast<int*>(scratch->uniform_flag);
-    if (HEAD_DIM == 128 &&
+    if (!is_h3 && HEAD_DIM == 128 &&
         edgedit::ggml_ext::sage_fallback_enabled(HEAD_DIM) &&
         uniform_flag != nullptr) {
         float* head_entropy = static_cast<float*>(scratch->head_entropy);
@@ -1139,7 +1155,9 @@ bool ed_cuda_sage_attn_custom_supported(const ggml_tensor* dst) {
         const ggml_tensor* h3_q = dst->src[0];
         const ggml_tensor* h3_k = dst->src[1];
         const ggml_tensor* h3_v = dst->src[2];
-        if (h3_q->ne[0] != 128 || h3_q->type != GGML_TYPE_F32 ||
+        if (edgedit::ggml_ext::sage_pv_fp8_enabled() ||
+            edgedit::ggml_ext::sage_fallback_enabled(128) ||
+            h3_q->ne[0] != 128 || h3_q->type != GGML_TYPE_F32 ||
             h3_k->type != GGML_TYPE_F32 || h3_v->type != GGML_TYPE_F32 ||
             h3_q->nb[0] != sizeof(float) || h3_k->nb[0] != sizeof(float) ||
             h3_v->nb[0] != sizeof(float) ||
@@ -1214,6 +1232,14 @@ bool ed_cuda_sage_attn_scratch_sizes_for(const ggml_tensor* dst, ed_cuda_sage_at
     out->uniform_flag_bytes = (size_t)d.HN * sizeof(int);
     out->head_entropy_bytes = (size_t)d.HN * sizeof(float);
     out->detect_acc_bytes   = (size_t)4 * d.HN * sizeof(float);
+    if (edgedit::ggml_ext::sage_attn_h3_params_valid(params)) {
+        // The unchanged shared dispatcher allocates every field unconditionally.
+        // One-byte placeholders avoid zero-size pool semantics and, importantly,
+        // do NOT reserve O(sequence * heads * dim) unused FP8/smooth-Q scratch.
+        // None of these fields is accessed by H3's locked FP16-PV variant.
+        out->qm_bytes = out->qk_bias_bytes = out->v_fp8_bytes = out->v_scale_bytes = 1;
+        out->uniform_flag_bytes = out->head_entropy_bytes = out->detect_acc_bytes = 1;
+    }
     return true;
 }
 
@@ -1224,6 +1250,27 @@ bool ed_cuda_sage_attn_custom_compute(ggml_tensor* dst,
         return false;
     }
     const SageAttnCustomParams params = decode_params(dst);
+    const bool is_h3 = edgedit::ggml_ext::sage_attn_h3_params_valid(params);
+    int h3_device = -1;
+    if (is_h3) {
+        // CUSTOM is atomic to the cut planner. Staging/rebinding must finish
+        // before this dispatch: Q/K/V/output all belong to this CUDA device.
+        // No CPU, managed, foreign-device, or unbound cut leaf is executable.
+        int major = 0;
+        if (cudaGetDevice(&h3_device) != cudaSuccess ||
+            cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, h3_device) != cudaSuccess ||
+            major < 8) return false; // cp.async + INT8/FP16 MMA require SM80+
+        const ggml_tensor* tensors[] = {dst, dst->src[0], dst->src[1], dst->src[2]};
+        for (const ggml_tensor* tensor : tensors) {
+            cudaPointerAttributes attr{};
+            if (tensor->data == nullptr ||
+                cudaPointerGetAttributes(&attr, tensor->data) != cudaSuccess ||
+                attr.type != cudaMemoryTypeDevice || attr.device != h3_device) {
+                fprintf(stderr, "[H3SA] refusing host/unbound/foreign-device tensor %s\n", tensor->name);
+                return false;
+            }
+        }
+    }
     cudaStream_t cu_stream = reinterpret_cast<cudaStream_t>(stream);
     const ggml_tensor* q = dst->src[0];
     const int64_t d_head = q->ne[0];
@@ -1235,5 +1282,24 @@ bool ed_cuda_sage_attn_custom_compute(ggml_tensor* dst,
         if (d_head == 64)       ok = run_sage<half, 64>(dst, scratch, cu_stream, params.n_head);
         else if (d_head == 128) ok = run_sage<half, 128>(dst, scratch, cu_stream, params.n_head);
     }
-    return ok;
+    // Do not report success after a bad launch (no synchronization or CPU fallback).
+    if (!ok || (is_h3 && cudaPeekAtLastError() != cudaSuccess)) return false;
+    if (is_h3) {
+        const uint64_t submission = h3_dispatch_submissions.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (submission == 1) {
+            // Evidence comes from the actual CUDA compute entry, after launching
+            // quantization + attention, NEVER option parsing or graph construction.
+            // Completion is still established by the graph's synchronize/status.
+            fprintf(stderr, "[H3SA] CUDA_DISPATCH launch=1 device=%d variant=int8qk_perwarp_f16pv_fp32acc "
+                            "head_dim=128 q_tokens=%lld k_tokens=%lld heads=%d batch=%lld "
+                            "smooth_k=1 smooth_q=0 pv_fp8=0 dense_fallback=0 tail_zero_fill=1 buffers=same_cuda_device\n",
+                    h3_device, (long long)q->ne[1], (long long)dst->src[1]->ne[1],
+                    params.n_head, (long long)(q->ne[2] / params.n_head));
+        }
+    }
+    return true;
+}
+
+uint64_t ed_cuda_sage_attn_h3_dispatch_count() {
+    return h3_dispatch_submissions.load(std::memory_order_relaxed);
 }

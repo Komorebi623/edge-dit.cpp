@@ -396,6 +396,8 @@ target_compile_definitions(edgedit
         ED_VERSION_PATCH=${PROJECT_VERSION_PATCH}
 )
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda/h3_subblock.cmake")
+
 if(ED_ENABLE_CUDA_SAGE_ATTN AND ED_GGML_CUDA)
     target_compile_definitions(edgedit PRIVATE ED_ENABLE_CUDA_SAGE_ATTN)
 endif()
@@ -546,7 +548,7 @@ endif()
 # Standalone opt-in tests do not alter production targets or other backends.
 if(ED_BUILD_H3_CUDA_TESTS)
     enable_testing()
-    foreach(_H3_TEST options cache sparse sage adaln fusion)
+    foreach(_H3_TEST options cache cache_offload sparse sage adaln fusion)
         if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/h3_cuda_${_H3_TEST}_test.cpp")
             add_executable(h3-cuda-${_H3_TEST}-test tests/h3_cuda_${_H3_TEST}_test.cpp)
             target_include_directories(h3-cuda-${_H3_TEST}-test PRIVATE

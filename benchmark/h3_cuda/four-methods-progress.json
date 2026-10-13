@@ -1,0 +1,511 @@
+{
+  "date": "2026-10-14",
+  "status": "in_progress_not_four_methods_complete",
+  "scope": [
+    "AdaLN",
+    "Cache-DiT",
+    "Sage",
+    "SubBlock"
+  ],
+  "excluded_weight_methods": [
+    "Turbo",
+    "VDN",
+    "VSA"
+  ],
+  "precision_lock_unchanged": true,
+  "source_reference_files_verified": 112,
+  "baseline_contract": {
+    "assets": {},
+    "models": {
+      "audio_vae": {
+        "bytes": 605254808,
+        "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+        "source_header_sha256": "23fb27ab02c45d7c6f5dfe5c3255ef956a5a13853c869b784bf8de4a1537d06b",
+        "tensor_types": {
+          "F32": 917
+        }
+      },
+      "fl2va": {
+        "bytes": 18779848448,
+        "sha256": "a25ee3184dd56e7fc5c8db1508d2e48a7e3c92919b516935c6059e4228e16107",
+        "source_header_sha256": "b4aebf1a52aa869c99ba7fd33c7e343200342404e07d1eb03260f7beebd02c7f",
+        "tensor_types": {
+          "BF16": 264,
+          "F32": 13,
+          "Q4_0": 50,
+          "Q4_K": 208
+        }
+      },
+      "llm": {
+        "bytes": 18218065024,
+        "sha256": "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc",
+        "source_header_sha256": "0c6bc5ded133ae026c992654de37dbd600fa70b50573a6ed3ac1f54ea29ddc59",
+        "tensor_types": {
+          "BF16": 552,
+          "Q4_K": 250,
+          "Q6_K": 100
+        }
+      },
+      "video_vae": {
+        "bytes": 5207808496,
+        "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+        "source_header_sha256": "7bd6afbb1b2cfbf7c19901869eb224ec1b3e2a8cdbd8516d18f515c60f157c26",
+        "tensor_types": {
+          "F16": 562
+        }
+      }
+    },
+    "modes": {
+      "t2va": {
+        "dit": "fl2va",
+        "inputs": {},
+        "prompt": "A locked-off cinematic wide shot of a sunlit mountain stream. Clear water ripples continuously over small stones, pine branches sway gently in a light breeze, and distant mountains remain stable. Natural synchronized audio: softly flowing water, a gentle breeze, and occasional distant birds. No music, no dialogue, no captions, no scene cuts."
+      }
+    },
+    "placement": {
+      "cpu_threads": 6,
+      "dit_offload": true,
+      "max_vram_gib": 22,
+      "text_encoder_offload": true,
+      "vae_offload": true
+    },
+    "sampling": {
+      "audio_channels": 2,
+      "audio_sample_rate": 32000,
+      "cfg_scale": 1,
+      "fps": 24,
+      "frames": 124,
+      "height": 480,
+      "ref_image_size": "match",
+      "sampler": "res_multistep",
+      "scheduler": "simple",
+      "seed": 42,
+      "steps": 20,
+      "width": 864
+    },
+    "weight_variant": "full_h3_existing_persistent_Q4_GGUF_not_pruned_not_distilled"
+  },
+  "runs": {
+    "adaln": {
+      "status": "validated",
+      "error": null,
+      "source_provenance": {
+        "binary_sha256": "afe603470a244bcac60d8980a7050e0f2d5a3e48855e10044c3e4098c9a59d87",
+        "cuda_architectures": "89",
+        "cuda_sage_attention": "ON",
+        "cudnn_frontend_revision": "07b368a2696f5fd0fc2207d4635c51cea4c0bf71",
+        "ggml_revision": "f270346d688c7bec7c56bae2ae73343aba6817ad",
+        "implemented_methods": "ED_H3_FUSED_OPS,ED_H3_CACHE_DIT,ED_H3_ADALN_CACHE,ED_H3_SAGE_ATTN,ED_H3_SPARSE_ATTN",
+        "onednn_revision": "5e9224036021433d2577548ed0539fe9a53256bc",
+        "shared_config_sha256": "68cadd789c8b1cb1dac0333d17a9fe7eb87c51573380206ea7c05229a1d51d6c",
+        "source_revision": "7c506348455615c38a1d75a835dac2d60f771eae",
+        "source_tree_sha256": "45d334ec9c2fe59fa951c0594feea6df155cf20285ed98f417c08cc35656ca1c",
+        "tracked_diff_sha256": "1e8533578f6e49b383b26a3f7aba1371f61cde29a5dbeff490293138ef912b4a"
+      },
+      "performance_measured": true,
+      "statistics": {
+        "t2va": {
+          "cli_wall_ms": {
+            "count": 1,
+            "max": 331702.10630306974,
+            "mean": 331702.10630306974,
+            "median": 331702.10630306974,
+            "min": 331702.10630306974,
+            "stdev": 0.0
+          },
+          "conditioning_ms": {
+            "count": 1,
+            "max": 1343,
+            "mean": 1343,
+            "median": 1343,
+            "min": 1343,
+            "stdev": 0.0
+          },
+          "decode_ms": {
+            "count": 1,
+            "max": 9938,
+            "mean": 9938,
+            "median": 9938,
+            "min": 9938,
+            "stdev": 0.0
+          },
+          "diffusion_ms": {
+            "count": 1,
+            "max": 187268,
+            "mean": 187268,
+            "median": 187268,
+            "min": 187268,
+            "stdev": 0.0
+          },
+          "noise_ms": {
+            "count": 1,
+            "max": 522,
+            "mean": 522,
+            "median": 522,
+            "min": 522,
+            "stdev": 0.0
+          },
+          "total_ms": {
+            "count": 1,
+            "max": 199852,
+            "mean": 199852,
+            "median": 199852,
+            "min": 199852,
+            "stdev": 0.0
+          }
+        }
+      },
+      "report_sha256": "a0ab1138ef9849f874680327e906b72a65904f59220109b2eea952fb485ba77d",
+      "report": "adaln-t2va/report.json",
+      "output": {
+        "sha256": "880d86cab228d92c2246299196560a159d5d4d40c52eb0762625a50f7bd82394",
+        "shape": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "audio_samples_per_channel": 165888,
+          "fps": "24",
+          "frames": 124,
+          "height": 480,
+          "width": 864
+        }
+      },
+      "memory_sampling": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 1172,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 15173.0,
+        "max_sample_gap_seconds": 0.5164182640146464
+      }
+    },
+    "adaln_binary_all_off": {
+      "status": "validated",
+      "error": null,
+      "source_provenance": {
+        "binary_sha256": "afe603470a244bcac60d8980a7050e0f2d5a3e48855e10044c3e4098c9a59d87",
+        "cuda_architectures": "89",
+        "cuda_sage_attention": "ON",
+        "cudnn_frontend_revision": "07b368a2696f5fd0fc2207d4635c51cea4c0bf71",
+        "ggml_revision": "f270346d688c7bec7c56bae2ae73343aba6817ad",
+        "implemented_methods": "ED_H3_FUSED_OPS,ED_H3_CACHE_DIT,ED_H3_ADALN_CACHE,ED_H3_SAGE_ATTN,ED_H3_SPARSE_ATTN",
+        "onednn_revision": "5e9224036021433d2577548ed0539fe9a53256bc",
+        "shared_config_sha256": "68cadd789c8b1cb1dac0333d17a9fe7eb87c51573380206ea7c05229a1d51d6c",
+        "source_revision": "7c506348455615c38a1d75a835dac2d60f771eae",
+        "source_tree_sha256": "45d334ec9c2fe59fa951c0594feea6df155cf20285ed98f417c08cc35656ca1c",
+        "tracked_diff_sha256": "1e8533578f6e49b383b26a3f7aba1371f61cde29a5dbeff490293138ef912b4a"
+      },
+      "performance_measured": true,
+      "statistics": {
+        "t2va": {
+          "cli_wall_ms": {
+            "count": 1,
+            "max": 256401.80924278684,
+            "mean": 256401.80924278684,
+            "median": 256401.80924278684,
+            "min": 256401.80924278684,
+            "stdev": 0.0
+          },
+          "conditioning_ms": {
+            "count": 1,
+            "max": 1374,
+            "mean": 1374,
+            "median": 1374,
+            "min": 1374,
+            "stdev": 0.0
+          },
+          "decode_ms": {
+            "count": 1,
+            "max": 10502,
+            "mean": 10502,
+            "median": 10502,
+            "min": 10502,
+            "stdev": 0.0
+          },
+          "diffusion_ms": {
+            "count": 1,
+            "max": 213373,
+            "mean": 213373,
+            "median": 213373,
+            "min": 213373,
+            "stdev": 0.0
+          },
+          "noise_ms": {
+            "count": 1,
+            "max": 544,
+            "mean": 544,
+            "median": 544,
+            "min": 544,
+            "stdev": 0.0
+          },
+          "total_ms": {
+            "count": 1,
+            "max": 226587,
+            "mean": 226587,
+            "median": 226587,
+            "min": 226587,
+            "stdev": 0.0
+          }
+        }
+      },
+      "report_sha256": "6feeb46537a7c5bfc6186038692096e2c07f251f9d696f267061acd1ac498e2d",
+      "report": "adaln-build-all-off/report.json",
+      "output": {
+        "sha256": "6d7c59869a046e88248d8bc2ecc78ac5c5ba81ae0de9700076939ea2cb88f462",
+        "shape": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "audio_samples_per_channel": 165888,
+          "fps": "24",
+          "frames": 124,
+          "height": 480,
+          "width": 864
+        }
+      },
+      "memory_sampling": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 933,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 16035.0,
+        "max_sample_gap_seconds": 0.5165574778802693
+      }
+    },
+    "subblock": {
+      "status": "validated",
+      "error": null,
+      "source_provenance": {
+        "binary_sha256": "78ad797268824b3bcc915a55acc67ac59f187f2f4e09a9ca3b6974f66641e478",
+        "cuda_architectures": "89",
+        "cuda_sage_attention": "ON",
+        "cudnn_frontend_revision": "07b368a2696f5fd0fc2207d4635c51cea4c0bf71",
+        "ggml_revision": "f270346d688c7bec7c56bae2ae73343aba6817ad",
+        "implemented_methods": "ED_H3_FUSED_OPS,ED_H3_CACHE_DIT,ED_H3_ADALN_CACHE,ED_H3_SAGE_ATTN,ED_H3_SPARSE_ATTN",
+        "onednn_revision": "5e9224036021433d2577548ed0539fe9a53256bc",
+        "shared_config_sha256": "a5a15ab1ca441d5d5858c3c3efb1ebdfa83e621d54f00f37120b47f65708ed1f",
+        "source_revision": "7c506348455615c38a1d75a835dac2d60f771eae",
+        "source_tree_sha256": "0630920e99d748526a7f25c131cb4804781ab9bf5fb030f91f302868bb30a39d",
+        "tracked_diff_sha256": "30df0523d9384396c995c1c2a9a3f28ad184f5355754ff2f4540db9948b22938"
+      },
+      "performance_measured": true,
+      "statistics": {
+        "t2va": {
+          "cli_wall_ms": {
+            "count": 1,
+            "max": 424502.73173698224,
+            "mean": 424502.73173698224,
+            "median": 424502.73173698224,
+            "min": 424502.73173698224,
+            "stdev": 0.0
+          },
+          "conditioning_ms": {
+            "count": 1,
+            "max": 1337,
+            "mean": 1337,
+            "median": 1337,
+            "min": 1337,
+            "stdev": 0.0
+          },
+          "decode_ms": {
+            "count": 1,
+            "max": 10489,
+            "mean": 10489,
+            "median": 10489,
+            "min": 10489,
+            "stdev": 0.0
+          },
+          "diffusion_ms": {
+            "count": 1,
+            "max": 381484,
+            "mean": 381484,
+            "median": 381484,
+            "min": 381484,
+            "stdev": 0.0
+          },
+          "noise_ms": {
+            "count": 1,
+            "max": 530,
+            "mean": 530,
+            "median": 530,
+            "min": 530,
+            "stdev": 0.0
+          },
+          "total_ms": {
+            "count": 1,
+            "max": 394658,
+            "mean": 394658,
+            "median": 394658,
+            "min": 394658,
+            "stdev": 0.0
+          }
+        }
+      },
+      "report_sha256": "6aa4b6a6a7e0516fef0b31ea3a1c2b44df9b8990ef72ce2761ea81403022b62e",
+      "report": "subblock-t2va/report.json",
+      "output": {
+        "sha256": "9fbeec0b066b858e3faf78370f12f007efc31dafa13b9c0790c73ed137746eb0",
+        "shape": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "audio_samples_per_channel": 165888,
+          "fps": "24",
+          "frames": 124,
+          "height": 480,
+          "width": 864
+        }
+      },
+      "memory_sampling": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 1440,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 16045.0,
+        "max_sample_gap_seconds": 0.5006932721007615
+      }
+    },
+    "cache_failed_1": {
+      "status": "failed",
+      "error": "ed-cli nonzero exit: 3",
+      "source_provenance": {
+        "binary_sha256": "78ad797268824b3bcc915a55acc67ac59f187f2f4e09a9ca3b6974f66641e478",
+        "cuda_architectures": "89",
+        "cuda_sage_attention": "ON",
+        "cudnn_frontend_revision": "07b368a2696f5fd0fc2207d4635c51cea4c0bf71",
+        "ggml_revision": "f270346d688c7bec7c56bae2ae73343aba6817ad",
+        "implemented_methods": "ED_H3_FUSED_OPS,ED_H3_CACHE_DIT,ED_H3_ADALN_CACHE,ED_H3_SAGE_ATTN,ED_H3_SPARSE_ATTN",
+        "onednn_revision": "5e9224036021433d2577548ed0539fe9a53256bc",
+        "shared_config_sha256": "a5a15ab1ca441d5d5858c3c3efb1ebdfa83e621d54f00f37120b47f65708ed1f",
+        "source_revision": "7c506348455615c38a1d75a835dac2d60f771eae",
+        "source_tree_sha256": "0630920e99d748526a7f25c131cb4804781ab9bf5fb030f91f302868bb30a39d",
+        "tracked_diff_sha256": "30df0523d9384396c995c1c2a9a3f28ad184f5355754ff2f4540db9948b22938"
+      },
+      "performance_measured": false,
+      "statistics": null,
+      "report_sha256": "94a5d356c4d24947167aa061659e54a9962102001d819b661956156fd8e51760",
+      "report": "cache-t2va/report.json"
+    },
+    "cache_failed_2": {
+      "status": "failed",
+      "error": "ed-cli nonzero exit: 3",
+      "source_provenance": {
+        "binary_sha256": "57adfb50ab327dcf8222c1ca7379da7d4c8ff02599fb0c617286729773c7a9de",
+        "cuda_architectures": "89",
+        "cuda_sage_attention": "ON",
+        "cudnn_frontend_revision": "07b368a2696f5fd0fc2207d4635c51cea4c0bf71",
+        "ggml_revision": "f270346d688c7bec7c56bae2ae73343aba6817ad",
+        "implemented_methods": "ED_H3_FUSED_OPS,ED_H3_CACHE_DIT,ED_H3_ADALN_CACHE,ED_H3_SAGE_ATTN,ED_H3_SPARSE_ATTN",
+        "onednn_revision": "5e9224036021433d2577548ed0539fe9a53256bc",
+        "shared_config_sha256": "a5a15ab1ca441d5d5858c3c3efb1ebdfa83e621d54f00f37120b47f65708ed1f",
+        "source_revision": "7c506348455615c38a1d75a835dac2d60f771eae",
+        "source_tree_sha256": "888b409546c05da4200d76f1461d6778a3d42e4b022c17a8fe75aef59864bc5c",
+        "tracked_diff_sha256": "0438d678a266b9e5736a432ec894f783029bc8d9674045f2713c62e5b326c577"
+      },
+      "performance_measured": false,
+      "statistics": null,
+      "report_sha256": "101147852ff71d3650e2a7b8a55db94fb0386fd97851708f080b9b609d964fc3",
+      "report": "cache-t2va-repair/report.json"
+    },
+    "sage": {
+      "status": "validated",
+      "performance_measured": true,
+      "statistics": {
+        "t2va": {
+          "cli_wall_ms": {
+            "count": 1,
+            "max": 282743.41633403674,
+            "mean": 282743.41633403674,
+            "median": 282743.41633403674,
+            "min": 282743.41633403674,
+            "stdev": 0.0
+          },
+          "conditioning_ms": {
+            "count": 1,
+            "max": 1330,
+            "mean": 1330,
+            "median": 1330,
+            "min": 1330,
+            "stdev": 0.0
+          },
+          "decode_ms": {
+            "count": 1,
+            "max": 10531,
+            "mean": 10531,
+            "median": 10531,
+            "min": 10531,
+            "stdev": 0.0
+          },
+          "diffusion_ms": {
+            "count": 1,
+            "max": 239591,
+            "mean": 239591,
+            "median": 239591,
+            "min": 239591,
+            "stdev": 0.0
+          },
+          "noise_ms": {
+            "count": 1,
+            "max": 555,
+            "mean": 555,
+            "median": 555,
+            "min": 555,
+            "stdev": 0.0
+          },
+          "total_ms": {
+            "count": 1,
+            "max": 252789,
+            "mean": 252789,
+            "median": 252789,
+            "min": 252789,
+            "stdev": 0.0
+          }
+        }
+      },
+      "memory_sampling": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 985,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 16749.0,
+        "max_sample_gap_seconds": 0.5762281611096114
+      },
+      "quality_vs_initial_baseline": {
+        "ssim": 0.9743189516129033,
+        "psnr_db": 33.836532258064516,
+        "audio_rmse": 0.007288005481413948
+      },
+      "source_provenance": {
+        "binary_sha256": "0d731a41e0ef3793cee1a9a072ade9a529585f466a670e4b49c42a518442075a",
+        "cuda_architectures": "89",
+        "cuda_sage_attention": "ON",
+        "cudnn_frontend_revision": "07b368a2696f5fd0fc2207d4635c51cea4c0bf71",
+        "ggml_revision": "f270346d688c7bec7c56bae2ae73343aba6817ad",
+        "implemented_methods": "ED_H3_FUSED_OPS,ED_H3_CACHE_DIT,ED_H3_ADALN_CACHE,ED_H3_SAGE_ATTN,ED_H3_SPARSE_ATTN",
+        "onednn_revision": "5e9224036021433d2577548ed0539fe9a53256bc",
+        "shared_config_sha256": "a5a15ab1ca441d5d5858c3c3efb1ebdfa83e621d54f00f37120b47f65708ed1f",
+        "source_revision": "7c506348455615c38a1d75a835dac2d60f771eae",
+        "source_tree_sha256": "8eb4995e1d71ef548482e903d35265c7e2a84e412b2925951c068a87738b4a28",
+        "tracked_diff_sha256": "0438d678a266b9e5736a432ec894f783029bc8d9674045f2713c62e5b326c577"
+      },
+      "report": "sage-t2va/report.json",
+      "report_sha256": "ef7c97c426d449c48b71daa688a732a054d68d66cf4da13dd6cb2efe1024d491",
+      "variant": "Q32 per-warp INT8 QK, K64 per-block, smooth-K, FP16 PV, FP32 accumulation, H3 tail zero fill; first/last layer dense, all20steps; not SM89 default FP8PV"
+    }
+  },
+  "correctness_tests": {
+    "adaln_production_tiny_cuda": 48,
+    "adaln_real_weight_projection_bitexact": 306,
+    "cache_production_tiny_cuda": 24,
+    "subblock_cuda_outputs": 214,
+    "sage_cuda_comparisons": 126
+  },
+  "unfinished": [
+    "Cache full-model graph planner151GiB compute estimate investigation",
+    "AdaLN full-denoiser output difference despite identical real projections",
+    "repeated full-model four-method performance and mode-matched quality",
+    "fusion breakdown root cause"
+  ],
+  "evidence_root": "_scratch/h3-offload-20261014"
+}

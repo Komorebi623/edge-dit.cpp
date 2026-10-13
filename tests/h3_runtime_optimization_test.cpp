@@ -213,6 +213,10 @@ struct TinyRunner : MiniMaxH3::MiniMaxH3Runner {
                 return build_adaln_projection_graph(segmented, token, state.contract.plans[i], j, 1);
             }), EA::Status::Stored, "real H3 ranged projection prefill");
         check(builds == state.contract.plans.size() * 5, "real H3 prefill must split every projection");
+        EA::Cache layer_major({true, 8u * 1024u * 1024u, 16384});
+        expect(layer_major.begin_request(state.contract), EA::Status::Stored, "layer-major H3 contract");
+        expect(prefill_adaln_layer_major(layer_major, state.contract, 1), EA::Status::Stored,
+               "real H3 layer-major schedule prefill");
         for (size_t i = 0; i < state.contract.plans.size(); ++i) {
             EA::Cache::StepToken a, b, segmented_token;
             expect(segmented.bind_step(state.contract, i, state.contract.plans[i], &segmented_token),
@@ -227,6 +231,13 @@ struct TinyRunner : MiniMaxH3::MiniMaxH3Runner {
                 expect(state.cache->lookup(b, j, shape, &bv), EA::Status::Hit, "cached readback");
                 check(std::memcmp(av, bv, static_cast<size_t>(shape[0] * shape[1]) * sizeof(float)) == 0,
                       "prefilled projection is not bitexact native F32 readback");
+                EA::Cache::StepToken layer_token;
+                expect(layer_major.bind_step(state.contract, i, state.contract.plans[i], &layer_token),
+                       EA::Status::Hit, "layer-major bind");
+                const float* layer_values = nullptr;
+                expect(layer_major.lookup(layer_token, j, shape, &layer_values), EA::Status::Hit, "layer-major lookup");
+                check(std::memcmp(av, layer_values, static_cast<size_t>(shape[0] * shape[1]) * sizeof(float)) == 0,
+                      "layer-major schedule graph changed projection math");
                 const float* segmented_values = nullptr;
                 expect(segmented.lookup(segmented_token, j, shape, &segmented_values), EA::Status::Hit,
                        "segmented H3 native readback");

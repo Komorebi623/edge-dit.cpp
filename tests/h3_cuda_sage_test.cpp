@@ -132,7 +132,9 @@ static void test_policy(ggml_backend_t cpu) {
     r = candidate(); r.is_cuda = false;
     check(h3_sage_decide(r).route == H3SageRoute::Reject, "CPU Sage accepted");
     r = candidate(); r.flash_attn = false;
-    check(h3_sage_decide(r).route == H3SageRoute::Dense, "flash-off used Sage");
+    check(h3_sage_decide(r).route == H3SageRoute::Reject, "flash-off silently fell back to dense");
+    r = candidate(); r.dense_fallback = true;
+    check(h3_sage_decide(r).route == H3SageRoute::Reject, "hidden dense fallback accepted");
     for (int count : {1, 2}) for (int i = 0; i < count; ++i) {
         r = candidate(); r.total_layers = count; r.layer_idx = i;
         check(h3_sage_decide(r).route == H3SageRoute::Dense, "tiny stack used Sage");
@@ -227,6 +229,11 @@ static void test_dispatch_predicate() {
     auto raw = h3_sage_custom_graph(c.ctx, t.q, t.k, t.v, 2);
     TestEnv gate("ED_SAGE_ATTN", "0");
     check(ed_cuda_sage_attn_custom_supported(raw), "H3SA requires global ED_SAGE_ATTN");
+    for (const char* key : {"ED_SAGE_FALLBACK", "ED_SAGE_PV_FP8"}) {
+        TestEnv override(key, "1");
+        check(!ed_cuda_sage_attn_custom_supported(raw), "H3SA accepted unvalidated FP8/hidden dense override");
+    }
+    check(ed_cuda_sage_attn_custom_supported(raw), "H3SA did not recover after override rejection");
     check(!ed_cuda_sage_attn_custom_supported(nullptr), "null dispatch accepted");
     auto op = raw->op; raw->op = GGML_OP_NONE;
     check(!ed_cuda_sage_attn_custom_supported(raw), "non-custom dispatch accepted"); raw->op = op;
@@ -463,6 +470,54 @@ static void test_shared_scaling(ggml_backend_t cpu) {
               << ", wrong 1/128=" << max_error(dense, wrong) << '\n';
 }
 
+// Build the ACTUAL cut plan on CPU without executing its CUSTOM node. This
+// proves the planner keeps H3SA atomic and preserves packed userdata; execution,
+// QKV rebinding and reuse are separately covered by the opt-in CUDA sidecar.
+static void test_real_cut_plan(ggml_backend_t cpu) {
+    namespace Cut = sd::ggml_graph_cut;
+    Context params(true), graph_context(true);
+    auto t = qkv(params.ctx, 65, 2, 2);
+    auto* buffer = ggml_backend_alloc_ctx_tensors(params.ctx, cpu);
+    check(buffer != nullptr, "CPU cut-plan parameter buffer");
+    std::unique_ptr<ggml_backend_buffer, decltype(&ggml_backend_buffer_free)> own(buffer, ggml_backend_buffer_free);
+    auto* ctx = graph_context.ctx;
+    auto* q = ggml_scale(ctx, t.q, 1.f);
+    auto* k = ggml_scale(ctx, t.k, 1.f);
+    auto* v = ggml_scale(ctx, t.v, 1.f);
+    Cut::mark_graph_cut(q, "qkv-producer", "q");
+    Cut::mark_graph_cut(k, "qkv-producer", "k");
+    Cut::mark_graph_cut(v, "qkv-producer", "v");
+    auto* raw = h3_sage_custom_graph(ctx, q, k, v, 2);
+    check(raw != nullptr, "cut H3SA graph");
+    auto* out = h3_sage_output_graph(ctx, raw, 2);
+    Cut::mark_graph_cut(out, "attention-consumer", "out");
+    auto* final = ggml_scale(ctx, out, 1.f);
+    auto* graph = ggml_new_graph_custom(ctx, 128, false);
+    ggml_build_forward_expand(graph, final);
+    const auto plan = Cut::build_plan(cpu, graph, {t.q, t.k, t.v}, "H3SA-CPU-plan-only");
+    check(plan.available && plan.valid && plan.has_cuts && plan.segments.size() == 3,
+          "producer/attention/output must form three actual segments");
+    size_t owners = 0;
+    CustomParamsLayout before{}; std::memcpy(&before, raw->op_params, sizeof(before));
+    for (const auto& segment : plan.segments) {
+        check(segment.comm_ops.empty(), "unexpected communications");
+        ggml_context* part_ctx = nullptr;
+        auto* part = Cut::build_segment_graph(graph, segment, &part_ctx);
+        check(part != nullptr, "real segment graph");
+        for (int i = 0; i < ggml_graph_n_nodes(part); ++i) {
+            if (ggml_graph_node(part, i) != raw) continue;
+            ++owners;
+            CustomParamsLayout after{}; std::memcpy(&after, raw->op_params, sizeof(after));
+            check(after.fun == before.fun && after.userdata == before.userdata && after.n_tasks == before.n_tasks,
+                  "cut builder corrupted H3SA tag");
+        }
+        ggml_free(part_ctx);
+    }
+    check(owners == 1, "H3SA must execute in exactly one segment");
+    Cut::clear_graph_cut_marks();
+    std::cout << "PASS actual CPU cut planner: three segments, H3SA atomic/tag preserved (NO CUDA execution)\n";
+}
+
 int main() {
     try {
         // Explicit CPU init only. No load_all(), no CUDA dependencies or calls.
@@ -473,6 +528,7 @@ int main() {
         test_tags();
         test_dispatch_predicate();
         test_shapes();
+        test_real_cut_plan(cpu.get());
         test_custom_graph();
         test_output_layout();
         test_shared_scaling(cpu.get());

@@ -1,6 +1,6 @@
 #pragma once
 
-// H3-only graph implementation, not a fused Triton/CuTe kernel or a global
+// H3-only SubBlock implementation, not a fused Triton/CuTe kernel or a global
 // backend switch. Define MINIMAX_H3_SPARSE_REFERENCE_ONLY for a libggml-free test.
 #include <algorithm>
 #include <cmath>
@@ -11,6 +11,9 @@
 #include <numeric>
 #include <string>
 #include <vector>
+#ifdef ED_ENABLE_CUDA_H3_SUBBLOCK
+#include "core/backend/ggml/cuda/h3_subblock.h"
+#endif
 #ifndef MINIMAX_H3_SPARSE_REFERENCE_ONLY
 #include "core/backend/ggml/ggml_extend.hpp"
 #endif
@@ -29,13 +32,39 @@ struct SparseAttentionLayout {
     std::vector<SparseTokenSpan> spans;
 };
 
-// Conservative metadata/node budget for the current per-head/per-Q-block
-// expanded graph. This is a rejection gate, NOT a proven VRAM bound; do not
-// increase it to force production clips through. Batched/native execution is
-// needed for large clips. Checked arithmetic avoids overflow on bad geometry.
+// Native builds bound router/gather allocations and a constant node count.
+// Other builds retain the conservative rejection gate for the per-head/per-Q
+// expanded reference graph. Neither branch raises the caller's graph cap or
+// claims to bound all model/stock-FlashAttention VRAM.
 inline bool h3_subblock_graph_budget(const SparseAttentionLayout& layout,
                                      int64_t heads, int64_t layers, int64_t capacity,
                                      std::string* reason = nullptr) {
+#ifdef ED_ENABLE_CUDA_H3_SUBBLOCK
+    // Native execution has two CUSTOM ops plus three metadata leaves per layer,
+    // independent of heads and query blocks. Bound actual CUDA router/gather
+    // scratch as well; this is not permission to expand the old graph cap.
+    auto native_fail = [&]() {
+        if (reason) *reason = "MiniMax-H3 SubBlock bounded execution capacity exceeded";
+        return false;
+    };
+    if (layers <= 0 || capacity <= 8192 || layers > (capacity-8192)/520) return native_fail();
+    int64_t sequence = 0, blocks = 0, protected_tokens = 0;
+    for (const auto& span : layout.spans) {
+        if (span.begin != sequence || span.end <= span.begin ||
+            span.end > edgedit::h3_subblock::max_sequence) return native_fail();
+        if (span.kind == SparseTokenKind::TargetVideo) blocks += (span.end-span.begin+63)/64;
+        else if (span.kind == SparseTokenKind::Text || span.kind == SparseTokenKind::Audio ||
+                 span.kind == SparseTokenKind::Reference || span.kind == SparseTokenKind::Query)
+            protected_tokens += span.end-span.begin;
+        else return native_fail();
+        sequence=span.end;
+    }
+    edgedit::h3_subblock::Capacity bounds;
+    if (!edgedit::h3_subblock::capacity(sequence,heads,blocks,blocks,protected_tokens,&bounds))
+        return native_fail();
+    if (reason) reason->clear();
+    return true;
+#else
     auto fail = [&]() {
         if (reason) *reason = "MiniMax-H3 SubBlock expanded graph exceeds conservative capacity; bounded execution required";
         return false;
@@ -64,6 +93,7 @@ inline bool h3_subblock_graph_budget(const SparseAttentionLayout& layout,
     if (heads > remaining / layers || per_head > remaining / layers / heads) return fail();
     if (reason) reason->clear();
     return true;
+#endif
 }
 
 // The runner's bind_backend_tensor_data registers a pointer, not a copy. Keep
@@ -307,6 +337,44 @@ inline ggml_tensor* constant(GGMLRunnerContext* runner, const SparseAttentionCon
     }
     return t;
 }
+#ifdef ED_ENABLE_CUDA_H3_SUBBLOCK
+inline ggml_tensor* native_attention(GGMLRunnerContext* runner, ggml_tensor* q,
+                                     ggml_tensor* k, ggml_tensor* v,
+                                     const SparseAttentionConfig& options,
+                                     const SparseAttentionLayout& layout, const Plan& plan) {
+    // CUDA identity checked without a global switch or loading other backends.
+    auto* device = ggml_backend_get_device(runner->backend);
+    auto* registry = device ? ggml_backend_dev_backend_reg(device) : nullptr;
+    const char* name = registry ? ggml_backend_reg_name(registry) : nullptr;
+    if (!name || std::strcmp(name, "CUDA") != 0 || !runner->flash_attn_enabled) return nullptr;
+    edgedit::h3_subblock::Capacity cap;
+    if (!edgedit::h3_subblock::capacity(q->ne[1], q->ne[2], plan.video.size(),
+                                       plan.topk, plan.protected_tokens, &cap)) return nullptr;
+    std::vector<int32_t> blocks, protected_chunks, protected_ids;
+    for (const auto& block : plan.video) {
+        blocks.push_back(int32_t(block.begin)); blocks.push_back(int32_t(block.end));
+    }
+    for (const auto& span : layout.spans) {
+        if (span.kind == SparseTokenKind::TargetVideo) continue;
+        for (int64_t t=span.begin;t<span.end;++t) protected_ids.push_back(int32_t(t));
+        for (int64_t t=span.begin;t<span.end;t+=64) {
+            protected_chunks.push_back(int32_t(t));
+            protected_chunks.push_back(int32_t(std::min(t+64,span.end)));
+        }
+    }
+    // Always one sentinel: avoids zero-length tensors; shape encodes real count.
+    protected_ids.push_back(-1); protected_chunks.push_back(0); protected_chunks.push_back(0);
+    auto* b = constant(runner,options,GGML_TYPE_I32,2,blocks.size()/2,blocks);
+    auto* p = constant(runner,options,GGML_TYPE_I32,2,protected_chunks.size()/2,protected_chunks);
+    auto* i = constant(runner,options,GGML_TYPE_I32,protected_ids.size(),1,protected_ids);
+    auto* route = edgedit::h3_subblock::router(runner->ggml_ctx,q,k,b,plan.topk);
+    auto* out = edgedit::h3_subblock::attention(runner->ggml_ctx,q,k,v,route,b,p,i);
+    // Absent dispatch or unsupported GPU is an error, never expanded/dense fallback.
+    if (!ggml_backend_supports_op(runner->backend,route) ||
+        !ggml_backend_supports_op(runner->backend,out)) return nullptr;
+    return out;
+}
+#endif
 inline ggml_tensor* slice(ggml_context* c, ggml_tensor* x, int64_t begin, int64_t end) {
     return ggml_view_2d(c, x, x->ne[0], end - begin, x->nb[1], size_t(begin) * x->nb[1]);
 }
@@ -403,6 +471,11 @@ inline ggml_tensor* h3_subblock_attention(GGMLRunnerContext* runner,
     if (q->type != GGML_TYPE_F32 || k->type != GGML_TYPE_F32 || v->type != GGML_TYPE_F32 ||
         q->nb[0] != ggml_type_size(q->type) || k->nb[0] != ggml_type_size(k->type) ||
         v->nb[0] != ggml_type_size(v->type)) return nullptr;
+#ifdef ED_ENABLE_CUDA_H3_SUBBLOCK
+    // Production CUDA takes the bounded path exclusively. Expanded graph below
+    // remains available only in builds without the native CUDA feature.
+    return native_attention(runner,q,k,v,options,layout,plan);
+#endif
     auto* c = runner->ggml_ctx;
     const int64_t blocks = int64_t(plan.video.size()), width = options.sparse_block_tokens;
     std::vector<int32_t> token_ids(size_t(blocks * width));

@@ -46,6 +46,7 @@ struct H3SageRequest {
     bool flash_attn = false;
     bool subblock_enabled = false; // caller must pass its ACTUAL execution mode
     bool pv_fp8 = false; // unvalidated alternative shared PV path
+    bool dense_fallback = false; // prohibit hybrid/dense recomputation being reported as Sage
     H3SageScope scope = H3SageScope::TokenRefiner; // missing layer metadata stays dense
     int layer_idx = -1;
     int total_layers = -1;
@@ -63,6 +64,8 @@ inline H3SageDecision h3_sage_decide(const H3SageRequest& request) {
         return {H3SageRoute::Reject, "H3 Sage + subblock is not validated"};
     if (request.pv_fp8)
         return {H3SageRoute::Reject, "H3 Sage + ED_SAGE_PV_FP8 is not validated"};
+    if (request.dense_fallback)
+        return {H3SageRoute::Reject, "H3 Sage forbids ED_SAGE_FALLBACK; no hidden dense recomputation"};
     if (request.scope == H3SageScope::TokenRefiner)
         return {H3SageRoute::Dense, "H3 token refiner stays dense"};
     if (request.total_layers <= 0 || request.layer_idx < 0 ||
@@ -72,7 +75,7 @@ inline H3SageDecision h3_sage_decide(const H3SageRequest& request) {
     // ED_SAGE_SKIP_FIRST/LAST or use pe != nullptr to infer token-refiner scope.
     if (request.layer_idx == 0 || request.layer_idx == request.total_layers - 1)
         return {H3SageRoute::Dense, "H3 first/last DiT block stays dense"};
-    if (!request.flash_attn) return {H3SageRoute::Dense, "H3 flash attention is off"};
+    if (!request.flash_attn) return {H3SageRoute::Reject, "H3 Sage requires flash attention; refusing silent dense"};
     return {H3SageRoute::Sage, "H3-scoped Sage candidate"};
 }
 
@@ -98,6 +101,7 @@ inline H3SageRequest h3_sage_request(const CudaOptimizationOptions* options,
     request.total_layers = total_layers;
     request.subblock_enabled = subblock_enabled || (options != nullptr && options->sparse_attn);
     request.pv_fp8 = edgedit::ggml_ext::sage_pv_fp8_enabled();
+    request.dense_fallback = edgedit::ggml_ext::sage_fallback_enabled(kH3SageHeadDim);
     return request;
 }
 
@@ -123,7 +127,10 @@ inline bool h3_sage_shape_supported(const ggml_tensor* q, const ggml_tensor* k,
 
 inline ggml_tensor* h3_sage_cont_f32(ggml_context* ctx, ggml_tensor* tensor) {
     if (tensor->type != GGML_TYPE_F32) tensor = ggml_cast(ctx, tensor, GGML_TYPE_F32);
-    if (!ggml_is_contiguous(tensor)) tensor = ggml_cont(ctx, tensor);
+    // ggml_is_contiguous ignores singleton-axis strides; SCALE requires the
+    // stricter padded-1D invariant even for batch=1 offset views.
+    if (!ggml_is_contiguous(tensor) || tensor->nb[2] != tensor->nb[1] * tensor->ne[1] ||
+        tensor->nb[3] != tensor->nb[2] * tensor->ne[2]) tensor = ggml_cont(ctx, tensor);
     return tensor;
 }
 
@@ -199,19 +206,20 @@ inline H3SageBuildResult h3_sage_try_build(ggml_context* ctx, ggml_backend_t bac
                                          const ggml_tensor* mask = nullptr) {
     request.is_cuda = h3_sage_cuda_backend(backend); // never trust a caller's claim
     request.pv_fp8 = edgedit::ggml_ext::sage_pv_fp8_enabled();
+    request.dense_fallback = edgedit::ggml_ext::sage_fallback_enabled(kH3SageHeadDim);
     const auto decision = h3_sage_decide(request);
     if (decision.route != H3SageRoute::Sage)
         return {decision.route, nullptr, decision.reason};
     if (ctx == nullptr) return {H3SageRoute::Reject, nullptr, "H3 Sage needs a graph context"};
     if (!h3_sage_shape_supported(q, k, v, n_head, mask))
-        return {H3SageRoute::Dense, nullptr, "H3 Sage shape/type/mask is unsupported; preserve dense"};
+        return {H3SageRoute::Reject, nullptr, "H3 Sage shape/type/mask is unsupported; refusing silent dense"};
     auto raw = h3_sage_custom_graph(ctx, q, k, v, n_head);
     if (raw == nullptr || !ggml_backend_supports_op(backend, raw))
         return {H3SageRoute::Reject, nullptr,
                 "H3-scoped Sage CUDA dispatch unavailable; build Sage and apply the H3SA tag patch"};
     auto output = h3_sage_output_graph(ctx, raw, n_head);
     if (output == nullptr) return {H3SageRoute::Reject, nullptr, "H3 Sage output layout is invalid"};
-    return {H3SageRoute::Sage, output, "H3-scoped Sage graph built"};
+    return {H3SageRoute::Sage, output, "H3 per-warp INT8-QK / FP16-PV / FP32-accum, smooth-K only; no dense fallback"};
 }
 
 } // namespace MiniMaxH3

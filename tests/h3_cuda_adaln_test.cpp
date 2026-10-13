@@ -392,6 +392,20 @@ struct TinyH3Runner : RunnerBridge<GGMLRunner> {
     std::optional<sd::Tensor<float>> consume_cuts(ggml_cgraph* graph, const sd::ggml_graph_cut::Plan& plan) {
         return compute_with_graph_cuts<float>(graph,plan,1,true);
     }
+    std::vector<sd::Tensor<float>> layer_features, layer_fractions;
+    std::vector<sd::Tensor<int32_t>> layer_lower, layer_upper;
+    ggml_cgraph* build_layer(Cache& cache, const RequestContract& contract, size_t projection,
+                            const std::vector<size_t>& plans, const std::vector<Cache::StepToken>& tokens) {
+        layer_features.clear(); layer_fractions.clear(); layer_lower.clear(); layer_upper.clear();
+        auto* merged = new_graph_custom(4096);
+        for (auto i : plans) {
+            auto* g = build(cache, tokens[i], contract.plans[i], projection, 1);
+            ggml_build_forward_expand(merged, ggml_graph_node(g, -1));
+            layer_features.push_back(std::move(features)); layer_fractions.push_back(std::move(fraction));
+            layer_lower.push_back(std::move(lower)); layer_upper.push_back(std::move(upper));
+        }
+        return merged;
+    }
     ggml_cgraph* parameterless_graph(Cache& cache,Cache::StepToken token,size_t projection) {
         Shape shape;cache.expected_shape(token,projection,&shape);
         return build_projection_graph(compute_ctx,cache,token,64,[&](size_t) {
@@ -583,6 +597,40 @@ static void segmented_failure_test() {
     std::cout << "PASS segmented failures: staged/builder/readback/late-return/nonfinite/budget, atomic reset and same-runner recovery\n";
 }
 
+static void layer_major_runner_test(bool curves) {
+    auto c=contract(); if(curves)c.curve_grid=5;
+    CpuFixture f; TinyH3Runner streamed(f.backend,curves,true), resident(f.backend,curves);
+    Cache cache({true,1u<<20,100}), reference({true,1u<<20,100});
+    cache.begin_request(c); reference.begin_request(c);
+    expect(prefill_request(resident,reference,c,1,[&](size_t i,auto t){return resident.build(reference,t,c.plans[i]);}),
+           Status::Stored,"layer-major reference");
+    auto build=[&](size_t j,const auto& plans,const auto& tokens){return streamed.build_layer(cache,c,j,plans,tokens);};
+    expect(prefill_request_layer_major(streamed,cache,c,1,build),Status::Stored,"layer-major streamed request");
+    check(streamed.executions==3,"layer-major must execute/transfer each projection once, not per plan");
+    check(streamed.transferred==3*(curves?3u:6u),"layer-major transferred repeated timestep weights");
+    streamed.check_restored();
+    for(size_t i=0;i<c.plans.size();++i)for(size_t j=0;j<c.projections.size();++j) {
+        auto a=bind(reference,c,i),b=bind(cache,c,i);Shape shape;cache.expected_shape(b,j,&shape);
+        const float *av=nullptr,*bv=nullptr;reference.lookup(a,j,shape,&av);cache.lookup(b,j,shape,&bv);
+        check(std::memcmp(av,bv,static_cast<size_t>(shape[0]*shape[1])*sizeof(float))==0,"layer-major math differs");
+    }
+    const size_t calls=streamed.executions;
+    expect(prefill_request_layer_major(streamed,cache,c,1,build),Status::Stored,"layer-major repeat");
+    check(streamed.executions==calls,"repeat layer-major executed");
+    for(auto failure:{TinyH3Runner::Failure::BeforeCompute,TinyH3Runner::Failure::AfterReadback,
+                      TinyH3Runner::Failure::ThrowAfterReadback,TinyH3Runner::Failure::NonFinite}) {
+        cache.begin_request(c);streamed.failure=failure;streamed.fail_on=streamed.executions+2;
+        bool rejected=false;
+        try { rejected=prefill_request_layer_major(streamed,cache,c,1,build)!=Status::Stored; }
+        catch(const std::exception&) { rejected=true; }
+        check(rejected && cache.used_bytes()==0,"failed layer-major retained earlier layer/plan");
+        streamed.check_restored();streamed.failure=TinyH3Runner::Failure::None;
+        cache.begin_request(c);
+        expect(prefill_request_layer_major(streamed,cache,c,1,build),Status::Stored,"layer-major same-runner recovery");
+    }
+    std::cout<<"PASS real layer-major once-per-projection transfer, exact math and atomic failures/recovery curve="<<curves<<"\n";
+}
+
 #endif
 int main(){try{
 #ifdef H3_ADALN_TEST_REAL_RUNNER
@@ -592,6 +640,7 @@ int main(){try{
 #ifdef H3_ADALN_TEST_REAL_RUNNER
     real_runner_test(false);real_runner_test(true);
     segmented_runner_test(false);segmented_runner_test(true);segmented_failure_test();
+    layer_major_runner_test(false);layer_major_runner_test(true);
 #endif
     std::cout<<"H3 exact AdaLN tests passed ("<<checks<<" checks; CPU only, no weights downloaded)\n";
 }catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<'\n';return 1;}}

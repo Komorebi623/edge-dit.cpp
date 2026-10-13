@@ -256,6 +256,7 @@ void graph_test() {
     ggml_backend_free(backend);
 }
 }
+#ifndef H3_CUDA_CACHE_TEST_NO_MAIN
 int main() {
     try {
         policy_test();
@@ -266,3 +267,5 @@ int main() {
         return 1;
     }
 }
+
+#endif // H3_CUDA_CACHE_TEST_NO_MAIN

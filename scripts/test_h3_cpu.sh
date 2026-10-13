@@ -20,3 +20,4 @@ python3 -m unittest discover -s tests -p 'test_h3_4090_workflow.py' -v
 python3 -m unittest discover -s tests -p 'test_h3_gpu_memory_monitor.py' -v
 python3 -m unittest discover -s tests -p 'test_h3_gpu_parity_guard.py' -v
 python3 -m unittest discover -s tests -p 'test_h3_build_source_stability.py' -v
+python3 -m unittest discover -s tests -p 'h3_subblock_build_test.py' -v

@@ -1,8 +1,11 @@
 #pragma once
 
 #include "ggml.h"
+#include <cstdint>
 
-// SageAttention2-style INT8-QK + F16-PV fused attention custom op.
+// SageAttention INT8-QK + F16-PV fused attention custom op. H3SA selects
+// per-warp Q32/K64, smooth-K only, FP32 accumulation, no hidden dense fallback.
+// This is NOT the upstream SM89 auto-selected FP8-PV variant.
 //
 // The compute entry point is defined inside ggml-cuda.cu (so it can take the
 // ggml_backend_cuda_context and use ctx.pool() for CUDA-graph-safe scratch),
@@ -15,7 +18,8 @@ bool ed_cuda_sage_attn_custom_supported(const ggml_tensor * dst);
 // Scratch is provided by the caller (allocated from the ggml CUDA pool). The
 // launcher computes the exact byte sizes it needs via
 // ed_cuda_sage_attn_scratch_sizes(); the caller allocates and passes the
-// buffers back in. Returns false if unsupported (caller must fall back).
+// buffers back in. Returns false if unsupported. H3SA callers must fail closed;
+// they must NOT fall back to dense while reporting Sage enabled.
 struct ed_cuda_sage_attn_scratch {
     void * q_int8  = nullptr; // int8 [d_head * L_q * HN]
     void * k_int8  = nullptr; // int8 [d_head * L_k * HN]
@@ -69,3 +73,9 @@ bool ed_cuda_sage_attn_scratch_sizes_for(const ggml_tensor * dst, ed_cuda_sage_a
 bool ed_cuda_sage_attn_custom_compute(ggml_tensor * dst,
                                       const ed_cuda_sage_attn_scratch * scratch,
                                       void * stream);
+
+// Monotonic process-wide count of successful H3SA launch submissions, NOT
+// completed kernels or CUDA-graph replays. No GPU API calls; safe to snapshot
+// before/after a request. Inspect completion/status separately. Legacy SAGQ
+// and rejected operations never increment this counter.
+uint64_t ed_cuda_sage_attn_h3_dispatch_count();

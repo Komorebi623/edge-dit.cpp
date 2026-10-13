@@ -108,9 +108,12 @@ __device__ __forceinline__ void load_global_to_share(T **lane_ptr, uint32_t &sme
   *lane_ptr += (CTA - smem_iters_col * global_to_shared_copy_lines_per_warp_per_iter) * gmem_stride;
 }
 
-// with predicate
-template <uint32_t global_to_shared_line_lanes, uint32_t global_to_shared_copy_lines_per_warp_per_iter, 
-          uint32_t smem_iters_row, uint32_t smem_iters_col, SwizzleMode swizzle_mode, uint32_t stride, uint32_t CTA, typename T>
+// with predicate. Legacy callers retain upstream kNoFill. H3's native FP16-PV
+// specialization requests kFillZero: a masked probability is zero, but MMA
+// still reads the corresponding V lane and 0 * uninitialized NaN is NaN.
+template <uint32_t global_to_shared_line_lanes, uint32_t global_to_shared_copy_lines_per_warp_per_iter,
+          uint32_t smem_iters_row, uint32_t smem_iters_col, SwizzleMode swizzle_mode, uint32_t stride, uint32_t CTA,
+          cp_async::SharedMemFillMode fill_mode = cp_async::SharedMemFillMode::kNoFill, typename T>
 __device__ __forceinline__ void load_global_to_share(T **lane_ptr, uint32_t &smem_offset,
                                                     const uint32_t &gmem_stride,
                                                     const smem_t<swizzle_mode, stride> &smem, uint32_t base_idx, uint32_t max_len)
@@ -126,7 +129,7 @@ __device__ __forceinline__ void load_global_to_share(T **lane_ptr, uint32_t &sme
 #pragma unroll
     for (uint32_t j = 0; j < smem_iters_row; j++)
     {
-      smem.load_128b_async<cp_async::SharedMemFillMode::kNoFill>(smem_offset, *lane_ptr, base_idx < max_len);
+      smem.load_128b_async<fill_mode>(smem_offset, *lane_ptr, base_idx < max_len);
       *lane_ptr += (global_to_shared_line_lanes * pack_size);
       smem_offset = smem.advance_offset_by_column<global_to_shared_line_lanes>(smem_offset);
     }

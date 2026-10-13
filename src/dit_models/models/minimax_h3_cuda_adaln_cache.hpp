@@ -726,5 +726,75 @@ Status prefill_request_segmented(Runner& runner, Cache& cache, const RequestCont
     return Status::Stored;
 }
 
+// SGLang H3 plan-cache _project_plans_from_checkpoint streams a projection
+// layer once for all request timesteps, not once per timestep. Preserve each
+// original small GEMM shape (no concatenated-batch rounding change), but share
+// the graph's weight leaves so H2D happens once per layer. The builder owns all
+// timestep input storage until readback, and merges only this layer's outputs.
+template<class Runner, class Build>
+Status prefill_request_layer_major(Runner& runner, Cache& cache,
+                                  const RequestContract& contract, int n_threads, Build build) {
+    if (contract.plans.empty() || n_threads <= 0) { cache.reset(); return Status::InvalidPlan; }
+    std::vector<Cache::StepToken> tokens(contract.plans.size());
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        auto status = cache.bind_step(contract, i, contract.plans[i], &tokens[i]);
+        if (status != Status::Hit) { cache.reset(); return status; }
+    }
+    detail::PrefillRollback rollback{cache, tokens.front()};
+    for (size_t j = 0; j < contract.projections.size(); ++j) {
+        std::vector<size_t> missing;
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            Shape shape{}; const float* values = nullptr;
+            auto status = cache.expected_shape(tokens[i], j, &shape);
+            if (status != Status::Hit) return status;
+            status = cache.lookup(tokens[i], j, shape, &values);
+            if (status == Status::Miss) missing.push_back(i);
+            else if (status != Status::Hit) return status;
+        }
+        if (missing.empty()) continue;
+        struct SegmentGuard {
+            Runner& runner; Cache& cache; const std::vector<Cache::StepToken>& tokens;
+            ~SegmentGuard() {
+                for (auto token : tokens) cache.discard_pending(token);
+                runner.exact_release_projection_graph();
+            }
+        } guard{runner, cache, tokens};
+        runner.exact_release_projection_graph();
+        bool built = true; ggml_cgraph* graph = nullptr;
+        auto safe_build = [&]() {
+            auto* g = build(j, missing, tokens);
+            if (!g) { built = false; return runner.exact_empty_graph(); }
+            return g;
+        };
+        if (!runner.exact_prepare_graph(safe_build, &graph) || !graph || !built) return Status::InvalidPlan;
+        for (auto i : missing) if (!cache.pending_only(tokens[i], j)) return Status::InvalidPlan;
+        std::unordered_set<ggml_tensor*> weights, visited;
+        for (auto* t = ggml_get_first_tensor(runner.exact_params_context()); t;
+             t = ggml_get_next_tensor(runner.exact_params_context(), t)) weights.insert(t);
+        std::vector<ggml_tensor*> selected, todo;
+        for (int n = 0; n < ggml_graph_n_nodes(graph); ++n) todo.push_back(ggml_graph_node(graph, n));
+        while (!todo.empty()) {
+            auto* t = todo.back(); todo.pop_back();
+            if (!t || !visited.insert(t).second) continue;
+            if (weights.count(t)) selected.push_back(t);
+            for (auto* src : t->src) if (src) todo.push_back(src);
+            if (t->view_src) todo.push_back(t->view_src);
+        }
+        if (!runner.exact_projection_params_supported(selected)) return Status::InvalidPlan;
+        Status captured = Status::Miss;
+        const bool executed = runner.exact_execute_graph(graph, n_threads, selected, [&](ggml_cgraph*) {
+            for (auto i : missing) {
+                captured = cache.capture_pending(tokens[i], runner.exact_runtime_backend());
+                if (captured != Status::Stored) return false;
+            }
+            return true;
+        });
+        if (!executed || captured != Status::Stored) return Status::InvalidPlan;
+    }
+    for (auto token : tokens) if (!cache.complete(token)) return Status::Miss;
+    rollback.success = true;
+    return Status::Stored;
+}
+
 } // namespace ExactAdaLN
 } // namespace MiniMaxH3
