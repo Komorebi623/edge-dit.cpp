@@ -114,8 +114,9 @@ inline size_t estimate_bytes(const VSAReference::Geometry& g, int64_t d, int64_t
 // O(1) graph nodes independent of H/T/S; storage O(D*H*T*64 + H*T*T).
 // Hard bounds reject before graph allocation; D=1..128 allows small CPU tests,
 // not a claim that a future native CUDA fine kernel supports these dimensions.
-inline Result build(ggml_context* ctx, ggml_tensor* q, ggml_tensor* k, ggml_tensor* v,
-                    ggml_tensor* raw_gate, ggml_tensor* fine_attention,
+using FineBuilder = std::function<ggml_tensor*(ggml_tensor* scores)>;
+inline Result build_with_fine(ggml_context* ctx, ggml_tensor* q, ggml_tensor* k, ggml_tensor* v,
+                    ggml_tensor* raw_gate, const FineBuilder& fine_builder,
                     const VSAReference::Geometry& geometry, GraphInputs& inputs,
                     size_t budget_bytes = default_budget_bytes) {
     require(ctx && q, "VSA graph null context/query");
@@ -125,7 +126,8 @@ inline Result build(ggml_context* ctx, ggml_tensor* q, ggml_tensor* k, ggml_tens
     require(estimate_bytes(geometry,d,h) <= budget_bytes, "VSA graph tensor byte budget exceeded");
     const int64_t s = int64_t(geometry.packed_tokens), t = int64_t(geometry.tiles()), p = t*64;
     detail::shape(q,d,s,h); detail::shape(k,d,s,h); detail::shape(v,d,h,s);
-    detail::shape(raw_gate,d*h,s); detail::shape(fine_attention,d*h,s);
+    detail::shape(raw_gate,d*h,s);
+    require(bool(fine_builder), "VSA graph needs explicit fine attention builder");
     VSAReference::validate_geometry(geometry);
 
     std::vector<int32_t> slots(static_cast<size_t>(p), static_cast<int32_t>(s)), row_tile(size_t(s), 0);
@@ -155,7 +157,19 @@ inline Result build(ggml_context* ctx, ggml_tensor* q, ggml_tensor* k, ggml_tens
     auto* ct = ggml_cont(ctx, ggml_permute(ctx,out.compressed_tiles,0,2,1,3));
     ct = ggml_reshape_2d(ctx, ct, d*h,t);
     out.compressed_rows = ggml_get_rows(ctx, ct, restore);
+    auto* fine_attention = fine_builder(out.scores);
+    detail::shape(fine_attention,d*h,s);
     out.output = ggml_add(ctx, fine_attention, ggml_mul(ctx, out.compressed_rows, raw_gate));
     return out;
+}
+// Existing injected-fine CPU API stays unchanged. The callback overload lets
+// native routing consume exactly the same pooled scores without a graph cycle.
+inline Result build(ggml_context* ctx, ggml_tensor* q, ggml_tensor* k, ggml_tensor* v,
+                    ggml_tensor* raw_gate, ggml_tensor* fine_attention,
+                    const VSAReference::Geometry& geometry, GraphInputs& inputs,
+                    size_t budget_bytes = default_budget_bytes) {
+    require(q, "VSA graph null query");
+    detail::shape(fine_attention,q->ne[0]*q->ne[2],int64_t(geometry.packed_tokens));
+    return build_with_fine(ctx,q,k,v,raw_gate,[&](ggml_tensor*){ return fine_attention; },geometry,inputs,budget_bytes);
 }
 }} // namespace MiniMaxH3::VSAGraph

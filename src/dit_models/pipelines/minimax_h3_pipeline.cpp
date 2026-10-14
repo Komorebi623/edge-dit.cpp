@@ -710,8 +710,28 @@ static nlohmann::json h3_dynamic_lora_manifest(const char* path, const ModelLoad
     if (d.at("schema_version") != 1 || d.at("kind") != "minimax-h3-dynamic-lora")
         throw std::invalid_argument("H3 dynamic LoRA manifest schema invalid");
     const std::string payload = d.value("payload_format", "low-rank-v1");
-    if (payload != "low-rank-v1" && payload != "fastvideo-dense-v1")
+    if (payload != "low-rank-v1" && payload != "fastvideo-dense-v1" && payload != "fastvideo-vsa-v1")
         throw std::invalid_argument("H3 dynamic LoRA payload format unsupported; VSA requires its own validated path");
+    if(payload=="fastvideo-vsa-v1") {
+        const auto& vsa=d.at("vsa");
+        if(vsa.at("tile_tokens")!=64 || vsa.at("sparsity").get<double>()!=.9 ||
+            vsa.at("prefix_policy")!="exempt" || vsa.at("gate_activation")!="linear" || vsa.at("gate_count")!=50 ||
+            d.at("steps")!=4 || d.at("video_shift").get<double>()!=12. || d.at("audio_shift").get<double>()!=3. ||
+            d.at("coefficient").get<double>()!=1. || d.at("base_partition")!="fl2va")
+            throw std::invalid_argument("H3 VSA must match complete four-forward V1/tile64/shift12,3 recipe");
+        if(d.at("sigmas")!=nlohmann::json::array({1.,.75,.5,.25,0.}))
+            throw std::invalid_argument("H3 VSA unshifted sigma grid differs from V1 contract");
+        for(const auto& key: {"video_sigmas","audio_sigmas"}) {
+            const auto& values=d.at(key);const double shift=std::string(key)=="video_sigmas"?12.:3.;
+            if(values.size()!=5)throw std::invalid_argument("H3 VSA sigma count invalid");
+            for(size_t i=0;i<5;++i) {const double u=1.-double(i)/4.;
+                if(std::abs(values.at(i).get<double>()-shift*u/(1.+(shift-1.)*u))>1e-9)
+                    throw std::invalid_argument("H3 VSA shifted sigma values invalid");}
+        }
+        // Our existing simple scheduler is exactly this uniform pre-shift grid.
+        if(d.at("scheduler")!="uniform")throw std::invalid_argument("H3 VSA exported scheduler contract invalid");
+        d["scheduler"]="simple";
+    }
     const std::string partition = d.at("base_partition").get<std::string>();
     if (partition != "fl2va" && partition != "ref2va") throw std::invalid_argument("H3 LoRA base partition invalid");
     const std::string file = d.at("adapter_file").get<std::string>();
@@ -755,6 +775,7 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
                                 std::string* error) try {
     (void)params;
     turbo_enabled_ = false;
+    vsa_enabled_ = false;
     turbo_recipe_ = {};
     dynamic_lora_partition_.clear();
     nlohmann::json dynamic_manifest;
@@ -771,6 +792,9 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     (void)backend_name;
     auto capabilities = MiniMaxH3::MiniMaxH3Runner::cuda_optimization_capabilities();
     capabilities.turbo = true;
+#if defined(ED_ENABLE_CUDA_H3_VSA)
+    capabilities.vsa = true; // opt-in compiled primitive, recipe-gated below
+#endif
 #if defined(ED_ENABLE_CUDA_MODULATION)
     capabilities.fused_ops = true;
 #endif
@@ -778,14 +802,19 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
         return false;
     }
     const char* dynamic_manifest_path = std::getenv("ED_H3_LORA_MANIFEST");
+    if(cuda_options.vsa && !(dynamic_manifest_path && *dynamic_manifest_path))
+        return set_minimax_error(error,"H3 VSA requires the matching full trained adapter manifest");
     if (dynamic_manifest_path && *dynamic_manifest_path) {
-        auto other = cuda_options; other.turbo = false;
+        auto other = cuda_options; other.turbo = false; other.vsa = false;
         if (!cuda_options.turbo || other.any_enabled() || !is_cuda)
             return set_minimax_error(error, "H3 dynamic LoRA requires ED_H3_TURBO=1 and all other research methods off");
         if (runtime.auto_fit() || params.weight_type != ED_DTYPE_AUTO ||
             (params.tensor_type_rules && *params.tensor_type_rules))
             return set_minimax_error(error, "H3 dynamic LoRA requires preserved base precision, not auto-fit/type overrides");
         dynamic_manifest = h3_dynamic_lora_manifest(dynamic_manifest_path, loader, &turbo_recipe_);
+        vsa_enabled_ = dynamic_manifest.value("payload_format", "low-rank-v1") == "fastvideo-vsa-v1";
+        if(vsa_enabled_ != cuda_options.vsa)
+            return set_minimax_error(error,"H3 VSA flag and trained adapter must be enabled together; dense fallback forbidden");
         dynamic_lora_partition_ = dynamic_manifest.at("base_partition").get<std::string>();
         if (!dynamic_loader.init_from_file(dynamic_manifest.at("resolved_adapter").get<std::string>()))
             return set_minimax_error(error, "H3 dynamic adapter tensor index invalid");
@@ -878,6 +907,8 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     // Turbo is a verified pipeline/model recipe, not a transformer custom op.
     auto runner_options = cuda_options;
     runner_options.turbo = false;
+    runner_options.vsa = false; // admitted separately with complete gate payload, not generic cache research
+
 
     LOG_INFO("minimax-h3 cuda optimizations: fused=%d cache_dit=%d adaln=%d sage=%d sparse=%d turbo=%d (experimental; quality not yet GPU-validated)",
              cuda_options.fused_ops, cuda_options.cache_dit, cuda_options.adaln_cache,
@@ -891,13 +922,38 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     // Validate execution restrictions after placement and process-group settings
     // are known, before allocating or staging any model parameters.
     diffusion_->configure_cuda_optimizations(runner_options);
-    if (!dynamic_manifest.is_null())
-        diffusion_->configure_dynamic_lora(dynamic_loader.get_tensor_storage_map(), dynamic_manifest.at("coefficient").get<float>(),
-            dynamic_manifest.value("payload_format", "low-rank-v1") == "fastvideo-dense-v1");
+    if (!dynamic_manifest.is_null()) {
+        auto ordinary = dynamic_loader.get_tensor_storage_map();
+#if defined(ED_ENABLE_CUDA_H3_VSA)
+        if(vsa_enabled_) diffusion_->configure_native_vsa(ordinary);
+#endif
+        diffusion_->configure_dynamic_lora(ordinary, dynamic_manifest.at("coefficient").get<float>(),
+            dynamic_manifest.value("payload_format", "low-rank-v1") != "low-rank-v1");
+    }
     if (!diffusion_->alloc_params_buffer()) return set_minimax_error(error, "H3 DiT parameter allocation failed");
     if (!dynamic_manifest.is_null()) {
-        if (!dynamic_loader.load_tensors(diffusion_->dynamic_lora->tensors(), {}, 6))
+        auto adapter_tensors=diffusion_->dynamic_lora->tensors();
+#if defined(ED_ENABLE_CUDA_H3_VSA)
+        if(vsa_enabled_) adapter_tensors.insert(diffusion_->native_vsa->gate_tensors.begin(),diffusion_->native_vsa->gate_tensors.end());
+#endif
+        if (!dynamic_loader.load_tensors(adapter_tensors, {}, 6))
             return set_minimax_error(error, "H3 dynamic adapter load failed");
+#if defined(ED_ENABLE_CUDA_H3_VSA)
+        if(vsa_enabled_) {
+            std::vector<ggml_bf16_t> chunk(1u<<20);
+            for(auto* gate:diffusion_->native_vsa->gates) {
+                bool nonzero=false;
+                for(size_t offset=0;offset<size_t(ggml_nelements(gate));offset+=chunk.size()) {
+                    const size_t count=std::min(chunk.size(),size_t(ggml_nelements(gate))-offset);
+                    ggml_backend_tensor_get(gate,chunk.data(),offset*sizeof(ggml_bf16_t),count*sizeof(ggml_bf16_t));
+                    for(size_t i=0;i<count;++i) {float v=ggml_bf16_to_fp32(chunk[i]);
+                        if(!std::isfinite(v))return set_minimax_error(error,"H3 VSA gate contains nonfinite value");nonzero|=v!=0.f;}
+                }
+                if(!nonzero)return set_minimax_error(error,"H3 VSA gate is all zero; untrained branch forbidden");
+            }
+            LOG_INFO("minimax-h3 VSA trained gates loaded:50 BF16,tile64,sparsity=0.9,raw linear gate; independent of SubBlock");
+        }
+#endif
         // Every factor is in the same runner params_ctx/weights pool, so the
         // existing graph-cut planner stages/accounts for them with base weights.
         LOG_INFO("minimax-h3 dynamic LoRA loaded: tensors=%zu coefficient=%g steps=%d partition=%s; original base immutable",
@@ -1493,6 +1549,10 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
             set_minimax_error(error, "MiniMax-H3 Ref2VA reference videos must have frames with a positive size and an aspect ratio from 1:4 to 4:1");
             return ED_STATUS_INVALID_ARGUMENT;
         }
+    }
+    if(vsa_enabled_ && (has_keyframes || params->ref_image_count>0 || params->ref_video_count>0 || params->ref_audio_count>0)) {
+        set_minimax_error(error,"FastH3 VSA V1 adapter is T2VA-only; other task types require matching trained weights");
+        return ED_STATUS_INVALID_ARGUMENT;
     }
     if (dynamic_lora_partition_ == "fl2va" && (params->ref_image_count > 0 || params->ref_video_count > 0 || params->ref_audio_count > 0)) {
         set_minimax_error(error, "H3 FL2VA LoRA cannot be applied to a Ref2VA reference request");

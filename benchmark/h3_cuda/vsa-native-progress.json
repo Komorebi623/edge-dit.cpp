@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-14",
+  "timezone": "Asia/Shanghai",
+  "status": "CPU_and_CUDA_build_complete_GPU_validation_unavailable",
+  "goal_complete": false,
+  "baseline_rebuilt": false,
+  "original_base_precision_changed": false,
+  "VSA_default_off": true,
+  "runtime_scope": "H3/CUDA fullV1/T2VA only; separate VSA+Turbo switches, all otherresearchmethods off",
+  "recipe": {
+    "schema_version": 1,
+    "kind": "minimax-h3-dynamic-lora",
+    "base_sha256": "a25ee3184dd56e7fc5c8db1508d2e48a7e3c92919b516935c6059e4228e16107",
+    "base_partition": "fl2va",
+    "adapter_file": "adapter.safetensors",
+    "adapter_sha256": "b9f3760573c568c8916e2ad62dc517bef185a1f21f8c202a79339ec190d468a6",
+    "source_adapter_sha256": "42dc502a2078f166c396a1fa75f29728d1844363652d345d5ef3e2b444ed6470",
+    "coefficient": 1.0,
+    "steps": 4,
+    "video_shift": 12.0,
+    "audio_shift": 3.0,
+    "cfg_scale": 1.0,
+    "sampler": "euler",
+    "scheduler": "uniform",
+    "pairs": 258,
+    "delta_count": 82,
+    "gate_count": 50,
+    "note": "Preparation only; runtime unsupported until separate native CUDA qualification on main.",
+    "payload_format": "fastvideo-vsa-v1",
+    "coefficient_applies_to": "lora_B @ lora_A, delta and gate weight",
+    "vsa": {
+      "tile_tokens": 64,
+      "sparsity": 0.9,
+      "prefix_policy": "exempt",
+      "gate_activation": "linear",
+      "gate_count": 50
+    },
+    "sigmas": [
+      1.0,
+      0.75,
+      0.5,
+      0.25,
+      0.0
+    ],
+    "video_sigmas": [
+      1.0,
+      0.972972972972973,
+      0.9230769230769231,
+      0.8,
+      0.0
+    ],
+    "audio_sigmas": [
+      1.0,
+      0.9,
+      0.75,
+      0.5,
+      0.0
+    ],
+    "runtime_supported": false
+  },
+  "normalized_payload": {
+    "bytes": 5625360384,
+    "full_sha256": "b9f3760573c568c8916e2ad62dc517bef185a1f21f8c202a79339ec190d468a6",
+    "manifest": {
+      "path": "_scratch/h3-vsa-native-20261014/normalized-vsa4/manifest.json",
+      "sha256": "5752d642fda6c9eef1a244e5ef98da4e89268ee832958048b9c42d75d4175751"
+    }
+  },
+  "build": {
+    "source": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-vsa-native-20261014/source-02",
+    "build": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-vsa-native-20261014/build-02/candidate",
+    "production_source_tree_sha256": "08aae0256f421ae7ffc70ac9325b3663c6151742f5ab5dd4671a0116db0e2b54",
+    "changed_production_files": [
+      "src/core/backend/ggml/cuda/h3_vsa.cmake",
+      "src/core/backend/ggml/cuda/h3_vsa.cu",
+      "src/core/backend/ggml/cuda/h3_vsa.h",
+      "src/core/backend/ggml/cuda/h3_vsa_shape.cpp",
+      "src/dit_models/models/minimax_h3_dynamic_lora.hpp",
+      "src/dit_models/models/minimax_h3_full.hpp",
+      "src/dit_models/models/minimax_h3_vsa_contract.hpp",
+      "src/dit_models/models/minimax_h3_vsa_graph.hpp",
+      "src/dit_models/models/minimax_h3_vsa_native.hpp",
+      "src/dit_models/pipelines/minimax_h3_pipeline.cpp",
+      "src/dit_models/pipelines/minimax_h3_pipeline.hpp",
+      "CMakeLists.txt"
+    ],
+    "status": "compiled_not_GPU_validated",
+    "cuda_primitives": {
+      "base_build": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate",
+      "scope": "CUDA primitive test library only; no production VSA model activation",
+      "files": {
+        "h3_vsa.cu": "f1322419a355e07a745879cf6b5174c043fbd8a96df325c7c706ac5f4b49f7b6",
+        "h3_vsa_shape.cpp": "826a19c0bdccb7182ce8b9d2702a9c39a16f8961be5756361c291dee04f1778f",
+        "h3_vsa.h": "761d7a84b40016e02e420f5466c8e3884a510569677dda32c0f0df1848023ff8",
+        "h3_vsa_shape.cpp.o": "02b899d90e8e267226c2326fdcd28660f55ffe3bfbf55fcd1ca22e0917ff1e7d",
+        "libggml-cuda.so": "e3d6d1f2eb1ea8627c8f83a88443429077169052925f58f50f2f043d2cf19854",
+        "libggml-cuda.so.0": "e3d6d1f2eb1ea8627c8f83a88443429077169052925f58f50f2f043d2cf19854",
+        "ggml-cuda.cu.o": "9587fa5bdc0a26ad12b2cf839f7754906921b7ecda624acefb80ef11b76262d4",
+        "ggml-cuda.cu": "e66faadbe0e327b9eb0129a96238b0799bcf0c0ade100598b76639fb1d90c4dc",
+        "h3_vsa.cu.o": "89cbf3bc1e444fe7bac9659b8ce68b8df91e2085999d636ae1dc33bc5d893abd"
+      },
+      "original_dispatch_sha256": "1284940278a57c529b88ba4a3b4f49a82cf431fea63848bfb74d9e7f1f6ee265"
+    },
+    "compile_define": "ED_ENABLE_CUDA_H3_VSA",
+    "base_build": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate",
+    "shared_libraries": {
+      "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate/bin/libggml-cpu.so.0.12.0": "894b8b29cd8bcb1f7c2ee07cfdb6f48c5cf87b6ec3cb933d793b9867446ebc5a",
+      "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate/bin/libggml.so.0.12.0": "099bd4b6e0bab479b5f79aae87d746e3000aa0eb24a1fa81454417a42d840d5e",
+      "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-vsa-native-20261014/build-02/candidate/bin/libggml-cuda.so.0.12.0": "e3d6d1f2eb1ea8627c8f83a88443429077169052925f58f50f2f043d2cf19854",
+      "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate/bin/libggml-base.so.0.12.0": "93bccda78a44eded1abbe7524ad92e5959d92e0cae0344b78334b1a8a884cdc2"
+    },
+    "baseline_rebuilt": false
+  },
+  "integration_vs_build_note": "All src/include unchanged from frozen source02; CMake-only additional CPU native-test registration after build",
+  "tests": {
+    "ctest": "18/18",
+    "workflow_media": "53/53",
+    "normalizer": "27/27",
+    "build_configuration": "4/4",
+    "native_CPU_checks": 19821,
+    "native_CPU_reference_comparisons": 42,
+    "assembled_nodes": 52,
+    "native_GPU_executed": false
+  },
+  "review_fixes": [
+    "exact integer90percent quota avoids float32ceil extra block",
+    "runtime complete258pair82delta set enforced; no partialadapter",
+    "V ldmatrix map follows correcttransposed B layout"
+  ],
+  "logs": [
+    {
+      "path": "_scratch/h3-vsa-native-20261014/logs/final-cpu03.log",
+      "sha256": "c9571ff8494345b17c484d576f86960026ea3598717ec2e464258a47324d4b27"
+    },
+    {
+      "path": "_scratch/h3-vsa-native-20261014/logs/native-cpu.log",
+      "sha256": "dbe370e0d6f7e277e13a9a68fe5de8071f5e3fef7d62e2a1c41d716d04c60b76"
+    },
+    {
+      "path": "_scratch/h3-vsa-native-20261014/logs/assembly-cpu02.log",
+      "sha256": "e7f8d87f6756fd9df3f19339d93f4fc5b2afdd22de8428a7b395d3ad5f127fc5"
+    },
+    {
+      "path": "_scratch/h3-vsa-native-20261014/logs/cmake-final.log",
+      "sha256": "0c8614db87b97d6d07658f20d7ad2dd1d72d16b5ec9cc08551f5286e65bac2a0"
+    }
+  ],
+  "GPU_unavailable": {
+    "first_known_time": "2026-10-14 20:53 Asia/Shanghai",
+    "latest_checked": "2026-10-14 23:14 Asia/Shanghai",
+    "all8occupied": true,
+    "unrelated_processes_modified": false,
+    "same_condition_recurred_across_goal_turns": true
+  },
+  "outputs": null,
+  "speed": null,
+  "quality": null,
+  "pending": [
+    "nativeCUDA numeric tests",
+    "FastVideo dense4 T2VA",
+    "FastVideo VSA4 T2VA",
+    "matchingLightRef4 mixed",
+    "threearticlesidentityrequiresaccessiblecontent"
+  ],
+  "prior_validated_outputs": "benchmark/h3_cuda/lora-results.json"
+}

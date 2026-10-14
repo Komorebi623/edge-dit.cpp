@@ -1,5 +1,7 @@
 # MiniMax-H3：跨服务器接续交接
 
+> **2026-10-14 VSA实验接入**：完整V1规范化648张量＋独立BF16 tile64 fine/router/压缩分支已编译，CPU18/18；默认关闭，尚无GPU验证/性能。8卡仍被他人训练占用，不启动推理。既有Larry4视频结果不变，Ref4/FastVideo/VSA仍待验证。看`h3-vsa-native-status.md`和`vsa-native-progress.json`。
+
 > **2026-10-14 FastVideo CPU接续**：完整dense adapter支持（258对＋85delta）及独立VSA压缩图组件已通过CPU回归16/16、normalizer18/18；VSA真实BF16训练权重5.34GB已4线程下载校验，50gate非零。GPU8卡仍占用，FastVideo/Ref4尚未生成，VSA开关未启用。看`h3-fastvideo-adapter-progress.md`和`fastvideo-adapter-progress.json`，不要覆盖此前已验证Larry4性能。
 
 > **2026-10-14 LoRA实现里程碑**：IPv4/TLS合法下载已解决，原Q4＋BF16独立增量接入；Larry4步106.12s、LightFL4步110.85s vs原254.33s，Larry首末帧smoke通过。默认关闭、H3/CUDA单方法、不重跑baseline。Ref4已下载/转换但8卡被无关训练占用，mixed未启动；VSA/三链接身份仍独立待办。看`h3-lora-results.md`与`benchmark/h3_cuda/lora-results.json`。

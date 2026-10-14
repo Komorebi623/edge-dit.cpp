@@ -652,5 +652,15 @@
     "VSA_gate_payload_downloaded_and_hashed": true,
     "VSA_production_enabled": false,
     "GPU_generation": false
+  },
+  "vsa_native_experimental": {
+    "date": "2026-10-14",
+    "status": "CPU_and_CUDA_build_complete_GPU_validation_unavailable",
+    "results": "benchmark/h3_cuda/vsa-native-progress.json",
+    "GPU_validated": false,
+    "production_default_enabled": false,
+    "CPU_ctest": "18/18",
+    "speed": null,
+    "quality": null
   }
 }

@@ -30,6 +30,7 @@ def main():
         mode_order=base['mode_order'];w.require(a.mode in mode_order if a.mode else len(mode_order)==1,'select one mode present in baseline')
         mode=a.mode or mode_order[0];r['mode']=mode
         manifest=base['manifest'];recipe=w.read_json(a.adapter_manifest)
+        r['gpu_initial_precheck']=w.gpu_precheck(manifest['run']);save()
         adapter=a.adapter_manifest.resolve().parent/recipe['adapter_file']
         w.require(recipe['kind']=='minimax-h3-dynamic-lora' and recipe['steps'] in (4,8),'unsupported recipe')
         w.require(w.sha256(adapter)==recipe['adapter_sha256'],'adapter checksum mismatch')
@@ -38,6 +39,7 @@ def main():
         w.require(task['dit']==recipe['base_partition'],'FL/Ref partition mismatch')
         r['sampling']={**manifest['sampling'],'steps':recipe['steps'],'cfg_scale':recipe['cfg_scale'],'sampler':'euler','scheduler':'simple'};r['placement']=manifest['placement'];r['prompt']=task['prompt']
         env,removed=w.isolated_env(manifest,'baseline');env.update(ED_H3_TURBO='1',ED_H3_LORA_MANIFEST=str(a.adapter_manifest.resolve()),CUDA_VISIBLE_DEVICES=manifest['run']['gpu_uuid'],CUDA_DEVICE_ORDER='PCI_BUS_ID')
+        if recipe.get('payload_format')=='fastvideo-vsa-v1': env['ED_H3_VSA']='1'
         r['optimization_env']={k:v for k,v in env.items() if k.startswith(('ED_','GGML_'))};r['removed_inherited_keys']=removed
         before=w.build_provenance(a.binary.resolve(),lock_runtime=True,runtime_env=env);r['build']=before
         previous=next(z for z in base['modes'][mode] if not z['warmup']);cmd=list(previous['command']);cmd[0]=str(a.binary.resolve());output=a.output/(mode+'.mp4')
@@ -47,7 +49,10 @@ def main():
         r['wall_ms']=(time.perf_counter()-start)*1000;r['returncode']=result.returncode
         (a.output/'stdout.log').write_bytes(result.stdout);log=a.output/'stderr.log';log.write_bytes(result.stderr)
         w.require(result.returncode==0,'generation failed; see stderr.log')
-        text=result.stderr.decode(errors='replace');w.require('dynamic LoRA loaded:' in text,'runtime adapter not attested');r['profile']=w.parse_profiles(text,log)
+        text=result.stderr.decode(errors='replace');w.require('dynamic LoRA loaded:' in text,'runtime adapter not attested')
+        if recipe.get('payload_format')=='fastvideo-vsa-v1':
+            w.require('VSA trained gates loaded:50 BF16,tile64' in text,'runtime VSA trained gates not attested')
+        r['profile']=w.parse_profiles(text,log)
         r['output']=str(output.resolve());r['media']=w.validate_media(output,r['sampling'],manifest['run']['media_timeout_seconds'],a.output)
         r['quality_vs_dense']={'video':w.video_metrics(Path(previous['output']),output,r['sampling']['frames'],manifest['run']['media_timeout_seconds'],a.output),'audio':w.audio_errors(Path(previous['media']['audio_pcm']),Path(r['media']['audio_pcm'])),'note':'Changed distilled model; distance to dense is not a perceptual quality score'}
         after=w.build_provenance(a.binary.resolve(),lock_runtime=True,runtime_env=env);w.require(before==after,'binary/shared library changed during run')

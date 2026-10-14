@@ -397,6 +397,7 @@ target_compile_definitions(edgedit
 )
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda/h3_subblock.cmake")
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda/h3_vsa.cmake")
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(edgedit PRIVATE ${CMAKE_DL_LIBS})
 endif()
@@ -579,7 +580,7 @@ if(ED_BUILD_H3_CUDA_TESTS)
 endif()
 
 if(ED_BUILD_H3_CUDA_TESTS)
-    foreach(_H3_TEST runtime_optimization vdn_graph dynamic_lora vsa_graph)
+    foreach(_H3_TEST runtime_optimization vdn_graph dynamic_lora vsa_graph vsa_assembly vsa_native)
         if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/h3_${_H3_TEST}_test.cpp")
             add_executable(h3-${_H3_TEST}-test tests/h3_${_H3_TEST}_test.cpp)
             target_include_directories(h3-${_H3_TEST}-test PRIVATE

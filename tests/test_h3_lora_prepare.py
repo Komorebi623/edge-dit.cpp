@@ -248,7 +248,7 @@ class FastVideo(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.normalize(self.pair('transformer_blocks.0.adaln_proj.linear', torch.ones(2, 4), torch.ones(3, 2)), 'diffusers')
 
-    def run_cli(self, root, source, shapes, layout, coefficient=.25):
+    def run_cli(self, root, source, shapes, layout, coefficient=.25, video_shift=3):
         from safetensors.torch import save_file
         adapter, base, output = root/'source.safetensors', root/'base.gguf', root/'out'
         save_file(source, str(adapter))
@@ -261,7 +261,7 @@ class FastVideo(unittest.TestCase):
         original_base, original_adapter = base.read_bytes(), adapter.read_bytes()
         argv = ['prepare_h3_lora', '--adapter', str(adapter), '--adapter-sha256', m.sha256(adapter),
                 '--base', str(base), '--base-sha256', m.sha256(base), '--layout', layout,
-                '--coefficient', str(coefficient), '--steps', '4', '--video-shift', '3',
+                '--coefficient', str(coefficient), '--steps', '4', '--video-shift', str(video_shift),
                 '--partition', 'fl2va', '--output', str(output)]
         with mock.patch('sys.argv', argv), contextlib.redirect_stdout(io.StringIO()): m.main()
         self.assertEqual(base.read_bytes(), original_base)
@@ -311,5 +311,263 @@ class FastVideo(unittest.TestCase):
                     self.run_cli(Path(tmp), bad, {'video_patch_proj.weight': (3, 4)}, 'fastvideo-dense')
                 self.assertFalse((Path(tmp)/'out').exists())
 
+
+class FastVideoVSA(unittest.TestCase):
+    prefix = FastVideo.prefix
+    gate_key = 'transformer_blocks.0.attn.to_gate_compress.set_weight'
+
+    @classmethod
+    def setUpClass(cls):
+        cls.previous_threads = torch.get_num_threads()
+        torch.set_num_threads(4)
+        # Initialize lazy meta dispatch before patching value-only reductions.
+        torch.cat([torch.empty(1, device='meta')])
+
+    @classmethod
+    def tearDownClass(cls):
+        torch.set_num_threads(cls.previous_threads)
+
+    @staticmethod
+    def fixture():
+        # Shape-only full V1 fixture: no multi-GB allocations or saved payloads.
+        source, shapes = {}, {}
+        def tensor(shape): return torch.empty(shape, dtype=torch.bfloat16, device='meta')
+        def pair(src, dst, shape):
+            source[src+'.lora_A.weight'] = tensor((64, shape[1]))
+            source[src+'.lora_B.weight'] = tensor((shape[0], 64))
+            shapes[dst+'.weight'] = shape
+        def delta(src, dst, shape, bias=False):
+            source[src+('.diff_b' if bias else '.diff')] = tensor(shape)
+            shapes[dst+('.bias' if bias else '.weight')] = shape
+        for i in range(50):
+            source[f'transformer_blocks.{i}.attn.to_gate_compress.set_weight'] = tensor((7168, 5376))
+        for root, native, layers in (('transformer_blocks', 'blocks', 50),
+                                     ('token_refiner.refiner_blocks', 'token_refiner.blocks', 2)):
+            for i in range(layers):
+                src, dst = f'{root}.{i}', f'{native}.{i}'
+                for side in 'qkv': pair(src+'.attn.to_'+side, dst+'.attn.qkv_proj', (7168, 5376))
+                shapes[dst+'.attn.qkv_proj.weight'] = (21504, 5376)
+                for tail, target, shape in (('attn.to_out.0', 'attn.out_proj', (5376, 7168)),
+                                            ('ff.net.0.proj', 'mlp.fc1', (28672, 5376)),
+                                            ('ff.net.2', 'mlp.fc2', (5376, 14336))):
+                    pair(src+'.'+tail, dst+'.'+target, shape)
+                if native == 'blocks':
+                    pair(src+'.adaln_proj.linear', dst+'.adaln_proj.linear', (96768, 2688))
+                    delta(src+'.adaln_proj.linear', dst+'.adaln_proj.linear', (96768,), bias=True)
+                    for norm in ('norm1', 'norm2'): shapes[dst+'.'+norm+'.weight'] = (5376,)
+        top_shapes = ((5376, 96), (5376, 32), (5376, 5120), (5376, 256),
+                      (2688, 5376), (10752, 2688), (96, 5376), (32, 5376))
+        for (src, dst), shape in zip(FastVideo.top.items(), top_shapes):
+            delta(src, dst, shape)
+            delta(src, dst, (shape[0],), bias=True)
+        delta('norm_out.norm', 'final_layer.norm', (5376,))
+        for norm, layers in (('norm1', (3, 4, 5, 6, 10, 17, 19)),
+                             ('norm2', (4, 6, 7, 8, 12, 13, 15, 17))):
+            for i in layers: delta(f'transformer_blocks.{i}.{norm}', f'blocks.{i}.{norm}', (5376,))
+        return source, shapes
+
+    @staticmethod
+    @contextlib.contextmanager
+    def header_checks():
+        # Meta tensors validate names/shapes/dtypes/fusion, NOT payload values.
+        # Real CPU tensors still run both unmocked value checks below.
+        finite, nonzero = torch.isfinite, torch.count_nonzero
+        with mock.patch.object(torch, 'isfinite', side_effect=lambda t:
+                               torch.tensor(True) if t.is_meta else finite(t)) as f, \
+             mock.patch.object(torch, 'count_nonzero', side_effect=lambda t:
+                               torch.tensor(1) if t.is_meta else nonzero(t)) as n:
+            yield f, n
+
+    def test_full_counts_reuses_dense_conversion_and_keeps_gate_bytes(self):
+        source, shapes = self.fixture()
+        # A mostly-zero, signed trained gate is valid; do not require all entries
+        # nonzero, apply sigmoid, round, normalize or prescale it.
+        gate = torch.zeros((7168, 5376), dtype=torch.bfloat16)
+        gate[0, 0] = -.0004215240478515625
+        source[self.gate_key] = gate
+        original_keys = set(source)
+        with self.header_checks(), mock.patch.object(m, 'normalize_fastvideo', wraps=m.normalize_fastvideo) as dense:
+            out, counts = m.normalize_fastvideo_vsa(source, shapes)
+        self.assertEqual(counts, {'pairs': 258, 'delta_count': 82, 'gate_count': 50})
+        self.assertEqual(len(out), 648)
+        dense.assert_called_once()
+        ordinary, passed_shapes = dense.call_args.args
+        self.assertIs(passed_shapes, shapes)
+        self.assertEqual(len(ordinary), 806)
+        self.assertFalse(any(k.endswith('.set_weight') for k in ordinary))
+        self.assertEqual(set(source), original_keys)
+        self.assertIs(out[self.prefix+'blocks.0.attn.to_gate_compress.weight'], gate)
+        self.assertEqual(gate[0, 0].item(), -.0004215240478515625)
+        self.assertEqual(torch.count_nonzero(gate).item(), 1)
+        self.assertTrue(all(t.dtype == torch.bfloat16 for t in out.values()))
+
+    def test_missing_misnamed_and_duplicate_gates(self):
+        source, shapes = self.fixture()
+        with self.header_checks():
+            for layer in (0, 25, 49):
+                bad = dict(source); del bad[f'transformer_blocks.{layer}.attn.to_gate_compress.set_weight']
+                with self.subTest(missing=layer), self.assertRaisesRegex(ValueError, 'missing VSA gates'):
+                    m.normalize_fastvideo_vsa(bad, shapes)
+            for key in ('transformer_blocks.00.attn.to_gate_compress.set_weight',
+                        'transformer_blocks.50.attn.to_gate_compress.set_weight',
+                        'transformer_blocks.0.attn.gate_compress.set_weight',
+                        'transformer_blocks.0.attn.vsa_gate.set_weight',
+                        'transformer.'+self.gate_key, 'model.diffusion_model.'+self.gate_key,
+                        self.gate_key.replace('.set_weight', '.weight.set_param'),
+                        self.gate_key.replace('.set_weight', '.diff'),
+                        self.gate_key.replace('.set_weight', '.lora_A.weight')):
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    m.normalize_fastvideo_vsa({**source, key: source[self.gate_key]}, shapes)
+            # A mapping-like input can expose repeated original keys; never keep
+            # only the last trained gate. Aliases above are rejected outright.
+            repeated = mock.Mock()
+            repeated.items.return_value = [*source.items(), (self.gate_key, source[self.gate_key])]
+            with self.assertRaisesRegex(ValueError, 'duplicate VSA gate'):
+                m.normalize_fastvideo_vsa(repeated, shapes)
+
+    def test_gate_shape_precision_and_base_geometry(self):
+        source, shapes = self.fixture()
+        with self.header_checks():
+            for shape in ((5376, 7168), (7168, 5375), (7168, 5376, 1), (0, 5376), (7168,)):
+                with self.subTest(shape=shape), self.assertRaisesRegex(ValueError, 'gate shape'):
+                    m.normalize_fastvideo_vsa({**source, self.gate_key: torch.empty(shape, dtype=torch.bfloat16, device='meta')}, shapes)
+            for dtype in (torch.float16, torch.float32, torch.float64, torch.int16):
+                with self.subTest(dtype=dtype), self.assertRaisesRegex(ValueError, 'BF16'):
+                    m.normalize_fastvideo_vsa({**source, self.gate_key: source[self.gate_key].to(dtype)}, shapes)
+            for shape in ((21501, 5376), (21504, 5375), ()):
+                with self.subTest(base=shape), self.assertRaisesRegex(ValueError, 'gate/base QKV'):
+                    m.normalize_fastvideo_vsa(source, {**shapes, 'blocks.0.attn.qkv_proj.weight': shape})
+            for layers in (range(49), range(51), range(1, 51)):
+                bad_shapes = {f'blocks.{i}.attn.qkv_proj.weight': (21504, 5376) for i in layers}
+                with self.subTest(layers=layers), self.assertRaisesRegex(ValueError, '50 base blocks'):
+                    m.normalize_fastvideo_vsa(source, bad_shapes)
+
+    def test_zero_and_nonfinite_gate_rejected_on_cpu_per_layer(self):
+        source, shapes = self.fixture()
+        # Expanded views keep tests small; checks still inspect the full shape.
+        with self.header_checks():
+            for layer in (0, 25, 49):
+                for value in (0., float('nan'), float('inf'), -float('inf')):
+                    gate = torch.tensor(value, dtype=torch.bfloat16).expand(7168, 5376)
+                    bad = {**source, f'transformer_blocks.{layer}.attn.to_gate_compress.set_weight': gate}
+                    with self.subTest(layer=layer, value=value), self.assertRaisesRegex(ValueError, 'nonfinite or all-zero'):
+                        m.normalize_fastvideo_vsa(bad, shapes)
+
+    def test_full_ordinary_payload_required_including_norm_deltas(self):
+        source, shapes = self.fixture()
+        omissions = [('transformer_blocks.0.attn.to_q.lora_A.weight',),
+                     tuple(f'transformer_blocks.0.ff.net.2.lora_{s}.weight' for s in 'AB'),
+                     tuple(f'token_refiner.refiner_blocks.1.attn.to_{q}.lora_{s}.weight' for q in 'qkv' for s in 'AB'),
+                     ('transformer_blocks.49.adaln_proj.linear.diff_b',), ('proj_in.diff',),
+                     ('norm_out.norm.diff',), ('transformer_blocks.3.norm1.diff',),
+                     ('transformer_blocks.17.norm2.diff',)]
+        with self.header_checks():
+            for keys in omissions:
+                bad = {k: t for k, t in source.items() if k not in keys}
+                with self.subTest(omitted=keys), self.assertRaises(ValueError):
+                    m.normalize_fastvideo_vsa(bad, shapes)
+            # Counts alone must not allow substituting another norm for a
+            # required delta, nor accepting duplicate aliases/replacements.
+            bad = dict(source)
+            bad['transformer_blocks.0.norm1.diff'] = bad.pop('transformer_blocks.3.norm1.diff')
+            with self.assertRaisesRegex(ValueError, 'coverage'): m.normalize_fastvideo_vsa(bad, shapes)
+            for key in ('norm_out.norm.weight.diff_param', 'proj_in.set_weight', 'unknown.diff'):
+                with self.subTest(extra=key), self.assertRaises(ValueError):
+                    m.normalize_fastvideo_vsa({**source, key: source['norm_out.norm.diff']}, shapes)
+
+    def test_dense_gate_rejection_unchanged(self):
+        source, shapes = self.fixture()
+        for layout in ('fastvideo', 'fastvideo-dense', 'fastvideo-vsa'):
+            with self.subTest(layout=layout), self.assertRaises(ValueError):
+                m.normalize_fastvideo(source, shapes, layout)
+
+    def test_vsa_manifest_recipe_and_metadata_without_full_save(self):
+        from safetensors.torch import save_file
+        source, shapes = self.fixture()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            def save_header_only(tensors, filename, metadata=None):
+                if Path(filename).name == 'source.safetensors':
+                    return save_file(tensors, filename, metadata=metadata)
+                # Exercise CLI dispatch/manifest, never serialize the meta/full
+                # 5GB fixture. Ordinary real save/dtype is covered by old tests.
+                self.assertEqual(len(tensors), 648)
+                self.assertEqual(metadata['payload_format'], 'fastvideo-vsa-v1')
+                self.assertEqual(metadata['runtime_supported'], 'false')
+                self.assertTrue(all(t.dtype == torch.bfloat16 for t in tensors.values()))
+                Path(filename).write_bytes(b'header-only test placeholder')
+            with self.header_checks(), mock.patch('safetensors.torch.load_file', return_value=source), \
+                 mock.patch('safetensors.torch.save_file', side_effect=save_header_only) as save:
+                # The existing fixture writes a tiny real source and GGUF
+                # header; only the full meta output writer is a placeholder.
+                output, manifest = FastVideo.run_cli(self, root, {'placeholder': torch.ones(1)}, shapes,
+                                                    'fastvideo-vsa', coefficient=1., video_shift=12)
+            self.assertEqual(save.call_count, 2)
+            self.assertEqual(manifest['payload_format'], 'fastvideo-vsa-v1')
+            self.assertEqual((manifest['pairs'], manifest['delta_count'], manifest['gate_count']), (258, 82, 50))
+            self.assertEqual(manifest['vsa'], {'tile_tokens': 64, 'sparsity': .9, 'prefix_policy': 'exempt',
+                                              'gate_activation': 'linear', 'gate_count': 50})
+            self.assertEqual(manifest['coefficient'], 1.)
+            self.assertEqual(manifest['coefficient_applies_to'], 'lora_B @ lora_A, delta and gate weight')
+            self.assertEqual((manifest['steps'], manifest['video_shift'], manifest['audio_shift']), (4, 12., 3.))
+            self.assertEqual((manifest['sampler'], manifest['scheduler']), ('euler', 'uniform'))
+            self.assertEqual(manifest['sigmas'], [1., .75, .5, .25, 0.])
+            self.assertEqual(manifest['video_sigmas'], [1., 36/37, 12/13, .8, 0.])
+            self.assertEqual(manifest['audio_sigmas'], [1., .9, .75, .5, 0.])
+            self.assertFalse(manifest['runtime_supported'])
+            self.assertIn('native CUDA qualification', manifest['note'])
+            self.assertEqual(manifest['adapter_sha256'], m.sha256(output/'adapter.safetensors'))
+
+    def test_invalid_recipe_rejected_before_loading_or_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = ['prepare_h3_lora', '--adapter', 'unused', '--adapter-sha256', 'unused',
+                    '--base', 'unused', '--base-sha256', 'unused', '--layout', 'fastvideo-vsa',
+                    '--coefficient', '1', '--steps', '4', '--video-shift', '12', '--audio-shift', '3',
+                    '--partition', 'fl2va', '--output', str(Path(tmp)/'out')]
+            for flag, value in (('--coefficient', '.25'), ('--coefficient', '2'), ('--coefficient', 'nan'),
+                                ('--steps', '8'), ('--video-shift', '3'), ('--audio-shift', '12')):
+                bad = argv.copy(); bad[bad.index(flag)+1] = value
+                with self.subTest(flag=flag, value=value), mock.patch('sys.argv', bad), \
+                     mock.patch.object(m, 'sha256') as checksum, self.assertRaises(ValueError): m.main()
+                checksum.assert_not_called()
+                self.assertFalse((Path(tmp)/'out').exists())
+
+    def test_real_header_maps_all_856_without_loading_or_saving_payload(self):
+        scratch = p.parents[1]/'_scratch'
+        root = scratch/'h3-vsa-continuation-20261014'
+        adapter, audit_path = root/'vsa-datafree.safetensors', root/'vsa-header-audit.json'
+        if not adapter.exists() or not audit_path.exists(): self.skipTest('local VSA artifact/header audit unavailable')
+        with adapter.open('rb') as f:
+            size, = struct.unpack('<Q', f.read(8))
+            self.assertLess(size, 1 << 20)
+            header = json.loads(f.read(size))
+        metadata = header.pop('__metadata__')
+        audit = json.loads(audit_path.read_text())
+        self.assertEqual(audit['original_full_sha256'], '42dc502a2078f166c396a1fa75f29728d1844363652d345d5ef3e2b444ed6470')
+        self.assertEqual(metadata, audit['metadata'])
+        self.assertEqual({k: {'dtype': v['dtype'], 'shape': v['shape']} for k, v in header.items()}, audit['tensors'])
+        fixture, shapes = self.fixture()
+        self.assertEqual(set(header), set(fixture))
+        for k, v in header.items():
+            self.assertEqual(v['dtype'], 'BF16')
+            self.assertEqual(tuple(v['shape']), tuple(fixture[k].shape))
+        base = scratch/'rtx4090-20261013/models/minimax_h3_ref2va-Q4_K_M.gguf'
+        if base.exists(): shapes = m.gguf_shapes(base)
+        source = {k: torch.empty(v['shape'], dtype=torch.bfloat16, device='meta') for k, v in header.items()}
+        with self.header_checks() as (finite, nonzero):
+            out, counts = m.normalize_fastvideo_vsa(source, shapes)
+        self.assertEqual(len(source), 856)
+        self.assertEqual(counts, {'pairs': 258, 'delta_count': 82, 'gate_count': 50})
+        self.assertEqual(len(out), 648)
+        # Every original tensor reaches validation, gates included. No payload
+        # bytes read: this is not a new numerical audit of the real artifact.
+        self.assertCountEqual([id(c.args[0]) for c in finite.call_args_list], [id(t) for t in source.values()])
+        self.assertEqual(nonzero.call_count, 50)
+        for i in range(50):
+            self.assertIs(out[self.prefix+f'blocks.{i}.attn.to_gate_compress.weight'],
+                          source[f'transformer_blocks.{i}.attn.to_gate_compress.set_weight'])
+        self.assertEqual(sum(k.endswith('.delta') for k in out), 82)
+        self.assertEqual(sum('.norm' in k and k.endswith('.delta') for k in out), 16)
+        self.assertTrue(all(t.dtype == torch.bfloat16 for t in out.values()))
 
 if __name__=='__main__':unittest.main()

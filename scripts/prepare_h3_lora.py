@@ -4,9 +4,10 @@
 Native adapters retain all factors. Diffusers Q/K/V factors are combined with
 block-diagonal B (not assumed to share A); SwiGLU B halves are swapped once.
 Native/Diffusers accept only A/B payloads; explicit FastVideo dense layouts also
-accept exact parameter deltas. Replacements/VSA gates are rejected, never omitted.
-A separate manifest binds base/adapter/recipe; its coefficient scales both B@A
-and deltas once, without prescaling or changing payload dtypes.
+accept exact parameter deltas. Only explicit fastvideo-vsa accepts the full V1
+payload with all 50 trained gates; it does not enable runtime support.
+A separate manifest binds base/adapter/recipe; its coefficient scales B@A,
+deltas and (VSA only) gates once, without prescaling or changing payload dtypes.
 """
 import argparse
 import hashlib
@@ -203,14 +204,69 @@ def normalize_fastvideo(tensors, shapes, layout='fastvideo-dense'):
     return result, {'pairs': len(pairs), 'delta_count': len(deltas)}
 
 
+def normalize_fastvideo_vsa(tensors, shapes):
+    """Full 50-layer FastH3 V1 only; return native tensors and emitted counts.
+
+    Gate matrices are new parameters, not base deltas. Ordinary conversion is
+    exactly normalize_fastvideo, including all trained norm deltas. The locked
+    V1 coverage below excludes only parameters unchanged in the source artifact.
+    No coefficient is baked in; V1 preparation permits only coefficient 1.
+    """
+    import torch
+    blocks = {int(m[1]) for key in shapes if (m := re.match(r'blocks\.(\d+)\.', key))}
+    if blocks != set(range(50)): raise ValueError('FastVideo VSA V1 requires all 50 base blocks')
+    ordinary, gates = {}, {}
+    for key, t in tensors.items():
+        gate = re.fullmatch(r'transformer_blocks\.(0|[1-9]\d*)\.attn\.to_gate_compress\.set_weight', key)
+        if not gate:
+            if key in ordinary: raise ValueError('duplicate payload '+key)
+            ordinary[key] = t
+            continue
+        layer = int(gate[1])
+        name = f'model.diffusion_model.blocks.{layer}.attn.to_gate_compress.weight'
+        if name in gates: raise ValueError('duplicate VSA gate '+key)
+        if layer not in blocks: raise ValueError('unexpected VSA gate layer '+key)
+        if shapes.get(f'blocks.{layer}.attn.qkv_proj.weight') != (21504, 5376):
+            raise ValueError('VSA gate/base QKV shape mismatch '+key)
+        if tuple(t.shape) != (7168, 5376): raise ValueError('invalid VSA gate shape '+key)
+        if t.dtype != torch.bfloat16: raise ValueError('VSA gate must retain BF16 precision '+key)
+        if not torch.isfinite(t).all() or not torch.count_nonzero(t):
+            raise ValueError('nonfinite or all-zero VSA gate '+key)
+        gates[name] = t.contiguous()
+    if len(gates) != 50: raise ValueError('missing VSA gates: require all 50 trained matrices')
+    result, counts = normalize_fastvideo(ordinary, shapes)
+    pair_targets = {f'blocks.{i}.{tail}' for i in range(50) for tail in
+                    ('attn.qkv_proj', 'attn.out_proj', 'mlp.fc1', 'mlp.fc2', 'adaln_proj.linear')}
+    pair_targets.update(f'token_refiner.blocks.{i}.{tail}' for i in range(2) for tail in
+                        ('attn.qkv_proj', 'attn.out_proj', 'mlp.fc1', 'mlp.fc2'))
+    delta_targets = {f'blocks.{i}.adaln_proj.linear.bias' for i in range(50)}
+    delta_targets.update(target+'.'+parameter for target in
+                         ('video_patch_proj', 'audio_patch_proj', 'condition_proj',
+                          'time_embedder.proj_in', 'time_embedder.proj_out',
+                          'final_layer.adaln_proj.linear', 'final_layer.video_out', 'final_layer.audio_out')
+                         for parameter in ('weight', 'bias'))
+    delta_targets.add('final_layer.norm.weight')
+    # Trained norm deltas in the V1 datafree artifact, not all base norm weights.
+    for norm, layers in (('norm1', (3, 4, 5, 6, 10, 17, 19)),
+                         ('norm2', (4, 6, 7, 8, 12, 13, 15, 17))):
+        delta_targets.update(f'blocks.{i}.{norm}.weight' for i in layers)
+    expected = {'model.diffusion_model.'+target+'.lora_'+side+'.weight'
+                for target in pair_targets for side in 'AB'}
+    expected.update('model.diffusion_model.'+target+'.delta' for target in delta_targets)
+    if set(result) != expected:
+        raise ValueError('incomplete/unexpected FastVideo VSA V1 A/B or delta coverage')
+    result.update(gates)
+    return result, {**counts, 'gate_count': len(gates)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--adapter', type=Path, required=True)
     parser.add_argument('--adapter-sha256', required=True)
     parser.add_argument('--base', type=Path, required=True)
     parser.add_argument('--base-sha256', required=True)
-    parser.add_argument('--layout', choices=('native','diffusers','fastvideo','fastvideo-dense'), required=True)
-    parser.add_argument('--coefficient', type=float, required=True, help='published strength*alpha/rank, not guessed; scales B@A and FastVideo deltas once')
+    parser.add_argument('--layout', choices=('native','diffusers','fastvideo','fastvideo-dense','fastvideo-vsa'), required=True)
+    parser.add_argument('--coefficient', type=float, required=True, help='published strength*alpha/rank; scales B@A, deltas and VSA gates once; VSA V1 requires 1')
     parser.add_argument('--steps', type=int, choices=(4,8), required=True)
     parser.add_argument('--video-shift', type=float, required=True)
     parser.add_argument('--audio-shift', type=float, default=3.)
@@ -219,13 +275,18 @@ def main():
     a = parser.parse_args()
     if a.output.exists(): raise ValueError('refusing existing output directory')
     if any(not math.isfinite(v) or v <= 0 for v in (a.coefficient,a.video_shift,a.audio_shift)): raise ValueError('invalid coefficient/shift')
+    vsa = a.layout == 'fastvideo-vsa'
+    if vsa and (a.coefficient != 1. or a.steps != 4 or a.video_shift != 12. or a.audio_shift != 3.):
+        raise ValueError('FastVideo VSA V1 requires coefficient 1, four steps and video/audio shifts 12/3')
     if sha256(a.adapter) != a.adapter_sha256 or sha256(a.base) != a.base_sha256: raise ValueError('full checksum mismatch')
     from safetensors.torch import load_file, save_file
     import torch
     torch.set_num_threads(4)
     source = load_file(str(a.adapter), device='cpu');shapes=gguf_shapes(a.base)
     fastvideo = a.layout in ('fastvideo', 'fastvideo-dense')
-    if fastvideo:
+    if vsa:
+        tensors, counts = normalize_fastvideo_vsa(source, shapes)
+    elif fastvideo:
         tensors, counts = normalize_fastvideo(source, shapes, a.layout)
     else:
         pairs=normalize(source,a.layout);tensors={};counts={'pairs':len(pairs)}
@@ -235,10 +296,23 @@ def main():
             for side,t in p.items(): tensors['model.diffusion_model.'+target+'.lora_'+side+'.weight']=t.contiguous()
     a.output.mkdir(parents=True)
     path=a.output/'adapter.safetensors'
-    save_file(tensors,str(path),metadata={'format':'edge-dit-h3-dynamic-lora-v1','source_sha256':a.adapter_sha256,'source_layout':a.layout,'conversion':'native identity or exact block-diagonal QKV + SwiGLU B half swap; no weight merge/requantization'})
+    metadata = {'format':'edge-dit-h3-dynamic-lora-v1','source_sha256':a.adapter_sha256,'source_layout':a.layout,'conversion':'native identity or exact block-diagonal QKV + SwiGLU B half swap; no weight merge/requantization'}
+    if vsa: metadata.update(payload_format='fastvideo-vsa-v1', runtime_supported='false')
+    save_file(tensors,str(path),metadata=metadata)
     manifest={'schema_version':1,'kind':'minimax-h3-dynamic-lora','base_sha256':a.base_sha256,'base_partition':a.partition,'adapter_file':path.name,'adapter_sha256':sha256(path),'source_adapter_sha256':a.adapter_sha256,'coefficient':a.coefficient,'steps':a.steps,'video_shift':a.video_shift,'audio_shift':a.audio_shift,'cfg_scale':1.,'sampler':'euler','scheduler':'simple',**counts,'note':'New model+NFE variant on immutable Q4. Not a same-weights speedup; all other research options disabled initially.'}
     if fastvideo:
         manifest.update(payload_format='fastvideo-dense-v1', coefficient_applies_to='lora_B @ lora_A and delta')
+    if vsa:
+        sigmas = [1., .75, .5, .25, 0.]  # Four forwards, plus terminal zero.
+        manifest.update(payload_format='fastvideo-vsa-v1',
+                        coefficient_applies_to='lora_B @ lora_A, delta and gate weight',
+                        vsa={'tile_tokens': 64, 'sparsity': .9, 'prefix_policy': 'exempt',
+                             'gate_activation': 'linear', 'gate_count': counts['gate_count']},
+                        scheduler='uniform', sigmas=sigmas,
+                        video_sigmas=[a.video_shift*s/(1+(a.video_shift-1)*s) for s in sigmas],
+                        audio_sigmas=[a.audio_shift*s/(1+(a.audio_shift-1)*s) for s in sigmas],
+                        runtime_supported=False,
+                        note='Preparation only; runtime unsupported until separate native CUDA qualification on main.')
     (a.output/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     print(json.dumps(manifest,indent=2))
 

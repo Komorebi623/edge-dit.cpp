@@ -27,3 +27,5 @@ python3 -m unittest discover -s tests -p 'test_h3_runtime_libraries.py' -v
 
 # Immutable H3 LoRA normalization; CPU only, no downloads.
 python3 -m unittest discover -s tests -p 'test_h3_lora_prepare.py' -v
+
+python3 -m unittest discover -s tests -p 'h3_vsa_build_test.py' -v

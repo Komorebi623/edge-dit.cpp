@@ -25,9 +25,13 @@
 #include "dit_models/models/minimax_h3_cuda_adaln_cache.hpp"
 #include "dit_models/models/minimax_h3_sha256.hpp"
 #include "dit_models/models/minimax_h3_dynamic_lora.hpp"
+#ifdef ED_ENABLE_CUDA_H3_VSA
+#include "dit_models/models/minimax_h3_vsa_native.hpp"
+#endif
 #include "optimization/cache/operator/cache_operator_registry.hpp"
 
 namespace MiniMaxH3 {
+    namespace VSANative { struct State; }
 
     constexpr int H3_GRAPH_SIZE          = 131072;
     constexpr float FRAME_RESCALE        = 5.f / 3.f;
@@ -382,7 +386,7 @@ namespace MiniMaxH3 {
                              const SparseAttentionLayout* sparse_layout = nullptr,
                              const SparseAttentionConfig* sparse_config = nullptr,
                              int layer_idx = -1, int total_layers = -1,
-                             bool optimized_step = false) {
+                             bool optimized_step = false, VSANative::State* vsa_context = nullptr) {
             auto qkv_proj = std::dynamic_pointer_cast<Linear>(blocks["qkv_proj"]);
             auto q_norm   = std::dynamic_pointer_cast<RMSNorm>(blocks["q_norm"]);
             auto k_norm   = std::dynamic_pointer_cast<RMSNorm>(blocks["k_norm"]);
@@ -438,7 +442,18 @@ namespace MiniMaxH3 {
                 v = ggml_cast(ctx->ggml_ctx, v, GGML_TYPE_BF16);
             }
             ggml_tensor* out = nullptr;
-            if (options && h3_cuda_backend(ctx->backend) && (optimized_step || options->sage_attn) &&
+#ifdef ED_ENABLE_CUDA_H3_VSA
+            if (vsa_context) {
+                auto& state = *vsa_context;
+                if (!h3_cuda_backend(ctx->backend) || layer_idx < 0 || size_t(layer_idx) >= state.gates.size())
+                    throw std::invalid_argument("H3 VSA invalid CUDA layer/gate context");
+                auto* gate = ggml_ext_linear(ctx->ggml_ctx, x, state.gates[size_t(layer_idx)], nullptr, true, 1.f);
+                gate = ggml_cast(ctx->ggml_ctx, ggml_cast(ctx->ggml_ctx, gate, GGML_TYPE_BF16), GGML_TYPE_F32);
+                out = VSANative::build(ctx->ggml_ctx, q, k, v, gate, state.geometry, state.inputs,
+                                       state.sparsity, state.graph_budget);
+            }
+#endif
+            if (!out && options && h3_cuda_backend(ctx->backend) && (optimized_step || options->sage_attn) &&
                 layer_idx > 0 && layer_idx + 1 < total_layers) {
                 if (options->sparse_attn) {
                     if (!sparse_layout || !sparse_config)
@@ -696,7 +711,7 @@ namespace MiniMaxH3 {
                              const SparseAttentionLayout* sparse_layout = nullptr,
                              const SparseAttentionConfig* sparse_config = nullptr,
                              int layer_idx = -1, int total_layers = -1,
-                             bool optimized_step = false) {
+                             bool optimized_step = false, VSANative::State* vsa_context = nullptr) {
             auto norm1 = std::dynamic_pointer_cast<RMSNorm>(blocks["norm1"]);
             auto norm2 = std::dynamic_pointer_cast<RMSNorm>(blocks["norm2"]);
             auto attn  = std::dynamic_pointer_cast<Attention>(blocks["attn"]);
@@ -737,7 +752,7 @@ namespace MiniMaxH3 {
                 return x;
             }
             auto attn_output = attn->forward(ctx, h, pe, options, sparse_layout, sparse_config,
-                                             layer_idx, total_layers, optimized_step);
+                                             layer_idx, total_layers, optimized_step, vsa_context);
             if (debug_output != nullptr && debug_target == "block0_attn_output") {
                 *debug_output = attn_output;
                 return x;
@@ -849,6 +864,7 @@ namespace MiniMaxH3 {
         int cuda_step = -1, cuda_total_steps = 0;
         bool cuda_conditional = true;
         SparseAttentionConfig sparse_config;
+        VSANative::State* vsa_context = nullptr; // H3-owned optional native VSA state; null by default.
         ExactAdaLN::Cache* adaln_cache = nullptr;
         ExactAdaLN::Cache::StepToken adaln_token;
         ExactAdaLN::GraphInputs* adaln_graph_inputs = nullptr;
@@ -1144,7 +1160,7 @@ namespace MiniMaxH3 {
                                             i == 0 ? debug_output : nullptr,
                                             &cuda_optimizations, cached_modulation,
                                             &sparse_layout, &sparse_config,
-                                            static_cast<int>(i), static_cast<int>(config.num_layers), optimized_step);
+                                            static_cast<int>(i), static_cast<int>(config.num_layers), optimized_step, vsa_context);
                 if (debug_output != nullptr && *debug_output != nullptr) {
                     return {nullptr, nullptr};
                 }
@@ -1458,6 +1474,36 @@ namespace MiniMaxH3 {
         Config config;
         MiniMaxH3Transformer3DModel model;
         std::shared_ptr<DynamicLoraAdapter> dynamic_lora;
+#ifdef ED_ENABLE_CUDA_H3_VSA
+        std::unique_ptr<VSANative::State> native_vsa;
+        void configure_native_vsa(String2TensorStorage& adapter) {
+            if (native_vsa || dynamic_lora || weight_adapter || model.cuda_optimizations.any_enabled() ||
+                config.num_layers != 50 || config.hidden_size != 5376 || config.num_attention_heads != 56 ||
+                config.attention_head_dim != 128 || config.uses_adaln_curves())
+                throw std::invalid_argument("H3 VSA requires the original full50-layer architecture and independent adapter");
+            auto state = std::make_unique<VSANative::State>();
+            // Validate every gate before mutating context, then remove gate
+            // payloads from the ordinary LoRA/delta loader's scope.
+            std::vector<std::string> names;
+            for (int i=0;i<50;++i) {
+                auto name="model.diffusion_model.blocks."+std::to_string(i)+".attn.to_gate_compress.weight";
+                auto it=adapter.find(name);
+                if(it==adapter.end() || it->second.type!=GGML_TYPE_BF16 || it->second.n_dims!=2 ||
+                    it->second.ne[0]!=5376 || it->second.ne[1]!=7168 || it->second.ne[2]!=1 || it->second.ne[3]!=1)
+                    throw std::invalid_argument("H3 VSA missing/mismatched BF16 gate: "+name);
+                names.push_back(name);
+            }
+            auto ordinary = adapter;
+            for(const auto& name:names) ordinary.erase(name);
+            VSAContract::validate_ordinary(ordinary); // cannot omit a trained norm/linear update
+            for(const auto& name:names) {
+                auto* t=ggml_new_tensor_2d(params_ctx,GGML_TYPE_BF16,5376,7168);
+                ggml_set_name(t,name.c_str()); // inference leaf in same weight pool
+                state->gates.push_back(t);state->gate_tensors.emplace(name,t);adapter.erase(name);
+            }
+            native_vsa=std::move(state);model.vsa_context=native_vsa.get();
+        }
+#endif
         void configure_dynamic_lora(const String2TensorStorage& adapter, float coefficient, bool allow_dense_deltas = false) {
             if (dynamic_lora || weight_adapter || model.cuda_optimizations.any_enabled())
                 throw std::invalid_argument("H3 dynamic LoRA requires an independent immutable adapter");
@@ -2214,6 +2260,24 @@ namespace MiniMaxH3 {
 
             auto runner_ctx = get_context();
             if (dynamic_lora) dynamic_lora->begin_graph();
+#ifdef ED_ENABLE_CUDA_H3_VSA
+            if (native_vsa) {
+                native_vsa->reset_graph();
+                native_vsa->inputs.bind_backend_tensor_data = [this](ggml_tensor* t,const void* p){set_backend_tensor_data(t,p);};
+                std::vector<VSAReference::Segment> spans;
+                for(const auto& span:layout.sequence_segments) {
+                    VSAReference::TokenKind kind=span.kind==SequenceKind::TARGET_VIDEO?VSAReference::TokenKind::Video:
+                        (span.kind==SequenceKind::TEXT?VSAReference::TokenKind::Text:
+                         (span.kind==SequenceKind::TARGET_AUDIO||span.kind==SequenceKind::CONDITION_AUDIO?
+                          VSAReference::TokenKind::Audio:VSAReference::TokenKind::DenseReference));
+                    VSAReference::Grid grid{};
+                    if(kind==VSAReference::TokenKind::Video) grid={size_t(video_input_cache.shape()[2]/config.patch_t),
+                        size_t(video_input_cache.shape()[1]/config.patch_h),size_t(video_input_cache.shape()[0]/config.patch_w)};
+                    spans.push_back({kind,size_t(span.end-span.start),grid});
+                }
+                native_vsa->geometry=VSAReference::make_geometry(spans,64);
+            }
+#endif
             if (model.cuda_optimizations.adaln_cache || model.cuda_optimizations.sparse_attn) {
                 runner_ctx.bind_backend_tensor_data = [this](ggml_tensor* tensor, const void* data) {
                     set_backend_tensor_data(tensor, data);
@@ -2253,6 +2317,17 @@ namespace MiniMaxH3 {
             auto graph      = new_graph_custom(H3_GRAPH_SIZE);
             ggml_build_forward_expand(graph, merged);
             if (dynamic_lora) dynamic_lora->validate_coverage(graph);
+#ifdef ED_ENABLE_CUDA_H3_VSA
+            if(native_vsa) {
+                std::set<const ggml_tensor*> seen;
+                for(int i=0;i<ggml_graph_n_nodes(graph);++i) {
+                    auto* node=ggml_graph_node(graph,i);
+                    if(node->op==GGML_OP_MUL_MAT)seen.insert(node->src[0]);
+                }
+                for(auto* gate:native_vsa->gates)if(!seen.count(gate))
+                    throw std::runtime_error("H3 VSA trained gate absent from full computation graph");
+            }
+#endif
             return graph;
         }
 
@@ -2421,8 +2496,13 @@ namespace MiniMaxH3 {
                                    params.minimax_video_sigma_shift,
                                    params.minimax_audio_sigma_shift);
             };
-            if (dynamic_lora && params_backend != runtime_backend)
+            if (dynamic_lora && params_backend != runtime_backend) {
+#ifdef ED_ENABLE_CUDA_H3_VSA
+                if(native_vsa) return compute_cuda_scoped_offloaded(get_graph,n_threads,params,"VSA",
+                    edgedit::h3_vsa::staging_limit);
+#endif
                 return compute_cuda_scoped_offloaded(get_graph, n_threads, params, "LoRA");
+            }
             if (model.cuda_optimizations.adaln_cache && params_backend != runtime_backend) {
                 if (model.cuda_optimizations.cache_dit || model.cuda_optimizations.sage_attn || model.cuda_optimizations.sparse_attn)
                     throw std::invalid_argument("MiniMax-H3 AdaLN offload is single-method until combined-path validation");
