@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-14",
+  "timezone": "Asia/Shanghai",
+  "status": "cpu_and_build_validated_gpu_pending",
+  "purpose": "Complete FastVideo dense adapter payload support; prerequisite for full4step candidate comparison and independentVSA integration",
+  "prior_lora_results": "benchmark/h3_cuda/lora-results.json",
+  "default_AB_unchanged": true,
+  "explicit_payload_format": "fastvideo-dense-v1",
+  "original_Q4_bytes_unchanged": true,
+  "runtime_contract": {
+    "matrices": "W_Q4*x + coefficient*B(Ax) + coefficient*DeltaW*x; no dense base materialization",
+    "vectors": "FP32(base+coefficient*delta), cast to existing parameter dtype, widen rounded bias for F32 consumer if necessary",
+    "weights": "all factors/deltas are runner-owned inference leaf weights, graphcut INPUT_PARAM staging/accounting",
+    "VSA_replacements": "rejected, needs independent VSA path"
+  },
+  "normalization": {
+    "manifest": {
+      "path": "_scratch/h3-vsa-continuation-20261014/normalized-fastvideo-dense4/manifest.json",
+      "sha256": "11ed35376037231df9de241ca0eb84a889cb6271eab3d75fdddc0ff9aabb413d"
+    },
+    "actual_source_file": "_scratch/h3-lora-goal-20261014/models/FastVideo/adapter_model.safetensors",
+    "source_full_sha256": "4ce198c83132251b7fd0de2503823aa49c53983f068318f66cb19eaefb7fcc12",
+    "input_tensors": 809,
+    "input_pairs": 362,
+    "normalized_pairs": 258,
+    "dense_deltas": 85,
+    "normalized_tensors": 601,
+    "dtype": "BF16",
+    "finite_scan": "all original tensors scanned by normalizer",
+    "coefficient": 1,
+    "NFE": 4,
+    "video_audio_shift": [
+      12,
+      3
+    ],
+    "note": "same scalar coefficient applies to AB and exact delta once; still no VSA mode"
+  },
+  "build": {
+    "source": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-vsa-continuation-20261014/dense-source-02",
+    "build": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-vsa-continuation-20261014/dense-build-02/candidate",
+    "production_source_tree_sha256": "d64c45f2ae42ee510cfe73b59ebd68810a531df5e47b443048961d9963ae2e44",
+    "changed_production_files": [
+      "src/dit_models/models/minimax_h3_dynamic_lora.hpp",
+      "src/dit_models/models/minimax_h3_full.hpp",
+      "src/dit_models/models/minimax_h3_vsa_graph.hpp",
+      "src/dit_models/pipelines/minimax_h3_pipeline.cpp",
+      "src/dit_models/pipelines/minimax_h3_pipeline.hpp",
+      "CMakeLists.txt"
+    ],
+    "recompiled": [
+      "objects/minimax_h3_pipeline.cpp.o",
+      "objects/dit_pipeline.cpp.o"
+    ],
+    "base_build": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate",
+    "base_source_tree": "9e38c09eff4531bf17e5079e2b20de535b71728717866787a5c06f3175df8985",
+    "shared_libraries": {
+      "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate/bin/libggml-cpu.so.0.12.0": "894b8b29cd8bcb1f7c2ee07cfdb6f48c5cf87b6ec3cb933d793b9867446ebc5a",
+      "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate/bin/libggml.so.0.12.0": "099bd4b6e0bab479b5f79aae87d746e3000aa0eb24a1fa81454417a42d840d5e",
+      "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate/bin/libggml-cuda.so.0.12.0": "b243cddce1ca0d52f1f1d0d4b10b608e10ce131e460e49f6108347066b2a0641",
+      "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate/bin/libggml-base.so.0.12.0": "93bccda78a44eded1abbe7524ad92e5959d92e0cae0344b78334b1a8a884cdc2"
+    },
+    "config_note": "Reused archived CMake configuration, no dependency or precision changes; no model baseline rebuild."
+  },
+  "tests": {
+    "unified_cpu_ctest": "16/16",
+    "workflow_media": "53/53",
+    "normalizer": "18/18",
+    "dense_cpp_checks": 35622,
+    "dense_cpp_graphs": 66,
+    "dense_failed_groups": 0,
+    "actual_model_GPU_runs": 0,
+    "GPU_status": "all8occupied_by_unrelated_training"
+  },
+  "VSA_checkpoint": {
+    "download": {
+      "repository": "FastVideo/FastVideo-FastH3-4-step-Preview-v1-LoRA",
+      "file": "vsa-datafree/adapter_model.safetensors",
+      "revision": "e0b0689c28d0bb78dec099df1fd31df6bb4c7aa0",
+      "metadata_api": "https://modelscope.cn/api/v1/models/FastVideo/FastVideo-FastH3-4-step-Preview-v1-LoRA/repo/files?Revision=master&Recursive=true",
+      "full_sha256": "42dc502a2078f166c396a1fa75f29728d1844363652d345d5ef3e2b444ed6470",
+      "bytes": 5339117712,
+      "seconds": 77.37818170315586,
+      "concurrency": 4,
+      "parts": [
+        {
+          "index": 0,
+          "start": 0,
+          "end": 1334779427,
+          "bytes": 1334779428
+        },
+        {
+          "index": 1,
+          "start": 1334779428,
+          "end": 2669558855,
+          "bytes": 1334779428
+        },
+        {
+          "index": 2,
+          "start": 2669558856,
+          "end": 4004338283,
+          "bytes": 1334779428
+        },
+        {
+          "index": 3,
+          "start": 4004338284,
+          "end": 5339117711,
+          "bytes": 1334779428
+        }
+      ],
+      "transport": "official CDN IPv4 verified TLS, no proxy/auth bypass",
+      "space": "one shared new output file; bounded1MiB per worker; no duplicate part files"
+    },
+    "header_audit": {
+      "path": "_scratch/h3-vsa-continuation-20261014/vsa-header-audit.json",
+      "sha256": "e9ecd989ef69ffcaa3dce370f39f53113707b047be82b0baafbc8caee5d7115a"
+    },
+    "actual_tensors": 856,
+    "dtype": "BF16",
+    "low_rank_pairs": 362,
+    "dense_deltas": 82,
+    "gate_matrices": 50,
+    "gate_shape": [
+      7168,
+      5376
+    ],
+    "all_gates_finite_and_nonzero": true,
+    "production_enabled": false,
+    "native_graph_primitives": {
+      "header": "src/dit_models/models/minimax_h3_vsa_graph.hpp",
+      "scope": "only true3D tile pooling / score / compressed attention / raw gate merge; fine_attention injected; not fullVSAproduction",
+      "cpu_checks": 54029,
+      "cpu_graphs": 12,
+      "fixed_nodes": 44,
+      "max_abs_error": 9.53674e-07,
+      "tests": "tests/h3_vsa_graph_test.cpp",
+      "production_wiring": false,
+      "target_geometry_metadata_only": {
+        "packed_tokens": 15256,
+        "tiles": 285,
+        "heads": 56,
+        "dim": 128,
+        "conservative_no_reuse_bytes": 7203157128,
+        "note": "not runtime peak VRAM; explicit byte budget checked"
+      }
+    }
+  },
+  "logs": [
+    {
+      "path": "_scratch/h3-vsa-continuation-20261014/dense-cpu03.log",
+      "sha256": "be75f204917ed2f130ec0e5dd3644ff33e795463dbfa4427c125409069209cf5"
+    },
+    {
+      "path": "_scratch/h3-vsa-continuation-20261014/final-cpu.log",
+      "sha256": "5f72f01f5441eabaef60581a23402d0f5b0a2718fe39cacb9ae7d41c9611f5f9"
+    },
+    {
+      "path": "_scratch/h3-vsa-continuation-20261014/dense-cuda-build02.log",
+      "sha256": "ab7627d414364148d2c5b82abfe721ef14dd26fc963b3b5fcca2c93fc055115e"
+    },
+    {
+      "path": "_scratch/h3-vsa-continuation-20261014/normalize-dense.log",
+      "sha256": "11ed35376037231df9de241ca0eb84a889cb6271eab3d75fdddc0ff9aabb413d"
+    },
+    {
+      "path": "_scratch/h3-vsa-continuation-20261014/vsa-graph-cpu.log",
+      "sha256": "fdc01a429ea7f5152ad13128b0b8ac737489c5c5b7b2e22e320f1810b40ee365"
+    }
+  ],
+  "performance": null,
+  "quality": null,
+  "GPU_recheck": {
+    "local_date_time": "2026-10-14 22:32 Asia/Shanghai",
+    "all8busy": true,
+    "unrelated_processes_untouched": true
+  }
+}

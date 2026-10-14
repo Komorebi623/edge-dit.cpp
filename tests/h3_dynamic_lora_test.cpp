@@ -483,9 +483,554 @@ static void loader_roundtrip() {
     }
 }
 
+// Dense opt-in regressions stay deliberately small and require no factor file.
+static const std::string norm_key = "model.diffusion_model.blocks.0.norm.weight";
+static ggml_tensor* add_vector(Params& p, const std::string& key, ggml_type type = GGML_TYPE_BF16,
+                               int64_t size = 4) {
+    auto* t = ggml_new_tensor_1d(p.ctx, type, size);
+    ggml_set_name(t, key.c_str());
+    check(p.base.emplace(key, t).second, "duplicate vector fixture");
+    return t;
+}
+static void add_delta(String2TensorStorage& storage, const std::string& key,
+                      ggml_type type = GGML_TYPE_F32, int64_t in = 32, int64_t out = 4,
+                      int dims = 2) {
+    const int64_t ne[] = {in, out};
+    const auto name = key + ".delta";
+    check(storage.emplace(name, TensorStorage(name, type, ne, dims, 0)).second, "duplicate delta fixture");
+}
+using Snapshot = std::map<ggml_tensor*, std::vector<uint8_t>>;
+static Snapshot snapshot(Params& p) {
+    Snapshot result;
+    for (auto* t = ggml_get_first_tensor(p.ctx); t; t = ggml_get_next_tensor(p.ctx, t)) result.emplace(t, bytes(t));
+    return result;
+}
+static void unchanged(const Snapshot& before, const std::string& label) {
+    for (const auto& entry : before) check(bytes(entry.first) == entry.second, label + ": " + entry.first->name);
+}
+static void store(ggml_tensor* t, const std::vector<float>& values) {
+    check(int64_t(values.size()) == ggml_nelements(t), "fixture value count");
+    const auto raw = encode(t->type, values, t->ne[0]);
+    if (t->buffer) ggml_backend_tensor_set(t, raw.data(), 0, raw.size());
+    else std::memcpy(t->data, raw.data(), raw.size());
+}
+// Same parameter/input pointers: compare the complete graph, not just its size.
+static void identical_graph(ggml_cgraph* expected, ggml_cgraph* actual, const std::string& label) {
+    check(ggml_graph_n_nodes(expected) == ggml_graph_n_nodes(actual), label + " node count");
+    namespace Cut = sd::ggml_graph_cut;
+    check(Cut::leaf_count(expected) == Cut::leaf_count(actual), label + " leaf count");
+    for (int i = 0; i < Cut::leaf_count(expected); ++i)
+        check(Cut::leaf_tensor(expected, i) == Cut::leaf_tensor(actual, i), label + " leaf identity/order");
+    for (int i = 0; i < ggml_graph_n_nodes(expected); ++i) {
+        auto* a = ggml_graph_node(expected, i); auto* b = ggml_graph_node(actual, i);
+        check(a->op == b->op && a->type == b->type && a->flags == b->flags &&
+              std::string(a->name) == b->name && !std::memcmp(a->ne, b->ne, sizeof(a->ne)) &&
+              !std::memcmp(a->nb, b->nb, sizeof(a->nb)) &&
+              !std::memcmp(a->op_params, b->op_params, sizeof(a->op_params)) && a->view_offs == b->view_offs,
+              label + " node metadata at " + std::to_string(i));
+        auto same_edge = [&](ggml_tensor* x, ggml_tensor* y) {
+            const int xi = node_index(expected, x), yi = node_index(actual, y);
+            check(xi == yi && (xi >= 0 || x == y), label + " graph edge");
+        };
+        for (int s = 0; s < GGML_MAX_SRC; ++s) same_edge(a->src[s], b->src[s]);
+        same_edge(a->view_src, b->view_src);
+    }
+}
+
+static void dense_numerical(ggml_type base_type, float coefficient, float conditioning, bool with_ab,
+                            bool strided = false) {
+    Params p; auto* w = p.add(module, base_type);
+    auto* bias = add_vector(p, module + ".bias", GGML_TYPE_F32);
+    String2TensorStorage storage;
+    add_delta(storage, module + ".weight");
+    if (with_ab) add_pair(storage);
+    Adapter adapter(p.ctx, p.base, storage, coefficient, true);
+    check(adapter.tensors().size() == (with_ab ? 3u : 1u), "dense payload allocation count");
+    for (const auto& entry : adapter.tensors()) {
+        check(!entry.second->data && !entry.second->buffer, "dense allocated before runner");
+        check(entry.first == entry.second->name && entry.second->type == storage.at(entry.first).type,
+              "dense payload name/type preserved");
+        check(!(entry.second->flags & GGML_TENSOR_FLAG_PARAM), "dense payload is an inference leaf");
+    }
+    p.alloc();
+    auto* d = adapter.tensors().at(module + ".weight.delta");
+    const auto wr = fill(w, .018f), dr = fill(d, .007f), biasr = fill(bias, .003f);
+    std::vector<float> ar, br;
+    if (with_ab) {
+        ar = fill(adapter.tensors().at(module + ".lora_A.weight"), .008f);
+        br = fill(adapter.tensors().at(module + ".lora_B.weight"), .02f);
+    }
+    for (const auto& entry : adapter.tensors()) check(entry.second->buffer == p.buffer, "runner owns dense payload");
+    const auto original = snapshot(p);
+    Context c;
+    auto* input = ggml_new_tensor_4d(c.ctx, GGML_TYPE_F32, 32, strided ? 3 : 2, strided ? 2 : 3, 2);
+    fill(input, .013f);
+    auto* x = strided ? ggml_permute(c.ctx, input, 0, 2, 1, 3) : input;
+    const auto input_bytes = bytes(input);
+    auto* baseline = ggml_ext_linear(c.ctx, x, w, bias, true, conditioning, (module + ".weight").c_str());
+    adapter.begin_graph();
+    auto* out = adapter.forward_with_lora(c.ctx, p.backend, x, w, bias, module + ".", linear(conditioning));
+    auto* g = graph(c, {out});
+    const auto coverage = adapter.report(g);
+    check(coverage.complete() && coverage.target_count == (with_ab ? 2u : 1u) &&
+          coverage.used.size() == coverage.target_count, "dense and A/B are separate covered targets");
+    adapter.validate_coverage(g);
+    std::set<ggml_tensor*> expected_weights{w, d};
+    if (with_ab) {
+        expected_weights.insert(adapter.tensors().at(module + ".lora_A.weight"));
+        expected_weights.insert(adapter.tensors().at(module + ".lora_B.weight"));
+    }
+    std::multiset<ggml_tensor*> matmul_weights;
+    for (int i = 0; i < ggml_graph_n_nodes(g); ++i) {
+        auto* node = ggml_graph_node(g, i);
+        if (node->op == GGML_OP_MUL_MAT) {
+            matmul_weights.insert(node->src[0]);
+            check(expected_weights.count(node->src[0]), "dense residual must not materialize merged weights");
+            if (node->src[0] == w) check(std::string(node->name) == module + ".weight", "dense preserves base matmul name");
+        }
+        // Matrix weights may only enter matmuls, never a cast/add/copy/requantization.
+        for (auto* src : node->src) if (src == w || src == d)
+            check(node->op == GGML_OP_MUL_MAT && node->src[0] == src, "no dense merge or full base dequantization");
+    }
+    check(matmul_weights == std::multiset<ggml_tensor*>(expected_weights.begin(), expected_weights.end()),
+          "exactly W*x, delta*x, and optional A*x/B*A*x");
+    for (int dim = 0; dim < 4; ++dim) check(out->ne[dim] == baseline->ne[dim], "dense 4D output shape");
+    unchanged(original, "dense graph construction changed parameter");
+    compute(c, graph(c, {baseline}));
+    compute(c, g);
+    for (int h = 0; h < 2; ++h) for (int z = 0; z < 3; ++z) for (int t = 0; t < 2; ++t) {
+        float ax[3] = {};
+        if (with_ab) for (int r = 0; r < 3; ++r) for (int k = 0; k < 32; ++k)
+            ax[r] += ar[r*32+k] * at(x, k, t, z, h);
+        for (int j = 0; j < 4; ++j) {
+            float dx = 0.f, bax = 0.f, wx = biasr[j];
+            for (int k = 0; k < 32; ++k) {
+                dx += dr[j*32+k] * at(x, k, t, z, h);
+                wx += wr[j*32+k] * at(x, k, t, z, h);
+            }
+            if (with_ab) for (int r = 0; r < 3; ++r) bax += br[j*3+r] * ax[r];
+            // For Q4, use the SAME untouched CPU base graph, not a dequantized
+            // scalar approximation or a newly quantized W+delta oracle.
+            close(at(out, j, t, z, h), at(baseline, j, t, z, h) + coefficient * (dx + bax),
+                  .00003f, "dense residual vs same CPU baseline");
+            if (base_type == GGML_TYPE_F32)
+                close(at(out, j, t, z, h), wx + coefficient * (dx + bax), .00003f, "dense+AB scalar oracle");
+        }
+    }
+    const auto first_result = bytes(out);
+    compute(c, g);
+    check(bytes(out) == first_result, "dense repeated compute drift");
+    unchanged(original, "dense execution changed base/payload");
+    check(bytes(input) == input_bytes, "dense execution changed input");
+}
+
+// Independent finite FP32 -> BF16 round-to-nearest-even oracle. In particular,
+// do not derive expected bytes from the adapter's cast or graph output.
+static uint16_t bf16_bits(float value) {
+    uint32_t bits; std::memcpy(&bits, &value, sizeof(bits));
+    return uint16_t((bits + 0x7fffU + ((bits >> 16) & 1U)) >> 16);
+}
+static float bf16_value(uint16_t value) {
+    uint32_t bits = uint32_t(value) << 16;
+    float result; std::memcpy(&result, &bits, sizeof(result)); return result;
+}
+static void dense_vectors(float coefficient, ggml_type payload_type) {
+    Params p; auto* w = p.add(module, GGML_TYPE_F32, 32, 8);
+    auto* bias = add_vector(p, module + ".bias", GGML_TYPE_BF16, 8);
+    auto* norm = add_vector(p, norm_key, GGML_TYPE_BF16, 8);
+    String2TensorStorage storage;
+    add_delta(storage, module + ".bias", payload_type, 8, 1, 1);
+    add_delta(storage, norm_key, payload_type, 8, 1, 1);
+    Adapter adapter(p.ctx, p.base, storage, coefficient, true);
+    p.alloc(); fill(w, .01f);
+    const std::vector<float> base_values{1.f, 1.0078125f, -1.f, -1.0078125f, .5f, .50390625f, -.5f, -.50390625f};
+    // Just above/below a BF16 halfway point, exact ties with even/odd LSBs,
+    // both signs. F32 cases also distinguish an erroneous early BF16 cast.
+    std::vector<float> delta_values{.0039215087890625f, .0038909912109375f, -.0039215087890625f,
+                                  -.0038909912109375f, .001953125f, .001953125f, -.001953125f, -.001953125f};
+    for (auto& v : delta_values) v /= coefficient;
+    const auto encoded_delta = encode(payload_type, delta_values, 8);
+    if (payload_type != GGML_TYPE_F32)
+        ggml_get_type_traits(payload_type)->to_float(encoded_delta.data(), delta_values.data(), delta_values.size());
+    store(bias, base_values); store(norm, base_values);
+    for (const auto& entry : adapter.tensors()) store(entry.second, delta_values);
+    const auto original = snapshot(p);
+    std::vector<uint16_t> expected_bits;
+    std::vector<float> expected_values;
+    bool premature_cast_differs = false, missing_cast_differs = false;
+    for (size_t i = 0; i < base_values.size(); ++i) {
+        const float update = coefficient * delta_values[i];
+        const float sum = base_values[i] + update;
+        const auto bits = bf16_bits(sum);
+        expected_bits.push_back(bits); expected_values.push_back(bf16_value(bits));
+        premature_cast_differs |= bits != bf16_bits(base_values[i] + bf16_value(bf16_bits(update)));
+        missing_cast_differs |= sum != expected_values.back();
+    }
+    check(missing_cast_differs, "BF16 fixture must expose omitted cast-back");
+    if (payload_type == GGML_TYPE_F32) check(premature_cast_differs, "BF16 fixture must expose premature rounding");
+    std::vector<uint8_t> expected_bytes(expected_bits.size() * sizeof(uint16_t));
+    std::memcpy(expected_bytes.data(), expected_bits.data(), expected_bytes.size());
+    Context c; auto* x = ggml_new_tensor_2d(c.ctx, GGML_TYPE_F32, 32, 2); fill(x, .03f);
+    auto* expected_bias = ggml_new_tensor_1d(c.ctx, GGML_TYPE_F32, 8); store(expected_bias, expected_values);
+    auto* baseline = ggml_ext_linear(c.ctx, x, w, expected_bias, true, 1.f, (module + ".weight").c_str());
+    adapter.begin_graph();
+    auto* patched_norm = adapter.patch_weight(c.ctx, p.backend, norm, norm_key);
+    auto* patched_bias = adapter.patch_weight(c.ctx, p.backend, bias, module + ".bias");
+    auto* out = adapter.forward_with_lora(c.ctx, p.backend, x, w, bias, module + ".", linear());
+    check(patched_norm != norm && patched_bias != bias, "vector update must be out-of-place");
+    check(patched_norm->type == GGML_TYPE_BF16 && patched_bias->type == GGML_TYPE_BF16, "vector retains base dtype");
+    auto* g = graph(c, {out, patched_norm, patched_bias});
+    adapter.validate_coverage(g);
+    for (auto* patched : {patched_norm, patched_bias}) {
+        check(patched->op == GGML_OP_CPY && patched->src[0]->op == GGML_OP_ADD &&
+              patched->src[0]->type == GGML_TYPE_F32 && patched->src[0]->src[0]->type == GGML_TYPE_F32 &&
+              patched->src[0]->src[1]->type == GGML_TYPE_F32, "vector FP32 add before BF16 cast-back");
+    }
+    unchanged(original, "vector graph construction changed parameter");
+    compute(c, graph(c, {patched_norm, patched_bias}));
+    check(bytes(patched_norm) == expected_bytes && bytes(patched_bias) == expected_bytes,
+          "standalone BF16 vector rounding oracle");
+    unchanged(original, "standalone vector execution changed base/payload");
+    for (int i = 0; i < ggml_graph_n_nodes(g); ++i) {
+        auto* node = ggml_graph_node(g, i);
+        // supports_op() accepts ADD too broadly in this CPU build; reject its
+        // known unsupported F32 + BF16 combination before ggml can abort.
+        const bool unsupported_add = node->op == GGML_OP_ADD && node->src[0]->type == GGML_TYPE_F32 &&
+                                     node->src[1]->type == GGML_TYPE_BF16;
+        check(!unsupported_add && ggml_backend_supports_op(p.backend, node),
+              std::string("dense BF16 linear CPU-unsupported op: ") + ggml_op_name(node->op) +
+              " dst=" + ggml_type_name(node->type) +
+              " src0=" + (node->src[0] ? ggml_type_name(node->src[0]->type) : "none") +
+              " src1=" + (node->src[1] ? ggml_type_name(node->src[1]->type) : "none"));
+    }
+    compute(c, graph(c, {baseline})); compute(c, g);
+    check(bytes(patched_norm) == expected_bytes, "BF16 norm FP32-add/RNE-cast oracle");
+    check(bytes(patched_bias) == expected_bytes, "BF16 bias FP32-add/RNE-cast oracle");
+    check(bytes(out) == bytes(baseline), "linear bias must use rounded BF16 update, not FP32 bias");
+    compute(c, g);
+    check(bytes(patched_norm) == expected_bytes && bytes(patched_bias) == expected_bytes && bytes(out) == bytes(baseline),
+          "vector repeated compute drift");
+    unchanged(original, "vector execution changed base/payload");
+}
+
+
+static void dense_zero_exact(bool with_ab) {
+    Params p; auto* w = p.add(module, GGML_TYPE_Q4_0);
+    auto* bias = add_vector(p, module + ".bias", GGML_TYPE_F32);
+    auto* norm = add_vector(p, norm_key);
+    String2TensorStorage storage;
+    add_delta(storage, module + ".weight");
+    add_delta(storage, module + ".bias", GGML_TYPE_BF16, 4, 1, 1);
+    add_delta(storage, norm_key, GGML_TYPE_F32, 4, 1, 1);
+    if (with_ab) add_pair(storage);
+    Adapter adapter(p.ctx, p.base, storage, 0.f, true);
+    p.alloc();
+    for (auto* t = ggml_get_first_tensor(p.ctx); t; t = ggml_get_next_tensor(p.ctx, t)) fill(t, .019f);
+    // Unused payloads contain NaNs: a zero-gain matmul/add is NOT an exact no-op.
+    for (const auto& entry : adapter.tensors()) store(entry.second, std::vector<float>(ggml_nelements(entry.second), NAN));
+    const auto original = snapshot(p);
+    Context c; auto* x = ggml_new_tensor_4d(c.ctx, GGML_TYPE_F32, 32, 2, 3, 2); fill(x, .015f);
+    auto* baseline = ggml_ext_linear(c.ctx, x, w, bias, true, 1.f/128.f, (module + ".weight").c_str());
+    auto* expected_norm = ggml_cast(c.ctx, norm, GGML_TYPE_F32);
+    adapter.begin_graph();
+    check(adapter.patch_weight(c.ctx, p.backend, norm, norm_key) == norm, "zero dense norm returns identical pointer");
+    check(adapter.patch_weight(c.ctx, p.backend, bias, module + ".bias") == bias, "zero dense bias returns identical pointer");
+    auto* out = adapter.forward_with_lora(c.ctx, p.backend, x, w, bias, module + ".", linear(1.f/128.f));
+    auto* actual_norm = ggml_cast(c.ctx, norm, GGML_TYPE_F32);
+    auto* expected = graph(c, {baseline, expected_norm}); auto* actual = graph(c, {out, actual_norm});
+    const auto coverage = adapter.report(actual);
+    check(coverage.complete() && coverage.target_count == (with_ab ? 4u : 3u), "zero dense-only coverage");
+    adapter.validate_coverage(actual);
+    check(adapter.get_extra_graph_size() == 0, "zero dense extra graph size");
+    identical_graph(expected, actual, "zero dense exact baseline");
+    namespace Cut = sd::ggml_graph_cut;
+    for (const auto& entry : adapter.tensors()) {
+        check(node_index(actual, entry.second) < 0, "zero dense payload cannot be a node");
+        for (int i = 0; i < Cut::leaf_count(actual); ++i)
+            check(Cut::leaf_tensor(actual, i) != entry.second, "zero dense payload cannot be reachable");
+    }
+    compute(c, expected); compute(c, actual);
+    check(bytes(out) == bytes(baseline) && bytes(actual_norm) == bytes(expected_norm), "zero dense output bytes");
+    unchanged(original, "zero dense changed base or NaN payload");
+}
+
+// Hand-built pre-dense A/B graph is the oracle for both the omitted flag and
+// explicit false; enabling the new feature without deltas must not change it.
+static void ab_graph_unchanged(int mode) {
+    Params p; auto* w = p.add(module, GGML_TYPE_Q4_0);
+    auto* bias = add_vector(p, module + ".bias", GGML_TYPE_F32);
+    String2TensorStorage storage; add_pair(storage);
+    const float coefficient = -.75f;
+    std::unique_ptr<Adapter> adapter;
+    if (mode == 0) adapter.reset(new Adapter(p.ctx, p.base, storage, coefficient));
+    else adapter.reset(new Adapter(p.ctx, p.base, storage, coefficient, mode == 2));
+    p.alloc();
+    for (auto* t = ggml_get_first_tensor(p.ctx); t; t = ggml_get_next_tensor(p.ctx, t)) fill(t, .007f);
+    const auto original = snapshot(p);
+    Context c; auto* input = ggml_new_tensor_4d(c.ctx, GGML_TYPE_F32, 32, 3, 2, 2); fill(input, .013f);
+    auto* x = ggml_permute(c.ctx, input, 0, 2, 1, 3);
+    auto* base = ggml_ext_linear(c.ctx, x, w, bias, true, 1.f/128.f, (module + ".weight").c_str());
+    auto* ax = ggml_ext_linear(c.ctx, x, adapter->tensors().at(module + ".lora_A.weight"), nullptr, true, 1.f);
+    auto* bax = ggml_ext_linear(c.ctx, ax, adapter->tensors().at(module + ".lora_B.weight"), nullptr, true, 1.f);
+    auto* reference = ggml_add(c.ctx, base, ggml_scale(c.ctx, bax, coefficient));
+    adapter->begin_graph();
+    auto* out = adapter->forward_with_lora(c.ctx, p.backend, x, w, bias, module + ".", linear(1.f/128.f));
+    auto* expected = graph(c, {reference}); auto* actual = graph(c, {out});
+    adapter->validate_coverage(actual);
+    identical_graph(expected, actual, "legacy A/B mode " + std::to_string(mode));
+    compute(c, expected); compute(c, actual);
+    check(bytes(reference) == bytes(out), "A/B exact result unchanged by opt-in API");
+    unchanged(original, "A/B opt-in API changed parameter");
+}
+
+static void dense_rejections() {
+    const auto wk = module + ".weight", dk = wk + ".delta";
+    auto bad = [&](const std::string& label, auto mutate) {
+        Params p; p.add(module); String2TensorStorage storage; add_delta(storage, wk);
+        mutate(p, storage);
+        const auto before = ggml_used_mem(p.ctx);
+        rejects([&] { Adapter a(p.ctx, p.base, storage, 1.f, true); }, "dense " + label);
+        check(ggml_used_mem(p.ctx) == before, "dense rejection partially allocated runner: " + label);
+    };
+    for (bool with_ab : {false, true}) for (float coefficient : {0.f, 1.f}) {
+        Params p; p.add(module); String2TensorStorage s; add_delta(s, wk);
+        if (with_ab) add_pair(s);
+        const auto before = ggml_used_mem(p.ctx);
+        rejects([&] { Adapter a(p.ctx, p.base, s, coefficient); }, "default false rejects .delta");
+        rejects([&] { Adapter a(p.ctx, p.base, s, coefficient, false); }, "explicit false rejects .delta");
+        check(ggml_used_mem(p.ctx) == before, "guarded opt-in must validate before allocation");
+    }
+    bad("missing base", [&](auto& p, auto&) { p.base.clear(); });
+    bad("null base", [&](auto& p, auto&) { p.base[wk] = nullptr; });
+    bad("key/name mismatch", [&](auto&, auto& s) { s.at(dk).name = module + ".bias.delta"; });
+    bad("duplicate storage alias", [&](auto&, auto& s) { s.emplace("alias", s.at(dk)); });
+    bad("base identity alias", [&](auto& p, auto& s) { p.base[module + "_alias.weight"] = p.base.at(wk); add_delta(s, module + "_alias.weight"); });
+    bad("A/B and dense base identity alias", [&](auto& p, auto& s) { p.base[module + "_alias.weight"] = p.base.at(wk); add_pair(s, module + "_alias"); });
+    bad("base type", [&](auto& p, auto&) { p.base.at(wk)->type = GGML_TYPE_I32; });
+    bad("nonleaf base", [&](auto& p, auto&) { p.base.at(wk)->op = GGML_OP_ADD; });
+    bad("view base", [&](auto& p, auto&) { p.base[wk] = ggml_view_tensor(p.ctx, p.base.at(wk)); });
+    bad("noncontiguous base", [&](auto& p, auto&) { p.base.at(wk)->nb[1] *= 2; });
+    bad("input shape", [&](auto&, auto& s) { s.at(dk).ne[0] = 31; });
+    bad("output shape", [&](auto&, auto& s) { s.at(dk).ne[1] = 5; });
+    bad("zero dimension", [&](auto&, auto& s) { s.at(dk).ne[0] = 0; });
+    bad("negative dimension", [&](auto&, auto& s) { s.at(dk).ne[1] = -1; });
+    bad("rank-3 payload", [&](auto&, auto& s) { s.at(dk).n_dims = 3; });
+    bad("rank-0 payload", [&](auto&, auto& s) { s.at(dk).n_dims = 0; });
+    bad("hidden dimension", [&](auto&, auto& s) { s.at(dk).ne[4] = 2; });
+    bad("overflow", [&](auto&, auto& s) { s.at(dk).ne[0] = std::numeric_limits<int64_t>::max(); });
+    bad("quantized payload", [&](auto&, auto& s) { s.at(dk).type = GGML_TYPE_Q4_0; });
+    bad("integer payload", [&](auto&, auto& s) { s.at(dk).type = GGML_TYPE_I32; });
+    bad("dtype conversion", [&](auto&, auto& s) { s.at(dk).expected_type = GGML_TYPE_F16; });
+    bad("FP8 payload", [&](auto&, auto& s) { s.at(dk).is_f8_e5m2 = true; });
+    bad("F64 payload", [&](auto&, auto& s) { s.at(dk).is_f64 = true; });
+    bad("reordered payload", [&](auto&, auto& s) { s.at(dk).swap_scale_shift = true; });
+    bad("existing delta name", [&](auto& p, auto&) { ggml_set_name(ggml_new_tensor_1d(p.ctx, GGML_TYPE_F32, 1), dk.c_str()); });
+    bad("unnormalized target", [&](auto&, auto& s) { s.clear(); add_delta(s, "diffusion_model.blocks.0.attn.qkv_proj.weight"); });
+    bad("unsupported dense suffix", [&](auto&, auto& s) { s.clear(); add_delta(s, module + ".alpha"); });
+    bad("incomplete A/B beside delta", [&](auto&, auto& s) { add_pair(s); s.erase(module + ".lora_B.weight"); });
+    for (int rank : {0, 2049}) bad("invalid A/B rank beside delta", [&](auto&, auto& s) { add_pair(s, module, GGML_TYPE_F32, GGML_TYPE_F32, 32, rank); });
+    bad("mismatched A/B rank beside delta", [&](auto&, auto& s) { add_pair(s); s.at(module + ".lora_B.weight").ne[0] = 2; });
+    {
+        Params p, foreign; p.base[wk] = foreign.add(module);
+        String2TensorStorage s; add_delta(s, wk);
+        const auto before = ggml_used_mem(p.ctx);
+        rejects([&] { Adapter a(p.ctx, p.base, s, 1.f, true); }, "dense foreign runner identity");
+        check(ggml_used_mem(p.ctx) == before, "foreign runner rejection allocated payload");
+    }
+    for (const auto& key : {module + ".bias", norm_key}) {
+        Params p; add_vector(p, key); String2TensorStorage s; add_delta(s, key, GGML_TYPE_F32, 5, 1, 1);
+        const auto before = ggml_used_mem(p.ctx);
+        rejects([&] { Adapter a(p.ctx, p.base, s, 1.f, true); }, "dense vector shape mismatch");
+        check(ggml_used_mem(p.ctx) == before, "vector shape rejection allocated payload");
+    }
+}
+
+static void dense_coverage_and_paths() {
+    // Reject a discarded delta even when BOTH its base and payload are still
+    // graph-reachable. Mere leaf presence or an earlier forward call is not use.
+    for (int kind = 0; kind < 3; ++kind) {
+        Params p; auto* w = p.add(module);
+        auto* bias = add_vector(p, module + ".bias", GGML_TYPE_F32);
+        auto* norm = add_vector(p, norm_key, GGML_TYPE_F32);
+        const std::string key = kind == 0 ? module + ".weight" : kind == 1 ? module + ".bias" : norm_key;
+        auto* base = p.base.at(key);
+        String2TensorStorage s; add_delta(s, key, GGML_TYPE_F32, base->ne[0], base->ne[1], kind ? 1 : 2);
+        Adapter a(p.ctx, p.base, s, 1.f, true);
+        Context c; auto* x = ggml_new_tensor_2d(c.ctx, GGML_TYPE_F32, 32, 2);
+        auto forward = [&] { return a.forward_with_lora(c.ctx, p.backend, x, w, bias, module + ".", linear()); };
+        auto use = [&] { return kind == 2 ? a.patch_weight(c.ctx, p.backend, norm, norm_key) : forward(); };
+        rejects([&] { use(); }, "dense begin_graph required");
+        a.begin_graph();
+        rejects([&] { a.validate_coverage(); }, "dense unused coverage");
+        auto* out = use();
+        check(a.report().complete() && a.report().target_count == 1, "dense call coverage");
+        auto* plain = ggml_ext_linear(c.ctx, x, w, bias, true, 1.f);
+        auto* payload_decoy = ggml_sum(c.ctx, a.tensors().at(key + ".delta"));
+        auto* base_decoy = ggml_sum(c.ctx, norm);
+        auto* discarded = graph(c, {plain, payload_decoy, base_decoy});
+        const auto missing = a.report(discarded);
+        check(missing.unused == std::vector<std::string>{key + ".delta"}, "discarded dense output must report exact target");
+        rejects([&] { a.validate_coverage(discarded); }, "discarded dense output with reachable base/payload");
+        auto* full = graph(c, {out});
+        a.validate_coverage(full);
+        rejects([&] { use(); }, "dense validated graph scope closes");
+        a.begin_graph();
+        check(a.report().used.empty(), "dense begin_graph resets all calls");
+        rejects([&] { a.validate_coverage(full); }, "dense previous output must not leak across graph scopes");
+        auto* replacement = ggml_new_tensor_2d(c.ctx, base->type, base->ne[0], base->ne[1]);
+        if (kind == 0) {
+            rejects([&] { a.forward_with_lora(c.ctx, p.backend, x, replacement, bias, module + ".", linear()); }, "dense changed matrix identity");
+            rejects([&] { a.forward_with_lora(c.ctx, p.backend, x, w, bias, "alias.", linear()); }, "dense matrix key alias");
+            rejects([&] { a.patch_weight(c.ctx, p.backend, w, key); }, "dense matrix cannot merge through patch_weight");
+        } else {
+            rejects([&] { a.patch_weight(c.ctx, p.backend, replacement, key); }, "dense changed vector identity");
+            rejects([&] { a.patch_weight(c.ctx, p.backend, base, "alias.weight"); }, "dense vector key alias");
+            if (kind == 1) {
+                rejects([&] { a.forward_with_lora(c.ctx, p.backend, x, w, replacement, module + ".", linear()); }, "dense changed forward bias identity");
+                auto* other_w = ggml_new_tensor_2d(c.ctx, GGML_TYPE_F32, 32, 4);
+                rejects([&] { a.forward_with_lora(c.ctx, p.backend, x, other_w, bias, "alias.", linear()); }, "dense forward bias key alias");
+            }
+        }
+        if (kind < 2) {
+            auto conv = linear(); conv.op_type = WeightAdapter::ForwardParams::op_type_t::OP_CONV2D;
+            rejects([&] { a.forward_with_lora(c.ctx, p.backend, x, w, bias, module + ".", conv); }, "dense convolution target rejected");
+            auto* bad_x = ggml_new_tensor_2d(c.ctx, GGML_TYPE_F32, 31, 2);
+            rejects([&] { a.forward_with_lora(c.ctx, p.backend, bad_x, w, bias, module + ".", linear()); }, "dense activation shape mismatch");
+        }
+        check(a.report().used.empty(), "failed dense calls must not count as use");
+    }
+    Params p; auto* w = p.add(module); auto* norm = add_vector(p, norm_key, GGML_TYPE_F32);
+    String2TensorStorage s; add_pair(s); add_delta(s, module + ".weight"); add_delta(s, norm_key, GGML_TYPE_F32, 4, 1, 1);
+    Adapter a(p.ctx, p.base, s, 1.f, true);
+    Context c; auto* x = ggml_new_tensor_2d(c.ctx, GGML_TYPE_F32, 32, 2);
+    a.begin_graph();
+    auto* y = a.forward_with_lora(c.ctx, p.backend, x, w, nullptr, module + ".", linear());
+    check(a.report().target_count == 3 && a.report().unused == std::vector<std::string>{norm_key + ".delta"}, "partial mixed A/B+dense coverage");
+    rejects([&] { a.validate_coverage(graph(c, {y})); }, "incomplete mixed dense coverage");
+    auto* n = a.patch_weight(c.ctx, p.backend, norm, norm_key);
+    rejects([&] { a.validate_coverage(graph(c, {y})); }, "called but discarded norm delta in mixed graph");
+    rejects([&] { a.validate_coverage(graph(c, {n})); }, "called but discarded matrix delta in mixed graph");
+    a.validate_coverage(graph(c, {y, n}));
+}
+
+static void dense_graph_cut_staging() {
+    namespace Cut = sd::ggml_graph_cut;
+    struct Marks { Marks() { Cut::clear_graph_cut_marks(); } ~Marks() { Cut::clear_graph_cut_marks(); } } marks;
+    Params p;
+    const std::string second = "model.diffusion_model.blocks.1.attn.out_proj";
+    auto* w0 = p.add(module, GGML_TYPE_Q4_0, 32, 32);
+    auto* w1 = p.add(second, GGML_TYPE_Q4_0, 32, 4);
+    auto* b0 = add_vector(p, module + ".bias", GGML_TYPE_F32, 32);
+    auto* norm = add_vector(p, norm_key, GGML_TYPE_BF16, 32);
+    auto* unused = p.add("model.diffusion_model.unused");
+    String2TensorStorage s;
+    add_pair(s, module, GGML_TYPE_F32, GGML_TYPE_F32, 32, 3, 32);
+    add_pair(s, second);
+    add_delta(s, module + ".weight", GGML_TYPE_F32, 32, 32);
+    add_delta(s, second + ".weight");
+    add_delta(s, module + ".bias", GGML_TYPE_BF16, 32, 1, 1);
+    add_delta(s, norm_key, GGML_TYPE_F32, 32, 1, 1);
+    Adapter adapter(p.ctx, p.base, s, .5f, true);
+    p.alloc();
+    std::unordered_set<const ggml_tensor*> parameter_set;
+    for (auto* t = ggml_get_first_tensor(p.ctx); t; t = ggml_get_next_tensor(p.ctx, t)) {
+        parameter_set.insert(t); fill(t, .001f);
+        check(t->buffer == p.buffer && t->data && !(t->flags & GGML_TENSOR_FLAG_PARAM), "dense inference leaf ownership");
+    }
+    const auto original = snapshot(p);
+    Context c(true); auto* x = ggml_new_tensor_2d(c.ctx, GGML_TYPE_F32, 32, 2); ggml_set_input(x);
+    adapter.begin_graph();
+    auto* patched = adapter.patch_weight(c.ctx, p.backend, norm, norm_key);
+    auto* normed = ggml_mul(c.ctx, x, ggml_cast(c.ctx, patched, GGML_TYPE_F32));
+    auto* y0 = adapter.forward_with_lora(c.ctx, p.backend, normed, w0, b0, module + ".", linear(1.f/128.f));
+    auto* y1 = adapter.forward_with_lora(c.ctx, p.backend, y0, w1, nullptr, second + ".", linear(1.f/128.f));
+    Cut::mark_graph_cut(y0, "block0", "out"); Cut::mark_graph_cut(y1, "block1", "out");
+    auto* g = graph(c, {y1}); adapter.validate_coverage(g);
+    std::set<ggml_tensor*> expected_all{w0, w1, b0, norm}, leaves;
+    for (const auto& entry : adapter.tensors()) expected_all.insert(entry.second);
+    for (int i = 0; i < Cut::leaf_count(g); ++i) leaves.insert(Cut::leaf_tensor(g, i));
+    for (auto* t : expected_all) check(leaves.count(t) && node_index(g, t) == -1, "base/A/B/delta must all be graph leaves");
+    const auto plan = Cut::build_plan(p.backend, g, parameter_set, "h3-dense-staging");
+    check(plan.available && plan.valid && plan.has_cuts && plan.segments.size() == 2, "dense two-cut plan");
+    std::set<ggml_tensor*> all_staged;
+    size_t total_bytes = 0;
+    for (const auto& segment : plan.segments) {
+        const bool first = segment.group_name == "block0";
+        check(first || segment.group_name == "block1", "unexpected dense cut group");
+        const auto& name = first ? module : second;
+        std::set<ggml_tensor*> expected{first ? w0 : w1, adapter.tensors().at(name + ".lora_A.weight"),
+            adapter.tensors().at(name + ".lora_B.weight"), adapter.tensors().at(name + ".weight.delta")};
+        if (first) { expected.insert(b0); expected.insert(norm); expected.insert(adapter.tensors().at(module + ".bias.delta")); expected.insert(adapter.tensors().at(norm_key + ".delta")); }
+        std::set<ggml_tensor*> classified;
+        bool previous_cut = false;
+        for (const auto& input : segment.input_refs) {
+            auto* t = Cut::input_tensor(g, input);
+            if (parameter_set.count(t)) {
+                check(input.type == Cut::Segment::INPUT_PARAM && input.leaf_index >= 0 && input.node_index == -1,
+                      "dense base/A/B/delta classification must be leaf INPUT_PARAM");
+                classified.insert(t);
+            }
+            previous_cut |= input.type == Cut::Segment::INPUT_PREVIOUS_CUT;
+        }
+        check(previous_cut == !first, "dense cut activation boundary");
+        check(classified == expected, "dense cut parameter classification");
+        const auto selected = Cut::runtime_param_tensors(g, segment, "h3-dense-staging");
+        check(std::set<ggml_tensor*>(selected.begin(), selected.end()) == expected && selected.size() == expected.size(),
+              "dense runtime staging must include exact base+A+B+deltas");
+        size_t expected_bytes = 0;
+        for (auto* t : expected) expected_bytes += ggml_nbytes(t);
+        check(segment.input_param_bytes == expected_bytes, "dense INPUT_PARAM byte accounting");
+        total_bytes += segment.input_param_bytes;
+        all_staged.insert(selected.begin(), selected.end());
+    }
+    size_t expected_bytes = 0;
+    for (auto* t : expected_all) expected_bytes += ggml_nbytes(t);
+    check(all_staged == expected_all && !all_staged.count(unused), "dense staging excludes unreachable base");
+    check(total_bytes == expected_bytes, "dense total staged bytes");
+    unchanged(original, "dense graph-cut planning changed parameter");
+}
+
+static void dense_zero_leaf_only() {
+    Params p;
+    auto* w = add_vector(p, norm_key, GGML_TYPE_BF16, 4);
+    String2TensorStorage storage;
+    add_delta(storage, norm_key, GGML_TYPE_BF16, 4, 1, 1);
+    Adapter adapter(p.ctx, p.base, storage, 0.f, true);
+    p.alloc();
+    Context c;
+    adapter.begin_graph();
+    auto* result = adapter.patch_weight(c.ctx, p.backend, w, norm_key);
+    check(result == w, "zero vector patch should return original leaf");
+    auto* g = graph(c, {result});
+    check(ggml_graph_n_nodes(g) == 0, "leaf-only regression must have no compute nodes");
+    adapter.validate_coverage(g);
+}
+
 int main() {
-    try {
-        static_assert(GGML_MAX_NAME == 128, "compile against the existing maxname128 build");
+    dense_zero_leaf_only();
+    static_assert(GGML_MAX_NAME == 128, "compile against the existing maxname128 build");
+    int failures = 0;
+    const auto run = [&](const std::string& name, auto test) {
+        try { test(); }
+        catch (const std::exception& e) {
+            ++failures;
+            std::cerr << "h3_dynamic_lora_test: FAIL [" << name << "]: " << e.what() << '\n';
+        }
+    };
+    run("dense F32+AB", [] { dense_numerical(GGML_TYPE_F32, 1.f, 1.f, true); });
+    run("dense F32+AB strided negative", [] { dense_numerical(GGML_TYPE_F32, -1.25f, 1.f/128.f, true, true); });
+    run("dense Q4", [] { dense_numerical(GGML_TYPE_Q4_0, .7f, 1.f/128.f, false); });
+    run("dense Q4+AB strided negative", [] { dense_numerical(GGML_TYPE_Q4_0, -.5f, 1.f/128.f, true, true); });
+    for (auto type : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16}) for (float coefficient : {1.f, -.75f})
+        run(std::string("BF16 norm/bias ") + ggml_type_name(type) + " coefficient=" + std::to_string(coefficient),
+            [&] { dense_vectors(coefficient, type); });
+    run("zero dense-only", [] { dense_zero_exact(false); });
+    run("zero dense+AB", [] { dense_zero_exact(true); });
+    for (int mode = 0; mode < 3; ++mode) run("A/B exact graph mode=" + std::to_string(mode), [&] { ab_graph_unchanged(mode); });
+    run("dense invalid metadata/opt-in", dense_rejections);
+    run("dense coverage/identity", dense_coverage_and_paths);
+    run("dense graph-cut staging", dense_graph_cut_staging);
+    run("legacy A/B regression suite", [] {
         graph_cut_param_staging();
         numerical(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, 1.f, 1.f);
         numerical(GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, -1.25f, 1.f/128.f, 3, 2, true);
@@ -497,9 +1042,8 @@ int main() {
         numerical(GGML_TYPE_Q4_0, GGML_TYPE_F32, GGML_TYPE_F32, .5f, 1.f/128.f, 1025);
         numerical(GGML_TYPE_Q4_0, GGML_TYPE_F32, GGML_TYPE_F32, .5f, 1.f/128.f, 1025, 1, true);
         zero_exact(); rejections(); coverage_and_paths(); loader_roundtrip();
-        std::cout << "h3_dynamic_lora_test: PASS (" << checks << " checks, " << graphs << " CPU graphs)\n";
-        return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "h3_dynamic_lora_test: FAIL: " << e.what() << '\n'; return 1;
-    }
+    });
+    std::cout << "h3_dynamic_lora_test: " << (failures ? "FAIL" : "PASS") << " (" << checks << " checks, "
+              << graphs << " CPU graphs, " << failures << " failed groups)\n";
+    return failures ? 1 : 0;
 }

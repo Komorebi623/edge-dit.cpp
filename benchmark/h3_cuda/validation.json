@@ -642,5 +642,15 @@
     "cuda_tiny": "10cases20graphs142278checks",
     "VSA_integrated": false,
     "note": "Model+NFE change, not lossless sameweights optimization. No baseline reruns; no unrelated processes changed."
+  },
+  "fastvideo_adapter_preparation": {
+    "date": "2026-10-14",
+    "status": "CPU_and_build_validated_GPU_pending",
+    "results": "benchmark/h3_cuda/fastvideo-adapter-progress.json",
+    "CPU_ctest": "16/16",
+    "normalization_tests": "18/18",
+    "VSA_gate_payload_downloaded_and_hashed": true,
+    "VSA_production_enabled": false,
+    "GPU_generation": false
   }
 }

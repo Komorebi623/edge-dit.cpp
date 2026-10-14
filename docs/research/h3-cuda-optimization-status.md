@@ -1,5 +1,7 @@
 # MiniMax-H3 CUDA 优化：环境、基线与逐项验证
 
+> **2026-10-14 FastVideo CPU接续**：完整dense adapter支持（258对＋85delta）及独立VSA压缩图组件已通过CPU回归16/16、normalizer18/18；VSA真实BF16训练权重5.34GB已4线程下载校验，50gate非零。GPU8卡仍占用，FastVideo/Ref4尚未生成，VSA开关未启用。看`h3-fastvideo-adapter-progress.md`和`fastvideo-adapter-progress.json`，不要覆盖此前已验证Larry4性能。
+
 > **2026-10-14 LoRA实现里程碑**：IPv4/TLS合法下载已解决，原Q4＋BF16独立增量接入；Larry4步106.12s、LightFL4步110.85s vs原254.33s，Larry首末帧smoke通过。默认关闭、H3/CUDA单方法、不重跑baseline。Ref4已下载/转换但8卡被无关训练占用，mixed未启动；VSA/三链接身份仍独立待办。看`h3-lora-results.md`与`benchmark/h3_cuda/lora-results.json`。
 
 > **2026-10-14 LoRA尝试最新状态**：ModelScope模型卡/文件SHA元数据已可读，收敛Larry4步与LightX2V4步候选；CDN实际返回校园网认证HTML（auth6.tsinghua.edu.cn），尚无真实adapter可加载。用户需认证服务器网络或提供本地LoRA；不绕过认证。无新模型baseline/生产代码改动/LoRA GPU实验。见`lora-trial-plan.json`与LoRA审计第8节。

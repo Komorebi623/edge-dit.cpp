@@ -1458,12 +1458,12 @@ namespace MiniMaxH3 {
         Config config;
         MiniMaxH3Transformer3DModel model;
         std::shared_ptr<DynamicLoraAdapter> dynamic_lora;
-        void configure_dynamic_lora(const String2TensorStorage& adapter, float coefficient) {
+        void configure_dynamic_lora(const String2TensorStorage& adapter, float coefficient, bool allow_dense_deltas = false) {
             if (dynamic_lora || weight_adapter || model.cuda_optimizations.any_enabled())
                 throw std::invalid_argument("H3 dynamic LoRA requires an independent immutable adapter");
             std::map<std::string, ggml_tensor*> base;
             model.get_param_tensors(base, "model.diffusion_model");
-            dynamic_lora = std::make_shared<DynamicLoraAdapter>(params_ctx, base, adapter, coefficient);
+            dynamic_lora = std::make_shared<DynamicLoraAdapter>(params_ctx, base, adapter, coefficient, allow_dense_deltas);
             set_weight_adapter(dynamic_lora);
             validate_dynamic_lora_mode();
         }

@@ -709,6 +709,9 @@ static nlohmann::json h3_dynamic_lora_manifest(const char* path, const ModelLoad
     std::ifstream input(manifest); nlohmann::json d; input >> d;
     if (d.at("schema_version") != 1 || d.at("kind") != "minimax-h3-dynamic-lora")
         throw std::invalid_argument("H3 dynamic LoRA manifest schema invalid");
+    const std::string payload = d.value("payload_format", "low-rank-v1");
+    if (payload != "low-rank-v1" && payload != "fastvideo-dense-v1")
+        throw std::invalid_argument("H3 dynamic LoRA payload format unsupported; VSA requires its own validated path");
     const std::string partition = d.at("base_partition").get<std::string>();
     if (partition != "fl2va" && partition != "ref2va") throw std::invalid_argument("H3 LoRA base partition invalid");
     const std::string file = d.at("adapter_file").get<std::string>();
@@ -889,7 +892,8 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     // are known, before allocating or staging any model parameters.
     diffusion_->configure_cuda_optimizations(runner_options);
     if (!dynamic_manifest.is_null())
-        diffusion_->configure_dynamic_lora(dynamic_loader.get_tensor_storage_map(), dynamic_manifest.at("coefficient").get<float>());
+        diffusion_->configure_dynamic_lora(dynamic_loader.get_tensor_storage_map(), dynamic_manifest.at("coefficient").get<float>(),
+            dynamic_manifest.value("payload_format", "low-rank-v1") == "fastvideo-dense-v1");
     if (!diffusion_->alloc_params_buffer()) return set_minimax_error(error, "H3 DiT parameter allocation failed");
     if (!dynamic_manifest.is_null()) {
         if (!dynamic_loader.load_tensors(diffusion_->dynamic_lora->tensors(), {}, 6))
