@@ -247,6 +247,7 @@ public:
     };
 private:
     friend class GraphInputs;
+    friend class TransientBudget;
     struct Slot {
         Shape shape{};
         size_t bytes = 0;
@@ -431,6 +432,23 @@ public:
         for (size_t j = 0; j < projection_count_; ++j) if (!slot(token, j)->data) return false;
         return true;
     }
+};
+
+// Charge request-scoped auxiliary buffers against the same cache budget.
+// Reset does not erase this charge while its owner still retains the bytes.
+class TransientBudget {
+    Cache& cache_;
+    size_t bytes_ = 0;
+    bool valid_ = false;
+public:
+    TransientBudget(Cache& cache, size_t bytes) : cache_(cache) {
+        if (!cache_.reserve(bytes)) return;
+        cache_.staging_bytes_ += bytes; bytes_ = bytes; valid_ = true;
+    }
+    ~TransientBudget() { cache_.staging_bytes_ -= bytes_; }
+    TransientBudget(const TransientBudget&) = delete;
+    TransientBudget& operator=(const TransientBudget&) = delete;
+    bool valid() const { return valid_; }
 };
 
 inline bool is_cuda_backend(ggml_backend_t backend) {

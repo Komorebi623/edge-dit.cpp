@@ -1,0 +1,100 @@
+{
+  "date": "2026-10-14",
+  "status": "repair_implemented_partial_validation_user_stopped_repeats",
+  "baseline_source": "97cc585d9dbd9ac5e30b78ef2e2c4a0d8bfbe9f2",
+  "candidate_source_tree_sha256": "6cbc640379a25562ba8d056f8b9bb75ad98e08641397ba25eb2ffc71703305f9",
+  "baseline_mixed_statistics": {
+    "ref_mixed": {
+      "cli_wall_ms": {
+        "count": 3,
+        "max": 628244.24864701,
+        "mean": 627992.9864944424,
+        "median": 628115.5511541292,
+        "min": 627619.1596821882,
+        "stdev": 330.07669614589054
+      },
+      "conditioning_ms": {
+        "count": 3,
+        "max": 23829,
+        "mean": 23814.333333333332,
+        "median": 23812,
+        "min": 23802,
+        "stdev": 13.650396819628847
+      },
+      "decode_ms": {
+        "count": 3,
+        "max": 10389,
+        "mean": 10345.333333333334,
+        "median": 10335,
+        "min": 10312,
+        "stdev": 39.52636251077669
+      },
+      "diffusion_ms": {
+        "count": 3,
+        "max": 548084,
+        "mean": 547811,
+        "median": 547892,
+        "min": 547457,
+        "stdev": 321.2522373462946
+      },
+      "noise_ms": {
+        "count": 3,
+        "max": 536,
+        "mean": 529,
+        "median": 527,
+        "min": 524,
+        "stdev": 6.244997998398398
+      },
+      "total_ms": {
+        "count": 3,
+        "max": 597644,
+        "mean": 597404.3333333334,
+        "median": 597473,
+        "min": 597096,
+        "stdev": 280.3789102863005
+      }
+    }
+  },
+  "candidate_mixed_completed_measured_runs": [
+    {
+      "wall_ms": 571529.243288096,
+      "diffusion_ms": 464764,
+      "output": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-adaln-fix-20261014/accept-mixed/candidate/ref_mixed-001.mp4",
+      "decoded_framemd5_body_identical": true,
+      "decoded_audio_identical": true,
+      "mp4_sha256": "b98d36e4f0b1f710a33ec278e78ef5ac1ca61c564a7051f538e8f5dab3fe42f4",
+      "byte_identical_baseline_outputs": [
+        "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-adaln-fix-20261014/accept-mixed/baseline/ref_mixed-001.mp4",
+        "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-adaln-fix-20261014/accept-mixed/baseline/ref_mixed-002.mp4"
+      ]
+    },
+    {
+      "wall_ms": 565665.7793449704,
+      "diffusion_ms": 464638,
+      "output": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-adaln-fix-20261014/accept-mixed/candidate/ref_mixed-002.mp4",
+      "decoded_framemd5_body_identical": false,
+      "decoded_audio_identical": false,
+      "mp4_sha256": "27391df4c01a0cb1206b2bc42d3cee3650e7d0c1e6523c96b2b5846fe4091816",
+      "byte_identical_baseline_outputs": [
+        "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-adaln-fix-20261014/accept-mixed/baseline/ref_mixed-003.mp4"
+      ]
+    }
+  ],
+  "formal_three_repeat_acceptance_complete": false,
+  "t2va_final_fix02_run": false,
+  "stop_reason": "User requested stop repeated validation and proceed to SubBlock. Remaining mixed run was stopped; T2VA and final modal8 were not launched. Preserve pending raw report, do not fabricate completed workflow status.",
+  "tests_completed": {
+    "cpu_ctest": "14/14",
+    "workflow_media": "53/53",
+    "cuda_tiny_comparisons": 48,
+    "locked_weight_projection_comparisons_fix01": 306,
+    "fix01_profile_mixed": "SSIM1, 124/124 exact frames, audioRMSE0"
+  },
+  "evidence_root": "_scratch/h3-adaln-fix-20261014",
+  "raw_reports": {
+    "_scratch/h3-adaln-fix-20261014/accept-mixed/baseline/report.json": "1e70023385f0855b8a17d42d0c9b8619fe973b94e9d0e32b83aa40843f1ef8c4",
+    "_scratch/h3-adaln-fix-20261014/accept-mixed/candidate/report.json": "9fb16a74aa020eb8d4450f03f68e43a20f74a5c6c11dfe0947a0f653a0996d27",
+    "_scratch/h3-adaln-fix-20261014/acceptance-status.json": "c533f880a9cba90d199a9519b304ef6050c99bdf41988322f44a6fd71f9f8c49"
+  },
+  "quality_note": "Both completed candidates match one baseline repeat byte-for-byte; baseline repeats themselves are not all identical. Candidate2 matches baseline3, NOT index-paired baseline2. Do not claim all repeated pairwise comparisons bitexact or completed formal comparison."
+}

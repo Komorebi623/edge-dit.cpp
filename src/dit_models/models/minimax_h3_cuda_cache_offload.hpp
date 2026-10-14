@@ -284,7 +284,8 @@ public:
     // merge is the same adjacent greedy policy, but its admission sizes are
     // measured with scoped boundaries rather than recursive historical leafs.
     typename BaseRunner::GraphCutPlan h3_cache_plan(ggml_cgraph* graph,
-            const std::unordered_set<const ggml_tensor*>& parameters, size_t budget, bool merge) {
+            const std::unordered_set<const ggml_tensor*>& parameters, size_t budget, bool merge,
+            const char* method = "Cache-DiT") {
         namespace Cut = sd::ggml_graph_cut;
         using Segment = typename BaseRunner::GraphCutSegment;
         auto base = Cut::build_plan(this->runtime_backend, graph, parameters, "h3-cache-offload");
@@ -350,8 +351,8 @@ public:
             for (const auto& input : i->input_refs)
                 if (input.type == Segment::INPUT_PREVIOUS_CUT) future.insert(input.display_name);
         }
-        LOG_INFO("minimax-h3 Cache-DiT scoped plan: base_segments=%zu merged_segments=%zu budget=%zu",
-                 base.segments.size(), plan.segments.size(), budget);
+        LOG_INFO("minimax-h3 %s scoped plan: base_segments=%zu merged_segments=%zu budget=%zu",
+                 method, base.segments.size(), plan.segments.size(), budget);
         return plan;
     }
     PassResult h3_cache_run_pass(Builder build, CudaDualBlockGraphPass& pass,

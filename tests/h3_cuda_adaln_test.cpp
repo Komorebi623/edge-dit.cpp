@@ -632,11 +632,23 @@ static void layer_major_runner_test(bool curves) {
 }
 
 #endif
+static void transient_budget_test() {
+    auto c=contract(); Cache cache({true,1u<<20,100});
+    expect(cache.begin_request(c),Status::Stored,"transient budget begin");
+    const auto initial=cache.used_bytes();
+    { TransientBudget temporary(cache,1234);
+      check(temporary.valid() && cache.used_bytes()==initial+1234,"temporary embedding bytes not charged");
+      {TransientBudget oversized(cache,cache.max_bytes());check(!oversized.valid(),"oversize temporary accepted");}
+      check(cache.used_bytes()==initial+1234,"failed temporary changed budget");
+      cache.reset();check(cache.used_bytes()==1234,"reset lost live embedding reservation");
+    }
+    check(cache.used_bytes()==0,"embedding reservation leaked after scope");
+}
 int main(){try{
 #ifdef H3_ADALN_TEST_REAL_RUNNER
     ggml_backend_register(h3_adaln_cpu_reg());
 #endif
-    identity_tests();validation_budget_tests();layout_and_staging_tests();import_budget_test();tensor_rejection_tests();graph_tests(false);graph_tests(true);
+    transient_budget_test();identity_tests();validation_budget_tests();layout_and_staging_tests();import_budget_test();tensor_rejection_tests();graph_tests(false);graph_tests(true);
 #ifdef H3_ADALN_TEST_REAL_RUNNER
     real_runner_test(false);real_runner_test(true);
     segmented_runner_test(false);segmented_runner_test(true);segmented_failure_test();

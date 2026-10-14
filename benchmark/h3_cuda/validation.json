@@ -599,5 +599,11 @@
       "processes_modified": false
     },
     "completion_audit": "_scratch/h3-offload-20261014/completion-audit.json"
+  },
+  "adaln_repair": {
+    "date": "2026-10-14",
+    "status": "repair_implemented_partial_validation_user_stopped_repeats",
+    "results": "benchmark/h3_cuda/adaln-fix-results.json",
+    "note": "User requested stop repeated validation and proceed to SubBlock. Remaining mixed run was stopped; T2VA and final modal8 were not launched. Preserve pending raw report, do not fabricate completed workflow status."
   }
 }

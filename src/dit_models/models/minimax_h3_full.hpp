@@ -1775,11 +1775,7 @@ namespace MiniMaxH3 {
             return ggml_concat(ctx, video, audio, 3);
         }
 
-        ggml_cgraph* build_adaln_projection_graph(ExactAdaLN::Cache& cache,
-                                                 ExactAdaLN::Cache::StepToken token,
-                                                 const ExactAdaLN::StepPlan& plan,
-                                                 size_t first_projection = 0,
-                                                 size_t projection_count = std::numeric_limits<size_t>::max()) {
+        ggml_tensor* build_adaln_time_embedding(const ExactAdaLN::StepPlan& plan) {
             ggml_tensor* features = nullptr;
             ggml_tensor* lower = nullptr;
             ggml_tensor* upper = nullptr;
@@ -1804,45 +1800,107 @@ namespace MiniMaxH3 {
                 features = make_input(timestep_feature_input_cache);
             }
             auto ctx = get_context();
-            auto* embedding = model.time_embedding(&ctx, features, lower, upper, fraction);
+            return model.time_embedding(&ctx, features, lower, upper, fraction);
+        }
+
+        ggml_cgraph* build_adaln_projection_graph(ExactAdaLN::Cache& cache,
+                                                 ExactAdaLN::Cache::StepToken token,
+                                                 const ExactAdaLN::StepPlan& plan,
+                                                 size_t first_projection = 0,
+                                                 size_t projection_count = std::numeric_limits<size_t>::max()) {
+            auto* embedding = build_adaln_time_embedding(plan);
+            auto ctx = get_context();
             return ExactAdaLN::build_projection_graph(compute_ctx, cache, token,
                 projection_count == 1 ? 256 : H3_GRAPH_SIZE,
-                [&](size_t index) {
-                    return model.project_adaln(&ctx, embedding, index);
-                }, first_projection, projection_count);
+                [&](size_t index) { return model.project_adaln(&ctx, embedding, index); },
+                first_projection, projection_count);
         }
 
         ExactAdaLN::Status prefill_adaln_layer_major(ExactAdaLN::Cache& cache,
-                                                       const ExactAdaLN::RequestContract& contract,
-                                                       int n_threads) {
-                    std::vector<sd::Tensor<float>> owned_features, owned_fractions;
-                    std::vector<sd::Tensor<int32_t>> owned_lower, owned_upper;
-                    const int64_t start = ggml_time_ms();
-                    auto status = ExactAdaLN::prefill_request_layer_major(*this, cache, contract, n_threads,
-                        [&](size_t projection, const std::vector<size_t>& plans,
-                            const std::vector<ExactAdaLN::Cache::StepToken>& tokens) -> ggml_cgraph* {
-                            owned_features.clear(); owned_fractions.clear(); owned_lower.clear(); owned_upper.clear();
-                            if (plans.empty() || plans.size() > (H3_GRAPH_SIZE - 1) / 256)
-                                throw std::invalid_argument("MiniMax-H3 AdaLN prefill schedule exceeds graph budget");
-                            auto* merged = new_graph_custom(plans.size() * 256);
-                            for (size_t i : plans) {
-                                auto* graph = build_adaln_projection_graph(cache, tokens[i],
-                                                                         contract.plans[i], projection, 1);
-                                if (!graph || ggml_graph_n_nodes(graph) == 0) return nullptr;
-                                ggml_build_forward_expand(merged, ggml_graph_node(graph, -1));
-                                // make_input registered raw data pointers. Moves keep their
-                                // allocations alive for ALL timestep graphs in this segment.
-                                owned_features.push_back(std::move(timestep_feature_input_cache));
-                                owned_fractions.push_back(std::move(curve_fraction_input_cache));
-                                owned_lower.push_back(std::move(curve_index_input_cache));
-                                owned_upper.push_back(std::move(curve_upper_index_input_cache));
-                            }
-                            return merged;
-                        });
-                    LOG_INFO("minimax-h3 AdaLN layer-major prefill: projections=%zu plans=%zu time=%lldms host-cache=%zu bytes; weights preserved",
-                             contract.projections.size(), contract.plans.size(),
-                             (long long)(ggml_time_ms() - start), cache.used_bytes());
-                    return status;
+                                                    const ExactAdaLN::RequestContract& contract,
+                                                    int n_threads) {
+            // Match SGLang's shared timestep embedding pass, then stream each
+            // layer's projection weights once across every request plan. Keep
+            // every GEMM shape and native F32 output; no concatenated-batch math.
+            if (contract.plans.empty() || contract.plans.size() > (H3_GRAPH_SIZE - 1) / 256)
+                return ExactAdaLN::Status::InvalidPlan;
+            ExactAdaLN::Cache::StepToken anchor;
+            auto status = cache.bind_step(contract, 0, contract.plans[0], &anchor);
+            if (status != ExactAdaLN::Status::Hit) return status;
+            // Re-entering a complete request is a storage-only hit. Do not
+            // allocate temporary embeddings or evict an otherwise valid cache
+            // just because its payload already occupies the requested budget.
+            bool complete = true;
+            for (size_t i = 0; i < contract.plans.size(); ++i) {
+                ExactAdaLN::Cache::StepToken token;
+                if (cache.bind_step(contract, i, contract.plans[i], &token) != ExactAdaLN::Status::Hit)
+                    return ExactAdaLN::Status::InvalidPlan;
+                complete = complete && cache.complete(token);
+            }
+            if (complete) return ExactAdaLN::Status::Stored;
+            ExactAdaLN::detail::PrefillRollback rollback{cache, anchor};
+            const int64_t start = ggml_time_ms();
+            auto embedding_contract = contract;
+            embedding_contract.projections = {{"h3.shared_time_embedding", config.time_embed_dim, 1, 1}};
+            // A temporary cache uses the exact same identity/finite guards. Its
+            // real bytes stay charged to the parent while layer outputs accrue.
+            const size_t available = cache.max_bytes() - cache.used_bytes();
+            ExactAdaLN::Cache embeddings({true, available, contract.plans.size()});
+            status = embeddings.begin_request(embedding_contract);
+            if (status != ExactAdaLN::Status::Stored) return status;
+            std::vector<sd::Tensor<float>> owned_features, owned_fractions;
+            std::vector<sd::Tensor<int32_t>> owned_lower, owned_upper;
+            status = ExactAdaLN::prefill_request_layer_major(*this, embeddings, embedding_contract, n_threads,
+                [&](size_t, const std::vector<size_t>& plans,
+                    const std::vector<ExactAdaLN::Cache::StepToken>& tokens) -> ggml_cgraph* {
+                    auto* merged = new_graph_custom(plans.size() * 256);
+                    for (size_t i : plans) {
+                        auto* value = build_adaln_time_embedding(embedding_contract.plans[i]);
+                        auto* graph = ExactAdaLN::build_projection_graph(compute_ctx, embeddings, tokens[i], 256,
+                            [&](size_t) { return value; }, 0, 1);
+                        if (!graph || ggml_graph_n_nodes(graph) == 0) return nullptr;
+                        ggml_build_forward_expand(merged, ggml_graph_node(graph, -1));
+                        owned_features.push_back(std::move(timestep_feature_input_cache));
+                        owned_fractions.push_back(std::move(curve_fraction_input_cache));
+                        owned_lower.push_back(std::move(curve_index_input_cache));
+                        owned_upper.push_back(std::move(curve_upper_index_input_cache));
+                    }
+                    return merged;
+                });
+            if (status != ExactAdaLN::Status::Stored) return status;
+            owned_features.clear(); owned_fractions.clear(); owned_lower.clear(); owned_upper.clear();
+            ExactAdaLN::TransientBudget embedding_budget(cache, embeddings.used_bytes());
+            if (!embedding_budget.valid()) return ExactAdaLN::Status::BudgetExceeded;
+            const int64_t embedded_at = ggml_time_ms();
+            status = ExactAdaLN::prefill_request_layer_major(*this, cache, contract, n_threads,
+                [&](size_t projection, const std::vector<size_t>& plans,
+                    const std::vector<ExactAdaLN::Cache::StepToken>& tokens) -> ggml_cgraph* {
+                    auto* merged = new_graph_custom(plans.size() * 256);
+                    for (size_t i : plans) {
+                        ExactAdaLN::Cache::StepToken embedding_token;
+                        if (embeddings.bind_step(embedding_contract, i, embedding_contract.plans[i], &embedding_token)
+                            != ExactAdaLN::Status::Hit) return nullptr;
+                        ExactAdaLN::Shape shape{}; const float* values = nullptr;
+                        if (embeddings.expected_shape(embedding_token, 0, &shape) != ExactAdaLN::Status::Hit ||
+                            embeddings.lookup(embedding_token, 0, shape, &values) != ExactAdaLN::Status::Hit) return nullptr;
+                        auto* embedding = ggml_new_tensor(compute_ctx, GGML_TYPE_F32, GGML_MAX_DIMS, shape.data());
+                        ggml_set_input(embedding);
+                        // embeddings owns immutable host bytes until ALL layers
+                        // have completed and the final graph has been released.
+                        set_backend_tensor_data(embedding, values);
+                        auto ctx = get_context();
+                        auto* graph = ExactAdaLN::build_projection_graph(compute_ctx, cache, tokens[i], 256,
+                            [&](size_t index) { return model.project_adaln(&ctx, embedding, index); }, projection, 1);
+                        if (!graph || ggml_graph_n_nodes(graph) == 0) return nullptr;
+                        ggml_build_forward_expand(merged, ggml_graph_node(graph, -1));
+                    }
+                    return merged;
+                });
+            rollback.success = status == ExactAdaLN::Status::Stored;
+            LOG_INFO("minimax-h3 AdaLN shared-embedding layer-major prefill: projections=%zu plans=%zu time_embeddings=%zu embedding=%lldms projection=%lldms host-cache=%zu bytes; weights preserved",
+                     contract.projections.size(), contract.plans.size(), contract.plans.size(),
+                     (long long)(embedded_at - start), (long long)(ggml_time_ms() - embedded_at), cache.used_bytes());
+            return status;
         }
 
         bool exact_projection_params_supported(const std::vector<ggml_tensor*>& params) const {
@@ -1866,11 +1924,21 @@ namespace MiniMaxH3 {
             try {
                 if (!prepare_compute_graph(build, &graph) || !graph)
                     throw std::runtime_error("MiniMax-H3 AdaLN offload graph build failed");
-                GraphCutPlan plan;
-                if (!resolve_graph_cut_plan(graph, &plan) || !plan.valid || plan.segments.empty())
+                // Existing H3 boundary-aware planner excludes completed ancestry
+                // from the live segment estimate. It enables legal adjacent merges
+                // without making graph nodes, workspaces, or model precision smaller.
+                auto plan = h3_cache_plan(graph, params_tensor_set_, max_graph_vram_bytes * 15 / 16, true, "AdaLN");
+                if (!plan.valid || plan.segments.empty())
                     throw std::runtime_error("MiniMax-H3 AdaLN offload graph plan failed");
                 sd::ggml_graph_cut::clear_comm_marks();
                 for (const auto& segment : plan.segments) {
+                    size_t remaining = max_graph_vram_bytes;
+                    for (size_t bytes : {segment.compute_buffer_size, segment.input_param_bytes,
+                                         segment.input_previous_cut_bytes, segment.output_bytes}) {
+                        if (bytes > remaining)
+                            throw std::invalid_argument("MiniMax-H3 AdaLN indivisible segment exceeds explicit planning budget");
+                        remaining -= bytes;
+                    }
                     if (!segment.comm_ops.empty())
                         throw std::invalid_argument("MiniMax-H3 AdaLN offload cannot use parallel graph cuts");
                     auto weights = sd::ggml_graph_cut::runtime_param_tensors(graph, segment, get_desc().c_str());

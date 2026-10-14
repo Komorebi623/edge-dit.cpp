@@ -1,5 +1,7 @@
 # MiniMax-H3：跨服务器接续交接
 
+> **2026-10-14 15:47接续**：AdaLN性能退化已修复，mixed已测571.53/565.67s vs baseline627.99s，各自与一个baseline产物逐字节一致（baseline重复本身有差异）；用户要求停止重复验收，三次正式矩阵未完成，勿误标完成。详见`h3-adaln-fix.md`及`validation.json.adaln_repair`。后续SubBlock优先，验证改为T2VA单次通过后mixed单次。
+
 > **2026-10-14最新状态**：AdaLN / Cache-DiT / Sage(F16PV) / SubBlock(indexed) 已完成4090单卡、原精度、864×480/124帧/20步的T2VA三次对照，另有完整mixed单次与40项全模式功能回归。受控serial offload已接通；异步/并行/adapter组合仍拒绝。当前数据、收益与限制以 `h3-four-method-results.md`、`h3-four-method-reproduce.md` 和 `validation.json.four_method_validation` 为准；下文保留先前交接/计划历史，不能把旧“未测/只resident”当最新状态。
 
 

@@ -1,8 +1,10 @@
 // Integrated tiny H3 regression: real default compute() versus request-local
 // ExactAdaLN prefill/import. Register ONLY CPU; never discover/load GPU backends.
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -13,6 +15,7 @@
 
 #include "dit_models/diffusion_model.hpp"
 #include "dit_models/models/minimax_h3_full.hpp"
+#include "ggml/src/ggml-backend-impl.h" // CPU-only observation; never replace the numeric implementation.
 // ggml_extend_backend.hpp defines discovery wrappers with these public CPU
 // names. Bind directly to the CPU library symbols, rather than invoking those
 // wrappers (or including ggml-cpu.h, which conflicts with their C++ linkage).
@@ -57,6 +60,57 @@ void same(const sd::Tensor<float>& a, const sd::Tensor<float>& b, const char* me
     if (std::memcmp(a.data(), b.data(), static_cast<size_t>(a.numel()) * sizeof(float)) == 0)
         ++exact_comparisons;
 }
+
+// Observe the graphs actually dispatched by the production prefill helper.
+// The CPU implementation still executes every graph; this scoped seam only
+// records shapes or injects a failure after real compute, and restores the hook.
+struct CpuGraphAudit {
+    using ShapeKey = std::array<int64_t, 3 * GGML_MAX_DIMS>;
+    using Shapes = std::map<const ggml_tensor*, std::multiset<ShapeKey>>;
+    inline static CpuGraphAudit* active = nullptr;
+    ggml_backend_t backend;
+    decltype(ggml_backend_i::graph_compute) original;
+    const std::set<const ggml_tensor*>& projection_weights;
+    const std::set<const ggml_tensor*>& time_weights;
+    Shapes projections;
+    size_t graphs = 0, time_gemms = 0, curve_reads = 0;
+    std::function<void(size_t, ggml_cgraph*)> before, after;
+    CpuGraphAudit(ggml_backend_t b, const std::set<const ggml_tensor*>& p,
+                  const std::set<const ggml_tensor*>& t)
+        : backend(b), original(b->iface.graph_compute), projection_weights(p), time_weights(t) {
+        check(ggml_backend_is_cpu(b) && original && !active, "CPU audit cannot nest/use another backend");
+        active = this;
+        backend->iface.graph_compute = dispatch;
+    }
+    ~CpuGraphAudit() { backend->iface.graph_compute = original; active = nullptr; }
+    CpuGraphAudit(const CpuGraphAudit&) = delete;
+    CpuGraphAudit& operator=(const CpuGraphAudit&) = delete;
+    static ggml_status dispatch(ggml_backend_t b, ggml_cgraph* graph) {
+        auto& audit = *active;
+        check(b == audit.backend, "graph dispatched on an unexpected CPU backend");
+        const size_t pass = ++audit.graphs;
+        for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+            auto* node = ggml_graph_node(graph, i);
+            if (node->op == GGML_OP_GET_ROWS) ++audit.curve_reads;
+            if (node->op != GGML_OP_MUL_MAT) continue;
+            audit.time_gemms += audit.time_weights.count(node->src[0]);
+            if (!audit.projection_weights.count(node->src[0])) continue;
+            ShapeKey shape{};
+            for (int d = 0; d < GGML_MAX_DIMS; ++d) {
+                shape[d] = node->src[0]->ne[d];
+                shape[GGML_MAX_DIMS + d] = node->src[1]->ne[d];
+                shape[2 * GGML_MAX_DIMS + d] = node->ne[d];
+            }
+            check(node->src[0]->type == GGML_TYPE_F32 && node->src[1]->type == GGML_TYPE_F32 &&
+                  node->type == GGML_TYPE_F32, "shared embedding changed native projection precision");
+            audit.projections[node->src[0]].insert(shape);
+        }
+        if (audit.before) audit.before(pass, graph);
+        const auto status = audit.original(b, graph);
+        if (status == GGML_STATUS_SUCCESS && audit.after) audit.after(pass, graph);
+        return status;
+    }
+};
 
 // Same architecture detection fixture as h3_cuda_cache_test.cpp, not a mock.
 // Every actual params_ctx weight/bias is allocated and seeded below.
@@ -126,6 +180,11 @@ struct TinyRunner : MiniMaxH3::MiniMaxH3Runner {
               config.attention_head_dim == 128 && config.num_attention_heads == 1,
               "tiny graph must keep H3 head128 and four real blocks");
     }
+    void check_projection_graph_released() {
+        check(!compute_ctx && backend_tensor_data_map.empty(),
+              "prefill retained a graph or binding into destroyed embedding storage");
+    }
+    void allow_test_projection_transfers() { max_graph_vram_bytes = 8u * 1024u * 1024u; }
     void use_test_host_parameters() {
         // A second CPU backend tests placement guards without GPU enumeration.
         check(params_backend == runtime_backend && !params_buffer, "test placement must precede allocation");
@@ -200,10 +259,16 @@ struct TinyRunner : MiniMaxH3::MiniMaxH3Runner {
         auto& state = adaln_branches[branch];
         EA::Cache direct({true, 8u * 1024u * 1024u, 16384});
         expect(direct.begin_request(state.contract), EA::Status::Stored, "direct projection contract");
-        expect(EA::prefill_request(*this, direct, state.contract, 1,
-            [&](size_t i, auto token) {
-                return build_adaln_projection_graph(direct, token, state.contract.plans[i]);
-            }), EA::Status::Stored, "independent real projection compute/readback");
+        CpuGraphAudit::Shapes direct_shapes;
+        {
+            CpuGraphAudit audit(exact_runtime_backend(), projection_weights, time_weights);
+            expect(EA::prefill_request(*this, direct, state.contract, 1,
+                [&](size_t i, auto token) {
+                    return build_adaln_projection_graph(direct, token, state.contract.plans[i]);
+                }), EA::Status::Stored, "independent real projection compute/readback");
+            check(audit.graphs == state.contract.plans.size(), "direct prefill graph count changed");
+            direct_shapes = audit.projections;
+        }
         EA::Cache segmented({true, 8u * 1024u * 1024u, 16384});
         expect(segmented.begin_request(state.contract), EA::Status::Stored, "segmented H3 contract");
         size_t builds = 0;
@@ -215,8 +280,23 @@ struct TinyRunner : MiniMaxH3::MiniMaxH3Runner {
         check(builds == state.contract.plans.size() * 5, "real H3 prefill must split every projection");
         EA::Cache layer_major({true, 8u * 1024u * 1024u, 16384});
         expect(layer_major.begin_request(state.contract), EA::Status::Stored, "layer-major H3 contract");
-        expect(prefill_adaln_layer_major(layer_major, state.contract, 1), EA::Status::Stored,
-               "real H3 layer-major schedule prefill");
+        {
+            CpuGraphAudit audit(exact_runtime_backend(), projection_weights, time_weights);
+            expect(prefill_adaln_layer_major(layer_major, state.contract, 1), EA::Status::Stored,
+                   "real H3 shared-embedding layer-major schedule prefill");
+            // Production 50 blocks + final = 51 projections; this bounded fixture
+            // has four REAL blocks + final = five, not 51 synthetic layers.
+            check(state.contract.projections.size() == 5 && audit.graphs == 6,
+                  "shared prefill must execute one embedding graph plus five layer graphs");
+            check(audit.time_gemms == (config.uses_adaln_curves() ? 0 : 2 * state.contract.plans.size()),
+                  "time embeddings were recomputed for each projection");
+            check(audit.curve_reads == (config.uses_adaln_curves() ? 2 * state.contract.plans.size() : 0),
+                  "curve embeddings were recomputed for each projection");
+            check(audit.projections == direct_shapes,
+                  "shared embedding changed per-plan native GEMM shapes or projection execution counts");
+        }
+        check(layer_major.used_bytes() == direct.used_bytes(), "shared embedding charge leaked after prefill");
+        check_projection_graph_released();
         for (size_t i = 0; i < state.contract.plans.size(); ++i) {
             EA::Cache::StepToken a, b, segmented_token;
             expect(segmented.bind_step(state.contract, i, state.contract.plans[i], &segmented_token),
@@ -392,6 +472,237 @@ void branch_layout_test(ggml_backend_t backend) {
           cached.adaln_branches[1].contract.schedule_identity == "tiny-cfg:v2", "new request identity stale");
     std::cout << "PASS CFG isolation, video/audio references, source/order/text-tag mutation, reset/new request\n";
 }
+// Bound memory and failure tests to the actual five-projection tiny model.
+// The second CPU backend exercises real selected-weight copies and restoration;
+// it does NOT validate CUDA placement, the new scoped planner, or mixed speed.
+void shared_prefill_budget_test(ggml_backend_t backend, bool curves) {
+    TinyRunner native(backend, tiny_weights(curves)), streamed(backend, tiny_weights(curves));
+    native.seed(); native.enable();
+    streamed.use_test_host_parameters(); streamed.allow_test_projection_transfers(); streamed.seed();
+    Inputs in; in.add_references(); auto p = in.params(true);
+    native.prepare_cuda_schedule({.8f, .5f, .5f, .125f, 0.f}, "shared-budget:v1", "tiny-f32:all-params");
+    native.begin_cuda_step(0, 4, true); native.prepare_adaln_branch(1, p);
+    const auto contract = native.adaln_branches[1].contract;
+    auto& reference = *native.adaln_branches[1].cache;
+    EA::Cache metadata({true, 8u << 20, 16384});
+    expect(metadata.begin_request(contract), EA::Status::Stored, "shared parent metadata");
+    const size_t parent_metadata = metadata.used_bytes();
+    std::vector<size_t> layer_bytes(5, 0);
+    auto payload_bytes = [](const EA::Shape& shape) {
+        size_t bytes = sizeof(float);
+        for (auto extent : shape) bytes *= static_cast<size_t>(extent);
+        return bytes;
+    };
+    for (size_t i = 0; i < contract.plans.size(); ++i) {
+        EA::Cache::StepToken token;
+        expect(reference.bind_step(contract, i, contract.plans[i], &token), EA::Status::Hit, "budget shape bind");
+        for (size_t j = 0; j < 5; ++j) {
+            EA::Shape shape{};
+            expect(reference.expected_shape(token, j, &shape), EA::Status::Hit, "budget shape");
+            layer_bytes[j] += payload_bytes(shape);
+        }
+    }
+    auto embedding_contract = contract;
+    embedding_contract.projections = {{"h3.shared_time_embedding", native.config.time_embed_dim, 1, 1}};
+    EA::Cache embedding_metadata({true, 8u << 20, 16384});
+    expect(embedding_metadata.begin_request(embedding_contract), EA::Status::Stored, "embedding metadata");
+    size_t embedding_bytes = embedding_metadata.used_bytes();
+    for (const auto& plan : contract.plans)
+        embedding_bytes += sizeof(float) * static_cast<size_t>(native.config.time_embed_dim) * plan.timesteps.size();
+    const size_t retained = reference.used_bytes(), peak = retained + embedding_bytes;
+    size_t sum = parent_metadata;
+    for (auto bytes : layer_bytes) sum += bytes;
+    check(sum == retained, "unexpected parent payload accounting");
+
+    struct WeightSnapshot { ggml_tensor* tensor; ggml_backend_buffer_t buffer; void* data; void* extra; std::vector<char> bytes; };
+    std::vector<WeightSnapshot> weights;
+    for (auto* t = ggml_get_first_tensor(streamed.exact_params_context()); t;
+         t = ggml_get_next_tensor(streamed.exact_params_context(), t)) {
+        weights.push_back({t, t->buffer, t->data, t->extra, std::vector<char>(ggml_nbytes(t))});
+        ggml_backend_tensor_get(t, weights.back().bytes.data(), 0, weights.back().bytes.size());
+    }
+    auto restored = [&] {
+        streamed.check_projection_graph_released();
+        for (const auto& w : weights) {
+            check(w.tensor->buffer == w.buffer && w.tensor->data == w.data && w.tensor->extra == w.extra,
+                  "shared prefill did not restore a source parameter binding");
+            std::vector<char> actual(w.bytes.size());
+            ggml_backend_tensor_get(w.tensor, actual.data(), 0, actual.size());
+            check(actual == w.bytes, "shared prefill mutated native F32 source weights");
+        }
+    };
+    auto compare = [&](EA::Cache& cache) {
+        check(cache.used_bytes() == retained, "temporary embedding budget not released");
+        for (size_t i = 0; i < contract.plans.size(); ++i) {
+            EA::Cache::StepToken a, b;
+            expect(reference.bind_step(contract, i, contract.plans[i], &a), EA::Status::Hit, "native bind");
+            expect(cache.bind_step(contract, i, contract.plans[i], &b), EA::Status::Hit, "shared bind");
+            for (size_t j = 0; j < 5; ++j) {
+                EA::Shape shape{}; const float *av = nullptr, *bv = nullptr;
+                expect(reference.expected_shape(a, j, &shape), EA::Status::Hit, "native shape");
+                expect(reference.lookup(a, j, shape, &av), EA::Status::Hit, "native payload");
+                expect(cache.lookup(b, j, shape, &bv), EA::Status::Hit, "shared payload");
+                check(std::memcmp(av, bv, payload_bytes(shape)) == 0, "budgeted shared projection differs from native");
+            }
+        }
+    };
+    // Exact peak, one-byte short, and one complete final-layer payload short.
+    for (size_t budget : {peak, peak - 1, peak - layer_bytes.back()}) {
+        EA::Cache cache({true, budget, 16384});
+        expect(cache.begin_request(contract), EA::Status::Stored, "bounded shared begin");
+        EA::Cache::StepToken old;
+        expect(cache.bind_step(contract, 0, contract.plans[0], &old), EA::Status::Hit, "bounded old token");
+        size_t passes = 0;
+        EA::Status result;
+        {
+            CpuGraphAudit audit(backend, streamed.projection_weights, streamed.time_weights);
+            audit.before = [&](size_t pass, ggml_cgraph*) {
+                passes = pass;
+                size_t wanted = parent_metadata;
+                if (pass > 1) {
+                    wanted += embedding_bytes;
+                    for (size_t j = 0; j + 2 < pass; ++j) wanted += layer_bytes[j];
+                }
+                check(cache.used_bytes() == wanted && wanted <= budget,
+                      "shared embedding was not charged alongside previously captured layers");
+            };
+            result = streamed.prefill_adaln_layer_major(cache, contract, 1);
+        }
+        // With a whole final layer missing, intercept() rejects its first
+        // tensor before execution. One byte short still builds that layer and
+        // fails during readback after some final-plan payloads were stored.
+        const size_t expected_passes = budget == peak - layer_bytes.back() ? 5 : 6;
+        check(passes == expected_passes, "budget rejection occurred at the wrong projection stage");
+        if (budget == peak) { expect(result, EA::Status::Stored, "exact shared peak budget"); compare(cache); }
+        else {
+            check(result != EA::Status::Stored, "insufficient shared budget was accepted");
+            check(cache.used_bytes() == 0 && cache.projection_count() == 0 && !cache.complete(old),
+                  "budget failure retained partial projections or transient charge");
+            EA::Shape shape{};
+            expect(cache.expected_shape(old, 0, &shape), EA::Status::Stale, "budget failure token survived");
+        }
+        restored();
+    }
+    // Real compute followed by nonfinite readback, exception, or request reset.
+    // Later-pass injection happens only AFTER earlier layers have been stored.
+    for (int fault = 0; fault < 4; ++fault) {
+        EA::Cache cache({true, peak, 16384});
+        expect(cache.begin_request(contract), EA::Status::Stored, "fault begin");
+        const size_t target = fault == 0 ? 1 : 4;
+        bool injected = false, threw = false;
+        EA::Status result = EA::Status::Miss;
+        {
+            CpuGraphAudit audit(backend, streamed.projection_weights, streamed.time_weights);
+            audit.after = [&](size_t pass, ggml_cgraph* graph) {
+                if (pass != target) return;
+                injected = true;
+                if (target > 1) check(cache.statistics().stores == 2 * contract.plans.size(),
+                                      "late failure did not exercise partially populated parent cache");
+                if (fault == 2) throw std::runtime_error("injected shared prefill post-compute error");
+                if (fault == 3) { cache.reset(); return; }
+                auto* output = ggml_graph_node(graph, -1);
+                check(output->type == GGML_TYPE_F32, "nonfinite injection requires native F32");
+                const float nan = std::numeric_limits<float>::quiet_NaN();
+                ggml_backend_tensor_set(output, &nan, 0, sizeof(nan));
+            };
+            try { result = streamed.prefill_adaln_layer_major(cache, contract, 1); }
+            catch (const std::runtime_error& error) {
+                threw = true;
+                check(fault == 2 && std::string(error.what()) == "injected shared prefill post-compute error",
+                      "unexpected exception during shared prefill");
+            }
+        }
+        check(injected && (threw || result != EA::Status::Stored), "shared prefill swallowed a compute/readback failure");
+        check(cache.used_bytes() == 0 && cache.projection_count() == 0,
+              "failed shared prefill leaked partial payload or underflowed its transient budget");
+        restored();
+        expect(cache.begin_request(contract), EA::Status::Stored, "same-runner recovery begin");
+        expect(streamed.prefill_adaln_layer_major(cache, contract, 1), EA::Status::Stored, "same-runner recovery prefill");
+        compare(cache); restored();
+    }
+    std::cout << "PASS shared " << (curves ? "curve" : "TimeEmbedder")
+              << " exact/short budgets, partial capture, real CPU transfers, rollback and recovery\n";
+}
+
+void shared_prefill_cfg_test(ggml_backend_t backend, bool curves) {
+    TinyRunner native(backend, tiny_weights(curves)), cached(backend, tiny_weights(curves));
+    native.seed(); cached.seed(); cached.enable();
+    const std::vector<float> repeated{.8f, .5f, .5f, .125f, 0.f};
+    cached.prepare_cuda_schedule(repeated, "shared-repeat-cfg:v1", "tiny-f32:all-params");
+    Inputs uncond, cond; cond.add_references(); uncond.context[0] -= .3f;
+    auto u = uncond.params(), c = cond.params(true);
+    for (int branch = 0; branch < 2; ++branch) {
+        cached.begin_cuda_step(0, 4, branch != 0);
+        cached.prepare_adaln_branch(1, branch ? c : u);
+        // Compare actual native and shared graphs, including every GEMM shape.
+        cached.compare_projection_readback(branch);
+        auto& state = cached.adaln_branches[branch];
+        expect(state.cache->begin_request(state.contract), EA::Status::Stored, "replace native with shared cache");
+        expect(cached.prefill_adaln_layer_major(*state.cache, state.contract, 1), EA::Status::Stored, "shared CFG prefill");
+        EA::Cache::StepToken a, b;
+        expect(state.cache->bind_step(state.contract, 1, state.contract.plans[1], &a), EA::Status::Hit, "first repeated sigma");
+        expect(state.cache->bind_step(state.contract, 2, state.contract.plans[2], &b), EA::Status::Hit, "second repeated sigma");
+        EA::Cache::StepToken wrong;
+        expect(state.cache->bind_step(state.contract, 1, state.contract.plans[2], &wrong), EA::Status::Miss,
+               "equal sigmas aliased different schedule indices");
+        for (size_t j = 0; j < 5; ++j) {
+            EA::Shape shape{}; const float *av = nullptr, *bv = nullptr;
+            expect(state.cache->expected_shape(a, j, &shape), EA::Status::Hit, "repeat shape");
+            expect(state.cache->lookup(a, j, shape, &av), EA::Status::Hit, "repeat first");
+            expect(state.cache->lookup(b, j, shape, &bv), EA::Status::Hit, "repeat second");
+            check(av != bv && std::memcmp(av, bv, static_cast<size_t>(shape[0] * shape[1]) * sizeof(float)) == 0,
+                  "repeated sigma lost native values or aliased distinct plan storage");
+        }
+    }
+    auto& a = cached.adaln_branches[0]; auto& b = cached.adaln_branches[1];
+    EA::Cache::StepToken token;
+    expect(a.cache->bind_step(a.contract, 1, a.contract.plans[1], &token), EA::Status::Hit, "unconditional token");
+    EA::Shape shape{};
+    expect(b.cache->expected_shape(token, 0, &shape), EA::Status::Stale, "CFG accepted another cache's token");
+    expect(b.cache->bind_step(a.contract, 1, a.contract.plans[1], &token), EA::Status::Miss, "CFG identity aliased");
+    for (size_t step = 0; step + 1 < repeated.size(); ++step) {
+        uncond.timestep[0] = cond.timestep[0] = repeated[step] * 1000.f;
+        for (int branch = 0; branch < 2; ++branch) {
+            auto& p = branch ? c : u;
+            cached.begin_cuda_step(static_cast<int>(step), 4, branch != 0);
+            same(native.compute(1, p), cached.compute(1, p), "shared-prefilled CFG full H3 graph differs");
+            check(cached.inspect(p).projections == 0, "shared-prefilled CFG consumer recomputed projections");
+        }
+    }
+    std::cout << "PASS shared prefill repeated sigma / CFG isolation and eight full H3 consumers; CPU only\n";
+}
+
+// Default regression, also runnable alone with --shared-prefill-reentry. A
+// complete native cache needs neither additional storage nor additional compute;
+// keep the retained-only budget to catch accidental temporary embedding work.
+void shared_prefill_reentry_test(ggml_backend_t backend) {
+    TinyRunner runner(backend, tiny_weights()); runner.seed(); runner.enable();
+    Inputs in; auto p = in.params();
+    runner.prepare_cuda_schedule(schedule, "shared-reentry:v1", "tiny-f32:all-params");
+    runner.begin_cuda_step(0, 3, true); runner.prepare_adaln_branch(1, p);
+    const auto contract = runner.adaln_branches[1].contract;
+    EA::Cache cache({true, runner.adaln_branches[1].cache->used_bytes(), 16384});
+    expect(cache.begin_request(contract), EA::Status::Stored, "reentry begin");
+    expect(EA::prefill_request(runner, cache, contract, 1, [&](size_t i, auto token) {
+        return runner.build_adaln_projection_graph(cache, token, contract.plans[i]);
+    }), EA::Status::Stored, "reentry complete native cache");
+    const size_t before = cache.used_bytes();
+    EA::Cache::StepToken old;
+    expect(cache.bind_step(contract, 0, contract.plans[0], &old), EA::Status::Hit, "reentry old token");
+    check(cache.complete(old), "reentry fixture was not already complete");
+    EA::Status result;
+    size_t executions = 0;
+    {
+        CpuGraphAudit audit(backend, runner.projection_weights, runner.time_weights);
+        result = runner.prefill_adaln_layer_major(cache, contract, 1);
+        executions = audit.graphs;
+    }
+    std::cout << "shared-reentry: status=" << EA::status_name(result) << " graphs=" << executions
+              << " retained-before=" << before << " retained-after=" << cache.used_bytes() << std::endl;
+    check(result == EA::Status::Stored && executions == 0 && cache.used_bytes() == before && cache.complete(old),
+          "complete cache reentry allocated temporary embeddings or invalidated valid projections");
+}
+
 void failure_test(ggml_backend_t backend) {
     TinyRunner runner(backend, tiny_weights()); runner.seed(); runner.enable();
     Inputs in; auto p = in.params();
@@ -536,7 +847,7 @@ void runtime_mode_test(ggml_backend_t backend) {
 }
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     ggml_backend_t backend = nullptr;
     try {
         // Do not use init_by_type/load_all/dev_count: those enumerate GPUs.
@@ -544,9 +855,20 @@ int main() {
         backend = h3_test_cpu_init();
         check(backend != nullptr && ggml_backend_is_cpu(backend), "independent CPU backend unavailable");
         h3_test_cpu_threads(backend, 1);
+        if (argc == 2 && std::string(argv[1]) == "--shared-prefill-reentry") {
+            shared_prefill_reentry_test(backend);
+            ggml_backend_free(backend);
+            return 0;
+        }
+        check(argc == 1, "unknown runtime regression argument");
         schedule_test(backend, false);
         schedule_test(backend, true);
         branch_layout_test(backend);
+        shared_prefill_budget_test(backend, false);
+        shared_prefill_budget_test(backend, true);
+        shared_prefill_cfg_test(backend, false);
+        shared_prefill_cfg_test(backend, true);
+        shared_prefill_reentry_test(backend);
         failure_test(backend);
         runtime_mode_test(backend);
         ggml_backend_free(backend);
