@@ -123,3 +123,62 @@ H56、总N15000、keep≈0.5，protected为连续span的例子：
 3. 一个online-softmax状态跨所有selected视频块及protected块，正确累积max/sum/PV；非视频Q的dense分支沿用stockflash或专门batch，不能少算输出。
 4. SM89内核可专门化现有ggml MMA Flash load/loop（需独立H3实例、固定源码生成与许可审查），或移植已固定、支持SM89的indexed块实现；不要改共享模板影响其他模型。
 5. 保留同样F32 Q、F16缩放K/V、输出补偿与重放/尾部/分段测试，先数值再完整Q4卸载性能。该路径才消除当前主性能风险。
+
+## v2：直接 indexed MMA attention（本轮新增，待主代理 GPU 验收）
+
+主代理提供的完整 Q4 对照：旧 gather **424.50s / DiT381.48s**，baseline约 **256s / DiT213s**，SSIM **0.926**。本 worker 没有重跑该实验；该结果属于旧 gather，**不属于下面新内核**。
+
+### 执行与总开关
+
+- `ED_H3_SPARSE_ATTN` 仍是唯一方法总开关、默认0。关闭它不会进入任何 SubBlock tag。
+- 新 `H3IA (0x48334941)` tag 与旧 gather `H3RA` tag独立；无 gather/dense-mask 静默回退。
+- 当前主代理已通过两路径共433次数值对照；`ED_H3_SPARSE_ATTN=1`默认选择indexed，`ED_H3_SUBBLOCK_INDEXED=0`仅作gather诊断。总开关默认仍为0，不会影响默认模型路径。
+- **验收通过后应由主代理把 indexed 设为总开关=1的默认实现，gather仅保留显式诊断选择**。临时INDEXED变量不是要求用户额外开启的最终接口。
+- 环境选择在构图时固化进tag；benchmark使用新进程，不在persistent/cached runner中途切换环境变量。
+- 新实现使用已有hash-checked build-local dispatcher hooks，不修改固定ggml文件、full.hpp或pipeline；现有首末层/步dense策略原样保留。
+
+### 直接索引核心
+
+新文件 `h3_subblock_indexed.cuh`：每CTA=Q64、一个head、4warps；每warp计算16行。
+Q只加载一次进寄存器。每轮依据本head/Qblock的route ID读取一个K64，K/V直接由原输入读到共享内存；之后依次读所有protected keys。
+受保护Q由另一kernel完整遍历真实K，仍产生全部输出。视频Q从未改成全N dense mask。
+
+- 不分配global K/V stage或全N mask，无D2H route读取。
+- 每层至多 **2次attention launch**（视频Q sparse、非视频Q dense）；router原有kernel不变。
+- 每CTA仅 **34,816 bytes shared memory**，K共享区先暂存Q、Q进寄存器后被K重用。
+- QK和PV均使用原生 `mma.sync.m16n8k16.row.col.f32.f16.f16.f32`；PV概率为F16，累积为FP32。
+- 行max/denominator/输出的在线softmax状态跨所有选中视频K64和protected块持续更新，不在模态边界reset。
+- 支持span-local尾部K64、最后不足16的子块、非连续F32输入视图、多个target span以及packed protected keys；不强迫topk成为8倍数。
+- 输入容量/布局门禁仍保留。CUDA capability要求SM80+并有匹配的已编译MMA架构；不支持时明确拒绝。
+
+**流量不是零**：不同Q块仍需读取其选中K/V（块稀疏attention的本来工作），本次消除的是旧路径每Q产生的global staging写入/再读取及全mask物化，不宣称K/V每层只读取一次。未做异步双缓冲或跨CTA预取；剩余读带宽、occupancy及router成本需要完整模型实测。
+
+### 精度差异明确说明
+
+本地固定ggml MMA路径先把Q转half，再与half(scale)相乘，结果half；本实现保持该顺序：
+`Q'=half(half(Q)*half(128/sqrt(128)))`，`K'=half(K/128)`，`V'=half(V/128)`。
+QK与PV均FP32累积，softmax max/sum和输出重缩放FP32，P进入PV前转F16，最终输出乘128补偿。
+
+- 原CPU数学参考使用F32 Q/K/V且没有上述half舍入，**不应期待bitexact**。
+- 官方固定SGLang基于BF16池化/架构专属稀疏内核；本地router仍维持既有F32池化/精确TopK，以不改变当前对照预算与路由契约。
+- 本online softmax以真实行max归一化；stock ggml另有max offset策略，运算排列/rounding也不完全相同。
+- 单测沿用预先固定CUDA容差 `abs4e-4 + rel4e-3`，没有为新内核放宽。完整视频/音频质量仍需主代理验证，不把小张量结果替代全Q4结果。
+
+### 借鉴来源与许可证
+
+无新增下载、未执行上游代码。使用现有固定vendor文件：
+
+| 文件 | 用途 | 许可证／SHA256 |
+|---|---|---|
+| `sage/mma.cuh` | 直接include现有ldmatrix和FP16 MMA wrapper，不修改它 | Apache-2.0；文件保留FlashInfer 2023及SageAttention 2024原声明；`841a0b028e25b48fd83ad042d7bf817f84bfd5e5630d19d08510b0b797914231` |
+| `sage/attn_utils.cuh` | 核对m16n16寄存器行列映射、四线程row reduction、FP32 online rescale/PV模式；未include整套Sage量化attention | Apache-2.0；`d74a33cc4e186ad545f8005e113c375eadf9c40639bc562f9a44e995dd3e72f0` |
+| 固定ggml `fattn-mma-f16.cuh` | 核对baseline Qhalf×scalehalf、K/V prep及float输出语义 | MIT；`7b72e041a8304d06b167587e573ac08f9fda7708a4a3be4908a8b00d62130a26` |
+
+新wrapper没有启用Sage的INT8、FP8或额外模型量化，也未复制完整官方Sage/FlashInfer kernel冒充其吞吐复现。
+
+### 本轮验证边界
+
+- SM89 NVCC standalone编译：两个indexed specialization均198 registers、34,816 bytes shared、0 spill、0 stack（候选完整flags结果以最终交付为准）。
+- CPU **68,051项检查、433次输出对照通过**：包括共享给CUDA的Q/K/V ldmatrix地址映射、P寄存器重组、全部输出地址唯一覆盖、half-prep在线softmax oracle、反序全选块与大幅移动max、两种implementation tag的既有尾部/换输入/多模态保护矩阵。
+- GPU测试现在对gather和indexed两个**显式不同tag**均进行原始CPU参考对照；主代理需重建matching candidate并通过既有single-GPU wrapper执行。
+- CPU oracle不能证明硬件MMA寄存器映射或真实CUDA同步正确；**本worker没有运行GPU，也没有新indexed完整模型性能数据**。

@@ -198,6 +198,7 @@ def validate_manifest(manifest: dict) -> None:
     require(sampling["audio_sample_rate"] == 32000 and sampling["audio_channels"] == 2,
             "H3 generated audio must be 32000 Hz stereo")
     settings = manifest["run"]
+    require(type(settings.get("lock_runtime_libraries", False)) is bool, "runtime library lock must be bool")
     integer(settings.get("warmup"), "warmup", 0)
     for key in ("repeats", "min_free_mib"):
         integer(settings.get(key), key)
@@ -229,6 +230,32 @@ def validate_manifest(manifest: dict) -> None:
                 all(v in ("0", "1") for v in env.values()), "all eight optimization env values must be explicit 0/1 strings")
         if phase == "baseline":
             require(all(v == "0" for v in env.values()), "baseline optimizations must all be zero")
+        tuning = binary.get("tuning_env", {})
+        require(isinstance(tuning, dict) and set(tuning) <= {"ED_H3_CACHE_THRESHOLD", "ED_H3_SPARSE_KEEP_RATIO", "ED_H3_SUBBLOCK_INDEXED", "ED_H3_SAGE_PV_FP8"},
+                "only explicitly supported H3 method tuning is permitted")
+        require(phase != "baseline" or not tuning, "baseline cannot carry research tuning")
+        for key, value in tuning.items():
+            require(isinstance(value, str), "method tuning must be an explicit numeric string")
+            try: number = float(value)
+            except ValueError: raise WorkflowError("invalid method tuning: " + key)
+            require(math.isfinite(number) and 0 <= number <= 1, "method tuning must be finite in [0,1]")
+            method = ("ED_H3_CACHE_DIT" if key == "ED_H3_CACHE_THRESHOLD" else
+                      "ED_H3_SAGE_ATTN" if key == "ED_H3_SAGE_PV_FP8" else "ED_H3_SPARSE_ATTN")
+            require(key not in ("ED_H3_SUBBLOCK_INDEXED", "ED_H3_SAGE_PV_FP8") or value in ("0", "1"),
+                    "kernel variant must be exactly0/1")
+            require(env[method] == "1", "method tuning requires its own enabled switch")
+            require(key != "ED_H3_SPARSE_KEEP_RATIO" or number > 0, "sparse keep ratio must be positive")
+    runtime_env = manifest.get("runtime_env", {})
+    runtime_keys = {"ED_CUDNN_SDPA_SYNC_F32_SELF_ATTN", "ED_PROFILE_GRAPH_CUTS",
+                    "ED_PROFILE_GRAPH_CUTS_COMPUTE_TOP", "ED_PROFILE_RUNNER"}
+    require(isinstance(runtime_env, dict) and set(runtime_env) <= runtime_keys,
+            "runtime_env permits only shared cuDNN-plan or read-only profiling controls")
+    for key, value in runtime_env.items():
+        if key == "ED_PROFILE_GRAPH_CUTS_COMPUTE_TOP":
+            require(isinstance(value, str) and value.isdigit() and 0 <= int(value) <= 100,
+                    "compute profile top must be an integer0..100 string")
+        else:
+            require(value in ("0", "1"), "shared runtime flags must be explicit0/1 strings")
     catalog = manifest.get("method_catalog")
     require(isinstance(catalog, dict) and set(catalog) <= set(OPTIONS), "explicit method_catalog required")
     for option, entry in catalog.items():
@@ -310,6 +337,8 @@ def isolated_env(manifest: dict, phase: str, inherited: dict | None = None) -> t
     env.update({key: "0" for key in OPTIONS})
     if phase == "candidate":
         env.update(manifest["binaries"][phase]["optimization_env"])
+        env.update(manifest["binaries"][phase].get("tuning_env", {}))
+    env.update(manifest.get("runtime_env", {}))
     env["ED_MINIMAX_H3_PROFILE"] = "1"
     return env, removed
 
@@ -393,13 +422,38 @@ def key_values(path: Path) -> dict:
     return result
 
 
-def build_provenance(binary: Path) -> dict:
+def build_provenance(binary: Path, *, lock_runtime: bool = False, runtime_env: dict | None = None) -> dict:
     build = binary.parent.parent
     files = [build / name for name in ("CMakeCache.txt", "build-config.txt", "h3-build-provenance.txt")]
-    return {"binary": str(binary), "binary_sha256": sha256(binary) if binary.is_file() else None,
-            "files": {p.name: {"path": str(p), "sha256": sha256(p), "values": key_values(p)}
-                      for p in files if p.is_file()}}
-
+    result = {"binary": str(binary), "binary_sha256": sha256(binary) if binary.is_file() else None,
+              "files": {p.name: {"path": str(p), "sha256": sha256(p), "values": key_values(p)}
+                        for p in files if p.is_file()}}
+    # Even unmeasured/tiny fake fixtures do not invoke ldd. Actual ELF runs opt
+    # into runtime locking; preserve old archived report compatibility.
+    if lock_runtime:
+        env = dict(os.environ if runtime_env is None else runtime_env)
+        require(not env.get("LD_PRELOAD") and not env.get("LD_AUDIT"),
+                "injected preload/audit libraries are not eligible for benchmarks")
+        paths = set()
+        for path in build.glob("bin/libggml*.so*"):
+            if path.is_file(): paths.add(path.resolve())
+        cache = result["files"].get("CMakeCache.txt", {}).get("values", {})
+        for key, value in cache.items():
+            if (key.startswith("cudnn") and key.endswith("_LIBRARY")):
+                require(Path(value).is_file(), "missing declared runtime library: " + value)
+                paths.add(Path(value).resolve())
+        with binary.open("rb") as stream: is_elf = stream.read(4) == b"\x7fELF"
+        if is_elf:
+            text = invoke(["ldd", str(binary)], 30, env=env).stdout
+            require("not found" not in text, "unresolved shared runtime library")
+            for line in text.splitlines():
+                match = re.search(r"(?:=>\s+)?(/[^\s]+)\s+\(", line)
+                if match: paths.add(Path(match[1]).resolve())
+            require(any("libggml-cuda" in p.name for p in paths), "CUDA shared-library closure missing")
+        result["runtime_libraries"] = {str(p): sha256(p) for p in sorted(paths)}
+        result["loader_environment"] = {key: env.get(key, "") for key in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT")}
+        result["runtime_library_scope"] = "ELF resolved closure + declared cuDNN components + build ggml libraries; full hashes before/after"
+    return result
 
 def implemented_methods(values: dict) -> set[str]:
     """Build-owned declaration: comma/space-separated env names or JSON list."""
@@ -482,6 +536,10 @@ def validate_build(manifest: dict, phase: str, provenance: dict) -> dict:
                     tail = block[-len(marker):]
             require(found, f"{option} unsupported: policy parser absent from binary")
             statuses[option] = "build_supported_requested_runtime_not_attested"
+    for key in manifest["binaries"][phase].get("tuning_env", {}):
+        with Path(provenance["binary"]).open("rb") as stream:
+            present = key.encode() in stream.read()
+        require(present, key + " unsupported: tuning parser absent from candidate binary")
     return {"options": statuses, "source_revision": values.get("source_revision", config.get("git_commit"))}
 
 
@@ -742,13 +800,17 @@ def verify_inputs(manifest: dict) -> dict:
 def contract(manifest: dict, modes: list[str]) -> dict:
     # Paths/binaries may be remapped between machines; content/order/precision
     # may not. Do not compare requested dtype strings in place of tensor types.
-    return {"sampling": manifest["sampling"], "placement": manifest["placement"],
+    result = {"sampling": manifest["sampling"], "placement": manifest["placement"],
             "weight_variant": manifest["weight_variant"],
             "models": {k: {field: v.get(field) for field in ("sha256", "bytes", "tensor_types", "source_header_sha256")}
                        for k, v in manifest["models"].items()},
             "assets": {k: {field: v.get(field) for field in ("sha256", "bytes", "kind", "embedded_audio_required")}
                        for k, v in manifest["assets"].items()},
             "modes": {k: manifest["modes"][k] for k in modes}}
+    # Preserve old saved contracts when unspecified; any explicit plan policy
+    # changes the A/B contract and requires a new baseline (including explicit0).
+    if "runtime_env" in manifest: result["runtime_env"] = dict(manifest["runtime_env"])
+    return result
 
 
 def frozen_report(path: Path) -> dict:
@@ -807,7 +869,7 @@ def run_phase(manifest: dict, phase: str, output_dir: Path, modes: list[str], *,
         require(not (dry_run and artifacts), "--artifact cannot be combined with --dry-run")
         env, removed = isolated_env(manifest, phase)
         report["environment"] = {"optimization_env": {k: env[k] for k in OPTIONS},
-                                 "profile_env": {"ED_MINIMAX_H3_PROFILE": "1"}, "removed_inherited_keys": removed,
+                                 "profile_env": {"ED_MINIMAX_H3_PROFILE": "1"}, "method_tuning": manifest["binaries"][phase].get("tuning_env", {}), "removed_inherited_keys": removed,
                                  "other_runtime_env": {k: v for k, v in env.items() if k.startswith(("CUDA_", "CUBLAS_", "CUDNN_", "NVIDIA_", "NCCL_", "OMP_", "MKL_")) and k != "CUDA_VISIBLE_DEVICES"}}
         report["git"] = git_provenance(manifest["resolved_repo_root"])
         if dry_run:
@@ -845,7 +907,7 @@ def run_phase(manifest: dict, phase: str, output_dir: Path, modes: list[str], *,
             write_json(report_path, report)
             return report_path
         binary = Path(manifest["binaries"][phase]["path"])
-        report["build"] = build_provenance(binary)
+        report["build"] = build_provenance(binary, lock_runtime=manifest["run"].get("lock_runtime_libraries", False), runtime_env=env)
         report["optimization_status"] = validate_build(manifest, phase, report["build"])
         report["gpu"] = gpu_precheck(manifest["run"])
         if phase == "candidate":
@@ -853,6 +915,10 @@ def run_phase(manifest: dict, phase: str, output_dir: Path, modes: list[str], *,
             if fixed_gpu is not None:
                 require(all(report["gpu"][k] == fixed_gpu[k] for k in ("uuid", "name", "total_mib")), "candidate GPU differs from baseline")
             require(report["environment"]["other_runtime_env"] == fixed["environment"]["other_runtime_env"], "runtime environment differs from baseline")
+            if manifest["run"].get("lock_runtime_libraries"):
+                require("runtime_libraries" in fixed.get("build", {}), "strict runtime lock requires a newly locked baseline")
+                require(report["build"]["loader_environment"] == fixed["build"].get("loader_environment"),
+                        "loader environment differs from locked baseline")
             if fixed.get("performance_measured"):
                 require(all(manifest["run"][key] == fixed["manifest"]["run"][key] for key in ("warmup", "repeats")),
                         "candidate warmup/repeat schedule differs from measured baseline")
@@ -921,7 +987,7 @@ def run_phase(manifest: dict, phase: str, output_dir: Path, modes: list[str], *,
     # Rehash build provenance after generation; a rebuilt binary cannot
     # silently change a measured run's source identity.
     if report["performance_measured"]:
-        current_build = build_provenance(Path(manifest["binaries"][phase]["path"]))
+        current_build = build_provenance(Path(manifest["binaries"][phase]["path"]), lock_runtime=manifest["run"].get("lock_runtime_libraries", False), runtime_env=env)
         if current_build != report["build"]:
             report.update(status="failed", statistics=None, performance_measured=False,
                           error="binary/build provenance changed during run")

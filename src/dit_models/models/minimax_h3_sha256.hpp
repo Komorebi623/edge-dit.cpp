@@ -9,6 +9,10 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#if defined(__linux__)
+#include <dlfcn.h>
+#include <memory>
+#endif
 namespace MiniMaxH3 {
 class Sha256 {
     std::array<uint32_t,8> h_{{0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19}};
@@ -41,7 +45,44 @@ public:
         std::ostringstream out;out<<std::hex<<std::setfill('0');for(auto v:h_)out<<std::setw(8)<<v;return out.str();
     }
 };
-inline std::string sha256_file(const std::string& path) {
+// Optional existing-system crypto provider, used only by the opted-in H3/CUDA
+// AdaLN identity pass. Full streaming SHA256, no stat/header hash shortcut.
+// No mandatory dependency or provider setting changes; portable implementation
+// remains the default and the fallback. OpenSSL API: EVP_DigestInit_ex/Update/Final.
+inline std::string sha256_file_native_crypto(const std::string& path) {
+#if defined(__linux__)
+    struct evp_md_ctx_st; struct evp_md_st; struct engine_st;
+    using Context = evp_md_ctx_st; using Digest = evp_md_st; using Engine = engine_st;
+    struct Library { void* handle; ~Library() { if (handle) dlclose(handle); } } library{dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL)};
+    if (!library.handle) return {};
+    auto create = reinterpret_cast<Context* (*)()>(dlsym(library.handle, "EVP_MD_CTX_new"));
+    auto destroy = reinterpret_cast<void (*)(Context*)>(dlsym(library.handle, "EVP_MD_CTX_free"));
+    auto sha = reinterpret_cast<const Digest* (*)()>(dlsym(library.handle, "EVP_sha256"));
+    auto init = reinterpret_cast<int (*)(Context*, const Digest*, Engine*)>(dlsym(library.handle, "EVP_DigestInit_ex"));
+    auto update = reinterpret_cast<int (*)(Context*, const void*, size_t)>(dlsym(library.handle, "EVP_DigestUpdate"));
+    auto finish = reinterpret_cast<int (*)(Context*, unsigned char*, unsigned int*)>(dlsym(library.handle, "EVP_DigestFinal_ex"));
+    if (!create || !destroy || !sha || !init || !update || !finish) return {};
+    std::unique_ptr<Context, decltype(destroy)> ctx(create(), destroy);
+    if (!ctx || init(ctx.get(), sha(), nullptr) != 1) return {};
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("H3 cannot read artifact: " + path);
+    std::array<char, 1024*1024> buffer{};
+    while (in) {
+        in.read(buffer.data(), buffer.size());
+        if (update(ctx.get(), buffer.data(), static_cast<size_t>(in.gcount())) != 1) return {};
+    }
+    if (!in.eof()) throw std::runtime_error("H3 artifact read failed: " + path);
+    std::array<unsigned char, 64> digest{}; unsigned int length = 0;
+    if (finish(ctx.get(), digest.data(), &length) != 1 || length != 32) return {};
+    std::ostringstream out; out << std::hex << std::setfill('0');
+    for (size_t i=0; i<length; ++i) out << std::setw(2) << unsigned(digest[i]);
+    return out.str();
+#else
+    (void)path; return {};
+#endif
+}
+inline std::string sha256_file(const std::string& path, bool use_native_crypto = false) {
+    if (use_native_crypto) { auto value = sha256_file_native_crypto(path); if (!value.empty()) return value; }
     std::ifstream in(path,std::ios::binary);if(!in)throw std::runtime_error("H3 cannot read artifact: "+path);
     Sha256 sum;std::array<char,1024*1024> buffer{};
     while(in){in.read(buffer.data(),buffer.size());sum.update(buffer.data(),static_cast<size_t>(in.gcount()));}

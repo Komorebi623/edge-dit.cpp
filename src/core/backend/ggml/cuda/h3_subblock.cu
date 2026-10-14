@@ -2,6 +2,7 @@
 #include "common.cuh"
 #include "fattn.cuh"
 #include <math_constants.h>
+#include "h3_subblock_indexed.cuh"
 
 // Bounded batching, not a dense LxL mask or per-head/per-Q expanded ggml graph.
 // Uses stock ggml FlashAttention with the baseline's K/V F16 * (1/128) prep.
@@ -167,6 +168,9 @@ bool ed_cuda_h3_subblock_supported(int device,const ggml_tensor* dst) {
        !GGML_CUDA_CC_IS_NVIDIA(ggml_cuda_info().devices[device].cc) ||
        ggml_cuda_info().devices[device].cc<GGML_CUDA_CC_TURING)return false;
     if(tag(dst)==router_tag)return true;
+    if(tag(dst)==indexed_attention_tag)
+        return ggml_cuda_info().devices[device].cc >= GGML_CUDA_CC_AMPERE &&
+               ggml_cuda_highest_compiled_arch(ggml_cuda_info().devices[device].cc) >= GGML_CUDA_CC_AMPERE;
     // Probe the actual batch/mask/precision layout before allocation. No fallback.
     Capacity c;
     if(!capacity(dst->src[0]->ne[1],dst->src[0]->ne[2],dst->src[4]->ne[1],
@@ -193,6 +197,22 @@ bool ed_cuda_h3_subblock_compute(ggml_backend_cuda_context& ctx,ggml_tensor* dst
         sort_rows<<<heads*blocks,256,0,stream>>>(scores.get(),static_cast<int32_t*>(dst->data),blocks,topk,width);
         CUDA_CHECK(cudaGetLastError());
         return true;
+    }
+    if(tag(dst)==indexed_attention_tag) {
+        const auto qi=input(q),ki=input(k),vi=input(dst->src[2],true);
+        indexed::Params p{{qi.p,qi.token_stride,qi.head_stride},{ki.p,ki.token_stride,ki.head_stride},
+                          {vi.p,vi.token_stride,vi.head_stride},
+                          static_cast<const int32_t*>(dst->src[4]->data),
+                          static_cast<const int32_t*>(dst->src[3]->data),
+                          static_cast<const int32_t*>(dst->src[5]->data),
+                          static_cast<const int32_t*>(dst->src[6]->data),
+                          static_cast<float*>(dst->data),sequence,heads,int(dst->src[4]->ne[1]),
+                          int(dst->src[3]->ne[0]),int(dst->src[6]->ne[0]-1),int(dst->src[5]->ne[1]-1)};
+        indexed::attention<true><<<dim3(p.video_blocks,heads),128,0,stream>>>(p);
+        if(p.protected_chunk_count)
+            indexed::attention<false><<<dim3(p.protected_chunk_count,heads),128,0,stream>>>(p);
+        CUDA_CHECK(cudaGetLastError());
+        return true; // explicitly indexed; no fallback to gather on failure
     }
     Capacity c;
     const int blocks=int(dst->src[4]->ne[1]), topk=int(dst->src[3]->ne[0]);

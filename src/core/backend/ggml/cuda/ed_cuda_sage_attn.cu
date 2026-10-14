@@ -35,6 +35,11 @@ namespace {
 
 using edgedit::ggml_ext::SageAttnCustomParams;
 std::atomic<uint64_t> h3_dispatch_submissions{0};
+std::atomic<uint64_t> h3_fp8_dispatch_submissions{0};
+static bool h3_scoped_params(const SageAttnCustomParams& params) {
+    return edgedit::ggml_ext::sage_attn_h3_params_valid(params) ||
+           (params.magic == ED_CUDA_H3_SAGE_FP8_MAGIC && params.n_head > 0);
+}
 
 // Kernel tiling constants must match the sage kernel launch (CTA_Q=128,
 // CTA_K=64, WARP_Q=32, WARP_K=64).
@@ -783,7 +788,7 @@ static void launch_sage_kernel(const int8_t* q_int8, const int8_t* k_int8, const
 // Launch the vendored FP8 sage kernel. Q/K are the same int8 contiguous
 // head-major buffers as the F16 path; V is the transposed+permuted e4m3 buffer
 // [hn][head_dim][L_k_pad]; v_scale is [hn][head_dim]. Output is f16 [d,L_q,HN].
-template <int HEAD_DIM>
+template <int HEAD_DIM, bool H3_SM89_MIXED = false>
 static void launch_sage_fp8_kernel(const int8_t* q_int8, const int8_t* k_int8, const int8_t* v_fp8,
                                    half* o_half, const float* q_scale, const float* k_scale,
                                    const float* v_scale,
@@ -809,9 +814,10 @@ static void launch_sage_fp8_kernel(const int8_t* q_int8, const int8_t* k_int8, c
         kCtaQ, kCtaK, kWarpQ, kWarpK, HEAD_DIM,
         DataType::kInt8,
         QuantGranularity::kPerWarp, QuantGranularity::kPerBlock,
-        /*DTypeSVAccum=*/float, /*use_inst_buffer=*/false, /*DTypeOut=*/half,
+        /*DTypeSVAccum=*/float, /*use_inst_buffer=*/H3_SM89_MIXED, /*DTypeOut=*/half,
         ComputeUnit::kCudaCore, MaskMode::kNone, /*return_lse=*/false,
-        /*fuse_v_scale=*/true, /*fuse_v_mean=*/false, /*use_pv_fp16_accu=*/false>;
+        /*fuse_v_scale=*/true, /*fuse_v_mean=*/false, /*use_pv_fp16_accu=*/H3_SM89_MIXED,
+        /*h3_zero_fill_tail=*/H3_SM89_MIXED>;
 
     // smem: max(Q_int8 + K_int8 + V_fp8, O_half)
     size_t smem_max = std::max(
@@ -869,8 +875,10 @@ static bool run_sage(ggml_tensor* dst, const ed_cuda_sage_attn_scratch* scratch,
     half*   o_half  = static_cast<half*>(scratch->o_half);
     int8_t* v_fp8   = static_cast<int8_t*>(scratch->v_fp8);
     float*  v_scale = static_cast<float*>(scratch->v_scale);
-    const bool is_h3 = edgedit::ggml_ext::sage_attn_h3_params_valid(decode_params(dst));
-    const bool use_pv_fp8 = !is_h3 && edgedit::ggml_ext::sage_pv_fp8_enabled();
+    const auto params = decode_params(dst);
+    const bool is_h3 = h3_scoped_params(params);
+    const bool h3_fp8 = params.magic == ED_CUDA_H3_SAGE_FP8_MAGIC;
+    const bool use_pv_fp8 = h3_fp8 || (!is_h3 && edgedit::ggml_ext::sage_pv_fp8_enabled());
     if (!q_int8 || !k_int8 || !q_scale || !k_scale || !km || !o_half) {
         return false;
     }
@@ -954,7 +962,8 @@ static bool run_sage(ggml_tensor* dst, const ed_cuda_sage_attn_scratch* scratch,
 
     if (use_pv_fp8) {
         // 4a) per-channel V scale (amax/448), then transpose+permute+quant to e4m3
-        constexpr float kE4M3Max = 448.0f;
+        // Official SM89 fp32+fp16 uses 2.25 to avoid FP16 MMA overflow.
+        const float kE4M3Max = h3_fp8 ? 2.25f : 448.0f;
         sage_v_channel_scale_kernel<T, HEAD_DIM><<<HN, HEAD_DIM, 0, stream>>>(
             v_ptr, v_scale, L_k, n_head, N, v_sd, v_sh, v_st, v_sb, kE4M3Max);
         {
@@ -965,7 +974,9 @@ static bool run_sage(ggml_tensor* dst, const ed_cuda_sage_attn_scratch* scratch,
                 v_ptr, v_fp8, v_scale, L_k, L_k_pad, n_head, N, v_sd, v_sh, v_st, v_sb);
         }
         // 5a) FP8-PV sage kernel (smooth-Q not supported on this path)
-        launch_sage_fp8_kernel<HEAD_DIM>(q_int8, k_int8, v_fp8, o_half, q_scale, k_scale, v_scale,
+        if (h3_fp8) launch_sage_fp8_kernel<HEAD_DIM, true>(q_int8, k_int8, v_fp8, o_half, q_scale, k_scale, v_scale,
+                               L_q, L_k, L_k_pad, HN, sm_scale, stream);
+        else launch_sage_fp8_kernel<HEAD_DIM>(q_int8, k_int8, v_fp8, o_half, q_scale, k_scale, v_scale,
                                L_q, L_k, L_k_pad, HN, sm_scale, stream);
     } else {
         // 4b) V -> contiguous f16 [d_head, L_k, HN] (hn = h + n_head*b)
@@ -1147,11 +1158,18 @@ bool ed_cuda_sage_attn_custom_supported(const ggml_tensor* dst) {
         return false;
     }
     const SageAttnCustomParams params = decode_params(dst);
-    if (edgedit::ggml_ext::sage_attn_h3_params_valid(params)) {
+    if (h3_scoped_params(params)) {
         // H3SA itself is the graph/request-scoped opt-in: no environment gate.
         // run_sage<T> reads K/V as Q's T, so H3's adapter normalizes all inputs
         // to F32. Reject mixed types, BF16, non-H3 dimensions and unsupported
         // layouts here even if the general Sage shape predicate accepts them.
+        if (params.magic == ED_CUDA_H3_SAGE_FP8_MAGIC) {
+#if !defined(__CUDACC_VER_MAJOR__) || (__CUDACC_VER_MAJOR__ * 10000 + __CUDACC_VER_MINOR__ * 100 < 120800)
+            // Vendor FP8 conversions/FP16 accumulation otherwise emit brkpt.
+            // Never advertise H3F8 support for an unusable compiler build.
+            return false;
+#endif
+        }
         const ggml_tensor* h3_q = dst->src[0];
         const ggml_tensor* h3_k = dst->src[1];
         const ggml_tensor* h3_v = dst->src[2];
@@ -1232,12 +1250,14 @@ bool ed_cuda_sage_attn_scratch_sizes_for(const ggml_tensor* dst, ed_cuda_sage_at
     out->uniform_flag_bytes = (size_t)d.HN * sizeof(int);
     out->head_entropy_bytes = (size_t)d.HN * sizeof(float);
     out->detect_acc_bytes   = (size_t)4 * d.HN * sizeof(float);
-    if (edgedit::ggml_ext::sage_attn_h3_params_valid(params)) {
+    if (h3_scoped_params(params)) {
         // The unchanged shared dispatcher allocates every field unconditionally.
         // One-byte placeholders avoid zero-size pool semantics and, importantly,
         // do NOT reserve O(sequence * heads * dim) unused FP8/smooth-Q scratch.
         // None of these fields is accessed by H3's locked FP16-PV variant.
-        out->qm_bytes = out->qk_bias_bytes = out->v_fp8_bytes = out->v_scale_bytes = 1;
+        out->qm_bytes = out->qk_bias_bytes = 1;
+        if (params.magic == ED_CUDA_H3_SAGE_FP8_MAGIC) out->v_f16_bytes = 1;
+        else out->v_fp8_bytes = out->v_scale_bytes = 1;
         out->uniform_flag_bytes = out->head_entropy_bytes = out->detect_acc_bytes = 1;
     }
     return true;
@@ -1250,7 +1270,7 @@ bool ed_cuda_sage_attn_custom_compute(ggml_tensor* dst,
         return false;
     }
     const SageAttnCustomParams params = decode_params(dst);
-    const bool is_h3 = edgedit::ggml_ext::sage_attn_h3_params_valid(params);
+    const bool is_h3 = h3_scoped_params(params);
     int h3_device = -1;
     if (is_h3) {
         // CUSTOM is atomic to the cut planner. Staging/rebinding must finish
@@ -1260,6 +1280,14 @@ bool ed_cuda_sage_attn_custom_compute(ggml_tensor* dst,
         if (cudaGetDevice(&h3_device) != cudaSuccess ||
             cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, h3_device) != cudaSuccess ||
             major < 8) return false; // cp.async + INT8/FP16 MMA require SM80+
+        if (params.magic == ED_CUDA_H3_SAGE_FP8_MAGIC) {
+            int minor = 0;
+            if (cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, h3_device) != cudaSuccess ||
+                !ed_cuda_h3_sage_fp8_arch_supported(major, minor)) {
+                fprintf(stderr, "[H3F8] refusing unsupported SM%d%d; this variant is SM89-only\n", major, minor);
+                return false;
+            }
+        }
         const ggml_tensor* tensors[] = {dst, dst->src[0], dst->src[1], dst->src[2]};
         for (const ggml_tensor* tensor : tensors) {
             cudaPointerAttributes attr{};
@@ -1286,7 +1314,16 @@ bool ed_cuda_sage_attn_custom_compute(ggml_tensor* dst,
     if (!ok || (is_h3 && cudaPeekAtLastError() != cudaSuccess)) return false;
     if (is_h3) {
         const uint64_t submission = h3_dispatch_submissions.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (submission == 1) {
+        const bool h3_fp8 = params.magic == ED_CUDA_H3_SAGE_FP8_MAGIC;
+        const uint64_t fp8_submission = h3_fp8 ? h3_fp8_dispatch_submissions.fetch_add(1, std::memory_order_relaxed) + 1 : 0;
+        if (h3_fp8 && fp8_submission == 1) {
+            fprintf(stderr, "[H3F8] CUDA_DISPATCH launch=1 device=%d variant=int8qk_perwarp_e4m3pv_fp32fp16 "
+                            "head_dim=128 q_tokens=%lld k_tokens=%lld heads=%d batch=%lld "
+                            "smooth_k=1 smooth_q=0 v_scale_max=2.25 dense_fallback=0 tail_zero_fill=1\n",
+                    h3_device, (long long)q->ne[1], (long long)dst->src[1]->ne[1], params.n_head,
+                    (long long)(q->ne[2]/params.n_head));
+        }
+        if (!h3_fp8 && submission == 1) {
             // Evidence comes from the actual CUDA compute entry, after launching
             // quantization + attention, NEVER option parsing or graph construction.
             // Completion is still established by the graph's synchronize/status.
@@ -1302,4 +1339,8 @@ bool ed_cuda_sage_attn_custom_compute(ggml_tensor* dst,
 
 uint64_t ed_cuda_sage_attn_h3_dispatch_count() {
     return h3_dispatch_submissions.load(std::memory_order_relaxed);
+}
+
+uint64_t ed_cuda_sage_attn_h3_fp8_dispatch_count() {
+    return h3_fp8_dispatch_submissions.load(std::memory_order_relaxed);
 }

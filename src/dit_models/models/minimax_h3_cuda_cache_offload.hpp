@@ -28,6 +28,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <unordered_set>
 
 namespace MiniMaxH3 { namespace CacheOffload {
@@ -223,6 +224,136 @@ public:
         this->free_compute_ctx();
         sd::ggml_graph_cut::clear_comm_marks();
     }
+    // Measure one candidate with actual graph-cut boundaries, without computing
+    // or staging parameters. Only existing metadata is temporarily rebound. A
+    // borrowed source-parameter buffer marks future cut values as externally
+    // allocated for gallocr; data stays NULL and that buffer is NEVER read.
+    size_t h3_cache_measure_planned_segment(ggml_cgraph* graph,
+                                            const typename BaseRunner::GraphCutSegment& segment) {
+        namespace Cut = sd::ggml_graph_cut;
+        using Index = decltype(this->cache_tensor_index_);
+        struct Scope {
+            RunnerBridge& runner;
+            Index old_index;
+            std::unordered_set<ggml_tensor*> seen;
+            std::vector<std::pair<ggml_tensor*, ggml_tensor>> saved;
+            std::vector<std::unique_ptr<ggml_tensor>> placeholders;
+            explicit Scope(RunnerBridge& r) : runner(r), old_index(std::move(r.cache_tensor_index_)) {}
+            void save(ggml_tensor* t) { if (t && seen.insert(t).second) saved.emplace_back(t, *t); }
+            ~Scope() {
+                for (auto& entry : saved) *entry.first = entry.second;
+                runner.cache_tensor_index_ = std::move(old_index);
+            }
+        } scope(*this);
+        // Save precisely the tensors bind_segment_cached_inputs and the segment
+        // builder may mutate, including secondary views and output flags.
+        for (const auto& input : segment.input_refs) scope.save(Cut::input_tensor(graph, input));
+        for (int index : segment.internal_node_indices) {
+            auto* t = ggml_graph_node(graph, index);
+            scope.save(t); scope.save(t->view_src);
+            for (auto* source : t->src) { scope.save(source); if (source) scope.save(source->view_src); }
+        }
+        for (int index : segment.output_node_indices) {
+            auto* t = ggml_graph_node(graph, index); scope.save(t); scope.save(t->view_src);
+        }
+        ggml_backend_buffer_t marker = nullptr;
+        for (auto* p = ggml_get_first_tensor(this->params_ctx); p && !marker;
+             p = ggml_get_next_tensor(this->params_ctx, p)) marker = p->buffer;
+        for (const auto& input : segment.input_refs) {
+            if (input.type != Cut::Segment::INPUT_PREVIOUS_CUT) continue;
+            require(marker, "boundary planning requires loaded CPU parameter storage");
+            auto* t = Cut::input_tensor(graph, input);
+            auto* source = t ? Cut::cache_source_tensor(t) : nullptr;
+            require(source, "missing previous-cut source during planning");
+            auto storage = std::make_unique<ggml_tensor>(*source);
+            storage->op = GGML_OP_NONE; storage->view_src = nullptr; storage->view_offs = 0;
+            for (auto*& parent : storage->src) parent = nullptr;
+            storage->buffer = marker; storage->data = nullptr; storage->extra = nullptr;
+            this->cache_tensor_index_[input.display_name] = storage.get();
+            scope.placeholders.push_back(std::move(storage));
+        }
+        require(this->bind_segment_cached_inputs(graph, segment), "temporary plan boundary binding failed");
+        ggml_context* ctx = nullptr;
+        auto* executable = Cut::build_segment_graph(graph, segment, &ctx);
+        std::unique_ptr<ggml_context, decltype(&ggml_free)> owner(ctx, ggml_free);
+        require(executable, "temporary bound plan graph unavailable");
+        return measure_bound_compute_buffer(this->runtime_backend, executable);
+    }
+
+    // Keep the shared topological cut discovery and segment builder. The local
+    // merge is the same adjacent greedy policy, but its admission sizes are
+    // measured with scoped boundaries rather than recursive historical leafs.
+    typename BaseRunner::GraphCutPlan h3_cache_plan(ggml_cgraph* graph,
+            const std::unordered_set<const ggml_tensor*>& parameters, size_t budget, bool merge) {
+        namespace Cut = sd::ggml_graph_cut;
+        using Segment = typename BaseRunner::GraphCutSegment;
+        auto base = Cut::build_plan(this->runtime_backend, graph, parameters, "h3-cache-offload");
+        require(base.available && base.valid && !base.segments.empty(), "invalid structural graph-cut plan");
+        auto plan = base; plan.segments.clear();
+        auto candidate = [&](size_t begin, size_t end) {
+            Segment out;
+            out.group_name = base.segments[begin].group_name;
+            if (end != begin) out.group_name += ".." + base.segments[end].group_name;
+            std::set<int> nodes, outputs, seeds;
+            for (size_t i = begin; i <= end; ++i) {
+                const auto& s = base.segments[i];
+                require(s.comm_ops.empty(), "parallel cut in serial cache plan");
+                nodes.insert(s.internal_node_indices.begin(), s.internal_node_indices.end());
+                outputs.insert(s.output_node_indices.begin(), s.output_node_indices.end());
+                seeds.insert(s.seed_node_indices.begin(), s.seed_node_indices.end());
+            }
+            out.internal_node_indices.assign(nodes.begin(), nodes.end());
+            out.output_node_indices.assign(outputs.begin(), outputs.end());
+            out.seed_node_indices.assign(seeds.begin(), seeds.end());
+            std::unordered_set<ggml_tensor*> internal, seen;
+            for (int i : nodes) internal.insert(ggml_graph_node(graph, i));
+            for (size_t i = begin; i <= end; ++i) for (const auto& input : base.segments[i].input_refs) {
+                auto* t = Cut::input_tensor(graph, input);
+                require(t, "missing cut input during local merge");
+                if (internal.count(t) || !seen.insert(t).second) continue;
+                out.input_refs.push_back(input);
+                if (input.type == Segment::INPUT_PREVIOUS_CUT) out.input_previous_cut_bytes += Cut::cache_tensor_bytes(t);
+                else if (input.type == Segment::INPUT_PARAM) out.input_param_bytes += ggml_nbytes(t);
+                else out.input_external_bytes += ggml_nbytes(t);
+            }
+            std::sort(out.input_refs.begin(), out.input_refs.end(), [](const auto& a, const auto& b) {
+                return a.type != b.type ? a.type < b.type : a.display_name < b.display_name;
+            });
+            for (int i : outputs) out.output_bytes += Cut::cache_tensor_bytes(ggml_graph_node(graph, i));
+            out.compute_buffer_size = h3_cache_measure_planned_segment(graph, out);
+            return out;
+        };
+        auto fits = [&](const Segment& s) {
+            size_t left = budget;
+            for (size_t bytes : {s.compute_buffer_size, s.input_param_bytes, s.input_previous_cut_bytes, s.output_bytes}) {
+                if (bytes > left) return false;
+                left -= bytes;
+            }
+            return true;
+        };
+        size_t begin = 0;
+        while (begin < base.segments.size()) {
+            size_t end = begin;
+            auto best = candidate(begin, end);
+            // An indivisible over-budget segment remains in the plan so the
+            // actual, post-bind launch guard rejects it; NEVER silently execute.
+            while (merge && fits(best) && end + 1 < base.segments.size()) {
+                auto next = candidate(begin, end + 1);
+                if (!fits(next)) break;
+                best = std::move(next); ++end;
+            }
+            plan.segments.push_back(std::move(best)); begin = end + 1;
+        }
+        std::unordered_set<std::string> future;
+        for (auto i = plan.segments.rbegin(); i != plan.segments.rend(); ++i) {
+            i->future_input_names = future;
+            for (const auto& input : i->input_refs)
+                if (input.type == Segment::INPUT_PREVIOUS_CUT) future.insert(input.display_name);
+        }
+        LOG_INFO("minimax-h3 Cache-DiT scoped plan: base_segments=%zu merged_segments=%zu budget=%zu",
+                 base.segments.size(), plan.segments.size(), budget);
+        return plan;
+    }
     PassResult h3_cache_run_pass(Builder build, CudaDualBlockGraphPass& pass,
                                  GraphInputs& inputs, Arena& arena, int threads,
                                  bool no_return, const Options& options) {
@@ -291,14 +422,10 @@ public:
         size_t capture_index = 0;
         for (const auto& item : requested)
             Cut::mark_graph_cut(item.second, "h3_cache_capture_" + std::to_string(capture_index++), "output");
-        auto plan = Cut::build_plan(this->runtime_backend, graph, all_params, "h3-cache-offload");
-        if (!cpu_test && plan.available && plan.valid)
-            // The stock estimate counts live previous-cut payloads, but not pooled
-            // allocation slack. Keep a bounded planning margin and still check
-            // exact owned allocations before each launch.
-            plan = Cut::apply_max_vram_budget(graph, plan,
-                                             (this->max_graph_vram_bytes - arena.limit_bytes()) * 15 / 16,
-                                             this->runtime_backend, all_params, "h3-cache-offload");
+        // Persistent-slot reservation and the existing 15/16 margin are unchanged.
+        const size_t planning_budget = cpu_test ? 0 :
+            (this->max_graph_vram_bytes - arena.limit_bytes()) * 15 / 16;
+        auto plan = h3_cache_plan(graph, all_params, planning_budget, !cpu_test);
         require(plan.available && plan.valid && !plan.segments.empty(), "invalid graph-cut plan");
         PassResult result;
         std::unordered_set<std::string> captured;

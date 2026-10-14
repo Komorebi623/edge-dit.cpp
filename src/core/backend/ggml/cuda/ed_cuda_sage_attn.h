@@ -3,6 +3,14 @@
 #include "ggml.h"
 #include <cstdint>
 
+// Separate H3 graph tag: Q32/K64 INT8, E4M3 PV, per-CTA FP16 MMA
+// accumulation folded into FP32 (upstream pv_accum_dtype="fp32+fp16").
+// The graph captures this choice; the process-wide ED_SAGE_PV_FP8 is unrelated.
+constexpr uint32_t ED_CUDA_H3_SAGE_FP8_MAGIC = 0x48334638u; // H3F8
+inline bool ed_cuda_h3_sage_fp8_arch_supported(int major, int minor) {
+    return major == 8 && minor == 9;
+}
+
 // SageAttention INT8-QK + F16-PV fused attention custom op. H3SA selects
 // per-warp Q32/K64, smooth-K only, FP32 accumulation, no hidden dense fallback.
 // This is NOT the upstream SM89 auto-selected FP8-PV variant.
@@ -79,3 +87,6 @@ bool ed_cuda_sage_attn_custom_compute(ggml_tensor * dst,
 // before/after a request. Inspect completion/status separately. Legacy SAGQ
 // and rejected operations never increment this counter.
 uint64_t ed_cuda_sage_attn_h3_dispatch_count();
+
+// Subset of h3_dispatch_count: successful H3F8 submissions only.
+uint64_t ed_cuda_sage_attn_h3_fp8_dispatch_count();

@@ -1,6 +1,6 @@
 {
   "date": "2026-10-14",
-  "status": "in_progress_not_four_methods_complete",
+  "status": "superseded_by_completed_results",
   "scope": [
     "AdaLN",
     "Cache-DiT",
@@ -492,6 +492,81 @@
       "report": "sage-t2va/report.json",
       "report_sha256": "ef7c97c426d449c48b71daa688a732a054d68d66cf4da13dd6cb2efe1024d491",
       "variant": "Q32 per-warp INT8 QK, K64 per-block, smooth-K, FP16 PV, FP32 accumulation, H3 tail zero fill; first/last layer dense, all20steps; not SM89 default FP8PV"
+    },
+    "cache_scoped": {
+      "status": "validated",
+      "performance_measured": true,
+      "statistics": {
+        "t2va": {
+          "cli_wall_ms": {
+            "count": 1,
+            "max": 228442.54215899855,
+            "mean": 228442.54215899855,
+            "median": 228442.54215899855,
+            "min": 228442.54215899855,
+            "stdev": 0.0
+          },
+          "conditioning_ms": {
+            "count": 1,
+            "max": 1332,
+            "mean": 1332,
+            "median": 1332,
+            "min": 1332,
+            "stdev": 0.0
+          },
+          "decode_ms": {
+            "count": 1,
+            "max": 10444,
+            "mean": 10444,
+            "median": 10444,
+            "min": 10444,
+            "stdev": 0.0
+          },
+          "diffusion_ms": {
+            "count": 1,
+            "max": 185311,
+            "mean": 185311,
+            "median": 185311,
+            "min": 185311,
+            "stdev": 0.0
+          },
+          "noise_ms": {
+            "count": 1,
+            "max": 521,
+            "mean": 521,
+            "median": 521,
+            "min": 521,
+            "stdev": 0.0
+          },
+          "total_ms": {
+            "count": 1,
+            "max": 198492,
+            "mean": 198492,
+            "median": 198492,
+            "min": 198492,
+            "stdev": 0.0
+          }
+        }
+      },
+      "memory_sampling": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 852,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 14153.0,
+        "max_sample_gap_seconds": 0.5548959639854729
+      },
+      "quality_vs_initial_baseline": {
+        "ssim": 0.9750243629032258,
+        "psnr_db": 35.68846774193548,
+        "audio_rmse": 0.007536790498512551
+      },
+      "actual_cache_hits": 0,
+      "steps": 20,
+      "note": "No hits; do not attribute graph/offload savings to reuse. Need measured RF tuning and same-path threshold0 control.",
+      "report": "cache-t2va-scoped/report.json",
+      "report_sha256": "57c5657a2036870b838b419093db546ac57058a6d038e90c09bcacd04d3fff91"
     }
   },
   "correctness_tests": {
@@ -501,11 +576,530 @@
     "subblock_cuda_outputs": 214,
     "sage_cuda_comparisons": 126
   },
-  "unfinished": [
-    "Cache full-model graph planner151GiB compute estimate investigation",
-    "AdaLN full-denoiser output difference despite identical real projections",
-    "repeated full-model four-method performance and mode-matched quality",
-    "fusion breakdown root cause"
+  "evidence_root": "_scratch/h3-offload-20261014",
+  "adaln_precision_diagnosis": {
+    "original_async_plan_fullshape_pairs": 6,
+    "original_async_differing_pairs": 1,
+    "shared_synchronous_plan_pairs": 6,
+    "shared_synchronous_plan_differing_pairs": 0,
+    "scope": "real full mixed-Q4, target latent geometry, same runner, 3 fixed sigma x2 roles; plans/control not full sampling trajectory",
+    "evidence": [
+      "logs/adaln-fullshape-denoiser-probe.log",
+      "logs/adaln-fullshape-sync-plan-probe.log"
+    ],
+    "next": "new baseline with explicit runtime_env shared sync policy; old async table not reused for performance"
+  },
+  "sync_baseline": {
+    "status": "validated",
+    "runtime_env": {
+      "ED_CUDNN_SDPA_SYNC_F32_SELF_ATTN": "1"
+    },
+    "statistics": {
+      "t2va": {
+        "cli_wall_ms": {
+          "count": 3,
+          "max": 254190.86798187345,
+          "mean": 254147.98503695056,
+          "median": 254177.28800000623,
+          "min": 254075.799128972,
+          "stdev": 62.88249327035204
+        },
+        "conditioning_ms": {
+          "count": 3,
+          "max": 1342,
+          "mean": 1335.6666666666667,
+          "median": 1338,
+          "min": 1327,
+          "stdev": 7.767453465154029
+        },
+        "decode_ms": {
+          "count": 3,
+          "max": 10484,
+          "mean": 10462,
+          "median": 10467,
+          "min": 10435,
+          "stdev": 24.879710609249457
+        },
+        "diffusion_ms": {
+          "count": 3,
+          "max": 211238,
+          "mean": 211160.33333333334,
+          "median": 211142,
+          "min": 211101,
+          "stdev": 70.31595361888604
+        },
+        "noise_ms": {
+          "count": 3,
+          "max": 542,
+          "mean": 533.3333333333334,
+          "median": 531,
+          "min": 527,
+          "stdev": 7.767453465154029
+        },
+        "total_ms": {
+          "count": 3,
+          "max": 224359,
+          "mean": 224293,
+          "median": 224262,
+          "min": 224258,
+          "stdev": 57.19265687131522
+        }
+      }
+    },
+    "report": "sync-baseline/baseline/report.json"
+  },
+  "sync_repeated_results": {
+    "cache": {
+      "statistics": {
+        "t2va": {
+          "cli_wall_ms": {
+            "count": 3,
+            "max": 178126.7629119102,
+            "mean": 177961.70885193473,
+            "median": 177986.17607587948,
+            "min": 177772.1875680145,
+            "stdev": 178.54943968089486
+          },
+          "conditioning_ms": {
+            "count": 3,
+            "max": 1334,
+            "mean": 1322.6666666666667,
+            "median": 1330,
+            "min": 1304,
+            "stdev": 16.289055630494154
+          },
+          "decode_ms": {
+            "count": 3,
+            "max": 10550,
+            "mean": 10513,
+            "median": 10503,
+            "min": 10486,
+            "stdev": 33.15116890850155
+          },
+          "diffusion_ms": {
+            "count": 3,
+            "max": 135065,
+            "mean": 135017,
+            "median": 135023,
+            "min": 134963,
+            "stdev": 51.264022471905186
+          },
+          "noise_ms": {
+            "count": 3,
+            "max": 528,
+            "mean": 524.3333333333334,
+            "median": 526,
+            "min": 519,
+            "stdev": 4.725815626252609
+          },
+          "total_ms": {
+            "count": 3,
+            "max": 148208,
+            "mean": 148190.66666666666,
+            "median": 148188,
+            "min": 148176,
+            "stdev": 16.165807537309522
+          }
+        }
+      },
+      "warmup": 1,
+      "repeats": 3,
+      "tuning": {
+        "ED_H3_CACHE_THRESHOLD": "0.12"
+      },
+      "report": "sync-cache/report.json",
+      "memory": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 2311,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 14153.0,
+        "max_sample_gap_seconds": 0.5249364289920777
+      },
+      "quality": [
+        {
+          "ssim": 0.9761253064516129,
+          "psnr_db": 35.58008064516129,
+          "exact_frames": 0,
+          "audio_rmse": 0.006037331708483778
+        },
+        {
+          "ssim": 0.9761253064516129,
+          "psnr_db": 35.58008064516129,
+          "exact_frames": 0,
+          "audio_rmse": 0.006037331708483778
+        },
+        {
+          "ssim": 0.9761253064516129,
+          "psnr_db": 35.58008064516129,
+          "exact_frames": 0,
+          "audio_rmse": 0.006037331708483778
+        }
+      ]
+    },
+    "cache-no-reuse": {
+      "statistics": {
+        "t2va": {
+          "cli_wall_ms": {
+            "count": 3,
+            "max": 228993.07294911705,
+            "mean": 228935.49824599177,
+            "median": 228957.73110701703,
+            "min": 228855.69068184122,
+            "stdev": 71.33860751716367
+          },
+          "conditioning_ms": {
+            "count": 3,
+            "max": 1364,
+            "mean": 1360,
+            "median": 1359,
+            "min": 1357,
+            "stdev": 3.605551275463989
+          },
+          "decode_ms": {
+            "count": 3,
+            "max": 10548,
+            "mean": 10511.666666666666,
+            "median": 10499,
+            "min": 10488,
+            "stdev": 31.942656954820357
+          },
+          "diffusion_ms": {
+            "count": 3,
+            "max": 185905,
+            "mean": 185868,
+            "median": 185859,
+            "min": 185840,
+            "stdev": 33.421549934136806
+          },
+          "noise_ms": {
+            "count": 3,
+            "max": 524,
+            "mean": 522,
+            "median": 521,
+            "min": 521,
+            "stdev": 1.7320508075688772
+          },
+          "total_ms": {
+            "count": 3,
+            "max": 199139,
+            "mean": 199124.66666666666,
+            "median": 199127,
+            "min": 199108,
+            "stdev": 15.631165450257807
+          }
+        }
+      },
+      "warmup": 1,
+      "repeats": 3,
+      "tuning": {
+        "ED_H3_CACHE_THRESHOLD": "0"
+      },
+      "report": "sync-cache-no-reuse/report.json",
+      "memory": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 2936,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 14153.0,
+        "max_sample_gap_seconds": 0.5655737319029868
+      },
+      "quality": [
+        {
+          "ssim": 1.0,
+          "psnr_db": null,
+          "exact_frames": 124,
+          "audio_rmse": 0.0
+        },
+        {
+          "ssim": 1.0,
+          "psnr_db": null,
+          "exact_frames": 124,
+          "audio_rmse": 0.0
+        },
+        {
+          "ssim": 1.0,
+          "psnr_db": null,
+          "exact_frames": 124,
+          "audio_rmse": 0.0
+        }
+      ]
+    },
+    "adaln": {
+      "statistics": {
+        "t2va": {
+          "cli_wall_ms": {
+            "count": 3,
+            "max": 250158.7859930005,
+            "mean": 250039.2659396554,
+            "median": 250053.6212469451,
+            "min": 249905.3905790206,
+            "stdev": 127.30618638560419
+          },
+          "conditioning_ms": {
+            "count": 3,
+            "max": 1337,
+            "mean": 1334.6666666666667,
+            "median": 1336,
+            "min": 1331,
+            "stdev": 3.2145502536643185
+          },
+          "decode_ms": {
+            "count": 3,
+            "max": 9914,
+            "mean": 9880.333333333334,
+            "median": 9888,
+            "min": 9839,
+            "stdev": 38.083242158898884
+          },
+          "diffusion_ms": {
+            "count": 3,
+            "max": 186316,
+            "mean": 186231,
+            "median": 186232,
+            "min": 186145,
+            "stdev": 85.5043858524228
+          },
+          "noise_ms": {
+            "count": 3,
+            "max": 541,
+            "mean": 532.6666666666666,
+            "median": 535,
+            "min": 522,
+            "stdev": 9.71253485622231
+          },
+          "total_ms": {
+            "count": 3,
+            "max": 198851,
+            "mean": 198734.66666666666,
+            "median": 198710,
+            "min": 198643,
+            "stdev": 106.17124532251344
+          }
+        }
+      },
+      "warmup": 1,
+      "repeats": 3,
+      "tuning": {},
+      "report": "sync-adaln/report.json",
+      "memory": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 3231,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 15173.0,
+        "max_sample_gap_seconds": 0.5654593389481306
+      },
+      "quality": [
+        {
+          "ssim": 1.0,
+          "psnr_db": null,
+          "exact_frames": 124,
+          "audio_rmse": 0.0
+        },
+        {
+          "ssim": 1.0,
+          "psnr_db": null,
+          "exact_frames": 124,
+          "audio_rmse": 0.0
+        },
+        {
+          "ssim": 1.0,
+          "psnr_db": null,
+          "exact_frames": 124,
+          "audio_rmse": 0.0
+        }
+      ]
+    },
+    "subblock": {
+      "statistics": {
+        "t2va": {
+          "cli_wall_ms": {
+            "count": 3,
+            "max": 327878.04971286096,
+            "mean": 327459.52469467494,
+            "median": 327262.06726417877,
+            "min": 327238.45710698515,
+            "stdev": 362.6454922046726
+          },
+          "conditioning_ms": {
+            "count": 3,
+            "max": 1329,
+            "mean": 1325.3333333333333,
+            "median": 1324,
+            "min": 1323,
+            "stdev": 3.2145502536643185
+          },
+          "decode_ms": {
+            "count": 3,
+            "max": 10503,
+            "mean": 10493,
+            "median": 10502,
+            "min": 10474,
+            "stdev": 16.46207763315433
+          },
+          "diffusion_ms": {
+            "count": 3,
+            "max": 284569,
+            "mean": 284532.6666666667,
+            "median": 284535,
+            "min": 284494,
+            "stdev": 37.554404979087785
+          },
+          "noise_ms": {
+            "count": 3,
+            "max": 521,
+            "mean": 520,
+            "median": 521,
+            "min": 518,
+            "stdev": 1.7320508075688772
+          },
+          "total_ms": {
+            "count": 3,
+            "max": 297768,
+            "mean": 297722.3333333333,
+            "median": 297743,
+            "min": 297656,
+            "stdev": 58.79058881601147
+          }
+        }
+      },
+      "warmup": 1,
+      "repeats": 3,
+      "tuning": {
+        "ED_H3_SPARSE_KEEP_RATIO": "0.5"
+      },
+      "report": "sync-subblock/report.json",
+      "memory": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 4157,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 16045.0,
+        "max_sample_gap_seconds": 0.5174433391075581
+      },
+      "quality": [
+        {
+          "ssim": 0.9173507177419354,
+          "psnr_db": 27.91258064516129,
+          "exact_frames": 0,
+          "audio_rmse": 0.007620626680822783
+        },
+        {
+          "ssim": 0.9173507177419354,
+          "psnr_db": 27.91258064516129,
+          "exact_frames": 0,
+          "audio_rmse": 0.007620626680822783
+        },
+        {
+          "ssim": 0.9173507177419354,
+          "psnr_db": 27.91258064516129,
+          "exact_frames": 0,
+          "audio_rmse": 0.007620626680822783
+        }
+      ]
+    },
+    "sage": {
+      "statistics": {
+        "t2va": {
+          "cli_wall_ms": {
+            "count": 3,
+            "max": 282920.34724215046,
+            "mean": 282782.9160907616,
+            "median": 282757.744057104,
+            "min": 282670.6569730304,
+            "stdev": 126.73409597324174
+          },
+          "conditioning_ms": {
+            "count": 3,
+            "max": 1334,
+            "mean": 1326.3333333333333,
+            "median": 1332,
+            "min": 1313,
+            "stdev": 11.590225767142472
+          },
+          "decode_ms": {
+            "count": 3,
+            "max": 10506,
+            "mean": 10466,
+            "median": 10449,
+            "min": 10443,
+            "stdev": 34.77067730142742
+          },
+          "diffusion_ms": {
+            "count": 3,
+            "max": 239689,
+            "mean": 239686.66666666666,
+            "median": 239687,
+            "min": 239684,
+            "stdev": 2.516611478423583
+          },
+          "noise_ms": {
+            "count": 3,
+            "max": 542,
+            "mean": 531,
+            "median": 532,
+            "min": 519,
+            "stdev": 11.532562594670797
+          },
+          "total_ms": {
+            "count": 3,
+            "max": 252838,
+            "mean": 252820,
+            "median": 252824,
+            "min": 252798,
+            "stdev": 20.29778313018444
+          }
+        }
+      },
+      "warmup": 1,
+      "repeats": 3,
+      "tuning": {},
+      "report": "sync-sage/report.json",
+      "memory": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 3456,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 16749.0,
+        "max_sample_gap_seconds": 0.5194101359229535
+      },
+      "quality": [
+        {
+          "ssim": 0.9798085806451613,
+          "psnr_db": 38.016451612903225,
+          "exact_frames": 0,
+          "audio_rmse": 0.006183588654387305
+        },
+        {
+          "ssim": 0.9798085806451613,
+          "psnr_db": 38.016451612903225,
+          "exact_frames": 0,
+          "audio_rmse": 0.006183588654387305
+        },
+        {
+          "ssim": 0.9798085806451613,
+          "psnr_db": 38.016451612903225,
+          "exact_frames": 0,
+          "audio_rmse": 0.006183588654387305
+        }
+      ]
+    }
+  },
+  "final_results": "benchmark/h3_cuda/four-methods-results.json",
+  "final_document": "docs/research/h3-four-method-results.md",
+  "historical_unfinished_at_checkpoint": [
+    "new synchronous-plan baseline and candidate repeated performance",
+    "Cache reuse tuning and no-reuse control",
+    "SubBlock indexed CUDA correctness and full-model performance",
+    "Sage SM89 FP8PV variant validation",
+    "mode-matched quality and full multimodal input checks",
+    "fusion root cause ablations"
   ],
-  "evidence_root": "_scratch/h3-offload-20261014"
+  "completion_audit_sha256": "8e54a633ce638db27267fb33ccf65f06321fbb283b322d0f510cca972079e557"
 }

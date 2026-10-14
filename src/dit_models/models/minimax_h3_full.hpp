@@ -2205,10 +2205,17 @@ namespace MiniMaxH3 {
                 auto result = CacheOffload::compute(*this, *cuda_cache_offload_state, cuda_cache_policy,
                     model.cuda_optimizations, cuda_cache_operators, get_graph,
                     [&](auto* pass) { model.cuda_cache_pass = pass; }, n_threads, execution, &stats);
+                std::ostringstream rf;
+                for (size_t i=0;i<stats.per_span_relative_l1.size();++i) {
+                    if (i) rf << ',';
+                    rf << stats.per_span_relative_l1[i];
+                }
                 LOG_INFO("minimax-h3 Cache-DiT offload: step=%d branch=%d hit=%d probe_segments=%zu remainder_segments=%zu H2D_weights=%zu bytes cache_peak=%zu bytes RF_spans=%zu",
                     model.cuda_step, cuda_cache_policy.branch_index(), stats.hit, stats.probe_segments,
                     stats.remainder_segments, stats.parameter_bytes, cuda_cache_offload_state->arena.peak_bytes(),
                     stats.per_span_relative_l1.size());
+                LOG_INFO("minimax-h3 Cache-DiT RF: step=%d threshold=%.6g span_rel_l1=[%s]",
+                         model.cuda_step, model.cuda_optimizations.cache_threshold, rf.str().c_str());
                 return restore_trailing_singleton_dims(std::move(result), params.x->dim());
             }
             if (!cuda_cache_store) cuda_cache_store = std::make_unique<RunnerCacheDeviceStore>(runtime_backend);

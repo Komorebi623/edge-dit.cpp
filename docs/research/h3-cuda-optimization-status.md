@@ -1,5 +1,8 @@
 # MiniMax-H3 CUDA 优化：环境、基线与逐项验证
 
+> **2026-10-14最新状态**：AdaLN / Cache-DiT / Sage(F16PV) / SubBlock(indexed) 已完成4090单卡、原精度、864×480/124帧/20步的T2VA三次对照，另有完整mixed单次与40项全模式功能回归。受控serial offload已接通；异步/并行/adapter组合仍拒绝。当前数据、收益与限制以 `h3-four-method-results.md`、`h3-four-method-reproduce.md` 和 `validation.json.four_method_validation` 为准；下文保留先前交接/计划历史，不能把旧“未测/只resident”当最新状态。
+
+
 > **4090接续更新（2026-10-13）**：已完成固定SM89构建、5/5整文件hash、真实CUDA tiny52/52，以及T2VA/Ref2VA mixed卸载baseline。单次fusion为回退而非加速；详细实测/范围见 `h3-4090-results.md`。下文H200“未推理”是历史记录，不代表本机状态。
 
 ## 环境与基线

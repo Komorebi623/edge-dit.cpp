@@ -2,6 +2,7 @@
 #include "dit_models/models/minimax_h3_cuda_options.hpp"
 #include "dit_models/models/minimax_h3_sha256.hpp"
 #include <filesystem>
+#include <chrono>
 #include <fstream>
 #include "json.hpp"
 
@@ -729,17 +730,20 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     if (cuda_options.adaln_cache) {
         // Hash only DiT shards (not 32B text encoder or VAEs) once at load.
         // Content identity never substitutes a path or header-only checksum.
+        const auto identity_start = std::chrono::steady_clock::now();
         std::set<size_t> file_indices;
         for (const auto& item : loader.get_tensor_storage_map())
             if (starts_with(item.first, "model.diffusion_model.")) file_indices.insert(item.second.file_index);
         MiniMaxH3::Sha256 digest;
         for (size_t index : file_indices) {
             if (index >= loader.file_paths().size()) return set_minimax_error(error, "H3 DiT file identity invalid");
-            const auto hash = MiniMaxH3::sha256_file(loader.file_paths()[index]);
+            const auto hash = MiniMaxH3::sha256_file(loader.file_paths()[index], is_cuda);
             digest.update(hash.data(), hash.size());
         }
         if (file_indices.empty()) return set_minimax_error(error, "H3 exact AdaLN missing full DiT identity");
         adaln_weights_identity_ = digest.finish();
+        LOG_INFO("minimax-h3 AdaLN full-file identity hash: %lldms (full bytes, native provider if available, portable fallback)",
+                 (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-identity_start).count());
     }
     runtime_ = &runtime;
     registry.clear();

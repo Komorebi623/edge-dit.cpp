@@ -3,6 +3,7 @@
 // H3 graph-side adapter only. This does not implement attention or enable the
 // process-wide Sage gate. CUDA must explicitly accept the H3 userdata tag.
 #include "backend/ggml/ed_ggml_sage_attn_ext.hpp"
+#include "backend/ggml/cuda/ed_cuda_sage_attn.h"
 #include "dit_models/models/minimax_h3_cuda_options.hpp"
 #include "ggml-backend.h"
 
@@ -27,14 +28,21 @@ static_assert(kH3SageCustomMagic != edgedit::ggml_ext::kSageAttnCustomMagic,
 
 inline float h3_sage_sm_scale() { return 1.0f / std::sqrt(float(kH3SageHeadDim)); }
 
-inline void* h3_sage_params_to_userdata(int64_t n_head) {
+inline bool h3_sage_fp8_enabled() {
+    const char* value = std::getenv("ED_H3_SAGE_PV_FP8");
+    return value && value[0] && std::strcmp(value,"0") && std::strcmp(value,"false") &&
+           std::strcmp(value,"FALSE") && std::strcmp(value,"off") && std::strcmp(value,"OFF");
+}
+
+inline void* h3_sage_params_to_userdata(int64_t n_head, bool fp8 = false) {
     if (n_head <= 0 || n_head > std::numeric_limits<int32_t>::max()) return nullptr;
-    const uintptr_t packed = uintptr_t(kH3SageCustomMagic) | (uintptr_t(n_head) << 32);
+    const uintptr_t packed = uintptr_t(fp8 ? ED_CUDA_H3_SAGE_FP8_MAGIC : kH3SageCustomMagic) | (uintptr_t(n_head) << 32);
     return reinterpret_cast<void*>(packed);
 }
 
 inline bool h3_sage_params_valid(const edgedit::ggml_ext::SageAttnCustomParams& params) {
-    return edgedit::ggml_ext::sage_attn_h3_params_valid(params);
+    return edgedit::ggml_ext::sage_attn_h3_params_valid(params) ||
+           (params.magic == ED_CUDA_H3_SAGE_FP8_MAGIC && params.n_head > 0);
 }
 
 enum class H3SageScope { TokenRefiner, DiT };
@@ -144,7 +152,7 @@ inline void h3_sage_cpu_custom_op_stub(ggml_tensor*, int, int, void*) {
 // GRAPH CONSTRUCTION ONLY: safe to inspect on CPU, never compute this custom
 // node on CPU. The runtime entry below additionally probes the CUDA backend.
 inline ggml_tensor* h3_sage_custom_graph(ggml_context* ctx, ggml_tensor* q,
-                                        ggml_tensor* k, ggml_tensor* v, int64_t n_head) {
+                                        ggml_tensor* k, ggml_tensor* v, int64_t n_head, bool fp8 = false) {
     if (ctx == nullptr || !h3_sage_shape_supported(q, k, v, n_head)) return nullptr;
     const int64_t batch = q->ne[2] / n_head;
     const int64_t sequence = q->ne[1];
@@ -166,8 +174,8 @@ inline ggml_tensor* h3_sage_custom_graph(ggml_context* ctx, ggml_tensor* q,
     ggml_tensor* args[] = {q, k, v};
     auto raw = ggml_custom_4d(ctx, GGML_TYPE_F32, kH3SageHeadDim, n_head * batch,
                               sequence, 1, args, 3, h3_sage_cpu_custom_op_stub, 1,
-                              h3_sage_params_to_userdata(n_head));
-    ggml_set_name(raw, "minimax_h3.sage.int8qk_f16pv.h3_scoped");
+                              h3_sage_params_to_userdata(n_head, fp8));
+    ggml_set_name(raw, fp8 ? "minimax_h3.sage.int8qk_fp8pv_fp32fp16.h3_scoped" : "minimax_h3.sage.int8qk_f16pv.h3_scoped");
     return raw;
 }
 
@@ -213,13 +221,17 @@ inline H3SageBuildResult h3_sage_try_build(ggml_context* ctx, ggml_backend_t bac
     if (ctx == nullptr) return {H3SageRoute::Reject, nullptr, "H3 Sage needs a graph context"};
     if (!h3_sage_shape_supported(q, k, v, n_head, mask))
         return {H3SageRoute::Reject, nullptr, "H3 Sage shape/type/mask is unsupported; refusing silent dense"};
-    auto raw = h3_sage_custom_graph(ctx, q, k, v, n_head);
+    const bool fp8 = h3_sage_fp8_enabled();
+    auto raw = h3_sage_custom_graph(ctx, q, k, v, n_head, fp8);
     if (raw == nullptr || !ggml_backend_supports_op(backend, raw))
         return {H3SageRoute::Reject, nullptr,
+                fp8 ? "H3F8 dispatch unavailable: requires CUDA compiler >=12.8 and SM89; no dense fallback" :
                 "H3-scoped Sage CUDA dispatch unavailable; build Sage and apply the H3SA tag patch"};
     auto output = h3_sage_output_graph(ctx, raw, n_head);
     if (output == nullptr) return {H3SageRoute::Reject, nullptr, "H3 Sage output layout is invalid"};
-    return {H3SageRoute::Sage, output, "H3 per-warp INT8-QK / FP16-PV / FP32-accum, smooth-K only; no dense fallback"};
+    return {H3SageRoute::Sage, output, fp8 ?
+        "H3 per-warp INT8-QK / E4M3-PV / FP32+FP16-accum, V scale_max=2.25, smooth-K only" :
+        "H3 per-warp INT8-QK / FP16-PV / FP32-accum, smooth-K only; no dense fallback"};
 }
 
 } // namespace MiniMaxH3

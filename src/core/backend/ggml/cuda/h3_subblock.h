@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <limits>
 
 struct ggml_backend_cuda_context;
@@ -14,6 +15,14 @@ struct ggml_backend_cuda_context;
 namespace edgedit::h3_subblock {
 constexpr uint32_t router_tag = 0x48335352u;    // H3SR
 constexpr uint32_t attention_tag = 0x48335341u ^ 0x100u; // distinct from H3 Sage tag
+constexpr uint32_t indexed_attention_tag = 0x48334941u; // H3IA, never alias gather
+enum class Implementation { Gather, Indexed };
+inline Implementation configured_implementation() {
+    const char* value=std::getenv("ED_H3_SUBBLOCK_INDEXED");
+    // The already-default-off H3 sparse total switch selects the actual indexed
+    // kernel. The old gather path is retained only as an explicit diagnostic.
+    return value && std::strcmp(value,"0")==0 ? Implementation::Gather : Implementation::Indexed;
+}
 constexpr int dimension = 128;
 constexpr int block_size = 64;
 constexpr int cell_size = 16;
@@ -23,6 +32,23 @@ constexpr int max_sequence = 65536;
 constexpr size_t router_limit = size_t(192) << 20;
 constexpr size_t gather_limit = size_t(128) << 20;
 constexpr int max_batch = 64;
+constexpr size_t indexed_shared_bytes = 34816;
+// Shared by the native PTX loader and the CPU fragment-address oracle. These
+// are the documented m16n8 mappings, not implementation-specific WMMA layouts.
+#ifdef __CUDACC__
+#define H3_INDEXED_HD __host__ __device__
+#else
+#define H3_INDEXED_HD
+#endif
+H3_INDEXED_HD constexpr int indexed_acc_row(int lane,int element) { return lane/4+((element%4)/2)*8; }
+H3_INDEXED_HD constexpr int indexed_acc_col(int lane,int element) { return (lane%4)*2+element%2+(element/4)*8; }
+H3_INDEXED_HD constexpr int indexed_q_row(int warp,int lane) { return warp*16+lane%16; }
+H3_INDEXED_HD constexpr int indexed_q_col(int tile,int lane) { return tile*16+(lane/16)*8; }
+H3_INDEXED_HD constexpr int indexed_k_row(int tile,int lane) { return tile*16+lane%8+(lane/16)*8; }
+H3_INDEXED_HD constexpr int indexed_k_col(int tile,int lane) { return tile*16+((lane/8)%2)*8; }
+H3_INDEXED_HD constexpr int indexed_v_row(int tile,int lane) { return tile*16+lane%16; }
+H3_INDEXED_HD constexpr int indexed_v_col(int tile,int lane) { return tile*16+(lane/16)*8; }
+#undef H3_INDEXED_HD
 
 struct Capacity {
     size_t means_bytes = 0;    // Q and K means together
@@ -108,13 +134,16 @@ inline ggml_tensor* router(ggml_context* c, ggml_tensor* q, ggml_tensor* k,
 }
 inline ggml_tensor* attention(ggml_context* c, ggml_tensor* q, ggml_tensor* k,
                               ggml_tensor* v, ggml_tensor* route, ggml_tensor* blocks,
-                              ggml_tensor* protected_chunks, ggml_tensor* protected_ids) {
+                              ggml_tensor* protected_chunks, ggml_tensor* protected_ids,
+                              Implementation implementation = configured_implementation()) {
     // blocks/protected_chunks: I32 [2,count], each pair [begin,end).
     // protected_ids: I32 [max(1,protected_count)]; dummy -1 if no protected tokens.
     ggml_tensor* args[] = {q, k, v, route, blocks, protected_chunks, protected_ids};
     auto* t = ggml_custom_4d(c, GGML_TYPE_F32, dimension * q->ne[2], q->ne[1], 1, 1,
-                           args, 7, no_cpu, 1, reinterpret_cast<void*>(uintptr_t(attention_tag)));
-    ggml_set_name(t, "h3.subblock.native.attention");
+                           args, 7, no_cpu, 1, reinterpret_cast<void*>(uintptr_t(implementation == Implementation::Indexed
+                               ? indexed_attention_tag : attention_tag)));
+    ggml_set_name(t, implementation == Implementation::Indexed
+                        ? "h3.subblock.indexed.attention" : "h3.subblock.native.attention");
     return t;
 }
 } // namespace edgedit::h3_subblock

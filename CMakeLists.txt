@@ -397,6 +397,9 @@ target_compile_definitions(edgedit
 )
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/core/backend/ggml/cuda/h3_subblock.cmake")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(edgedit PRIVATE ${CMAKE_DL_LIBS})
+endif()
 
 if(ED_ENABLE_CUDA_SAGE_ATTN AND ED_GGML_CUDA)
     target_compile_definitions(edgedit PRIVATE ED_ENABLE_CUDA_SAGE_ATTN)
@@ -548,7 +551,7 @@ endif()
 # Standalone opt-in tests do not alter production targets or other backends.
 if(ED_BUILD_H3_CUDA_TESTS)
     enable_testing()
-    foreach(_H3_TEST options cache cache_offload sparse sage adaln fusion)
+    foreach(_H3_TEST options cache cache_offload cache_plan sparse sage adaln fusion)
         if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/h3_cuda_${_H3_TEST}_test.cpp")
             add_executable(h3-cuda-${_H3_TEST}-test tests/h3_cuda_${_H3_TEST}_test.cpp)
             target_include_directories(h3-cuda-${_H3_TEST}-test PRIVATE
@@ -567,6 +570,9 @@ if(ED_BUILD_H3_CUDA_TESTS)
         add_executable(h3-${_H3_TEST}-test tests/h3_${_H3_TEST}_test.cpp)
         target_include_directories(h3-${_H3_TEST}-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
         target_compile_features(h3-${_H3_TEST}-test PRIVATE cxx_std_17)
+        if(_H3_TEST STREQUAL "sha256" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            target_link_libraries(h3-${_H3_TEST}-test PRIVATE ${CMAKE_DL_LIBS})
+        endif()
         target_compile_options(h3-${_H3_TEST}-test PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>)
         add_test(NAME h3-${_H3_TEST} COMMAND h3-${_H3_TEST}-test)
     endforeach()

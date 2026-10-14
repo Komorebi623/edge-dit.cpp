@@ -19,7 +19,7 @@ bool qshape(const ggml_tensor* q) {
 bool ed_cuda_h3_subblock_shape_supported(const ggml_tensor* dst) {
     using namespace edgedit::h3_subblock;
     const auto magic = tag(dst);
-    if (magic != router_tag && magic != attention_tag) return false;
+    if (magic != router_tag && magic != attention_tag && magic != indexed_attention_tag) return false;
     const auto* q = dst->src[0]; const auto* k = dst->src[1];
     if (!qshape(q) || !qshape(k) || k->ne[1] != q->ne[1] || k->ne[2] != q->ne[2] ||
         !ggml_is_contiguous(dst)) return false;

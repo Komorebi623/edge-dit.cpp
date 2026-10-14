@@ -131,12 +131,135 @@ static SparseAttentionReference emulate(const Fixture& f) {
     }
     return out;
 }
+// CPU verification of the exact ldmatrix address functions shared with the
+// indexed CUDA kernel. This proves the intended fragment layout, NOT execution
+// of the hardware instructions (the guarded CUDA matrix below is still needed).
+static void indexed_layout_tests() {
+    using Fragments=std::array<std::array<float,8>,32>;
+    auto load_matrix=[](auto address,bool transpose) {
+        Fragments f{};
+        for(int lane=0;lane<32;++lane)for(int reg=0;reg<4;++reg)for(int half=0;half<2;++half) {
+            int row=lane/4,col=2*(lane%4)+half;
+            auto a=address(reg*8+(transpose?col:row));
+            f[lane][reg*2+half]=float(a.first*1000+a.second+(transpose?row:col));
+        }
+        return f;
+    };
+    auto decode=[](const Fragments& f,bool a) {
+        std::array<float,256> matrix{};std::array<int,256> written{};
+        for(int lane=0;lane<32;++lane)for(int e=0;e<8;++e) {
+            const int row=a?lane/4+((e/2)%2)*8:2*(lane%4)+e%2+((e/2)%2)*8;
+            const int col=a?2*(lane%4)+e%2+(e/4)*8:lane/4+(e/4)*8;
+            check(++written[row*16+col]==1,"MMA fragment aliases an element");
+            matrix[row*16+col]=f[lane][e];
+        }
+        return matrix;
+    };
+    for(int warp=0;warp<4;++warp)for(int d=0;d<8;++d) {
+        auto q=decode(load_matrix([&](int l){return std::make_pair(native::indexed_q_row(warp,l),native::indexed_q_col(d,l));},false),true);
+        for(int r=0;r<16;++r)for(int c=0;c<16;++c)
+            check(q[r*16+c]==float((warp*16+r)*1000+d*16+c),"Q ldmatrix layout");
+    }
+    for(int kt=0;kt<4;++kt)for(int d=0;d<8;++d) {
+        auto k=decode(load_matrix([&](int l){return std::make_pair(native::indexed_k_row(kt,l),native::indexed_k_col(d,l));},false),false);
+        auto v=decode(load_matrix([&](int l){return std::make_pair(native::indexed_v_row(kt,l),native::indexed_v_col(d,l));},true),false);
+        for(int r=0;r<16;++r)for(int c=0;c<16;++c) {
+            check(k[r*16+c]==float((kt*16+c)*1000+d*16+r),"K-transpose ldmatrix layout");
+            check(v[r*16+c]==float((kt*16+r)*1000+d*16+c),"V transposed-ldmatrix layout");
+        }
+    }
+    Fragments probability{};
+    for(int l=0;l<32;++l)for(int e=0;e<8;++e)
+        probability[l][e]=float(native::indexed_acc_row(l,e)*1000+native::indexed_acc_col(l,e));
+    auto p=decode(probability,true);
+    for(int r=0;r<16;++r)for(int c=0;c<16;++c)
+        check(p[r*16+c]==float(r*1000+c),"P accumulator-to-A packing");
+    std::array<int,64*128> written{};
+    for(int w=0;w<4;++w)for(int d=0;d<8;++d)for(int l=0;l<32;++l)for(int e=0;e<8;++e) {
+        const int row=w*16+native::indexed_acc_row(l,e),col=d*16+native::indexed_acc_col(l,e);
+        check(++written[row*128+col]==1,"indexed output alias / duplicate scatter");
+    }
+    for(int n:written)check(n==1,"indexed output hole");
+    check(native::indexed_shared_bytes==34816,"indexed scratch size changed");
+    check(native::indexed_attention_tag!=native::attention_tag && native::indexed_attention_tag!=native::router_tag,"indexed tag collision");
+}
+
+static float as_half(float x) {return ggml_fp16_to_fp32(ggml_fp32_to_fp16(x));}
+// Per-K64 online max/sum/PV oracle, with the indexed kernel's baseline half
+// prep and half probabilities. No call to its original dense reference math.
+static std::vector<float> indexed_online_oracle(const Fixture& f,const SparseAttentionReference& routes) {
+    const int N=f.length,H=f.heads,B=int(f.plan.video.size()),K=f.plan.topk;
+    std::vector<float> q(f.q.size()),k(q.size()),v(q.size()),output(q.size());
+    const float scale=as_half(128.f/std::sqrt(128.f));
+    for(size_t i=0;i<q.size();++i) {
+        q[i]=as_half(as_half(f.q[i])*scale);k[i]=as_half(f.k[i]/128.f);v[i]=as_half(f.v[i]/128.f);
+    }
+    for(int h=0;h<H;++h) {
+        int qb=0;
+        for(const auto& chunk:f.plan.chunks) {
+            std::vector<std::vector<int>> tiles;
+            if(chunk.kind==SparseTokenKind::TargetVideo) {
+                for(int rank=0;rank<K;++rank) {
+                    const int id=routes.selected_blocks[(size_t(h)*B+qb)*K+rank];
+                    std::vector<int> tokens;for(int t=int(f.plan.video[id].begin);t<f.plan.video[id].end;++t)tokens.push_back(t);
+                    tiles.push_back(tokens);
+                }
+                for(size_t p=0;p+1<f.protected_ids.size();p+=64) {
+                    std::vector<int> tokens;for(size_t i=p;i<std::min(p+64,f.protected_ids.size()-1);++i)tokens.push_back(f.protected_ids[i]);
+                    tiles.push_back(tokens);
+                }
+                ++qb;
+            } else for(int start=0;start<N;start+=64) {
+                std::vector<int> tokens;for(int t=start;t<std::min(start+64,N);++t)tokens.push_back(t);tiles.push_back(tokens);
+            }
+            for(int t=int(chunk.begin);t<chunk.end;++t) {
+                float maximum=-std::numeric_limits<float>::infinity(),denominator=0;
+                std::array<float,128> numerator{};
+                for(const auto& keys:tiles) {
+                    std::vector<float> scores;float next=maximum;
+                    for(int key:keys) {
+                        float dot=0;for(int d=0;d<128;++d)dot+=q[size_t(d+128*(t+N*h))]*k[size_t(d+128*(key+N*h))];
+                        scores.push_back(dot);next=std::max(next,dot);
+                    }
+                    const float alpha=std::exp(maximum-next);maximum=next;denominator*=alpha;
+                    for(float& x:numerator)x*=alpha;
+                    for(size_t key=0;key<keys.size();++key) {
+                        const float weight=std::exp(scores[key]-maximum);denominator+=weight;
+                        const float rounded=as_half(weight);
+                        for(int d=0;d<128;++d)numerator[d]+=rounded*v[size_t(d+128*(h+H*keys[key]))];
+                    }
+                }
+                for(int d=0;d<128;++d)output[size_t(d+128*(h+H*t))]=numerator[d]*(128.f/denominator);
+            }
+        }
+    }
+    return output;
+}
+static void indexed_online_tests() {
+    for(bool mixed:{false,true})for(int replay=0;replay<2;++replay) {
+        Fixture f(mixed?193:65,2,mixed);f.fill(299+replay);
+        const auto ref=f.reference();near(indexed_online_oracle(f,ref),ref.output,4e-4f,4e-3f);
+    }
+    // Full keep, deliberately reversed route order and large moving row maxima.
+    // A dense global softmax reference is order independent; a broken online
+    // rescale (including resetting between video/protected tiles) is not.
+    Fixture f(193,2,true,4);f.fill(125);
+    for(int h=0;h<2;++h)for(int t=0;t<f.length;++t) {
+        f.q[size_t(128*(t+f.length*h))]=1;
+        f.k[size_t(128*(t+f.length*h))]=float((t%97)-48)*2;
+    }
+    auto ref=f.reference();auto reordered=ref;
+    for(size_t row=0;row<reordered.selected_blocks.size();row+=4)
+        std::reverse(reordered.selected_blocks.begin()+row,reordered.selected_blocks.begin()+row+4);
+    near(indexed_online_oracle(f,reordered),ref.output,4e-4f,4e-3f);
+}
+
 struct Graph {
     ggml_context* ctx=nullptr;ggml_cgraph* graph=nullptr;
     ggml_tensor *q=nullptr,*k=nullptr,*v=nullptr,*blocks=nullptr,*chunks=nullptr,*ids=nullptr,*route=nullptr,*out=nullptr;
     ggml_backend_buffer_t buffer=nullptr;
     const Fixture& fixture;bool strides;
-    Graph(const Fixture& f,bool view):fixture(f),strides(view) {
+    Graph(const Fixture& f,bool view,bool indexed=false):fixture(f),strides(view) {
         ctx=ggml_init({4u<<20,nullptr,true});check(ctx,"ggml metadata context");
         auto input=[&](bool value) {
             const int64_t a=value?f.heads:f.length,b=value?f.length:f.heads;
@@ -149,7 +272,9 @@ struct Graph {
         chunks=ggml_new_tensor_2d(ctx,GGML_TYPE_I32,2,f.chunks.size()/2);
         ids=ggml_new_tensor_1d(ctx,GGML_TYPE_I32,f.protected_ids.size());
         route=native::router(ctx,q,k,blocks,f.plan.topk);
-        out=native::attention(ctx,q,k,v,route,blocks,chunks,ids);
+        out=native::attention(ctx,q,k,v,route,blocks,chunks,ids,
+                              indexed?native::Implementation::Indexed:native::Implementation::Gather);
+        check(native::tag(out)==(indexed?native::indexed_attention_tag:native::attention_tag),"wrong implementation tag / silent fallback");
         graph=ggml_new_graph_custom(ctx,64,false);ggml_build_forward_expand(graph,out);
         check(ggml_graph_n_nodes(graph)<=5,"native graph node count grew with blocks/heads");
         check(ed_cuda_h3_subblock_shape_supported(route),"native router shape rejected");
@@ -254,14 +379,17 @@ int main(int argc,char** argv) {
         }
         if(gpu && !permit(argc,argv)){std::cerr<<"NOT RUN: missing/stale single-GPU guard\n";return 2;}
         capacity_tests();
+        indexed_layout_tests();
+        indexed_online_tests();
         ggml_backend_t backend=nullptr;
         if(gpu) {
             check(ggml_backend_cuda_get_device_count()==1,"exactly one visible CUDA device required");
             backend=ggml_backend_cuda_init(0);check(backend&&ggml_backend_is_cuda(backend),"CUDA backend unavailable");
         }
+        for(bool use_indexed:{false,true}) {
         for(bool mixed:{false,true})for(int n: mixed?std::vector<int>{149,193,257}:std::vector<int>{1,15,16,17,63,64,65,127,128,129,257})
             for(int topk:{-1,1})for(bool views:{false,true}) {
-                Fixture f(n,3,mixed,topk);Graph graph(f,views);if(gpu)graph.alloc(backend);
+                Fixture f(n,3,mixed,topk);Graph graph(f,views,use_indexed);if(gpu)graph.alloc(backend);
                 for(int replay=0;replay<2;++replay) {
                     f.fill(977+n+replay*1000);auto ref=f.reference();
                     auto actual=gpu?graph.run(backend):emulate(f);
@@ -278,7 +406,7 @@ int main(int argc,char** argv) {
         // More than one native batch in BOTH video and protected phases;
         // heads/Q chunks cross a batch boundary and reuse the same scratch.
         {
-            Fixture f(193,17,true);Graph graph(f,true);if(gpu)graph.alloc(backend);
+            Fixture f(193,17,true);Graph graph(f,true,use_indexed);if(gpu)graph.alloc(backend);
             for(int replay=0;replay<2;++replay) {
                 f.fill(779+replay);auto ref=f.reference();
                 auto actual=gpu?graph.run(backend):emulate(f);
@@ -296,7 +424,7 @@ int main(int argc,char** argv) {
                 f.k[size_t(128*(t+128*h))]=(t<64?2.f:-2.f)*(h==0?1.f:-1.f);
             }
             auto ref=f.reference();check(ref.selected_blocks==std::vector<int32_t>({0,1,1,0}),"adversarial reference route");
-            Graph graph(f,true);if(gpu)graph.alloc(backend);
+            Graph graph(f,true,use_indexed);if(gpu)graph.alloc(backend);
             auto actual=gpu?graph.run(backend):emulate(f);
             check(actual.selected_blocks==ref.selected_blocks,"per-query or per-head routing collapsed");
             near(actual.output,ref.output,gpu?4e-4f:2e-6f,gpu?4e-3f:2e-6f);
@@ -310,7 +438,7 @@ int main(int argc,char** argv) {
                 f.k[size_t(128*t)]=t<64?0.f:((t/16)%2?8.f:-8.f);
             }
             auto ref=f.reference();check(ref.selected_blocks==std::vector<int32_t>({1,1}),"sub-cell reference route");
-            Graph graph(f,false);if(gpu)graph.alloc(backend);
+            Graph graph(f,false,use_indexed);if(gpu)graph.alloc(backend);
             auto actual=gpu?graph.run(backend):emulate(f);
             check(actual.selected_blocks==ref.selected_blocks,"whole-block / mean-query-only proxy substituted");
             near(actual.output,ref.output,gpu?4e-4f:2e-6f,gpu?4e-3f:2e-6f);
@@ -318,11 +446,12 @@ int main(int argc,char** argv) {
         // All-zero routing ties must pick low IDs; all K blocks must equal dense.
         for(bool full:{false,true}) {
             Fixture f(193,2,true,full?4:1);f.fill(422);std::fill(f.q.begin(),f.q.end(),0);
-            auto ref=f.reference();Graph graph(f,true);if(gpu)graph.alloc(backend);
+            auto ref=f.reference();Graph graph(f,true,use_indexed);if(gpu)graph.alloc(backend);
             auto actual=gpu?graph.run(backend):emulate(f);
             check(actual.selected_blocks==ref.selected_blocks,"equal-score deterministic selection");
             near(actual.output,ref.output,gpu?4e-4f:2e-6f,gpu?4e-3f:2e-6f);
         }
+        } // gather and explicitly tagged indexed implementation
         if(backend)ggml_backend_free(backend);
         std::cout<<(gpu?"CUDA":"CPU-only")<<" SubBlock: checks="<<checks<<" output comparisons="<<comparisons<<" PASS\n";
         return 0;

@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "baseline_revision": "97cc585d9dbd9ac5e30b78ef2e2c4a0d8bfbe9f2",
+  "submodules": {
+    "ggml": "f270346d688c7bec7c56bae2ae73343aba6817ad",
+    "onednn": "5e9224036021433d2577548ed0539fe9a53256bc"
+  },
+  "weight_variant": "full_h3_existing_persistent_Q4_GGUF_not_pruned_not_distilled",
+  "models": {
+    "fl2va": {
+      "path": "{model_root}/diffusion_models/minimax_h3_fl2va-Q4_K_M.gguf",
+      "bytes": 18779848448,
+      "sha256": "a25ee3184dd56e7fc5c8db1508d2e48a7e3c92919b516935c6059e4228e16107",
+      "tensor_types": {
+        "F32": 13,
+        "BF16": 264,
+        "Q4_0": 50,
+        "Q4_K": 208
+      },
+      "source_header_sha256": "b4aebf1a52aa869c99ba7fd33c7e343200342404e07d1eb03260f7beebd02c7f"
+    },
+    "llm": {
+      "path": "{model_root}/text_encoders/qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+      "bytes": 18218065024,
+      "sha256": "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc",
+      "tensor_types": {
+        "BF16": 552,
+        "Q6_K": 100,
+        "Q4_K": 250
+      },
+      "source_header_sha256": "0c6bc5ded133ae026c992654de37dbd600fa70b50573a6ed3ac1f54ea29ddc59"
+    },
+    "video_vae": {
+      "path": "{model_root}/vae/minimax_h3_video_vae_fp16.safetensors",
+      "bytes": 5207808496,
+      "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+      "tensor_types": {
+        "F16": 562
+      },
+      "source_header_sha256": "7bd6afbb1b2cfbf7c19901869eb224ec1b3e2a8cdbd8516d18f515c60f157c26"
+    },
+    "audio_vae": {
+      "path": "{model_root}/vae/minimax_h3_audio_vae_fp32.safetensors",
+      "bytes": 605254808,
+      "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+      "tensor_types": {
+        "F32": 917
+      },
+      "source_header_sha256": "23fb27ab02c45d7c6f5dfe5c3255ef956a5a13853c869b784bf8de4a1537d06b"
+    }
+  },
+  "assets": {},
+  "sampling": {
+    "width": 864,
+    "height": 480,
+    "frames": 124,
+    "fps": 24,
+    "steps": 20,
+    "seed": 42,
+    "cfg_scale": 1,
+    "sampler": "res_multistep",
+    "scheduler": "simple",
+    "ref_image_size": "match",
+    "audio_sample_rate": 32000,
+    "audio_channels": 2
+  },
+  "placement": {
+    "dit_offload": true,
+    "text_encoder_offload": true,
+    "vae_offload": true,
+    "max_vram_gib": 22,
+    "cpu_threads": 6
+  },
+  "modes": {
+    "t2va": {
+      "dit": "fl2va",
+      "prompt": "A locked-off cinematic wide shot of a sunlit mountain stream. Clear water ripples continuously over small stones, pine branches sway gently in a light breeze, and distant mountains remain stable. Natural synchronized audio: softly flowing water, a gentle breeze, and occasional distant birds. No music, no dialogue, no captions, no scene cuts.",
+      "inputs": {}
+    }
+  },
+  "required_build": {
+    "CMAKE_CUDA_ARCHITECTURES": "89",
+    "ED_ENABLE_CUDNN_SDPA": "ON",
+    "ED_ENABLE_CUDA_SAGE_ATTN": "OFF"
+  },
+  "precision_lock": "{repo_root}/docs/research/h3-precision-lock.json",
+  "status": "reproduction_plan_not_a_measurement",
+  "note": "Default workflow is baseline-only; examples must keep --dry-run until an exclusively scheduled idle GPU is authorized and its zero UUID placeholder is replaced. No GPU reservation or performance/quality claim. Original mixed-Q4 weights and full SHA256 pins are unchanged. 22 GiB is a graph-planning budget, not a hard device-memory limit.",
+  "locations": {
+    "host": {
+      "model_root": "{repo_root}/models/minimax-h3",
+      "asset_root": "{repo_root}/_scratch/rtx4090-20261013/reference-assets"
+    },
+    "container": {
+      "model_root": "{repo_root}/models/minimax-h3",
+      "asset_root": "{repo_root}/_scratch/rtx4090-20261013/reference-assets"
+    }
+  },
+  "run": {
+    "warmup": 1,
+    "repeats": 3,
+    "timeout_seconds": 3600,
+    "media_timeout_seconds": 180,
+    "gpu_index": 0,
+    "min_free_mib": 22528,
+    "max_utilization_percent": 0,
+    "phase": "baseline-only",
+    "gpu_uuid": "GPU-00000000-0000-0000-0000-000000000000",
+    "lock_runtime_libraries": true
+  },
+  "runtime_env": {
+    "ED_CUDNN_SDPA_SYNC_F32_SELF_ATTN": "1"
+  },
+  "binaries": {
+    "baseline": {
+      "path": "{repo_root}/_scratch/rtx4090-20261013/build-baseline/baseline/bin/ed-cli",
+      "label": "original_97cc585_locked_baseline",
+      "optimization_env": {
+        "ED_H3_FUSED_OPS": "0",
+        "ED_H3_CACHE_DIT": "0",
+        "ED_H3_ADALN_CACHE": "0",
+        "ED_H3_SAGE_ATTN": "0",
+        "ED_H3_SPARSE_ATTN": "0",
+        "ED_H3_VDN": "0",
+        "ED_H3_TURBO": "0",
+        "ED_H3_VSA": "0"
+      }
+    },
+    "candidate": {
+      "path": "{repo_root}/_scratch/h3-offload-20261014/four-methods-build-06/candidate/bin/ed-cli",
+      "source_snapshot": "{repo_root}/_scratch/h3-offload-20261014/four-methods-source-06",
+      "label": "Cache-DiT approximate threshold=0.12",
+      "optimization_env": {
+        "ED_H3_FUSED_OPS": "0",
+        "ED_H3_CACHE_DIT": "1",
+        "ED_H3_ADALN_CACHE": "0",
+        "ED_H3_SAGE_ATTN": "0",
+        "ED_H3_SPARSE_ATTN": "0",
+        "ED_H3_VDN": "0",
+        "ED_H3_TURBO": "0",
+        "ED_H3_VSA": "0"
+      },
+      "tuning_env": {
+        "ED_H3_CACHE_THRESHOLD": "0.12"
+      }
+    }
+  },
+  "method_catalog": {
+    "ED_H3_FUSED_OPS": {
+      "status": "unsupported",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {},
+      "note": "Not selected in this single-method reproduction manifest."
+    },
+    "ED_H3_CACHE_DIT": {
+      "status": "implemented",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {},
+      "note": "Previously measured approximate setting, not a recommended quality threshold or a quality guarantee. Report actual cache hits, video/audio differences and quality review."
+    },
+    "ED_H3_ADALN_CACHE": {
+      "status": "unsupported",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {},
+      "note": "Not selected in this single-method reproduction manifest."
+    },
+    "ED_H3_SAGE_ATTN": {
+      "status": "unsupported",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {},
+      "note": "Not selected in this single-method reproduction manifest."
+    },
+    "ED_H3_SPARSE_ATTN": {
+      "status": "unsupported",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {},
+      "note": "Not selected in this single-method reproduction manifest."
+    },
+    "ED_H3_VDN": {
+      "status": "unsupported",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {},
+      "note": "Not selected in this single-method reproduction manifest."
+    },
+    "ED_H3_TURBO": {
+      "status": "unsupported",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {},
+      "note": "Not selected in this single-method reproduction manifest."
+    },
+    "ED_H3_VSA": {
+      "status": "unsupported",
+      "modes": [
+        "t2va"
+      ],
+      "required_build": {},
+      "note": "Not selected in this single-method reproduction manifest."
+    }
+  },
+  "method_catalog_note": "Catalog/labels/source_snapshot describe the requested experiment, not GPU execution evidence. Real runs must validate build capability and library hashes, and inspect the actual method/variant logs; source_snapshot is documentary metadata, not a replacement for build provenance.",
+  "hash_status": "expected_precision_lock_full_sha256_pins_not_reverified_by_dry_run",
+  "performance_results": null
+}

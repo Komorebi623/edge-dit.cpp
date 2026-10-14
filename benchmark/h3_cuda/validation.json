@@ -500,5 +500,104 @@
       "compute_processes": [],
       "observed_after_final_test": true
     }
+  },
+  "four_method_validation": {
+    "date": "2026-10-14",
+    "timezone": "Asia/Shanghai",
+    "status": "completed_at_documented_configs",
+    "methods": [
+      "AdaLN",
+      "Cache-DiT",
+      "Sage INT8QK/F16PV",
+      "SubBlock indexed"
+    ],
+    "deferred_weight_methods": [
+      "Turbo",
+      "VDN",
+      "VSA"
+    ],
+    "reference_files_verified": 112,
+    "production_source_snapshot": "four-methods-source-06",
+    "source_tree_sha256": "ab1525ee3c7cedadb9d69c77f6a4d08d5ed33905d367b259b943f44be38cf1dd",
+    "baseline_source": "97cc585d9dbd9ac5e30b78ef2e2c4a0d8bfbe9f2",
+    "T2VA": {
+      "width": 864,
+      "height": 480,
+      "frames": 124,
+      "steps": 20,
+      "warmup": 1,
+      "repeats": 3,
+      "runtime_env": {
+        "ED_CUDNN_SDPA_SYNC_F32_SELF_ATTN": "1"
+      },
+      "results_json": "benchmark/h3_cuda/four-methods-results.json"
+    },
+    "mixed_full_target": {
+      "mode": "ref_mixed",
+      "warmup": 0,
+      "repeats": 1,
+      "all_four_methods_measured": true,
+      "semantic_quality_accepted": false
+    },
+    "functional_modes": {
+      "passed": 40,
+      "total": 40,
+      "modes": 8,
+      "groups": 5,
+      "width": 256,
+      "height": 256,
+      "frames": 22,
+      "steps": 4,
+      "max_vram_gib": 16,
+      "not_performance_data": true
+    },
+    "GPU_tests": {
+      "adaln_native_projection_real_weights_exact": 306,
+      "adaln_target_shape_sync_plan_exact_pairs": 6,
+      "cache_production_tiny_pairs": 24,
+      "sage_F16PV_comparisons": 126,
+      "subblock_gather_and_indexed_comparisons": 433,
+      "fusion_ablation_pairs": 11,
+      "fusion_full_profile_pairs": 1
+    },
+    "extra_variants": {
+      "SubBlock_keep10": "measured_3_repeats_slow_and_lossy_not_adopted",
+      "Sage_FP8PV": "standalone_accuracy_gate_failed_not_production_benchmarked"
+    },
+    "all_methods_default_off": true,
+    "gpu_count_per_run": 1,
+    "gpu_processes_modified": false,
+    "precision_lock_changed": false,
+    "upstream_changed": false,
+    "results_document": "docs/research/h3-four-method-results.md",
+    "reproduction_document": "docs/research/h3-four-method-reproduce.md",
+    "evidence_root": "_scratch/h3-offload-20261014",
+    "cpu_regression": {
+      "ctest_passed": 14,
+      "ctest_total": 14,
+      "workflow_media_passed": 53,
+      "skipped": 0,
+      "source_fetch_passed": 18,
+      "LoRA_CPU_passed": 5,
+      "build_config_passed": 29,
+      "server_preflight_passed": 56,
+      "request_cleanup_passed": 29,
+      "4090_workflow_passed": 14,
+      "memory_monitor_passed": 7,
+      "GPU_guard_mock_passed": 5,
+      "source_stability_passed": 2,
+      "SubBlock_build_gate_passed": 5,
+      "deterministic_plan_passed": 4,
+      "method_tuning_passed": 5,
+      "runtime_library_guard_passed": 3,
+      "log": "logs/final-acceptance-cpu.log"
+    },
+    "final_gpu_state": {
+      "time": "2026-10-14T08:18:01.656482+08:00",
+      "gpu": "GPU-95eb7a54-3471-4542-5a4d-894df955a273, 3, 0",
+      "compute_processes": "",
+      "processes_modified": false
+    },
+    "completion_audit": "_scratch/h3-offload-20261014/completion-audit.json"
   }
 }

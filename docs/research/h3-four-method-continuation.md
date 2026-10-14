@@ -1,6 +1,8 @@
 # H3四项无训练方法：2026-10-14续做
 
-目标：10月14日晚完成AdaLN / Cache-DiT / Sage / SubBlock的同条件生产性能对照，15日早可查。Turbo/VDN/VSA暂停开发。**任务仍进行中，不把tiny/编译通过当性能完成。**
+> 最新已完成的T2VA三次实测与mixed单次对照见 `h3-four-method-results.md`；下文保留开发过程与曾遇到的问题，不代表最终未修复状态。
+
+目标：10月14日晚完成AdaLN / Cache-DiT / Sage / SubBlock的同条件生产性能对照，15日早可查。Turbo/VDN/VSA暂停开发。**主四方法已完成约定配置的完整对照，见最新结果文档；本文件是过程中各阶段记录，不把tiny/编译通过当性能完成。**
 
 ## 已核对的上游与实质差异
 
@@ -48,3 +50,10 @@
 ### Cache图规划进一步定位
 
 CPU全尺寸图诊断发现`dense_square_nodes=0`，此前“dense attention fallback”只是假设，**现已排除**。失败来源是通用segment graph构造递归收集前序边界节点的全部祖先，内存估计把历史激活作为叶子累计到百GiB。H3专用边界截断诊断可把remainder最大真实段估计降到约8.64GB；修复/回归正在进行，未删除预算门禁。
+
+### 新基线控制项与后续实测
+
+- Cache scoped边界修复后完整目标成功：CLI228.443s / DiT185.311s / 峰值14,153MiB，但20步命中0。**不能把省时计作Cache-DiT跨步复用收益**；需RF实测与同执行器threshold0控制，图卸载改进另列。
+- AdaLN目标几何实际Q4完整DiT诊断：默认cuDNN异步plan仅首次冷forward有差异，后5组exact；将现有 `ED_CUDNN_SDPA_SYNC_F32_SELF_ATTN=1` 固定给两组后6/6全部exact，profile明确sync build。确认冷启动算法选择是比较变量，不改变模型精度。
+- workflow新增受限共同`runtime_env`仅允许此同步plan键，进入比较contract，旧数据不可混用。新同步baseline正在1预热+3测量。该设置不改项目生产默认行为。
+- full-file identity保留，H3/CUDA AdaLN可用现有libcrypto3的EVP流式SHA256（无mandatory依赖、不可用则portable）；实际18.8GB hash21.84s且完整digest与锁一致。消除纯C++校验带来的不必要冷进程成本，不能省略完整hash。

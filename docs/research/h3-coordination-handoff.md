@@ -1,5 +1,8 @@
 # MiniMax-H3：跨服务器接续交接
 
+> **2026-10-14最新状态**：AdaLN / Cache-DiT / Sage(F16PV) / SubBlock(indexed) 已完成4090单卡、原精度、864×480/124帧/20步的T2VA三次对照，另有完整mixed单次与40项全模式功能回归。受控serial offload已接通；异步/并行/adapter组合仍拒绝。当前数据、收益与限制以 `h3-four-method-results.md`、`h3-four-method-reproduce.md` 和 `validation.json.four_method_validation` 为准；下文保留先前交接/计划历史，不能把旧“未测/只resident”当最新状态。
+
+
 更新：2026-10-13（Asia/Shanghai）。当前选择：在 Mac 的 Codex 中连接另一台服务器，优先空闲 RTX 4090。**本文件是恢复进度入口；不需要重新从头研究，也不依赖旧聊天迁移。**
 
 > **2026-10-13 RTX4090 已接续**：本机独立worktree `_scratch/h3-cuda-continuation`，生产源码提交 `d81041f`。最新实测和下一步看 `h3-4090-results.md` 与 `validation.json.rtx4090_continuation`；不要重新hash下载前已验证记录替代未来新机整文件核验。原始baseline/精度锁不变，AdaLN卸载仍未生产放行。

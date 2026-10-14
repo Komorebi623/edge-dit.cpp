@@ -175,6 +175,29 @@ static void test_policy(ggml_backend_t cpu) {
     std::cout << "PASS policy/global isolation/CPU fail-closed\n";
 }
 
+static void test_h3_fp8_policy() {
+    for (const char* value : {"", "0", "false", "FALSE", "off", "OFF"}) {
+        TestEnv scoped("ED_H3_SAGE_PV_FP8", value);
+        TestEnv legacy("ED_SAGE_PV_FP8", "1");
+        check(!h3_sage_fp8_enabled(), "global FP8 must not enable H3 variant");
+    }
+    TestEnv scoped("ED_H3_SAGE_PV_FP8", "1");
+    TestEnv legacy("ED_SAGE_PV_FP8", "0");
+    check(h3_sage_fp8_enabled(), "H3 FP8 explicit option");
+    check(h3_sage_decide({}).route == H3SageRoute::Dense, "FP8 sub-option bypassed master gate");
+    auto params = edgedit::ggml_ext::sage_attn_params_from_userdata(h3_sage_params_to_userdata(56,true));
+    check(h3_sage_params_valid(params) && params.magic == ED_CUDA_H3_SAGE_FP8_MAGIC && params.n_head==56,
+          "H3F8 tag ABI");
+    check(!edgedit::ggml_ext::sage_attn_params_valid(params), "H3F8 gained legacy SAGQ gate");
+    Context c(true);auto t=qkv(c.ctx,65,2,2);
+    auto* raw=h3_sage_custom_graph(c.ctx,t.q,t.k,t.v,2,true);
+    check(raw && std::string(raw->name).find("fp8pv_fp32fp16")!=std::string::npos,"FP8 graph identity");
+    check(ed_cuda_h3_sage_fp8_arch_supported(8,9),"SM89 policy");
+    for(auto arch: {std::pair<int,int>{8,0},{8,6},{9,0},{12,0}})
+        check(!ed_cuda_h3_sage_fp8_arch_supported(arch.first,arch.second),"unsupported SM accepted");
+    std::cout << "PASS H3F8 independent opt-in/tag/SM89 policy (graph-only, no GPU)\n";
+}
+
 static void test_tags() {
     using namespace edgedit::ggml_ext;
     for (int64_t heads : {int64_t(1), int64_t(56), int64_t(65535), int64_t(INT32_MAX)}) {
@@ -526,6 +549,7 @@ int main() {
         TestEnv pv("ED_SAGE_PV_FP8", "0");
         test_policy(cpu.get());
         test_tags();
+        test_h3_fp8_policy();
         test_dispatch_predicate();
         test_shapes();
         test_real_cut_plan(cpu.get());

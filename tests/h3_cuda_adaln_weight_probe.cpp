@@ -269,6 +269,7 @@ void compare(EA::Cache& direct, EA::Cache& major, const EA::RequestContract& c, 
     }
 }
 } // namespace
+#ifndef H3_ADALN_WEIGHT_PROBE_NO_MAIN
 int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string(argv[1]) == "--help") {
@@ -338,3 +339,4 @@ int main(int argc, char** argv) {
     } catch (const Failure& e) { std::cerr << "FAIL completed=0: " << e.what() << '\n'; return e.code; }
       catch (const std::exception& e) { std::cerr << "FAIL completed=0: " << e.what() << '\n'; return 1; }
 }
+#endif // H3_ADALN_WEIGHT_PROBE_NO_MAIN
