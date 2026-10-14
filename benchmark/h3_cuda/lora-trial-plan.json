@@ -1,0 +1,132 @@
+{
+  "date": "2026-10-14",
+  "timezone": "Asia/Shanghai",
+  "status": "awaiting_campus_network_auth_or_user_provided_adapter",
+  "user_request": "Minimal H3 LoRA adaptation, prefer4steps else8, reuse baseline; no repeated full-generation tests",
+  "vsa_public_release_verified": "ModelScope FastVideo namespace model card lists three VSA adapters with trained exact deltas/gates; payload bytes not yet independently verified",
+  "candidates": [
+    {
+      "publisher_namespace": "lightx2v",
+      "repository": "Minimax-h3-Turbo",
+      "file": "minimax_h3_fl2v_turbo_4step_v0.1.safetensors",
+      "expected_bytes": 1383677888,
+      "expected_sha256_from_TLS_metadata": "5ff4a12c8b4599fec716e1b15a45e504e0d1129111896bdcde5ac4a15e395b29",
+      "modelscope_metadata_path": "_scratch/h3-lora-implementation-20261014/modelscope.cn-api.json",
+      "adapter_downloaded": false,
+      "actual_tensor_header_verified": false,
+      "gpu_measured": false,
+      "priority": 2
+    },
+    {
+      "publisher_namespace": "lightx2v",
+      "repository": "Minimax-h3-Turbo",
+      "file": "minimax_h3_fl2v_turbo_4step_v1.2_768p_bf16.safetensors",
+      "expected_bytes": 1383677808,
+      "expected_sha256_from_TLS_metadata": "c3d4a2cf618efea71b9e21a4baaa12d412f1eb6c2b6f86efacaf0ebb6814b689",
+      "modelscope_metadata_path": "_scratch/h3-lora-implementation-20261014/modelscope.cn-api.json",
+      "adapter_downloaded": false,
+      "actual_tensor_header_verified": false,
+      "gpu_measured": false,
+      "priority": 2
+    },
+    {
+      "publisher_namespace": "larryvrh",
+      "repository": "MiniMax-H3-Turbo-Lora",
+      "file": "minimax_h3_turbo_v4_step600_ema.safetensors",
+      "expected_bytes": 779849816,
+      "expected_sha256_from_TLS_metadata": "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3",
+      "modelscope_metadata_path": "_scratch/h3-lora-implementation-20261014/larryvrh-api.json",
+      "adapter_downloaded": false,
+      "actual_tensor_header_verified": false,
+      "gpu_measured": false,
+      "priority": 1
+    },
+    {
+      "publisher_namespace": "FastVideo",
+      "repository": "FastVideo-FastH3-4-step-Preview-v1-LoRA",
+      "file": "dense-datafree/adapter_model.safetensors",
+      "expected_bytes": 1485626152,
+      "expected_sha256_from_TLS_metadata": "4ce198c83132251b7fd0de2503823aa49c53983f068318f66cb19eaefb7fcc12",
+      "modelscope_metadata_path": "_scratch/h3-lora-implementation-20261014/FastVideo-api.json",
+      "adapter_downloaded": false,
+      "actual_tensor_header_verified": false,
+      "gpu_measured": false,
+      "priority": 3
+    },
+    {
+      "publisher_namespace": "FastVideo",
+      "repository": "FastVideo-FastH3-4-step-Preview-v1-LoRA",
+      "file": "vsa-datafree/adapter_model.safetensors",
+      "expected_bytes": 5339117712,
+      "expected_sha256_from_TLS_metadata": "42dc502a2078f166c396a1fa75f29728d1844363652d345d5ef3e2b444ed6470",
+      "modelscope_metadata_path": "_scratch/h3-lora-implementation-20261014/FastVideo-api.json",
+      "adapter_downloaded": false,
+      "actual_tensor_header_verified": false,
+      "gpu_measured": false,
+      "priority": 4
+    }
+  ],
+  "selection_note": "Larry v4 EMA4steps first for our static/small-motion scene; card recommends6-8 for quality/heavy-motion. LightX4stepv0.1 has known12/3 shifts/alpha8; newer768pv1.2 requires exact current recipe confirmation. FastVideo dense4step is next but dense delta payload handling required; VSA requires larger implementation and is not minimal loader-only patch. No best-quality ranking without outputs.",
+  "baseline_report": "_scratch/h3-subblock-fix-20261014/t2va-once/baseline/report.json",
+  "sampling_fixed": {
+    "width": 864,
+    "height": 480,
+    "frames": 124,
+    "fps": 24,
+    "seed": 42,
+    "cfg_scale": 1
+  },
+  "policy": {
+    "fresh_baseline_runs": 0,
+    "candidate_warmup": 0,
+    "candidate_repeats": 1,
+    "single_GPU": true,
+    "other_research_methods": "all off initially",
+    "original_Q4_weights": "immutable; no automatic requantization",
+    "model_recipe_change": "new adapter/NFE recipe recorded separately; not same-weights acceleration claim"
+  },
+  "download_blocker": {
+    "verified_metadata_hosts": [
+      "modelscope.cn",
+      "api.github.com"
+    ],
+    "public_weight_CDN": "returns HTML campus authentication-required page instead of model bytes",
+    "observed_portal_host": "auth6.tsinghua.edu.cn",
+    "action_required": "user authenticates server networking through authorized channel, or supplies local adapter safetensors",
+    "diagnostic": "per-call public CDN certificate exception was approved to identify error; invalid HTML rejected, no model loaded, no system CA change; do not retry/bypass portal",
+    "no_credentials_collected": true
+  },
+  "resources": {
+    "free_disk_GiB_approx": 37,
+    "largest_candidate_bytes": 5339117712,
+    "no_weight_payload_downloaded": true
+  },
+  "implementation_state": {
+    "production_code_changed": false,
+    "model_lock_changed": false,
+    "gpu_runs": 0,
+    "reason": "Avoid broad speculative code edits before actual header/format can be validated; minimal immutable dynamic-LoRA seam identified in H3Runner params_ctx with existing loader and graph-cut parameter ownership."
+  },
+  "metadata_evidence": [
+    {
+      "path": "_scratch/h3-lora-implementation-20261014/modelscope.cn-api.json",
+      "sha256": "9db54839c8457762f708797405ae44b7e44006a98033d5fd731c0dfa9d7d6eea"
+    },
+    {
+      "path": "_scratch/h3-lora-implementation-20261014/FastVideo-api.json",
+      "sha256": "1f19bf3741d1d1178fe9c906f97871dabfd822cbad051f1a639ac7c110b5f075"
+    },
+    {
+      "path": "_scratch/h3-lora-implementation-20261014/larryvrh-api.json",
+      "sha256": "c28b89beebebae4c723a9125ad38593775c7be556618a33602c29ee4edc80ec2"
+    },
+    {
+      "path": "_scratch/h3-lora-implementation-20261014/light-files.json",
+      "sha256": "6e1e67ffafa60c6e7a7607f6effc68f5ac07f34c487beb734aa2ad69f2b75230"
+    },
+    {
+      "path": "_scratch/h3-lora-implementation-20261014/light-revisions.json",
+      "sha256": "414a612794c87bfbcf511a3535025610fe07d548485875d6b5e5af4da4c5ea7c"
+    }
+  ]
+}

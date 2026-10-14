@@ -119,3 +119,21 @@
 - [4090实验入口](https://github.com/hao-ai-lab/FastVideo/blob/d5253fd71055927f12aa6c4aa679b93a00238851/scripts/benchmarks/minimax_h3_4090/bench_pod.py)
 - [SM89 VSA实现](https://github.com/hao-ai-lab/FastVideo/blob/d5253fd71055927f12aa6c4aa679b93a00238851/fastvideo/attention/backends/minimax_h3_sparse_int8.py)
 - [NVFP4计算能力门槛](https://github.com/hao-ai-lab/FastVideo/blob/d5253fd71055927f12aa6c4aa679b93a00238851/fastvideo/layers/quantization/nvfp4_config.py)
+
+## 8. 实际下载尝试与候选收敛（2026-10-14）
+
+**已通过正常TLS读到ModelScope对应命名空间的模型卡/文件元数据**，不再把“HF不可达”当作所有权重说明都不可读取。此处是ModelScope当前内容核验，不称HF当前latest已验证：
+
+| 候选 | 公开元数据文件大小 | 本轮选择 |
+|---|---:|---|
+| Larry `minimax_h3_turbo_v4_step600_ema.safetensors` | 779,849,816 B | 先4步；静态/小运动当前首选候选，非实测质量排名 |
+| LightX2V `minimax_h3_fl2v_turbo_4step_v0.1.safetensors` | 1,383,677,888 B | 4步明确配方，作为第二候选 |
+| LightX2V `minimax_h3_fl2v_turbo_4step_v1.2_768p_bf16.safetensors` | 1,383,677,808 B | 文件存在，不能由v1.0规格表猜全部v1.2参数 |
+| FastVideo `dense-datafree/adapter_model.safetensors` | 1,485,626,152 B | 4步，额外dense增量需完整处理 |
+| FastVideo `vsa-datafree/adapter_model.safetensors` | 5,339,117,712 B | VSA训练权重已公开列出；非普通A/B-only，不作为最小改动的第一条 |
+
+Larry模型卡明确“all bf16”，有效增量`B@A`、alpha=rank、strength1；4步是建议最小值，6–8更好，v4在4步剧烈运动下可能拖影。其作者列出bf16/int8_convrot及pruned_int8/pruned_fp8兼容，不将“any base”扩大为本项目GGUF Q4已经验证。FastVideo元数据tensor_type为BF16，模型卡确认VSA三个adapter含exact delta和gate。上述**是元数据声明，不是已下载tensor逐一检查**。
+
+正式下载之前的Range文件头请求被拒绝。根因现已定位：CDN返回283字节HTML，正文为`Authentication is required`并指向`auth6.tsinghua.edu.cn`校园网认证页；不是有效safetensors。首次TLS报错后，在明确批准下仅对公共CDN诊断请求临时使用单次证书例外以识别错误；未发送账号凭据、未改系统证书、未加载返回内容，也未绕过校园认证。后续须用户完成该服务器校园网认证，或提供本地adapter文件。权重完整SHA必须与已通过TLS获得的元数据对上才能使用。
+
+已询问用户这一必要权限/资源。无需新增大规模代码或重建baseline；候选文件空间充足，但**当前0个真实adapter下载、0次GPU LoRA实验，不能宣称已选出效果最好者或适配完成**。候选清单、预期SHA256和单次试验策略见`benchmark/h3_cuda/lora-trial-plan.json`。原模型/依赖/默认参数不变。

@@ -1,5 +1,7 @@
 # MiniMax-H3：跨服务器接续交接
 
+> **2026-10-14 LoRA尝试最新状态**：ModelScope模型卡/文件SHA元数据已可读，收敛Larry4步与LightX2V4步候选；CDN实际返回校园网认证HTML（auth6.tsinghua.edu.cn），尚无真实adapter可加载。用户需认证服务器网络或提供本地LoRA；不绕过认证。无新模型baseline/生产代码改动/LoRA GPU实验。见`lora-trial-plan.json`与LoRA审计第8节。
+
 > **2026-10-14 LoRA接续研究**：最新可访问GitHub已核验；优先原Q4＋高精度动态LoRA，候选Larry8步/LightX2V、FastVideo dense4步。HF证书失败，未确认最新adapter文件、未下载或推理；不得标记Q4 LoRA已支持。路线与缺口见`h3-lora-q4-deployment-audit-20261014.md`、`benchmark/h3_cuda/lora-q4-audit-20261014.json`。
 
 > **2026-10-14追加keep25实验已完成**：T2VA205.72s、mixed538.70s，各1次；比keep50再省4.49%/2.28%，输出有额外稀疏差异。精度/二进制/输入不变，不改默认参数。见`h3-subblock-keep25.md`与`validation.json.subblock_keep25`。无剩余GPU测试。
