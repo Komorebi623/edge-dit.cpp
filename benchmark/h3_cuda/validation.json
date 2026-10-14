@@ -615,5 +615,15 @@
     "mixed_time_reduction_percent": 12.2,
     "both_outputs_byte_identical_to_old_subblock": true,
     "note": "same keep0.5/precision/input; not dense-output parity, no three-repeat claim. No remaining GPU queue."
+  },
+  "subblock_keep25": {
+    "date": "2026-10-14",
+    "status": "complete_single_t2va_then_single_mixed",
+    "results": "benchmark/h3_cuda/subblock-keep25-results.json",
+    "new_full_generations": 2,
+    "only_tuning_change": "ED_H3_SPARSE_KEEP_RATIO=0.25",
+    "same_binary_libraries_inputs_precision_verified": true,
+    "production_defaults_changed": false,
+    "note": "single observations; extra speed vs keep50 is 4.49% T2VA / 2.28% mixed with different outputs. No queued runs."
   }
 }

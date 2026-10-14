@@ -1,0 +1,232 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-14",
+  "timezone": "Asia/Shanghai",
+  "status": "complete_single_t2va_then_single_mixed",
+  "request": "Measure nominal 75% target-video block sparsity, keep0.25, changing no other variable",
+  "baseline_revision": "97cc585d9dbd9ac5e30b78ef2e2c4a0d8bfbe9f2",
+  "source_tree_sha256": "9e38c09eff4531bf17e5079e2b20de535b71728717866787a5c06f3175df8985",
+  "run_policy": {
+    "warmup": 0,
+    "repeats": 1,
+    "baseline_reused": true,
+    "keep50_reused": true,
+    "max_new_full_generations": 2,
+    "mixed_after_t2va": true
+  },
+  "parameters": {
+    "keep_ratio": 0.25,
+    "nominal_target_video_block_sparsity": 0.75,
+    "previous_keep_ratio": 0.5,
+    "block_tokens": 64,
+    "n_q": 4,
+    "n_k": 4,
+    "dense_first_steps": 2,
+    "dense_last_step": true,
+    "dense_first_and_last_dit_layer": true,
+    "protected_non_video_queries_dense": true,
+    "protected_non_video_kv_always_retained": true,
+    "topk_rule": "ceil(keep_ratio * number_of_target_video_blocks), independently per head/query block",
+    "note": "Only sparsity aligned with the user-requested official setting; this is not a full official schedule/backend reproduction. Production defaults unchanged."
+  },
+  "cases": {
+    "t2va": {
+      "mode": "t2va",
+      "baseline_cli_seconds": 254.3327923049219,
+      "keep50_cli_seconds": 215.37702553882264,
+      "keep25_cli_seconds": 205.71678560390137,
+      "baseline_dit_seconds": 211.297,
+      "keep50_dit_seconds": 172.403,
+      "keep25_dit_seconds": 162.358,
+      "speedup_vs_dense": 1.2363249384745323,
+      "time_reduction_vs_dense_percent": 19.11511538108478,
+      "speedup_vs_keep50": 1.0469589290274135,
+      "time_reduction_vs_keep50_percent": 4.485269452836771,
+      "quality_vs_dense": {
+        "keep50": {
+          "ssim": 0.9173507177419354,
+          "psnr_db": 27.91258064516129,
+          "audio_rmse": 0.007620626680822783,
+          "audio_relative_l2": 0.469285675188421
+        },
+        "keep25": {
+          "ssim": 0.8639465564516129,
+          "psnr_db": 24.805967741935483,
+          "audio_rmse": 0.009536064510478079,
+          "audio_relative_l2": 0.5872402178815134
+        }
+      },
+      "output": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-keep25-20261014/t2va/candidate/t2va-000.mp4",
+      "output_sha256": "95cbe26632fd2a020fdb9c79b58622ff175980dfdb801586a560ffc5aa522bce",
+      "output_shape": {
+        "audio_channels": 2,
+        "audio_sample_rate": 32000,
+        "audio_samples_per_channel": 165888,
+        "fps": "24",
+        "frames": 124,
+        "height": 480,
+        "width": 864
+      },
+      "decoded_finite": true,
+      "same_binary_libraries_inputs_sampling_placement_and_other_tuning_verified": true,
+      "binary_sha256": "ec5ff4458a12872459287a293627d907d182b727ca674ce640c7f5aeec39822d",
+      "reports": {
+        "baseline": {
+          "path": "_scratch/h3-subblock-fix-20261014/t2va-once/baseline/report.json",
+          "sha256": "f60b7e5b247ca3a18827ead08b185efe35af86c0f0730e56f0a005c2de88e15c"
+        },
+        "keep50": {
+          "path": "_scratch/h3-subblock-fix-20261014/t2va-once/candidate/report.json",
+          "sha256": "0421535ad876bacab574a7d7582c02ba988132ffa0281d6755f03a3515a66c84"
+        },
+        "keep25": {
+          "path": "_scratch/h3-subblock-keep25-20261014/t2va/candidate/report.json",
+          "sha256": "0932b4b6445fc29ad30b200c74190ff506ed6bfdcf3f65ec8377b564539ecebc"
+        },
+        "comparison": {
+          "path": "_scratch/h3-subblock-keep25-20261014/t2va/compare/report.json",
+          "sha256": "627da34e31c329eccb143157e17ae82b02664b674623e22eee10adbd3971f7dc"
+        }
+      },
+      "memory": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 799,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 15505.0,
+        "max_sample_gap_seconds": 0.5487396488897502
+      },
+      "manifest": {
+        "path": "_scratch/h3-subblock-keep25-20261014/t2va-single.json",
+        "sha256": "abca36205401718f50b756839ed14073a795e8ad166bdd9bd32ea15f017526f8"
+      }
+    },
+    "mixed": {
+      "mode": "ref_mixed",
+      "baseline_cli_seconds": 627.9100476631429,
+      "keep50_cli_seconds": 551.300021514995,
+      "keep25_cli_seconds": 538.7028134400025,
+      "baseline_dit_seconds": 547.981,
+      "keep50_dit_seconds": 469.145,
+      "keep25_dit_seconds": 458.353,
+      "speedup_vs_dense": 1.1655963770701112,
+      "time_reduction_vs_dense_percent": 14.207008560404134,
+      "speedup_vs_keep50": 1.0233843368935653,
+      "time_reduction_vs_keep50_percent": 2.2850004685969094,
+      "quality_vs_dense": {
+        "keep50": {
+          "ssim": 0.9778977258064516,
+          "psnr_db": 38.20991935483871,
+          "audio_rmse": 0.0046898900159404264,
+          "audio_relative_l2": 0.3041300414690326
+        },
+        "keep25": {
+          "ssim": 0.9715179919354838,
+          "psnr_db": 36.626854838709676,
+          "audio_rmse": 0.004643818511700226,
+          "audio_relative_l2": 0.3011423960343873
+        }
+      },
+      "output": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-keep25-20261014/mixed/candidate/ref_mixed-000.mp4",
+      "output_sha256": "16fc7e7bb61fa29328fa87d6622116243c3028ce7a29e5f714c8f1c527be6d40",
+      "output_shape": {
+        "audio_channels": 2,
+        "audio_sample_rate": 32000,
+        "audio_samples_per_channel": 165888,
+        "fps": "24",
+        "frames": 124,
+        "height": 480,
+        "width": 864
+      },
+      "decoded_finite": true,
+      "same_binary_libraries_inputs_sampling_placement_and_other_tuning_verified": true,
+      "binary_sha256": "ec5ff4458a12872459287a293627d907d182b727ca674ce640c7f5aeec39822d",
+      "reports": {
+        "baseline": {
+          "path": "_scratch/h3-offload-20261014/mixed-sync-baseline/baseline/report.json",
+          "sha256": "dff37a3cfb17c12908539c4c7eedb12fb09c93840ca7a1ccd59ded2ee3ab115a"
+        },
+        "keep50": {
+          "path": "_scratch/h3-subblock-fix-20261014/mixed-once-02/candidate/report.json",
+          "sha256": "751e6355f49086e2034ac02c877084159ac2deb0602b5dbce03a3c81327adc4b"
+        },
+        "keep25": {
+          "path": "_scratch/h3-subblock-keep25-20261014/mixed/candidate/report.json",
+          "sha256": "af5df5a403afaf32118eedc8e33c092797f1a9fc5a0a8a1301952aae823978a7"
+        },
+        "comparison": {
+          "path": "_scratch/h3-subblock-keep25-20261014/mixed/compare/report.json",
+          "sha256": "8462d57a40085a00e5546767c3fe37b221c74e1250ca1811eec65b64e38694d8"
+        }
+      },
+      "memory": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 1803,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 18529.0,
+        "max_sample_gap_seconds": 0.560986801981926
+      },
+      "manifest": {
+        "path": "_scratch/h3-subblock-keep25-20261014/mixed-single.json",
+        "sha256": "261c0efc9b5a2b4bc00e22b9a05f32e16d092a3c29d828256d59a864291455fd"
+      }
+    }
+  },
+  "models": {
+    "audio_vae": {
+      "bytes": 605254808,
+      "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+    },
+    "fl2va": {
+      "bytes": 18779848448,
+      "sha256": "a25ee3184dd56e7fc5c8db1508d2e48a7e3c92919b516935c6059e4228e16107"
+    },
+    "llm": {
+      "bytes": 18218065024,
+      "sha256": "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc"
+    },
+    "video_vae": {
+      "bytes": 5207808496,
+      "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522"
+    },
+    "ref2va": {
+      "bytes": 18779848448,
+      "sha256": "fdaecd3e73cf70a866184e49958c7f17055c5294252921ceac7dc459ce6be11e"
+    }
+  },
+  "limitations": [
+    "Single observations; no repeated statistics/confidence intervals",
+    "CLI excludes outer workflow full hashes and decoded-media validation; DiT is native diffusion_ms",
+    "Changed video/PCM expected: sparse approximation, not lossless compression",
+    "SSIM/PSNR and waveform errors measure distance to fixed dense output, not intrinsic or semantic quality",
+    "No subjective listening or motion/identity/synchronization acceptance; no eight-mode sweep",
+    "GPU memory is sampled whole-device usage, not exact process peak or hard cap"
+  ],
+  "sampling": {
+    "audio_channels": 2,
+    "audio_sample_rate": 32000,
+    "cfg_scale": 1,
+    "fps": 24,
+    "frames": 124,
+    "height": 480,
+    "ref_image_size": "match",
+    "sampler": "res_multistep",
+    "scheduler": "simple",
+    "seed": 42,
+    "steps": 20,
+    "width": 864
+  },
+  "placement": {
+    "cpu_threads": 6,
+    "dit_offload": true,
+    "max_vram_gib": 22,
+    "text_encoder_offload": true,
+    "vae_offload": true
+  },
+  "runtime_env": {
+    "ED_CUDNN_SDPA_SYNC_F32_SELF_ATTN": "1"
+  }
+}

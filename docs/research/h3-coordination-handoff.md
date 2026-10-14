@@ -1,5 +1,7 @@
 # MiniMax-H3：跨服务器接续交接
 
+> **2026-10-14追加keep25实验已完成**：T2VA205.72s、mixed538.70s，各1次；比keep50再省4.49%/2.28%，输出有额外稀疏差异。精度/二进制/输入不变，不改默认参数。见`h3-subblock-keep25.md`与`validation.json.subblock_keep25`。无剩余GPU测试。
+
 > **2026-10-14 SubBlock修复完成**：同精度/输入/keep0.5，T2VA单次254.33→215.38s（↓15.3%）；mixed复用同配置baseline，单次627.91→551.30s（↓12.2%）。两个产物均与旧SubBlock逐字节相同，仍有相对dense的稀疏误差。详见`h3-subblock-fix.md`与`validation.json.subblock_repair`。按用户要求不再默认重复3次；先T2VA一次，再mixed一次。
 
 > **2026-10-14 15:47接续**：AdaLN性能退化已修复，mixed已测571.53/565.67s vs baseline627.99s，各自与一个baseline产物逐字节一致（baseline重复本身有差异）；用户要求停止重复验收，三次正式矩阵未完成，勿误标完成。详见`h3-adaln-fix.md`及`validation.json.adaln_repair`。后续SubBlock优先，验证改为T2VA单次通过后mixed单次。

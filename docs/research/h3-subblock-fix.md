@@ -62,3 +62,7 @@ N=15000、H=56、D=128、235个视频块、TopK118；无protected token，合成
 T2VA分段79→5，mixed91→10；该规划收益与原生稀疏内核收益共同计入上述CLI数字，没有把总提升全算成稀疏计算减少。采样显存峰值：T2VA baseline16035、修复15505MiB；mixed baseline18751、修复18529MiB。T2VA按报告时间窗口划分采样，均不是精确进程峰值。
 
 完整机器证据与报告hash：`benchmark/h3_cuda/subblock-fix-results.json`。新T2VA证据`_scratch/h3-subblock-fix-20261014/t2va-once/`；mixed证据`mixed-once-02/`。第一次mixed准备因误用T2VA-only方法目录而在推理前拒绝，失败记录保留；修正为已有mixed目录后仅执行了一次模型生成。所有GPU任务已结束，无待执行队列。
+
+## 追加：keep25（75%名义稀疏率）
+
+仅改保留率，同一修复版：T2VA205.72s、mixed538.70s，相对keep50再省4.49%/2.28%；相对dense省19.12%/14.21%。T2VA与dense的SSIM降至0.863947，mixed为0.971518；并非上一轮无额外误差的工程修改。各1次，无默认参数变化。完整表见`h3-subblock-keep25.md`及`benchmark/h3_cuda/subblock-keep25-results.json`。
