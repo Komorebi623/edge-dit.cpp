@@ -1,0 +1,65 @@
+{
+  "date": "2026-10-15",
+  "timezone": "Asia/Shanghai",
+  "status": "launched_waiting_gpu",
+  "deadline": "2026-10-15T09:00:00+08:00",
+  "poll_seconds": 180,
+  "launch_receipt": {
+    "controller_pid": 755647,
+    "guardian_pid": 755650,
+    "controller_process_group": 755647,
+    "guardian_process_group": 755650,
+    "deadline": "2026-10-15T09:00:00+08:00",
+    "plan": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-overnight-20261015/plan.json",
+    "state": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-overnight-20261015/run/status.json",
+    "final_report_directory": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-overnight-20261015/final-report",
+    "fallback_directory": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-overnight-20261015/deadline-fallback-report",
+    "note": "Both detached processes confirmed alive; bounded to deadline/report completion, no daemon retry loop after completion."
+  },
+  "queue_plan": {
+    "path": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-overnight-20261015/plan.json",
+    "sha256": "950682c4e44c4bfd8e34dc784fa6ed774c71897ecff44b2bef4a2c03b69b949d"
+  },
+  "controller_tests": {
+    "passed": 8,
+    "total": 8
+  },
+  "report_skill": {
+    "path": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-report-runtime/skill/SOURCE.json",
+    "sha256": "e6aba3c87bd91fe978721e8f69cdcac675dd1f3dd5d0bf781cc67d43b7cdcab7",
+    "origin": "anthropics/skills",
+    "commit": "dbd4588f9e1033efb41dad4bef2f7947c8993d44"
+  },
+  "preview_QA": {
+    "status": "passed",
+    "slide_count": 14,
+    "rendered_pages": 14,
+    "errors": [],
+    "pptx_sha256": "5601720a7815bfa1b7b323799ba88fb64da11877f2ef54eb7143ae8718c7d43c",
+    "pdf_sha256": "93dc11bd8a1989e9f0b3fc8b9e849bbe36b910155d1969fc37c53eb01b7a07d6",
+    "as_of": "2026-10-15 01:28",
+    "visual_review": "Automated package/bounds/render checks; initial draft manually reviewed separately. Updated overnight result values still require final human glance."
+  },
+  "deadline_e2e": {
+    "status": "complete",
+    "GPU_tasks_started": 0,
+    "last_GPU_poll": null,
+    "report_QA": {
+      "status": "passed",
+      "slide_count": 14,
+      "rendered_pages": 14,
+      "errors": [],
+      "pptx_sha256": "65ef4cac461e334d74710c1e73ea2387951c75f41e04e6cbb08e5cd3ba153bd2",
+      "pdf_sha256": "0a264b483c8837b89dd102a03ee0b1384a8d22edd8c9f5a7d8d7ed9dcf0de626",
+      "as_of": "2026-10-15 01:31",
+      "visual_review": "Automated package/bounds/render checks; initial draft manually reviewed separately. Updated overnight result values still require final human glance."
+    }
+  },
+  "pending": [
+    "Ref2VA4mixed",
+    "FastVideo dense4T2VA",
+    "VSA CUDAparity thenVSA4T2VA",
+    "article identities require usercontent"
+  ],
+  "note": "Launch-time record only; future state must read live PID/status/report. Plan completion not guaranteed if GPU occupied or test fails; deadline creates truthful report."
+}
