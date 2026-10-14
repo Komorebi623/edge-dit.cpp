@@ -97,3 +97,25 @@
 - [FastVideo Comfy转换器](https://github.com/hao-ai-lab/FastVideo/blob/d5253fd71055927f12aa6c4aa679b93a00238851/scripts/checkpoint_conversion/convert_minimax_h3_comfy_lora.py)：QKV与SwiGLU实质转换，不是重命名。
 - [FastH3 V2/PDD配方](https://github.com/hao-ai-lab/FastVideo/blob/d5253fd71055927f12aa6c4aa679b93a00238851/docs/inference/fasth3-distilled.md)：梯度、门控、头数与硬件限制。
 - [LightX2V Turbo规格](https://github.com/ModelTC/Minimax-H3-Turbo/blob/02e26d591f7a04d5d1a074c9566d5dd4f22f6225/README.md)、[当前合并实现](https://github.com/ModelTC/LightX2V/blob/8e86555809efd20138d3a4e1f937ee306cdf0ee0/lightx2v/models/networks/minimax_h3/lora.py)：分区、NFE/双shift、原精度限制。
+
+## 7. 后续精度/配对追问（2026-10-14）
+
+进一步读完FastVideo `scripts/benchmarks/minimax_h3_4090/README.md`与`bench_pod.py`、`minimax_h3_sparse_int8.py`、`nvfp4_config.py`（仍固定d5253fd）：
+
+- **有SM89专用VSA tile64路径**，可选择BF16 QK/BF16 PV或INT8 QK/BF16 PV；保留原tile路由、尾块和学习到的压缩分支。不能笼统说FastVideo VSA只能Blackwell。
+- 该4090实测文档明确使用**private `FastVideo/FastH3-Pruned-8Step-FP8-ckpt300`**，修订`f2ef54f9ff2091762ab8689b6514dcab5bc1d383`，DiT为FP8，非完整Q4；记录其当时私有状态，不由代码仓库推断HF当前可下载性。脚本L93说明NVFP4选项为其他GPU保留，4090 DiT使用FP8。
+- 该4090记录的text encoder是**NVFP4存储、逐linear反量化到BF16 GEMM**；这不证明4090以原生NVFP4运行整个DiT。当前NVFP4 quant config最小capability=100，不能直接把其Blackwell主计算路径给SM89。
+- 官方RTX PRO6000文档明确引用公开FastH3 V1/V2 **NVFP4成品学生模型**，例如`FastVideo/FastVideo-FastH3-8-Step-V2-NVFP4`。这是已训练/量化学生，不等于通用Q4底模＋任意LoRA的公开配对。
+- Larry/LightX2V：在已核验官方源码/说明中，**未确认针对本项目Q4_K/Q4_0混合GGUF的作者验证配对**；SGLang当前GGUF+LoRA明确不支持，LightX2V合并器拒绝quantized DiT。HF API重试仍证书失败；不能把“未确认”写成“全球不存在”。
+
+精度解释：LoRA训练精度、adapter存储精度、base量化格式、运行累积精度是不同维度。LoRA不天然只能用于某个dtype，但须匹配模型架构/具体训练base/张量布局；base量化误差、合并舍入、动态执行和重新量化会改变有效模型。`Q4_K/Q4_0`、NVFP4、NF4同为4bit也不互换，GGUF只是容器，不是统一4bit语义。
+
+未量化的理想实数运算中，`(W+sBA)x = Wx+sB(Ax)`。量化后比较的是`Q(W+sBA)x`与`Q(W)x+sB(Ax)`，二者通常不等价。优先动态分支是避免把小LoRA增量再次压进低bit权重，但不消除原Q4误差，也不构成已验证质量保证。
+
+若用户优先VSA：以VSA训练学生/携带完整gate与dense增量的adapter为模型基准，完整实现稀疏细粒度分支＋粗粒度压缩分支＋gate合并，严格遵守NFE/rungs/shifts。首选tile64 SM89可实现路径，不能以SubBlock顶替；之后再独立比较保留原Q4＋adapter与学生重新量化的质量/性能，不自动改原精度锁。无需重训才能移植已有模型，但不能忽略训练新增参数。
+
+补充源码证据（官方固定GitHub版本）：
+- [4090专项记录](https://github.com/hao-ai-lab/FastVideo/blob/d5253fd71055927f12aa6c4aa679b93a00238851/scripts/benchmarks/minimax_h3_4090/README.md)
+- [4090实验入口](https://github.com/hao-ai-lab/FastVideo/blob/d5253fd71055927f12aa6c4aa679b93a00238851/scripts/benchmarks/minimax_h3_4090/bench_pod.py)
+- [SM89 VSA实现](https://github.com/hao-ai-lab/FastVideo/blob/d5253fd71055927f12aa6c4aa679b93a00238851/fastvideo/attention/backends/minimax_h3_sparse_int8.py)
+- [NVFP4计算能力门槛](https://github.com/hao-ai-lab/FastVideo/blob/d5253fd71055927f12aa6c4aa679b93a00238851/fastvideo/layers/quantization/nvfp4_config.py)

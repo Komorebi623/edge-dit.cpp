@@ -421,5 +421,40 @@
       "sha256": "a77bc604b26a711efab66e804b517957bb10a00d1cb1e2a4a556ab4854c0dffd"
     }
   ],
-  "document": "docs/research/h3-lora-q4-deployment-audit-20261014.md"
+  "document": "docs/research/h3-lora-q4-deployment-audit-20261014.md",
+  "q4_pairing_followup": {
+    "date": "2026-10-14",
+    "official_4090_vsa_path": "SM89 tile64 exists; specific published benchmark uses private pruned FP8 DiT, not our Q4",
+    "official_4090_text_encoder": "NVFP4 storage dequantized to BF16 matmul",
+    "NVFP4_DiT_min_capability_in_checked_config": 100,
+    "Larry_LightX2V_our_Q4_pairing": "not verified; official SGLang GGUF+LoRA unsupported and LightX2V merged quantized DiT rejected",
+    "HF_latest_metadata": "retry still TLS certificate error",
+    "no_gpu_or_weight_downloads": true,
+    "evidence": [
+      {
+        "path": "_scratch/h3-lora-audit-20261014/q4-followup/fastvideo/attention/backends/minimax_h3_sparse_int8.py",
+        "sha256": "3e5e21767dd55ddfaf0089be165913b69ebb14126e416bca07c7b0cc84d630e4"
+      },
+      {
+        "path": "_scratch/h3-lora-audit-20261014/q4-followup/fastvideo/layers/quantization/nvfp4_config.py",
+        "sha256": "027afb824ae6cfe6bf5df57ac43b20b595aa0df8edf8236460f027cc8d40e41f"
+      },
+      {
+        "path": "_scratch/h3-lora-audit-20261014/q4-followup/hf-access-status.txt",
+        "sha256": "4aac99f3ce765d14dbbd482bff9c2b6067edd63accb8eb337ef05dbc706f6a3e"
+      },
+      {
+        "path": "_scratch/h3-lora-audit-20261014/q4-followup/receipts.jsonl",
+        "sha256": "372fd32a29c89947e5b8f98dec2e6a0740b81c0c48e54cc30d1221d62643028e"
+      },
+      {
+        "path": "_scratch/h3-lora-audit-20261014/q4-followup/scripts/benchmarks/minimax_h3_4090/README.md",
+        "sha256": "5b60b75634a6183474c7a614f33f923f72c38781ed83654f0e1f1f969ead5eca"
+      },
+      {
+        "path": "_scratch/h3-lora-audit-20261014/q4-followup/scripts/benchmarks/minimax_h3_4090/bench_pod.py",
+        "sha256": "134c531e9d0569f26ba8e5fdbe71de9ae6ba59092662d28e8592a994b5675912"
+      }
+    ]
+  }
 }
