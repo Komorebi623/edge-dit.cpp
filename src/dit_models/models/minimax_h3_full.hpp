@@ -24,6 +24,7 @@
 #include "dit_models/models/minimax_h3_cuda_sage.hpp"
 #include "dit_models/models/minimax_h3_cuda_adaln_cache.hpp"
 #include "dit_models/models/minimax_h3_sha256.hpp"
+#include "dit_models/models/minimax_h3_dynamic_lora.hpp"
 #include "optimization/cache/operator/cache_operator_registry.hpp"
 
 namespace MiniMaxH3 {
@@ -398,6 +399,8 @@ namespace MiniMaxH3 {
                                               sequence > 32768 &&
                                               attention_activation_bytes > ctx->max_graph_vram_bytes;
             std::vector<ggml_tensor*> qkv;
+            if (low_memory_attention && ctx->weight_adapter)
+                throw std::invalid_argument("H3 dynamic LoRA sliced-QKV geometry is not supported; use a smaller sequence or larger planning budget");
             if (low_memory_attention) {
                 qkv.reserve(3);
                 for (int projection = 0; projection < 3; ++projection) {
@@ -1454,6 +1457,35 @@ namespace MiniMaxH3 {
         using ResearchRunnerBase = CacheOffload::RunnerBridge<ExactAdaLN::RunnerBridge<GGMLRunner>>;
         Config config;
         MiniMaxH3Transformer3DModel model;
+        std::shared_ptr<DynamicLoraAdapter> dynamic_lora;
+        void configure_dynamic_lora(const String2TensorStorage& adapter, float coefficient) {
+            if (dynamic_lora || weight_adapter || model.cuda_optimizations.any_enabled())
+                throw std::invalid_argument("H3 dynamic LoRA requires an independent immutable adapter");
+            std::map<std::string, ggml_tensor*> base;
+            model.get_param_tensors(base, "model.diffusion_model");
+            dynamic_lora = std::make_shared<DynamicLoraAdapter>(params_ctx, base, adapter, coefficient);
+            set_weight_adapter(dynamic_lora);
+            validate_dynamic_lora_mode();
+        }
+        void validate_dynamic_lora_mode() const {
+            if (!dynamic_lora) return;
+            if (!h3_cuda_backend(runtime_backend) || weight_adapter != dynamic_lora ||
+                model.cuda_optimizations.any_enabled() || (process_group_ && process_group_->enabled()) ||
+                h3_env_flag_enabled("ED_MINIMAX_H3_REUSE_GRAPH") ||
+                std::getenv("ED_MINIMAX_H3_DEBUG_TARGET") || h3_env_flag_enabled("ED_ASYNC_OFFLOAD"))
+                throw std::invalid_argument("H3 dynamic LoRA: only immutable single-CUDA serial execution; no other research methods/reuse/debug/async");
+#if defined(ED_ENABLE_ASYNC_OFFLOAD)
+            if (async_offload_level() != 0) throw std::invalid_argument("H3 dynamic LoRA cannot use async weight offload");
+#endif
+            auto* device = ggml_backend_get_device(runtime_backend);
+            auto* registry = device ? ggml_backend_dev_backend_reg(device) : nullptr;
+            if (!registry || std::string(ggml_backend_reg_name(registry)) != "CUDA" ||
+                ggml_backend_reg_dev_count(registry) != 1)
+                throw std::invalid_argument("H3 dynamic LoRA requires one visible CUDA device");
+            if (params_backend != runtime_backend && (!ggml_backend_is_cpu(params_backend) ||
+                params_on_runtime_backend || phase_params_pinned_ || !max_graph_vram_bytes))
+                throw std::invalid_argument("H3 dynamic LoRA offload requires immutable CPU parameters and explicit budget");
+        }
         struct AdaLNBranch {
             std::unique_ptr<ExactAdaLN::Cache> cache;
             ExactAdaLN::RequestContract contract;
@@ -2181,6 +2213,7 @@ namespace MiniMaxH3 {
             }
 
             auto runner_ctx = get_context();
+            if (dynamic_lora) dynamic_lora->begin_graph();
             if (model.cuda_optimizations.adaln_cache || model.cuda_optimizations.sparse_attn) {
                 runner_ctx.bind_backend_tensor_data = [this](ggml_tensor* tensor, const void* data) {
                     set_backend_tensor_data(tensor, data);
@@ -2219,6 +2252,7 @@ namespace MiniMaxH3 {
                                          : debug_output);
             auto graph      = new_graph_custom(H3_GRAPH_SIZE);
             ggml_build_forward_expand(graph, merged);
+            if (dynamic_lora) dynamic_lora->validate_coverage(graph);
             return graph;
         }
 
@@ -2359,6 +2393,7 @@ namespace MiniMaxH3 {
             GGML_ASSERT(params.x != nullptr && params.timesteps != nullptr && params.context != nullptr);
             // Recheck dynamic state before prefill/build/replay; configure-time
             // checks cannot protect later environment/adapter/group changes.
+            validate_dynamic_lora_mode();
             validate_cuda_research_execution_mode(model.cuda_optimizations);
             if (model.cuda_optimizations.cache_dit) validate_cuda_cache_execution_mode();
             validate_cuda_sparse_capacity(params);
@@ -2386,6 +2421,8 @@ namespace MiniMaxH3 {
                                    params.minimax_video_sigma_shift,
                                    params.minimax_audio_sigma_shift);
             };
+            if (dynamic_lora && params_backend != runtime_backend)
+                return compute_cuda_scoped_offloaded(get_graph, n_threads, params, "LoRA");
             if (model.cuda_optimizations.adaln_cache && params_backend != runtime_backend) {
                 if (model.cuda_optimizations.cache_dit || model.cuda_optimizations.sage_attn || model.cuda_optimizations.sparse_attn)
                     throw std::invalid_argument("MiniMax-H3 AdaLN offload is single-method until combined-path validation");

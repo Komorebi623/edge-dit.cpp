@@ -698,6 +698,53 @@ static bool h3_load_turbo_recipe(const ModelLoader& loader,
     return set_minimax_error(error, "ED_H3_TURBO requires a hash-verified offline merged checkpoint and adjacent manifest");
 }
 
+// Explicit immutable dynamic adapter deployment; original GGUF stays unchanged.
+// Manifest opt-in is distinct from the existing offline-merged artifact schema.
+static nlohmann::json h3_dynamic_lora_manifest(const char* path, const ModelLoader& loader,
+                                               MiniMaxH3::TurboRecipe* recipe) {
+    namespace fs = std::filesystem;
+    const fs::path manifest = fs::absolute(path);
+    if (!fs::is_regular_file(manifest) || fs::file_size(manifest) > (1u << 20))
+        throw std::invalid_argument("H3 dynamic LoRA manifest missing/oversized");
+    std::ifstream input(manifest); nlohmann::json d; input >> d;
+    if (d.at("schema_version") != 1 || d.at("kind") != "minimax-h3-dynamic-lora")
+        throw std::invalid_argument("H3 dynamic LoRA manifest schema invalid");
+    const std::string partition = d.at("base_partition").get<std::string>();
+    if (partition != "fl2va" && partition != "ref2va") throw std::invalid_argument("H3 LoRA base partition invalid");
+    const std::string file = d.at("adapter_file").get<std::string>();
+    if (file.empty() || fs::path(file).filename() != fs::path(file) || fs::path(file).extension() != ".safetensors")
+        throw std::invalid_argument("H3 LoRA adapter must be an adjacent safetensors basename");
+    const fs::path adapter = fs::weakly_canonical(manifest.parent_path() / file);
+    if (adapter.parent_path() != fs::weakly_canonical(manifest.parent_path()) ||
+        !fs::is_regular_file(adapter) || fs::file_size(adapter) > (size_t(8) << 30))
+        throw std::invalid_argument("H3 LoRA adapter outside directory or budget");
+    auto check_hash = [](const fs::path& p, const std::string& expected) {
+        if (expected.size() != 64 || MiniMaxH3::sha256_file(p.string(), true) != expected)
+            throw std::invalid_argument("H3 dynamic LoRA full-file checksum mismatch: " + p.filename().string());
+    };
+    std::set<size_t> selected;
+    for (const auto& item : loader.get_tensor_storage_map())
+        if (starts_with(item.first, "model.diffusion_model.")) selected.insert(item.second.file_index);
+    if (selected.size() != 1 || *selected.begin() >= loader.file_paths().size())
+        throw std::invalid_argument("H3 dynamic LoRA currently requires one verified original DiT GGUF");
+    const fs::path base = loader.file_paths()[*selected.begin()];
+    if (base.extension() != ".gguf") throw std::invalid_argument("H3 dynamic LoRA base must be original GGUF");
+    check_hash(base, d.at("base_sha256").get<std::string>());
+    check_hash(adapter, d.at("adapter_sha256").get<std::string>());
+    const float coefficient = d.at("coefficient").get<float>();
+    if (!std::isfinite(coefficient) || coefficient <= 0.f || coefficient > 4.f)
+        throw std::invalid_argument("H3 dynamic LoRA coefficient invalid");
+    // matching_merged_weights is the legacy recipe provenance flag: both paths
+    // reach it only after their own full-file verification, not from filenames.
+    *recipe = {d.at("steps").get<int>(), d.at("video_shift").get<float>(),
+        d.at("audio_shift").get<float>(), d.at("cfg_scale").get<float>(),
+        d.at("sampler").get<std::string>(), d.at("scheduler").get<std::string>(), true};
+    std::string error;
+    if (!recipe->valid(&error)) throw std::invalid_argument(error);
+    d["resolved_adapter"] = adapter.string();
+    return d;
+}
+
 bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
                                 ModelRuntime& runtime,
                                 const ModelLoader& loader,
@@ -706,6 +753,9 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     (void)params;
     turbo_enabled_ = false;
     turbo_recipe_ = {};
+    dynamic_lora_partition_.clear();
+    nlohmann::json dynamic_manifest;
+    ModelLoader dynamic_loader;
     MiniMaxH3::CudaOptimizationOptions cuda_options;
     if (!MiniMaxH3::parse_cuda_optimization_options(
             MiniMaxH3::cuda_optimization_process_environment(), &cuda_options, error)) {
@@ -724,7 +774,19 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     if (!MiniMaxH3::validate_cuda_optimization_options(cuda_options, is_cuda, capabilities, error)) {
         return false;
     }
-    if (cuda_options.turbo && !h3_load_turbo_recipe(loader, &turbo_recipe_, error)) return false;
+    const char* dynamic_manifest_path = std::getenv("ED_H3_LORA_MANIFEST");
+    if (dynamic_manifest_path && *dynamic_manifest_path) {
+        auto other = cuda_options; other.turbo = false;
+        if (!cuda_options.turbo || other.any_enabled() || !is_cuda)
+            return set_minimax_error(error, "H3 dynamic LoRA requires ED_H3_TURBO=1 and all other research methods off");
+        if (runtime.auto_fit() || params.weight_type != ED_DTYPE_AUTO ||
+            (params.tensor_type_rules && *params.tensor_type_rules))
+            return set_minimax_error(error, "H3 dynamic LoRA requires preserved base precision, not auto-fit/type overrides");
+        dynamic_manifest = h3_dynamic_lora_manifest(dynamic_manifest_path, loader, &turbo_recipe_);
+        dynamic_lora_partition_ = dynamic_manifest.at("base_partition").get<std::string>();
+        if (!dynamic_loader.init_from_file(dynamic_manifest.at("resolved_adapter").get<std::string>()))
+            return set_minimax_error(error, "H3 dynamic adapter tensor index invalid");
+    } else if (cuda_options.turbo && !h3_load_turbo_recipe(loader, &turbo_recipe_, error)) return false;
     turbo_enabled_ = cuda_options.turbo;
     adaln_weights_identity_.clear();
     if (cuda_options.adaln_cache) {
@@ -826,7 +888,18 @@ bool MiniMaxH3Pipeline::prepare(const ed_context_params_t& params,
     // Validate execution restrictions after placement and process-group settings
     // are known, before allocating or staging any model parameters.
     diffusion_->configure_cuda_optimizations(runner_options);
-    diffusion_->alloc_params_buffer();
+    if (!dynamic_manifest.is_null())
+        diffusion_->configure_dynamic_lora(dynamic_loader.get_tensor_storage_map(), dynamic_manifest.at("coefficient").get<float>());
+    if (!diffusion_->alloc_params_buffer()) return set_minimax_error(error, "H3 DiT parameter allocation failed");
+    if (!dynamic_manifest.is_null()) {
+        if (!dynamic_loader.load_tensors(diffusion_->dynamic_lora->tensors(), {}, 6))
+            return set_minimax_error(error, "H3 dynamic adapter load failed");
+        // Every factor is in the same runner params_ctx/weights pool, so the
+        // existing graph-cut planner stages/accounts for them with base weights.
+        LOG_INFO("minimax-h3 dynamic LoRA loaded: tensors=%zu coefficient=%g steps=%d partition=%s; original base immutable",
+            diffusion_->dynamic_lora->tensors().size(), dynamic_manifest.at("coefficient").get<float>(), turbo_recipe_.steps,
+            dynamic_lora_partition_.c_str());
+    }
     diffusion_->get_param_tensors(registry.tensors(), "model.diffusion_model");
 
     const std::string rope_inv_freq_name = "model.diffusion_model.rope.inv_freq";
@@ -1416,6 +1489,14 @@ ed_status_t MiniMaxH3Pipeline::generate_video(const ed_video_generation_params_t
             set_minimax_error(error, "MiniMax-H3 Ref2VA reference videos must have frames with a positive size and an aspect ratio from 1:4 to 4:1");
             return ED_STATUS_INVALID_ARGUMENT;
         }
+    }
+    if (dynamic_lora_partition_ == "fl2va" && (params->ref_image_count > 0 || params->ref_video_count > 0 || params->ref_audio_count > 0)) {
+        set_minimax_error(error, "H3 FL2VA LoRA cannot be applied to a Ref2VA reference request");
+        return ED_STATUS_INVALID_ARGUMENT;
+    }
+    if (!dynamic_lora_partition_.empty() && params->lora_count > 0) {
+        set_minimax_error(error, "H3 immutable LoRA deployment cannot change request adapters");
+        return ED_STATUS_INVALID_ARGUMENT;
     }
     const int64_t resolved_seed = h3_resolve_seed(params->seed);
     bool need_audio_vae_for_conditioning = params->ref_audio_count > 0;

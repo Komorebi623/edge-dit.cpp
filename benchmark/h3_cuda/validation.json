@@ -625,5 +625,22 @@
     "same_binary_libraries_inputs_precision_verified": true,
     "production_defaults_changed": false,
     "note": "single observations; extra speed vs keep50 is 4.49% T2VA / 2.28% mixed with different outputs. No queued runs."
+  },
+  "dynamic_lora": {
+    "date": "2026-10-14",
+    "status": "T2VA_two4step_success_FL2VA_smoke_pass_Ref2VA_waiting_GPU",
+    "results": "benchmark/h3_cuda/lora-results.json",
+    "original_base_precision_preserved": true,
+    "default_off": true,
+    "H3_CUDA_only": true,
+    "tested": [
+      "Larry v4EMA4NFE T2VA",
+      "LightX2VFLv0.1 4NFE T2VA",
+      "Larry4NFE first-last small functional"
+    ],
+    "cpu_ctest": "15/15",
+    "cuda_tiny": "10cases20graphs142278checks",
+    "VSA_integrated": false,
+    "note": "Model+NFE change, not lossless sameweights optimization. No baseline reruns; no unrelated processes changed."
   }
 }

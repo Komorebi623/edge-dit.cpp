@@ -137,3 +137,7 @@ Larry模型卡明确“all bf16”，有效增量`B@A`、alpha=rank、strength1�
 正式下载之前的Range文件头请求被拒绝。根因现已定位：CDN返回283字节HTML，正文为`Authentication is required`并指向`auth6.tsinghua.edu.cn`校园网认证页；不是有效safetensors。首次TLS报错后，在明确批准下仅对公共CDN诊断请求临时使用单次证书例外以识别错误；未发送账号凭据、未改系统证书、未加载返回内容，也未绕过校园认证。后续须用户完成该服务器校园网认证，或提供本地adapter文件。权重完整SHA必须与已通过TLS获得的元数据对上才能使用。
 
 已询问用户这一必要权限/资源。无需新增大规模代码或重建baseline；候选文件空间充足，但**当前0个真实adapter下载、0次GPU LoRA实验，不能宣称已选出效果最好者或适配完成**。候选清单、预期SHA256和单次试验策略见`benchmark/h3_cuda/lora-trial-plan.json`。原模型/依赖/默认参数不变。
+
+## 9. 实现进展：IPv4下载与原Q4独立LoRA已验证
+
+后续实证定位到IPv6路径拦截，而官方ModelScopeCDN IPv4＋正常TLS可用；没有登录或绕过认证、没有改系统网络设置。已下载并完整hash验证Larry、LightFL4、FastVideo dense4、LightRef4。Larry/Light原始A/B确认为BF16，真实tensor清单已核对，不再只有模型卡声明。H3/CUDA最小独立LoRA接入完成，两条4NFE T2VA分别106.12/110.85s，原baseline254.33s；Larry小首末帧功能通过。Ref4待GPU空闲，VSA保持独立未集成。新的权威入口`h3-lora-results.md`与`benchmark/h3_cuda/lora-results.json`，不把上文历史下载阻塞当当前状态。

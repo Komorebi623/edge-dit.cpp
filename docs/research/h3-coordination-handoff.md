@@ -1,5 +1,7 @@
 # MiniMax-H3：跨服务器接续交接
 
+> **2026-10-14 LoRA实现里程碑**：IPv4/TLS合法下载已解决，原Q4＋BF16独立增量接入；Larry4步106.12s、LightFL4步110.85s vs原254.33s，Larry首末帧smoke通过。默认关闭、H3/CUDA单方法、不重跑baseline。Ref4已下载/转换但8卡被无关训练占用，mixed未启动；VSA/三链接身份仍独立待办。看`h3-lora-results.md`与`benchmark/h3_cuda/lora-results.json`。
+
 > **2026-10-14 LoRA尝试最新状态**：ModelScope模型卡/文件SHA元数据已可读，收敛Larry4步与LightX2V4步候选；CDN实际返回校园网认证HTML（auth6.tsinghua.edu.cn），尚无真实adapter可加载。用户需认证服务器网络或提供本地LoRA；不绕过认证。无新模型baseline/生产代码改动/LoRA GPU实验。见`lora-trial-plan.json`与LoRA审计第8节。
 
 > **2026-10-14 LoRA接续研究**：最新可访问GitHub已核验；优先原Q4＋高精度动态LoRA，候选Larry8步/LightX2V、FastVideo dense4步。HF证书失败，未确认最新adapter文件、未下载或推理；不得标记Q4 LoRA已支持。路线与缺口见`h3-lora-q4-deployment-audit-20261014.md`、`benchmark/h3_cuda/lora-q4-audit-20261014.json`。

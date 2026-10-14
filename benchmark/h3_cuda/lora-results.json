@@ -1,0 +1,405 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-14",
+  "timezone": "Asia/Shanghai",
+  "status": "two_four_step_lora_candidates_validated_ref2va_pending_occupied_gpu",
+  "goal_scope": "Integrate a good opt-in H3/CUDA LoRA, prioritize4NFE; VSA requested as preferred extra but deliberately remains separate unsupported trained-architecture work, not silently approximated with SubBlock. Shared article identities remain gated by site CAPTCHA/login.",
+  "recommended": "Larry v4_step600_ema 4NFE, strength1 alpha=rank for this static/small-motion sample; not universal ranking",
+  "baseline": {
+    "source": "97cc585d9dbd9ac5e30b78ef2e2c4a0d8bfbe9f2",
+    "report": {
+      "path": "_scratch/h3-subblock-fix-20261014/t2va-once/baseline/report.json",
+      "sha256": "f60b7e5b247ca3a18827ead08b185efe35af86c0f0730e56f0a005c2de88e15c"
+    },
+    "wall_ms": 254332.7923049219,
+    "diffusion_ms": 211297,
+    "rerun": false
+  },
+  "candidate_build": {
+    "source": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-lora-goal-20261014/source-02",
+    "build": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-lora-goal-20261014/build-02/candidate",
+    "production_source_tree_sha256": "d85643448b1dbba3dfaa58526c338edb0a705ce9bbe49ab40e0de44222f18e42",
+    "changed_production_files": [
+      "src/dit_models/models/minimax_h3_dynamic_lora.hpp",
+      "src/dit_models/models/minimax_h3_full.hpp",
+      "src/dit_models/pipelines/minimax_h3_pipeline.cpp",
+      "src/dit_models/pipelines/minimax_h3_pipeline.hpp"
+    ],
+    "recompiled": [
+      "objects/minimax_h3_pipeline.cpp.o",
+      "objects/dit_pipeline.cpp.o"
+    ],
+    "base_build": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate",
+    "base_source_tree": "9e38c09eff4531bf17e5079e2b20de535b71728717866787a5c06f3175df8985",
+    "shared_libraries": {
+      "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate/bin/libggml-cpu.so.0.12.0": "894b8b29cd8bcb1f7c2ee07cfdb6f48c5cf87b6ec3cb933d793b9867446ebc5a",
+      "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate/bin/libggml.so.0.12.0": "099bd4b6e0bab479b5f79aae87d746e3000aa0eb24a1fa81454417a42d840d5e",
+      "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate/bin/libggml-cuda.so.0.12.0": "b243cddce1ca0d52f1f1d0d4b10b608e10ce131e460e49f6108347066b2a0641",
+      "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate/bin/libggml-base.so.0.12.0": "93bccda78a44eded1abbe7524ad92e5959d92e0cae0344b78334b1a8a884cdc2"
+    },
+    "config_note": "Reused archived CMake configuration, no dependency or precision changes; no model baseline rebuild."
+  },
+  "cases": {
+    "larry4": {
+      "recipe": {
+        "schema_version": 1,
+        "kind": "minimax-h3-dynamic-lora",
+        "base_sha256": "a25ee3184dd56e7fc5c8db1508d2e48a7e3c92919b516935c6059e4228e16107",
+        "base_partition": "fl2va",
+        "adapter_file": "adapter.safetensors",
+        "adapter_sha256": "33639fcc3f09754fb2109b68469ba2a02f6d629ecc70d7fba20d7b75aabc57c0",
+        "source_adapter_sha256": "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3",
+        "coefficient": 1.0,
+        "steps": 4,
+        "video_shift": 12.0,
+        "audio_shift": 3.0,
+        "cfg_scale": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "pairs": 259,
+        "note": "New model+NFE variant on immutable Q4. Not a same-weights speedup; all other research options disabled initially."
+      },
+      "report": {
+        "path": "_scratch/h3-lora-goal-20261014/larry4-v2-trial/validated-report.json",
+        "sha256": "49622894d87ad0275ba931aa40441b5a0e7a9f19d566fa1e8c8c77a590f433aa"
+      },
+      "wall_ms": 106117.78101092204,
+      "diffusion_ms": 41661,
+      "pipeline_ms": 54257,
+      "decode_ms": 10561,
+      "speedup_vs_dense_cli": 2.3967028888282633,
+      "time_reduction_vs_dense_percent": 58.27601307357312,
+      "quality_distance_vs_dense": {
+        "ssim": 0.767912435483871,
+        "psnr_db": 21.778306451612902,
+        "audio": {
+          "rmse": 0.014735078728437665,
+          "relative_l2": 0.9074006193520578,
+          "relative_l2_defined": true,
+          "scalar_samples": 331776,
+          "reference_norm": 9.35353708887773
+        }
+      },
+      "audio_sanity": {
+        "peak": 0.06021773815155029,
+        "rms": 0.004570894408971071,
+        "nonfinite_samples": 0,
+        "samples_abs_ge_1": 0
+      },
+      "output": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-lora-goal-20261014/larry4-v2-trial/t2va.mp4",
+      "output_sha256": "ceccba18b00fc4edfe8c0f5bb5bf465ac1bdcddcba40b95e30be23d06a2547f2",
+      "output_shape": {
+        "width": 864,
+        "height": 480,
+        "frames": 124,
+        "fps": "24",
+        "audio_sample_rate": 32000,
+        "audio_channels": 2,
+        "audio_samples_per_channel": 165888
+      },
+      "optimization_env": {
+        "ED_H3_FUSED_OPS": "0",
+        "ED_H3_CACHE_DIT": "0",
+        "ED_H3_ADALN_CACHE": "0",
+        "ED_H3_SAGE_ATTN": "0",
+        "ED_H3_SPARSE_ATTN": "0",
+        "ED_H3_VDN": "0",
+        "ED_H3_VSA": "0",
+        "ED_H3_TURBO": "1",
+        "ED_CUDNN_SDPA_SYNC_F32_SELF_ATTN": "1",
+        "ED_MINIMAX_H3_PROFILE": "1",
+        "ED_H3_LORA_MANIFEST": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-lora-goal-20261014/normalized-larry4/manifest.json"
+      },
+      "build_binary_sha256": "1f05a649a2d8d6e20fa68ca95746e2354e61e6a36ca91df3035d3b7565362b9e",
+      "identities": {
+        "models": {
+          "audio_vae": {
+            "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+            "bytes": 605254808
+          },
+          "fl2va": {
+            "sha256": "a25ee3184dd56e7fc5c8db1508d2e48a7e3c92919b516935c6059e4228e16107",
+            "bytes": 18779848448
+          },
+          "llm": {
+            "sha256": "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc",
+            "bytes": 18218065024
+          },
+          "video_vae": {
+            "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+            "bytes": 5207808496
+          }
+        },
+        "assets": {}
+      },
+      "memory": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 494,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 16457.0,
+        "max_sample_gap_seconds": 0.5730552710592747
+      }
+    },
+    "lightx2v4": {
+      "recipe": {
+        "schema_version": 1,
+        "kind": "minimax-h3-dynamic-lora",
+        "base_sha256": "a25ee3184dd56e7fc5c8db1508d2e48a7e3c92919b516935c6059e4228e16107",
+        "base_partition": "fl2va",
+        "adapter_file": "adapter.safetensors",
+        "adapter_sha256": "edd5dcfd33f9b441b17ed709d6fe1de2d5fa68e058c1afbbaf08b6b78777412e",
+        "source_adapter_sha256": "5ff4a12c8b4599fec716e1b15a45e504e0d1129111896bdcde5ac4a15e395b29",
+        "coefficient": 0.0625,
+        "steps": 4,
+        "video_shift": 12.0,
+        "audio_shift": 3.0,
+        "cfg_scale": 1.0,
+        "sampler": "euler",
+        "scheduler": "simple",
+        "pairs": 208,
+        "note": "New model+NFE variant on immutable Q4. Not a same-weights speedup; all other research options disabled initially."
+      },
+      "report": {
+        "path": "_scratch/h3-lora-goal-20261014/light4-v2-trial/report.json",
+        "sha256": "6ac1ceb4a862b27eac8297c75f9f28ecb5adb745f1a15dcf22ff4975d445ed12"
+      },
+      "wall_ms": 110846.65477997623,
+      "diffusion_ms": 43738,
+      "pipeline_ms": 56371,
+      "decode_ms": 10610,
+      "speedup_vs_dense_cli": 2.294456181918677,
+      "time_reduction_vs_dense_percent": 56.416687846103166,
+      "quality_distance_vs_dense": {
+        "ssim": 0.6814449919354839,
+        "psnr_db": 18.448951612903226,
+        "audio": {
+          "rmse": 0.017197379520629816,
+          "relative_l2": 1.0590315203498375,
+          "relative_l2_defined": true,
+          "scalar_samples": 331776,
+          "reference_norm": 9.35353708887773
+        }
+      },
+      "audio_sanity": {
+        "peak": 0.07256478071212769,
+        "rms": 0.012834761291742325,
+        "nonfinite_samples": 0,
+        "samples_abs_ge_1": 0
+      },
+      "output": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-lora-goal-20261014/light4-v2-trial/t2va.mp4",
+      "output_sha256": "9e4d9826c2a8d2f2c8a2cf5d0ead740efde9c5c8d1b93d0d8a0a2ce87cfccf4e",
+      "output_shape": {
+        "width": 864,
+        "height": 480,
+        "frames": 124,
+        "fps": "24",
+        "audio_sample_rate": 32000,
+        "audio_channels": 2,
+        "audio_samples_per_channel": 165888
+      },
+      "optimization_env": {
+        "ED_H3_FUSED_OPS": "0",
+        "ED_H3_CACHE_DIT": "0",
+        "ED_H3_ADALN_CACHE": "0",
+        "ED_H3_SAGE_ATTN": "0",
+        "ED_H3_SPARSE_ATTN": "0",
+        "ED_H3_VDN": "0",
+        "ED_H3_VSA": "0",
+        "ED_H3_TURBO": "1",
+        "ED_CUDNN_SDPA_SYNC_F32_SELF_ATTN": "1",
+        "ED_MINIMAX_H3_PROFILE": "1",
+        "ED_H3_LORA_MANIFEST": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-lora-goal-20261014/normalized-light4/manifest.json"
+      },
+      "build_binary_sha256": "1f05a649a2d8d6e20fa68ca95746e2354e61e6a36ca91df3035d3b7565362b9e",
+      "identities": {
+        "models": {
+          "audio_vae": {
+            "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+            "bytes": 605254808
+          },
+          "fl2va": {
+            "sha256": "a25ee3184dd56e7fc5c8db1508d2e48a7e3c92919b516935c6059e4228e16107",
+            "bytes": 18779848448
+          },
+          "llm": {
+            "sha256": "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc",
+            "bytes": 18218065024
+          },
+          "video_vae": {
+            "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+            "bytes": 5207808496
+          }
+        },
+        "assets": {}
+      },
+      "memory": {
+        "measurement": "sampled whole-device memory; not exact peak or process-only usage",
+        "requested_interval_seconds": 0.25,
+        "samples": 533,
+        "telemetry_errors": 0,
+        "telemetry_complete": true,
+        "sampled_peak_used_mib": 16725.0,
+        "max_sample_gap_seconds": 0.5243309829384089
+      }
+    }
+  },
+  "functional_checks": {
+    "larry_FL2VA_first_last": {
+      "report": {
+        "path": "_scratch/h3-lora-goal-20261014/larry4-first-last-smoke/report.json",
+        "sha256": "8351a0ff2bef7cf05763efba41edf28c18046af107588743b40f1297d29d959b"
+      },
+      "sampling": {
+        "audio_channels": 2,
+        "audio_sample_rate": 32000,
+        "cfg_scale": 1.0,
+        "fps": 24,
+        "frames": 22,
+        "height": 256,
+        "ref_image_size": "match",
+        "sampler": "euler",
+        "scheduler": "simple",
+        "seed": 42,
+        "steps": 4,
+        "width": 256
+      },
+      "output": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-lora-goal-20261014/larry4-first-last-smoke/first_last.mp4",
+      "shape": {
+        "width": 256,
+        "height": 256,
+        "frames": 22,
+        "fps": "24",
+        "audio_sample_rate": 32000,
+        "audio_channels": 2,
+        "audio_samples_per_channel": 29696
+      },
+      "finite": true,
+      "note": "256x256/22f/4NFE functional only, not target-performance row"
+    }
+  },
+  "tests": {
+    "cpu_ctest": "15/15",
+    "workflow_media": "53/53",
+    "adapter_CPU_checks": 33805,
+    "adapter_CPU_graphs": 20,
+    "normalizer_tests": "6/6",
+    "CUDA_status": "final10cases20graphs142278checks_passed"
+  },
+  "limits": [
+    "Single successful run per candidate, not repeated statistics",
+    "Same immutable Q4/inputs/seed/geometry/placement but model+NFE+sampler changed; not lossless same-model kernel speedup",
+    "CLI includes base+adapter SHA256 checks and process startup/load; outer workflow hash/media checks excluded",
+    "No subjective audio listening or fast-motion/identity/lipsync acceptance",
+    "Existing8mode baseline not rebuilt; final selected adapter only T2VA and small FL2VA first-last verified",
+    "FL2VA adapter not approved for Ref2VA/mixed; separate matching adapter required",
+    "FastVideo dense4 downloaded and header inspected but not run:85dense deltas require separate validated support",
+    "VSA gate/compression and VAE replacement not integrated in this minimalLoRA patch",
+    "Three user article identities unresolved afterIPv4, genuine CAPTCHA/login redirects; never inferred from guesses"
+  ],
+  "failures_preserved": [
+    "larry4-trial/report.json",
+    "light4-trial/report.json"
+  ],
+  "failure_root_cause": "ggml_set_param is a training flag promoting A/B weights into internal graph nodes; graph-cut planning then omitted staging. Removed flag; all inference weights remain leaves in runner-owned WEIGHTS buffer. Added exact staging/accounting regression and old-bug negative control.",
+  "evidence_root": "_scratch/h3-lora-goal-20261014",
+  "download_transport": "Official ModelScope metadata/selected CDN via IPv4 with normal TLS and full hashes. IPv6 path was intercepted; no network auth bypass. Three adapters downloaded once, no repeated payload downloads.",
+  "new_model_payloads": [
+    {
+      "publisher": "FastVideo",
+      "repository": "FastVideo-FastH3-4-step-Preview-v1-LoRA",
+      "filename": "dense-datafree/adapter_model.safetensors",
+      "modelscope_revision": "e0b0689c28d0bb78dec099df1fd31df6bb4c7aa0",
+      "metadata_url": "https://modelscope.cn/api/v1/models/FastVideo/FastVideo-FastH3-4-step-Preview-v1-LoRA/repo/files?Revision=master&Recursive=true",
+      "full_sha256": "4ce198c83132251b7fd0de2503823aa49c53983f068318f66cb19eaefb7fcc12",
+      "bytes": 1485626152,
+      "download_seconds": 138.335828040028,
+      "transport": "official CDN, IPv4, TLS verification enabled, no credential/proxy/auth bypass"
+    },
+    {
+      "publisher": "larryvrh",
+      "repository": "MiniMax-H3-Turbo-Lora",
+      "filename": "minimax_h3_turbo_v4_step600_ema.safetensors",
+      "modelscope_revision": "593f8550fe7e46d1d3ca5a6ce6bfc8c2a5998e37",
+      "metadata_url": "https://modelscope.cn/api/v1/models/larryvrh/MiniMax-H3-Turbo-Lora/repo/files?Revision=master&Recursive=true",
+      "full_sha256": "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3",
+      "bytes": 779849816,
+      "download_seconds": 129.54882329609245,
+      "transport": "official CDN, IPv4, TLS verification enabled, no credential/proxy/auth bypass"
+    },
+    {
+      "publisher": "lightx2v",
+      "repository": "Minimax-h3-Turbo",
+      "filename": "minimax_h3_fl2v_turbo_4step_v0.1.safetensors",
+      "modelscope_revision": "46a3ce225152f6881d7bec61dbe073f1a0584b4f",
+      "metadata_url": "https://modelscope.cn/api/v1/models/lightx2v/Minimax-h3-Turbo/repo/files?Revision=master&Recursive=true",
+      "full_sha256": "5ff4a12c8b4599fec716e1b15a45e504e0d1129111896bdcde5ac4a15e395b29",
+      "bytes": 1383677888,
+      "download_seconds": 21.085893422132358,
+      "transport": "official CDN, IPv4, TLS verification enabled, no credential/proxy/auth bypass"
+    }
+  ],
+  "current_source_provenance_note": "All src/include files exactly match executed frozen source02. Only CMakeLists has subsequent opt-in CPU test registration; tests/docs/helpers added afterwards do not change executed production objects.",
+  "logs": [
+    {
+      "path": "_scratch/h3-lora-goal-20261014/final-cpu-regression.log",
+      "sha256": "39df010e4d18dcf0a2ad79d1b6a066941a18b5adec672dc3b1ea6d1341e2856c"
+    },
+    {
+      "path": "_scratch/h3-lora-goal-20261014/cpu-dynamic-graphcut.log",
+      "sha256": "c65754c207eb3bbf9961c85bb212dd36d1c4d315c7cc487171d809002f50685b"
+    },
+    {
+      "path": "_scratch/h3-lora-goal-20261014/prepare-tests.log",
+      "sha256": "ca3cee2a81a7b67ff8c7e3816e232d2edf9cd9471331dd60491bb0d19870cd67"
+    },
+    {
+      "path": "_scratch/h3-lora-goal-20261014/cuda-tiny-v3.log",
+      "sha256": "a2ac81d884ad99fe138f6ca59bec8ba788b8b2efbbb02920fdb947478b1bbd67"
+    },
+    {
+      "path": "_scratch/h3-lora-goal-20261014/build02.log",
+      "sha256": "234c0ec4a6950584e1c18a765bde2b78bcf6d531b7514f5642ef3db1a37cc249"
+    },
+    {
+      "path": "_scratch/h3-lora-goal-20261014/final-cuda-tiny.log",
+      "sha256": "eb89f7b93d33d794b60548db19c7ebe5f5d65e89e7afc9d93cb7dc43c9b826ef"
+    },
+    {
+      "path": "_scratch/h3-lora-goal-20261014/final-cuda-tiny.log",
+      "sha256": "eb89f7b93d33d794b60548db19c7ebe5f5d65e89e7afc9d93cb7dc43c9b826ef"
+    }
+  ],
+  "pending_ref2va": {
+    "adapter": "lightx2v/minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors",
+    "original": {
+      "publisher": "lightx2v",
+      "repository": "Minimax-h3-Turbo",
+      "filename": "minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors",
+      "modelscope_revision": "94b21758d9f5ff45b2a8e3cfc1875caf8c53cf01",
+      "bytes": 1383677768,
+      "full_sha256": "9e642fc8749c74f8da5e2382877ab5c7aa37b9a73b7fd0d6d457bd1b3cb1ae99",
+      "transport": "official CDN IPv4 verified TLS,4 bounded parallel Range requests,full hash checked;no auth bypass",
+      "download_seconds": 16.09809359512292
+    },
+    "normalized_manifest": {
+      "path": "_scratch/h3-lora-goal-20261014/normalized-light-ref4/manifest.json",
+      "sha256": "b386fdee7edabd638f25511fb45ab222ae9acabbb63cedf40a9c498bc1c03623"
+    },
+    "steps": 4,
+    "coefficient": 0.0625,
+    "video_audio_shifts": [
+      12,
+      3
+    ],
+    "status": "not_launched_occupancy_gate_rejected_all8gpus_busy_with_unrelated_training",
+    "attempt_report": {
+      "path": "_scratch/h3-lora-goal-20261014/light-ref4-trial/report.json",
+      "sha256": "5caa9529cb87eb7c49605610650326fa3a6fb20164bed2d5aeb8ee269b10923c"
+    },
+    "baseline": "_scratch/h3-offload-20261014/mixed-sync-baseline/baseline/report.json",
+    "performance": null,
+    "quality": null
+  }
+}

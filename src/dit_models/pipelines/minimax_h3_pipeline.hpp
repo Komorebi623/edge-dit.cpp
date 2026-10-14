@@ -59,6 +59,7 @@ public:
 private:
     MiniMaxH3::TurboRecipe turbo_recipe_;
     bool turbo_enabled_ = false;
+    std::string dynamic_lora_partition_;
     std::string adaln_weights_identity_;
     bool ready_ = false;
     ModelRuntime* runtime_ = nullptr;

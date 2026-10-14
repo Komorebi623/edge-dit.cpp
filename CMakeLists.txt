@@ -579,7 +579,7 @@ if(ED_BUILD_H3_CUDA_TESTS)
 endif()
 
 if(ED_BUILD_H3_CUDA_TESTS)
-    foreach(_H3_TEST runtime_optimization vdn_graph)
+    foreach(_H3_TEST runtime_optimization vdn_graph dynamic_lora)
         if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/h3_${_H3_TEST}_test.cpp")
             add_executable(h3-${_H3_TEST}-test tests/h3_${_H3_TEST}_test.cpp)
             target_include_directories(h3-${_H3_TEST}-test PRIVATE

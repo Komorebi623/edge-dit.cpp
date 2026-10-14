@@ -128,5 +128,7 @@
       "path": "_scratch/h3-lora-implementation-20261014/light-revisions.json",
       "sha256": "414a612794c87bfbcf511a3535025610fe07d548485875d6b5e5af4da4c5ea7c"
     }
-  ]
+  ],
+  "superseded_by": "benchmark/h3_cuda/lora-results.json",
+  "current_status": "IPv4_TLS_downloads_solved_Larry4_LightFL4_validated_Ref4_waiting_GPU"
 }
