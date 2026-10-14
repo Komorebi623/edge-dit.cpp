@@ -1,0 +1,425 @@
+{
+  "date": "2026-10-14",
+  "timezone": "Asia/Shanghai",
+  "status": "source_audit_complete_adapter_metadata_and_runtime_pending",
+  "scope": "latest reachable official GitHub code; no adapter payload/download/inference/training",
+  "integration_head": "58c4764",
+  "hf_current_revision_verified": false,
+  "hf_limitation": "Hugging Face model/API and official alias domains fail self-signed TLS validation under approved network. System and certifi CA tested; verification not disabled. web tool returned no usable page. Cannot call v4 latest HF release.",
+  "preferred_route": "immutable original mixed-Q4 base plus separate native-precision low-rank output branch; no VSA initially",
+  "candidates": [
+    "Larry v4 step600 EMA,8NFE,FL2VA (current SGLang/RH pinned recommendation, actual HF latest/header not verified)",
+    "LightX2V explicitly matched FL2VA/Ref2VA variants with exact alpha/rank/dual shifts",
+    "FastVideo FastH3 Preview-v1-LoRA dense-datafree/adapter_model.safetensors,4forward,includes dense payloads"
+  ],
+  "not_plain_lora": [
+    "RH unpublished in-house weights",
+    "FastH3 VSA variants needing trained compression gate",
+    "OmniRef PDD widened output heads and Blackwell tile128",
+    "Trim/NVFP4/pruned model swaps"
+  ],
+  "resources": {
+    "disk_free_GiB_approx": 37,
+    "host_RAM_GiB_approx": 499,
+    "existing_dit_bytes": 18779848448,
+    "all_tensors_BF16_payload_GiB_estimate": 61.69638207554817,
+    "large_weights_downloaded": false
+  },
+  "production_code_changed": false,
+  "gpu_inference_executed": false,
+  "precision_lock_changed": false,
+  "dependency_locks_changed": false,
+  "evidence": [
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/11c8b75e8a7d7b0a817a3ba363ea73599841051c.json",
+      "bytes": 31375,
+      "sha256": "ebc952798cc9688c314fb0bfbce74a60e464b28454c4213fc28491a8c54c6c6a"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/1f98744c2cf1764ae1802d48b2626e592a440a96.json",
+      "bytes": 11390,
+      "sha256": "fba28fc1a96f5c3f401eb7cbf67e6479791a5ebcfd091801c6f719da18913a94"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/209a0d53e642a8110ea7817d2c423895807518e3.json",
+      "bytes": 923,
+      "sha256": "ada9e49313d86518646fd945f040434face5d224c8115ee7b30f0d98a2d79fc6"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/4a5cdfb4cb918d5248d6b2af318e2ef4e5a207f5.json",
+      "bytes": 11292,
+      "sha256": "b96ca1095d2736daebc44de4331f84f2571e35aad622c4e6a95b068cb0eccdf2"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/54d7ad100747810673b2dcae5afc217d0ae91bbe.json",
+      "bytes": 29065,
+      "sha256": "b1cca29f21da65479e15dba3c77ef0f53b50d44d8255fc7b70e0144ea2a0c8d9"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/594b4af6142d526cc0475893b2a710f73ef590d6.json",
+      "bytes": 56805,
+      "sha256": "434170cb550c5f038816ac3449e81698dc5ecf94590daa8e6de09a90e3eb1076"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/5cf938e9de5fdd645c3271b861a678a010c563bd.json",
+      "bytes": 945,
+      "sha256": "fdcc9231cb4bcdbe8b08cbd8266ad915e450e30c4898fdd069c1ee0a0141acf8"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/6ddc8a5bcb57558439531dbd2581dba91eda2f43.json",
+      "bytes": 8980,
+      "sha256": "8e04de0c286b6b624d80735525318f50ea11f7cbe01bc02c756bd58588e4b5b9"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/7b8c5573c792709b203f11782609fde0580c8b32.json",
+      "bytes": 3116,
+      "sha256": "ae042bc6045b53bbefea5a186263193b7feded1364db631f27331e4cd0f13748"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/7db20a2df3870c8291b3d0af7c70d71a485e0c61.json",
+      "bytes": 4790,
+      "sha256": "73ceaee9222399cfaa41436476aeb831f5ece8b07cd0563743d0ec5689e49dc6"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/9debdf0430cd6809f672fbb333a46a4334dcce81.json",
+      "bytes": 18175,
+      "sha256": "a5d2ad6decee936039be1041e708515d484589f81002e7acb5e1481a094a0ffd"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/a93d57f812babf797c7d104c7eafac4f143d7f2b.json",
+      "bytes": 20927,
+      "sha256": "3da7607ec72fcba793398ad334b19b2c163cb1e3c5add87a7497b4f3da909840"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/bab336c30642ce0376c9ffed8d4c8fbd9691d9da.json",
+      "bytes": 9952,
+      "sha256": "d79598b0d60a54c55f3e583633dc87d6e3d7ab6fbff6578c3729f4536921f337"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/bcfb15fe47dfcc8a46b2b1dfa42ab16e9979eec9.json",
+      "bytes": 17125,
+      "sha256": "0f5cb933a042bd63257c9dc7c00f8c4d4ef94d117f07d37b17b41f836fa5d780"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/bf53a265df17f4ca2e4b0ae7e07163bbb1362fa9.json",
+      "bytes": 915,
+      "sha256": "1f6f7410e8204de6e536ed3242b05a597eeb930f39502faf1b5c40cfe3d7e064"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/cb4c049bd546aa2aa9cf05cc5ada36a332df2331.json",
+      "bytes": 945,
+      "sha256": "5b45c78bd716645dccea146151dbfb6b008b6bac5b6d9ba4f6c7c81a145619ae"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/cf2c1e9686b52dbff3080836c8b61fcc7728840a.json",
+      "bytes": 8100,
+      "sha256": "1aee861f093033321ed2d7bf955725cda3049e012504fdd0bbb984601406d6a3"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/api-blobs/f06a45618d3cb7c48e1be79d52e5044de8612c2d.json",
+      "bytes": 16545,
+      "sha256": "68da6b37cb9c75d7aaf532fe9768689e3e3e7a3bcce128184481b4a0821fa600"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/fetch-list.tsv",
+      "bytes": 1638,
+      "sha256": "67bed9433684ce7a3b7619d6c9641b27345c7d850a8ea3eb0f026e067435edc6"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/github-main.json",
+      "bytes": 275123,
+      "sha256": "9eb923598669fbe7db9d22824f1eec1bf234c8b767435f00b5cb700831dd389b"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/github-tree.json",
+      "bytes": 1140736,
+      "sha256": "9dbd7afb7ec57019e7b7892d074d52acd8a0316c326f90ab738ff2d632da0d7f"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/source/FastVideo/docs/inference/fasth3_rtx_pro_6000.md",
+      "bytes": 12963,
+      "sha256": "c6fef9ba1b82072e09bfbd9db427f85d26bbb930de61aa339b2efe06719dba24"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/source/FastVideo/examples/inference/basic/basic_fasth3_lora_preview.py",
+      "bytes": 3247,
+      "sha256": "a6228542f43235094ff05103769aa5776675cc62129ea87e343812c48a7799ab"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/source/FastVideo/examples/inference/basic/run_fasth3_lora_preview_dense_datafree.sh",
+      "bytes": 444,
+      "sha256": "f84cbf4f8b2acc47a073abd2fcaac1b205de6b352a227f260660d67f345ba0e2"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/source/FastVideo/examples/inference/basic/run_fasth3_lora_preview_vsa_datafree.sh",
+      "bytes": 437,
+      "sha256": "000ab24beafc9e97e2fca108b2b2efbe291576c618391472362bdcb29b911234"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/source/FastVideo/examples/inference/lora/minimax_h3_lora_inference.py",
+      "bytes": 11501,
+      "sha256": "778bd100bf76cbb8b653c613fec2c25d80173b2615a42c7ce28417f1e0543af3"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/source/FastVideo/fastvideo/models/loader/lora_patch.py",
+      "bytes": 13982,
+      "sha256": "06847135bbbdc77fa8c0099b4c7c0c8850f000b6662d04145c69dca24ef368d1"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/source/FastVideo/scripts/checkpoint_conversion/convert_minimax_h3_comfy_lora.py",
+      "bytes": 8039,
+      "sha256": "b44f064b494d905dda406b24166159bc2b15007fd0f41f58f7ac36b6bda8e8ce"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/source/README.md",
+      "bytes": 16012,
+      "sha256": "01cf3d1bfb3047582aab360913d0a21eec6318dc6e85669e9b261a9cadc623e0"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/source/docs/cookbook/minimax-h3.md",
+      "bytes": 20403,
+      "sha256": "ec4dd76f11dd2073634be055ecf7ab8f87c557d92b5ab5d534a2988975e7ef32"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/source/docs/inference/fasth3-distilled.md",
+      "bytes": 10755,
+      "sha256": "77cc0125d95ecbbd6a21bd9102aceaede0d9cc6b1931f36daaa7c9ec97bdfaf5"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/source/fastvideo/attention/backends/video_sparse_attn_h3.py",
+      "bytes": 52662,
+      "sha256": "cb08b7c40a5e33d64643cd4e052b26c9c71d0a17531faabb53b70c107698c105"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/source/fastvideo/configs/models/dits/minimax_h3.py",
+      "bytes": 4263,
+      "sha256": "7edfa964ee2ab88d5ebadc08930d2777594265fd4a6e3a86916a97d2fac4fe60"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/source/fastvideo/models/dits/minimax_h3.py",
+      "bytes": 59930,
+      "sha256": "b7d470816af7b18620710e3b40c7625f2658d1950d7859f018ecc5130d379753"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/source/fastvideo/pipelines/basic/minimax_h3/vsa_guard.py",
+      "bytes": 1795,
+      "sha256": "070f0bf9273f3c9df82d37a193229cda71d6915024fd2c53f76de0c535b3a394"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fastvideo/source-manifest.json",
+      "bytes": 5007,
+      "sha256": "26e83b4e0c374dc5581245f80231e6ee18569f4c76a6d84963d9cc1a2e7a7df0"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/fetch_selected.py",
+      "bytes": 1752,
+      "sha256": "fe433848830d199e61bc2d55c115af8a80906a3c5740c4bf7a432a12ef497bd2"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/local/fl2va-gguf-header.json",
+      "bytes": 99392,
+      "sha256": "3095e006deede0fa3b1b188e10ff91191c401a521a14033fb65273d4ab902854"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/comfy-head.json",
+      "bytes": 8462,
+      "sha256": "fb84767234be991f31ecfe9aec0e6ec4ea6560a5afe55423b7c29e3955e0333f"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/comfy-releases.json",
+      "bytes": 2,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/fetch-manifest.jsonl",
+      "bytes": 9250,
+      "sha256": "5ffb8bb5f3e6ace46df4bc103de9db4cea7e630aba7e9c2fdf80b1386990538e"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/fetch_metadata.py",
+      "bytes": 3081,
+      "sha256": "2f1ac0ead6bb1533e3526158cfdd39a57001da26282945a071047df159c2c1d0"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/github-branches.json",
+      "bytes": 225,
+      "sha256": "7c9b8a44c43913e87355fd75955f566bea582906ce5786690737942a6d0effe8"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/github-head.json",
+      "bytes": 5401,
+      "sha256": "6812dcff871c24672b64059467393401f67ef52ceb2609c088cf8ecdcbb2331c"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/github-issues.json",
+      "bytes": 12253,
+      "sha256": "16b2a83457c1427daba9f156658a5c96fa120a895a253b85c98960b59d097da2"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/github-org-repos.json",
+      "bytes": 96820,
+      "sha256": "a3e7baa3b9d80c5d3e2faf85b44a4a468d213579643f4112d77a03199b3da39d"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/github-releases.json",
+      "bytes": 2,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/github-repo.json",
+      "bytes": 7517,
+      "sha256": "6f13a4137c06ccc8f0cd34e332232be8d9b00fd174870bd8a8513020db080aaf"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/github-tags.json",
+      "bytes": 2,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/github-tree.json",
+      "bytes": 3311452,
+      "sha256": "84db62af6c2b285e404b8408d6ad5238829e3645373298ae7f8ce9d8b71dc304"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/local-baseline.json",
+      "bytes": 1429,
+      "sha256": "885c26e1bf97c7ee29280b53fe5831310ba7bb4d4da118311f2673b652b17cb7"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/requests-01.json",
+      "bytes": 903,
+      "sha256": "98a7ef697a26c06bdd82373490b597fa80b99b019189992e3e41fd7ee88ff98f"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/requests-02.json",
+      "bytes": 654,
+      "sha256": "81080756f43c9851bf69ddfaae66035377c38db1070b5d3f3c8e041397f54efb"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/requests-03.json",
+      "bytes": 608,
+      "sha256": "349a004df12433fd5965e8bd2a2846597dd447b983241e90c046f2c3d7f452bd"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/requests-04.json",
+      "bytes": 1275,
+      "sha256": "0be9dda73a46fba1d03bc442cc06f67166470892f2f46a0be2f08f80d1dd2249"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/rh-PIN.md",
+      "bytes": 1881,
+      "sha256": "11063edc36ce5da6f94b2bc6dde3ed61a216e7f59e3dc6309c5d1ea831632eec"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/rh-README.md",
+      "bytes": 22239,
+      "sha256": "dffd70779845d77d34f18bc1dfee16024ea16aa641d2af9837f915057046e978"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/rh-pin-api.json",
+      "bytes": 3757,
+      "sha256": "25de53667cc844adddf5de14734d6e651c937028a01301fa8d2987587c3c9c60"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/rh-readme-api.json",
+      "bytes": 31766,
+      "sha256": "ce6f82db0d7ab89a46dc37cd5550a8455bd28bd19018375314c21ad089efc49f"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/runninghub/source/ComfyUI-RH-MiniMax-H3/README.md",
+      "bytes": 7770,
+      "sha256": "ae5c2d4cd0abafbc439211a7de2ad6a1e5e375f9eec7c0bbc0e7c03a34d66773"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/selected-receipts.jsonl",
+      "bytes": 5405,
+      "sha256": "214ba46de2029e4c1fdaf7fff0c9dc20332392ef2a45fc4047d8a10f56768fd1"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/LightX2V-README.md",
+      "bytes": 27148,
+      "sha256": "33e87d39c40d111005418b99851e439964c752de861f3c6cd2b0b94a8bfa37b2"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/LightX2V-head.json",
+      "bytes": 148206,
+      "sha256": "96201daca8ed73d3327691c8981bc8e2d79ab91aecb0be8cd1c7f16949203fec"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/LightX2V-readme-api.json",
+      "bytes": 38343,
+      "sha256": "36b37cd140f6736202ff169204326d86ecb9d9b65ae9d5a1163695eaa883d53b"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/LightX2V-repo.json",
+      "bytes": 6332,
+      "sha256": "22f51c9f48ee900cf77f16c5460bc6c3d21e21a2c6147f0a14520d3e902dc9b6"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/LightX2V-tree.json",
+      "bytes": 990364,
+      "sha256": "0196ee433b9401ece0308aa2be3ddfbfead8fba5db1f23f4fb5ca779aee0e071"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/Minimax-H3-Turbo-README.md",
+      "bytes": 9330,
+      "sha256": "282e45f90c7fed5eb4861d1a0cd17199604e31d74d7bdd4c191b4d39cdbde138"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/Minimax-H3-Turbo-head.json",
+      "bytes": 9314,
+      "sha256": "d598268b4286838ba3053f484babdd163eee63874f8a6f38a12756c8bd1cfb12"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/Minimax-H3-Turbo-readme-api.json",
+      "bytes": 13846,
+      "sha256": "599712d237044688f4bc560ac01f3e785083237e7f9b611882e38fefb54750db"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/Minimax-H3-Turbo-repo.json",
+      "bytes": 6456,
+      "sha256": "59c9fba0a21993978bbbc1c262346f4d6ea06417a068417615cc82bd26423e8a"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/Minimax-H3-Turbo-tree.json",
+      "bytes": 16367,
+      "sha256": "fb23f167ee1154a9e8b376edcea5ae78c522220f95987a3de57c0ad923e963f3"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/github-search-MiniMax-H3_Turbo_LoRA.json",
+      "bytes": 171482,
+      "sha256": "b55481cbba6be379ecf671ee2ff8b570b419f14d83739b0c0fb90a1a6f2fee56"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/github-search-MiniMax-H3_larryvrh.json",
+      "bytes": 13110,
+      "sha256": "7561d6d0098745340d636479c3e6cfad7d1823b18b31b5169d1a067bfd8916a1"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/sglang-current-head.json",
+      "bytes": 13829,
+      "sha256": "246809cd4a0d0ab7c859d30f204bc4d15120dc774e9af8649f402c536d92bb29"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/source/LightX2V/lightx2v/models/networks/minimax_h3/lora.py",
+      "bytes": 9943,
+      "sha256": "f8ef1753f22f079c8b90d600fd712d37786d05f23570e1f4ffecfcd15c60dae1"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/source/LightX2V/lightx2v/models/schedulers/minimax_h3/scheduler.py",
+      "bytes": 9629,
+      "sha256": "8795cb34232d6a41b40444dd6d58dc969f81c6773c3505d32e57e44e43ad94a8"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/source/Minimax-H3-Turbo/DIFFUSERS_SETUP_AND_INFERENCE.md",
+      "bytes": 4121,
+      "sha256": "1640d66afb305ed7691ef7db72e2cf6e7225e9ba357f6bb8a0a6e085ebbaebcf"
+    },
+    {
+      "path": "_scratch/h3-lora-audit-20261014/turbo/source/Minimax-H3-Turbo/inference_minimax_h3.py",
+      "bytes": 44355,
+      "sha256": "a77bc604b26a711efab66e804b517957bb10a00d1cb1e2a4a556ab4854c0dffd"
+    }
+  ],
+  "document": "docs/research/h3-lora-q4-deployment-audit-20261014.md"
+}
