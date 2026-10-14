@@ -1,5 +1,7 @@
 # H3/CUDA 四方法：受控性能对照
 
+> **2026-10-14 SubBlock修复完成**：同精度/输入/keep0.5，T2VA单次254.33→215.38s（↓15.3%）；mixed复用同配置baseline，单次627.91→551.30s（↓12.2%）。两个产物均与旧SubBlock逐字节相同，仍有相对dense的稀疏误差。详见`h3-subblock-fix.md`与`validation.json.subblock_repair`。按用户要求不再默认重复3次；先T2VA一次，再mixed一次。
+
 日期：2026-10-14（Asia/Shanghai）。**主目标T2VA四项均已完成预热1次＋测量3次；复杂mixed各完成独立1次对照。8模式×baseline及四方法共40个完整权重功能任务全部通过。** Turbo/VDN/VSA本轮未开发。机器可读证据：`benchmark/h3_cuda/four-methods-results.json`。
 
 ## 1. 环境与固定条件

@@ -4,6 +4,7 @@
 #include <iostream>
 #include <stdexcept>
 #ifndef MINIMAX_H3_SPARSE_REFERENCE_ONLY
+#include "core/backend/ggml/cuda/h3_subblock.h"
 #include "../third_party/ggml/src/ggml-backend-impl.h" // test-only capability rejection
 #endif
 #ifndef MINIMAX_H3_SPARSE_REFERENCE_ONLY
@@ -416,6 +417,23 @@ int main(int argc, char** argv) {
         test_reference();
 #ifndef MINIMAX_H3_SPARSE_REFERENCE_ONLY
         test_graph();
+        // New SM89 native packing: bounded scratch, ragged final head batches,
+        // and invalid dimensions, without discovering/initializing a GPU.
+        namespace native = edgedit::h3_subblock;
+        for (int n : {1,63,64,65,13000,15000,32768,65536})
+            for (int h : {1,3,7,8,9,17,56,64}) {
+                const int batch = native::indexed_stage_heads(n,h);
+                check(batch >= 1 && batch <= h && batch <= 8, "invalid indexed head batch");
+                check(size_t(batch)*n*128*2*sizeof(uint16_t) <= native::indexed_staging_limit,
+                      "indexed staging exceeds bounded scratch");
+                int covered = 0;
+                for (int first=0; first<h; first+=batch) covered += std::min(batch,h-first);
+                check(covered == h, "indexed head batching drops/duplicates tail heads");
+            }
+        for (int64_t n : {int64_t(-1),int64_t(0),int64_t(65537),INT64_MAX})
+            check(native::indexed_stage_heads(n,56)==0,"invalid sequence accepted for staging");
+        for (int64_t h : {int64_t(-1),int64_t(0),int64_t(65),INT64_MAX})
+            check(native::indexed_stage_heads(15000,h)==0,"invalid head count accepted for staging");
 #endif
         std::cout << "H3 SubBlock sparse tests passed (CPU only)\n";
         return 0;

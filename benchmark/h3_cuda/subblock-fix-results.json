@@ -1,0 +1,444 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-14",
+  "timezone": "Asia/Shanghai",
+  "status": "complete_single_t2va_then_single_mixed",
+  "new_full_generations": 3,
+  "no_more_gpu_experiments_queued": true,
+  "baseline_source": "97cc585d9dbd9ac5e30b78ef2e2c4a0d8bfbe9f2",
+  "candidate_source_tree_sha256": "9e38c09eff4531bf17e5079e2b20de535b71728717866787a5c06f3175df8985",
+  "candidate_build_provenance": {
+    "path": "_scratch/h3-subblock-fix-20261014/fix-build-01/candidate/h3-build-provenance.txt",
+    "sha256": "64f8673f5779a75afe9dbb24830e83565eda151fdde92709134a65541eb15b04"
+  },
+  "kernel_diagnostics": "benchmark/h3_cuda/subblock-fix-kernel-profile.json",
+  "cases": {
+    "t2va": {
+      "mode": "t2va",
+      "baseline_reused": false,
+      "baseline_cli_ms": 254332.7923049219,
+      "old_subblock_cli_ms": 327459.52469467494,
+      "old_subblock_measurements": 3,
+      "fixed_cli_ms": 215377.02553882264,
+      "baseline_dit_ms": 211297,
+      "old_subblock_dit_ms": 284532.6666666667,
+      "fixed_dit_ms": 172403,
+      "speedup_vs_baseline": 1.180872433671331,
+      "time_reduction_vs_baseline_percent": 15.316847824874602,
+      "time_reduction_vs_old_subblock_percent": 34.22789404594619,
+      "quality_vs_dense": {
+        "video": {
+          "exact_frame_count": 0,
+          "mean_psnr_db": 27.91258064516129,
+          "mean_ssim": 0.9173507177419354,
+          "pixel_format": "yuv444p",
+          "psnr_null_means": "positive_infinity_for_exact_match; no fictitious finite PSNR"
+        },
+        "audio": {
+          "reference_norm": 9.35353708887773,
+          "relative_l2": 0.469285675188421,
+          "relative_l2_defined": true,
+          "rmse": 0.007620626680822783,
+          "scalar_samples": 331776
+        },
+        "shape": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "audio_samples_per_channel": 165888,
+          "fps": "24",
+          "frames": 124,
+          "height": 480,
+          "width": 864
+        }
+      },
+      "mp4_byte_identical_to_old_subblock": true,
+      "output": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/t2va-once/candidate/t2va-000.mp4",
+      "output_sha256": "e8df1dd16053ee56c0e962ccaf72b77b056834561e73029c070fab235fbffcd8",
+      "old_output": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-offload-20261014/sync-subblock/t2va-001.mp4",
+      "baseline_output": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/t2va-once/baseline/t2va-000.mp4",
+      "contract": {
+        "assets": {},
+        "models": {
+          "audio_vae": {
+            "bytes": 605254808,
+            "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+            "source_header_sha256": "23fb27ab02c45d7c6f5dfe5c3255ef956a5a13853c869b784bf8de4a1537d06b",
+            "tensor_types": {
+              "F32": 917
+            }
+          },
+          "fl2va": {
+            "bytes": 18779848448,
+            "sha256": "a25ee3184dd56e7fc5c8db1508d2e48a7e3c92919b516935c6059e4228e16107",
+            "source_header_sha256": "b4aebf1a52aa869c99ba7fd33c7e343200342404e07d1eb03260f7beebd02c7f",
+            "tensor_types": {
+              "BF16": 264,
+              "F32": 13,
+              "Q4_0": 50,
+              "Q4_K": 208
+            }
+          },
+          "llm": {
+            "bytes": 18218065024,
+            "sha256": "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc",
+            "source_header_sha256": "0c6bc5ded133ae026c992654de37dbd600fa70b50573a6ed3ac1f54ea29ddc59",
+            "tensor_types": {
+              "BF16": 552,
+              "Q4_K": 250,
+              "Q6_K": 100
+            }
+          },
+          "video_vae": {
+            "bytes": 5207808496,
+            "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+            "source_header_sha256": "7bd6afbb1b2cfbf7c19901869eb224ec1b3e2a8cdbd8516d18f515c60f157c26",
+            "tensor_types": {
+              "F16": 562
+            }
+          }
+        },
+        "modes": {
+          "t2va": {
+            "dit": "fl2va",
+            "inputs": {},
+            "prompt": "A locked-off cinematic wide shot of a sunlit mountain stream. Clear water ripples continuously over small stones, pine branches sway gently in a light breeze, and distant mountains remain stable. Natural synchronized audio: softly flowing water, a gentle breeze, and occasional distant birds. No music, no dialogue, no captions, no scene cuts."
+          }
+        },
+        "placement": {
+          "cpu_threads": 6,
+          "dit_offload": true,
+          "max_vram_gib": 22,
+          "text_encoder_offload": true,
+          "vae_offload": true
+        },
+        "runtime_env": {
+          "ED_CUDNN_SDPA_SYNC_F32_SELF_ATTN": "1"
+        },
+        "sampling": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "cfg_scale": 1,
+          "fps": 24,
+          "frames": 124,
+          "height": 480,
+          "ref_image_size": "match",
+          "sampler": "res_multistep",
+          "scheduler": "simple",
+          "seed": 42,
+          "steps": 20,
+          "width": 864
+        },
+        "weight_variant": "full_h3_existing_persistent_Q4_GGUF_not_pruned_not_distilled"
+      },
+      "method_env": {
+        "method_tuning": {
+          "ED_H3_SPARSE_KEEP_RATIO": "0.5",
+          "ED_H3_SUBBLOCK_INDEXED": "1"
+        },
+        "optimization_env": {
+          "ED_H3_ADALN_CACHE": "0",
+          "ED_H3_CACHE_DIT": "0",
+          "ED_H3_FUSED_OPS": "0",
+          "ED_H3_SAGE_ATTN": "0",
+          "ED_H3_SPARSE_ATTN": "1",
+          "ED_H3_TURBO": "0",
+          "ED_H3_VDN": "0",
+          "ED_H3_VSA": "0"
+        },
+        "other_runtime_env": {
+          "OMP_NUM_THREADS": "6"
+        },
+        "profile_env": {
+          "ED_MINIMAX_H3_PROFILE": "1"
+        },
+        "removed_inherited_keys": []
+      },
+      "reports": {
+        "baseline": {
+          "path": "_scratch/h3-subblock-fix-20261014/t2va-once/baseline/report.json",
+          "sha256": "f60b7e5b247ca3a18827ead08b185efe35af86c0f0730e56f0a005c2de88e15c"
+        },
+        "candidate": {
+          "path": "_scratch/h3-subblock-fix-20261014/t2va-once/candidate/report.json",
+          "sha256": "0421535ad876bacab574a7d7582c02ba988132ffa0281d6755f03a3515a66c84"
+        },
+        "comparison": {
+          "path": "_scratch/h3-subblock-fix-20261014/t2va-once/compare/report.json",
+          "sha256": "699bb23f03c8e2c40fda83562910267c626b4d012af66e747bfe76712db6f2bc"
+        },
+        "old_subblock": {
+          "path": "_scratch/h3-offload-20261014/sync-subblock/report.json",
+          "sha256": "a03504a0c3aec81dc7c4021c7b9de7c6e21a22d3eb625770b1b78d48e7981fce"
+        }
+      },
+      "candidate_binary_sha256": "ec5ff4458a12872459287a293627d907d182b727ca674ce640c7f5aeec39822d"
+    },
+    "mixed": {
+      "mode": "ref_mixed",
+      "baseline_reused": true,
+      "baseline_cli_ms": 627910.0476631429,
+      "old_subblock_cli_ms": 1018728.610459948,
+      "old_subblock_measurements": 1,
+      "fixed_cli_ms": 551300.021514995,
+      "baseline_dit_ms": 547981,
+      "old_subblock_dit_ms": 938710,
+      "fixed_dit_ms": 469145,
+      "speedup_vs_baseline": 1.1389624943921104,
+      "time_reduction_vs_baseline_percent": 12.200796345473853,
+      "time_reduction_vs_old_subblock_percent": 45.88352424242925,
+      "quality_vs_dense": {
+        "video": {
+          "exact_frame_count": 0,
+          "mean_psnr_db": 38.20991935483871,
+          "mean_ssim": 0.9778977258064516,
+          "pixel_format": "yuv444p",
+          "psnr_null_means": "positive_infinity_for_exact_match; no fictitious finite PSNR"
+        },
+        "audio": {
+          "reference_norm": 8.882307831654138,
+          "relative_l2": 0.3041300414690326,
+          "relative_l2_defined": true,
+          "rmse": 0.0046898900159404264,
+          "scalar_samples": 331776
+        },
+        "shape": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "audio_samples_per_channel": 165888,
+          "fps": "24",
+          "frames": 124,
+          "height": 480,
+          "width": 864
+        }
+      },
+      "mp4_byte_identical_to_old_subblock": true,
+      "output": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/mixed-once-02/candidate/ref_mixed-000.mp4",
+      "output_sha256": "746ccd1f5fce4ffce53ca7231317fbbfaf06240b6939c7ab5b71a6c3beb9a1b1",
+      "old_output": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-offload-20261014/mixed-sync-subblock/ref_mixed-000.mp4",
+      "baseline_output": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-offload-20261014/mixed-sync-baseline/baseline/ref_mixed-000.mp4",
+      "contract": {
+        "assets": {
+          "extra_audio": {
+            "bytes": null,
+            "embedded_audio_required": null,
+            "kind": "audio",
+            "sha256": "b5b8230e6cdb35150cddfb10105126b0a9bf30a8cefadd890efa12c43316ebc2"
+          },
+          "paired_audio": {
+            "bytes": null,
+            "embedded_audio_required": null,
+            "kind": "audio",
+            "sha256": "b5b8230e6cdb35150cddfb10105126b0a9bf30a8cefadd890efa12c43316ebc2"
+          },
+          "reference_image": {
+            "bytes": null,
+            "embedded_audio_required": null,
+            "kind": "image",
+            "sha256": "3185ab2b1b07cc5adc544a57001584a9cf2a205475de72ffb0a52e9689447a70"
+          },
+          "reference_video": {
+            "bytes": null,
+            "embedded_audio_required": true,
+            "kind": "video",
+            "sha256": "a870d784225b37badab8acddb70e3dab152a5357ef2e3e59862f1acd6ed4bcf1"
+          }
+        },
+        "models": {
+          "audio_vae": {
+            "bytes": 605254808,
+            "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+            "source_header_sha256": "23fb27ab02c45d7c6f5dfe5c3255ef956a5a13853c869b784bf8de4a1537d06b",
+            "tensor_types": {
+              "F32": 917
+            }
+          },
+          "llm": {
+            "bytes": 18218065024,
+            "sha256": "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc",
+            "source_header_sha256": "0c6bc5ded133ae026c992654de37dbd600fa70b50573a6ed3ac1f54ea29ddc59",
+            "tensor_types": {
+              "BF16": 552,
+              "Q4_K": 250,
+              "Q6_K": 100
+            }
+          },
+          "ref2va": {
+            "bytes": 18779848448,
+            "sha256": "fdaecd3e73cf70a866184e49958c7f17055c5294252921ceac7dc459ce6be11e",
+            "source_header_sha256": "b4aebf1a52aa869c99ba7fd33c7e343200342404e07d1eb03260f7beebd02c7f",
+            "tensor_types": {
+              "BF16": 264,
+              "F32": 13,
+              "Q4_0": 50,
+              "Q4_K": 208
+            }
+          },
+          "video_vae": {
+            "bytes": 5207808496,
+            "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+            "source_header_sha256": "7bd6afbb1b2cfbf7c19901869eb224ec1b3e2a8cdbd8516d18f515c60f157c26",
+            "tensor_types": {
+              "F16": 562
+            }
+          }
+        },
+        "modes": {
+          "ref_mixed": {
+            "dit": "ref2va",
+            "inputs": {
+              "ref-audio": [
+                "extra_audio"
+              ],
+              "ref-image": [
+                "reference_image"
+              ],
+              "ref-video": [
+                "reference_video"
+              ],
+              "ref-video-audio": [
+                "paired_audio"
+              ]
+            },
+            "prompt": "Continue the same sunlit mountain stream shown in <Picture 1> and <Video 1>. Preserve the mountain silhouette, pine trees, rocks, and stable camera composition. Water flows naturally throughout, with gentle pine-branch movement. Use <Audio 1> and the supplied audio reference for natural flowing-water ambience, light wind, and distant birds. No music, no dialogue, no text, no scene cuts."
+          }
+        },
+        "placement": {
+          "cpu_threads": 6,
+          "dit_offload": true,
+          "max_vram_gib": 22,
+          "text_encoder_offload": true,
+          "vae_offload": true
+        },
+        "runtime_env": {
+          "ED_CUDNN_SDPA_SYNC_F32_SELF_ATTN": "1"
+        },
+        "sampling": {
+          "audio_channels": 2,
+          "audio_sample_rate": 32000,
+          "cfg_scale": 1,
+          "fps": 24,
+          "frames": 124,
+          "height": 480,
+          "ref_image_size": "match",
+          "sampler": "res_multistep",
+          "scheduler": "simple",
+          "seed": 42,
+          "steps": 20,
+          "width": 864
+        },
+        "weight_variant": "full_h3_existing_persistent_Q4_GGUF_not_pruned_not_distilled"
+      },
+      "method_env": {
+        "method_tuning": {
+          "ED_H3_SPARSE_KEEP_RATIO": "0.5",
+          "ED_H3_SUBBLOCK_INDEXED": "1"
+        },
+        "optimization_env": {
+          "ED_H3_ADALN_CACHE": "0",
+          "ED_H3_CACHE_DIT": "0",
+          "ED_H3_FUSED_OPS": "0",
+          "ED_H3_SAGE_ATTN": "0",
+          "ED_H3_SPARSE_ATTN": "1",
+          "ED_H3_TURBO": "0",
+          "ED_H3_VDN": "0",
+          "ED_H3_VSA": "0"
+        },
+        "other_runtime_env": {
+          "OMP_NUM_THREADS": "6"
+        },
+        "profile_env": {
+          "ED_MINIMAX_H3_PROFILE": "1"
+        },
+        "removed_inherited_keys": []
+      },
+      "reports": {
+        "baseline": {
+          "path": "_scratch/h3-offload-20261014/mixed-sync-baseline/baseline/report.json",
+          "sha256": "dff37a3cfb17c12908539c4c7eedb12fb09c93840ca7a1ccd59ded2ee3ab115a"
+        },
+        "candidate": {
+          "path": "_scratch/h3-subblock-fix-20261014/mixed-once-02/candidate/report.json",
+          "sha256": "751e6355f49086e2034ac02c877084159ac2deb0602b5dbce03a3c81327adc4b"
+        },
+        "comparison": {
+          "path": "_scratch/h3-subblock-fix-20261014/mixed-once-02/compare/report.json",
+          "sha256": "653c22620fbce078cdc8ecf94ccc0bd067efa5c87a0c882c3fd9a9f985ce1d6b"
+        },
+        "old_subblock": {
+          "path": "_scratch/h3-offload-20261014/mixed-sync-subblock/report.json",
+          "sha256": "69fa15e3c415ccda748574a2a6074c739658226d9db0066666d066a1b330ae5a"
+        }
+      },
+      "candidate_binary_sha256": "ec5ff4458a12872459287a293627d907d182b727ca674ce640c7f5aeec39822d"
+    }
+  },
+  "models": {
+    "audio_vae": {
+      "bytes": 605254808,
+      "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+    },
+    "fl2va": {
+      "bytes": 18779848448,
+      "sha256": "a25ee3184dd56e7fc5c8db1508d2e48a7e3c92919b516935c6059e4228e16107"
+    },
+    "llm": {
+      "bytes": 18218065024,
+      "sha256": "11e6efe70a57ce7f4838c47bdbd1a1c4b8ce10e2b7747f1b065990b70f4b05fc"
+    },
+    "video_vae": {
+      "bytes": 5207808496,
+      "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522"
+    },
+    "ref2va": {
+      "bytes": 18779848448,
+      "sha256": "fdaecd3e73cf70a866184e49958c7f17055c5294252921ceac7dc459ce6be11e"
+    }
+  },
+  "tests": {
+    "cpu_ctest": "14/14",
+    "workflow_media": "53/53",
+    "final_cuda_output_comparisons": 433,
+    "static_async_hazard_review": "no concrete issue found; not a race-check run"
+  },
+  "limitations": [
+    "one complete generation per new arm, no repeated statistical-confidence claim",
+    "mixed reuses the validated same-configuration single baseline; no second baseline generation",
+    "outputs equal previous SubBlock, not dense baseline; original sparse approximation and audio differences remain",
+    "full eight-mode production matrix not rerun per user instruction; T2VA and mixed only",
+    "sampled device memory is not exact process peak or a hard VRAM cap",
+    "no isolated full-model executor-only ablation; end-to-end benefit includes kernel and graph-planner improvements",
+    "NVIDIA performance counters unavailable; no driver/system changes"
+  ],
+  "evidence_root": "_scratch/h3-subblock-fix-20261014",
+  "memory": {
+    "note": "sampled whole-device MiB. T2VA arm peaks split using candidate report creation UTC mapped to monitor-relative time; the boundary is an idle interval. Not hard/exact VRAM peaks.",
+    "t2va_baseline_mib": 16035.0,
+    "t2va_fixed_mib": 15505.0,
+    "mixed_baseline_mib": 18751.0,
+    "mixed_fixed_mib": 18529.0,
+    "reports": [
+      {
+        "path": "_scratch/h3-subblock-fix-20261014/t2va-once-memory/memory-report.json",
+        "sha256": "4c8ecea82c6dd4f42ecad5ccd48902c2270c13d041afa8df9158d83324f825b4"
+      },
+      {
+        "path": "_scratch/h3-subblock-fix-20261014/mixed-once-02-memory/memory-report.json",
+        "sha256": "9ebae12133c5ec6f2d68ce6c1cd22b4fd992a3af3f2e2a7a5202ea7d97588e3d"
+      }
+    ]
+  },
+  "test_logs": [
+    {
+      "path": "_scratch/h3-subblock-fix-20261014/logs/cpu-regression.log",
+      "sha256": "d157db58098961d69816af765164a2157d57c41d920cc22ed92f6e1cadad95dc"
+    },
+    {
+      "path": "_scratch/h3-subblock-fix-20261014/logs/final-tiny.log",
+      "sha256": "242847a73df2ad254c134d5f691a9c575341dcc92d4f344ac3ce60ff4816fd8d"
+    },
+    {
+      "path": "_scratch/h3-subblock-fix-20261014/logs/final-kernel-dense-probe.log",
+      "sha256": "1ec2ac0d872937c131f2d49b8a40e21281a9dbf53ee4110ba8cd39147e09310f"
+    }
+  ]
+}

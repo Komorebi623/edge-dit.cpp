@@ -33,6 +33,13 @@ constexpr size_t router_limit = size_t(192) << 20;
 constexpr size_t gather_limit = size_t(128) << 20;
 constexpr int max_batch = 64;
 constexpr size_t indexed_shared_bytes = 34816;
+// K/V conversion is amortized across all queries, in bounded head batches.
+constexpr size_t indexed_staging_limit = size_t(128) << 20;
+inline int indexed_stage_heads(int64_t sequence, int64_t heads) {
+    if (sequence <= 0 || sequence > max_sequence || heads <= 0 || heads > max_heads) return 0;
+    return int(std::min<int64_t>(std::min<int64_t>(heads, 8),
+        indexed_staging_limit / (size_t(sequence) * dimension * 2 * sizeof(uint16_t))));
+}
 // Shared by the native PTX loader and the CPU fragment-address oracle. These
 // are the documented m16n8 mappings, not implementation-specific WMMA layouts.
 #ifdef __CUDACC__

@@ -31,6 +31,17 @@ __global__ void pool_cells(Input q, Input k, const int32_t* blocks, float* pq, f
     pq[i] = valid ? (n ? sq/n : 0) : CUDART_NAN_F;
     pk[i] = valid ? (n ? sk/n : 0) : CUDART_NAN_F;
 }
+// Bounded head-major K/V packing. Values follow the old indexed kernel's
+// exact F32*(1/128) -> F16 conversion, but only once per actual token/head.
+__global__ void pack_indexed_kv(Input k, Input v, half* pk, half* pv,
+                               int sequence, int head_begin, int head_count) {
+    const int64_t i=int64_t(blockIdx.x)*blockDim.x+threadIdx.x;
+    if(i>=int64_t(sequence)*head_count*dimension) return;
+    const int d=i%dimension, token=(i/dimension)%sequence;
+    const int head=head_begin+int(i/(int64_t(sequence)*dimension));
+    pk[i]=__float2half_rn(read(k,d,token,head)*(1.0f/128.0f));
+    pv[i]=__float2half_rn(read(v,d,token,head)*(1.0f/128.0f));
+}
 __device__ float warp_sum(float x) {
     for (int offset=16; offset; offset/=2) x += __shfl_down_sync(0xffffffffu,x,offset);
     return __shfl_sync(0xffffffffu,x,0);
@@ -208,9 +219,20 @@ bool ed_cuda_h3_subblock_compute(ggml_backend_cuda_context& ctx,ggml_tensor* dst
                           static_cast<const int32_t*>(dst->src[6]->data),
                           static_cast<float*>(dst->data),sequence,heads,int(dst->src[4]->ne[1]),
                           int(dst->src[3]->ne[0]),int(dst->src[6]->ne[0]-1),int(dst->src[5]->ne[1]-1)};
-        indexed::attention<true><<<dim3(p.video_blocks,heads),128,0,stream>>>(p);
-        if(p.protected_chunk_count)
-            indexed::attention<false><<<dim3(p.protected_chunk_count,heads),128,0,stream>>>(p);
+        const int batch=indexed_stage_heads(sequence,heads);
+        GGML_ASSERT(batch>0);
+        const size_t elements=size_t(batch)*sequence*dimension;
+        ggml_cuda_pool_alloc<half> packed_k(ctx.pool(),elements),packed_v(ctx.pool(),elements);
+        p.packed_k=packed_k.get();p.packed_v=packed_v.get();
+        for(int begin=0;begin<heads;begin+=batch) {
+            const int count=std::min(batch,heads-begin);
+            p.head_begin=begin;
+            const int64_t n=int64_t(count)*sequence*dimension;
+            pack_indexed_kv<<<(n+255)/256,256,0,stream>>>(ki,vi,packed_k.get(),packed_v.get(),sequence,begin,count);
+            indexed::attention<true><<<dim3(p.video_blocks,count),128,0,stream>>>(p);
+            if(p.protected_chunk_count)
+                indexed::attention<false><<<dim3(p.protected_chunk_count,count),128,0,stream>>>(p);
+        }
         CUDA_CHECK(cudaGetLastError());
         return true; // explicitly indexed; no fallback to gather on failure
     }

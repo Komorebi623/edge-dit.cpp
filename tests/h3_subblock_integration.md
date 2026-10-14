@@ -1,5 +1,7 @@
 # H3 SubBlock 有界 CUDA：接入与验证记录（2026-10-14）
 
+> 后续状态（2026-10-14）：已完成SM89 indexed片内流水与有界K/V转换优化，完整T2VA/mixed均提速且与旧indexed产物逐字节相同；见`docs/research/h3-subblock-fix.md`。下文保留最初gather及后续indexed接入历史。
+
 ## 实现状态
 
 已实现：两个 H3 专用 CUSTOM 节点（router / attention），三个 metadata leaves。

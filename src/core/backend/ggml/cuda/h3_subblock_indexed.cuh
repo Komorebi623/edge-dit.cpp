@@ -19,6 +19,8 @@ struct Params {
     const int32_t *blocks, *route, *protected_chunks, *protected_ids;
     float* output;
     int sequence, heads, video_blocks, topk, protected_count, protected_chunk_count;
+    const half *packed_k = nullptr, *packed_v = nullptr;
+    int head_begin = 0;
 };
 static __device__ __forceinline__ float load(Input x,int d,int token,int head) {
     return x.data[int64_t(head)*x.head_stride+int64_t(token)*x.token_stride+d];
@@ -40,6 +42,49 @@ static __device__ __forceinline__ float row_sum(float x) {
     return x+__shfl_xor_sync(0xffffffffu,x,2);
 }
 
+// One async group per K or V tile. K(next) overlaps softmax/PV(current),
+// V(next) overlaps QK(next), with only the original two shared-memory tiles.
+// wait_group<1> waits the older group, never a tile still consumed by a warp.
+template<bool Sparse, bool Value>
+static __device__ __forceinline__ void prefetch_tile(const Params& p, int block, int iter, half* shared) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    int begin=0,end=0;
+    if constexpr(Sparse) if(iter<p.topk) {
+        const int id=p.route[(int64_t(blockIdx.y+p.head_begin)*p.video_blocks+block)*p.topk+iter];
+        if(id<0 || id>=p.video_blocks) asm volatile("trap;");
+        begin=p.blocks[2*id];end=p.blocks[2*id+1];
+    }
+    for(int i=threadIdx.x;i<64*128/8;i+=128) {
+        const int row=i/16,d=(i%16)*8;
+        int token;
+        if constexpr(Sparse) {
+            if(iter<p.topk) token=begin+row<end?begin+row:-1;
+            else {
+                const int index=(iter-p.topk)*64+row;
+                token=index<p.protected_count?p.protected_ids[index]:-1;
+            }
+        } else token=iter*64+row;
+        const bool valid=token>=0 && token<p.sequence;
+        const half* source=(Value?p.packed_v:p.packed_k)+
+            (int64_t(blockIdx.y)*p.sequence+(valid?token:0))*128+d;
+        const unsigned address=static_cast<unsigned>(__cvta_generic_to_shared(shared+row*stride+d));
+        const int bytes=valid?16:0;
+        asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;" :: "r"(address),"l"(source),"r"(bytes));
+    }
+    asm volatile("cp.async.commit_group;");
+#endif
+}
+static __device__ __forceinline__ void wait_older_tile() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.wait_group 1;");
+#endif
+}
+static __device__ __forceinline__ void wait_all_tiles() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.wait_group 0;");
+#endif
+}
+
 // Sparse CTA: (one actual video Q64, one head), reading ONLY its topk K64
 // blocks, then all protected keys. Dense CTA is ONLY for protected Q chunks.
 // One online-softmax state spans every selected/protected tile. No full-N mask,
@@ -51,7 +96,7 @@ __global__ __launch_bounds__(128,2) void attention(Params p) {
     half* sk=storage;
     half* sv=storage+64*stride;
     const int lane=threadIdx.x%32, warp=threadIdx.x/32;
-    const int block=blockIdx.x, head=blockIdx.y;
+    const int block=blockIdx.x, head=blockIdx.y+p.head_begin;
     const int32_t* spans=Sparse?p.blocks:p.protected_chunks;
     const int first=spans[2*block],last=spans[2*block+1];
     // Same prep order as pinned stock ggml MMA: half(Q) * half(scale),
@@ -74,7 +119,11 @@ __global__ __launch_bounds__(128,2) void attention(Params p) {
     float out[8][8]={};
     float maximum[2]={-CUDART_INF_F,-CUDART_INF_F},denominator[2]={0,0};
     const int iterations=Sparse ? p.topk+(p.protected_count+63)/64 : (p.sequence+63)/64;
+    prefetch_tile<Sparse,false>(p,block,0,sk);
+    prefetch_tile<Sparse,true>(p,block,0,sv);
     for(int iter=0;iter<iterations;++iter) {
+        wait_older_tile(); // K(current) is older than V(current).
+        __syncthreads();
         int key_begin=0,key_end=0;
         if constexpr(Sparse) {
             if(iter<p.topk) {
@@ -85,21 +134,6 @@ __global__ __launch_bounds__(128,2) void attention(Params p) {
                 key_begin=p.blocks[2*id];key_end=p.blocks[2*id+1];
             }
         }
-        for(int i=threadIdx.x;i<64*128;i+=128) {
-            const int row=i/128,d=i%128;
-            int token;
-            if constexpr(Sparse) {
-                if(iter<p.topk) token=key_begin+row<key_end ? key_begin+row:-1;
-                else {
-                    const int index=(iter-p.topk)*64+row;
-                    token=index<p.protected_count ? p.protected_ids[index]:-1;
-                }
-            } else token=iter*64+row;
-            const bool valid=token>=0 && token<p.sequence;
-            sk[row*stride+d]=__float2half_rn(valid?load(p.k,d,token,head)*(1.0f/128):0);
-            sv[row*stride+d]=__float2half_rn(valid?load(p.v,d,token,head)*(1.0f/128):0);
-        }
-        __syncthreads();
         float scores[4][8]={}; // four K16 blocks, all 64 keys for 16 query rows
 #pragma unroll
         for(int d=0;d<8;++d) {
@@ -112,6 +146,8 @@ __global__ __launch_bounds__(128,2) void attention(Params p) {
                 mma::mma_sync_m16n16k16_row_col_f16f16f32(scores[kt],qreg[d],kr);
             }
         }
+        __syncthreads(); // K(current) must be dead in every warp before reuse.
+        if(iter+1<iterations) prefetch_tile<Sparse,false>(p,block,iter+1,sk);
         // Mask real K64 tails (including a partial packed protected tile).
 #pragma unroll
         for(int kt=0;kt<4;++kt) {
@@ -153,6 +189,9 @@ __global__ __launch_bounds__(128,2) void attention(Params p) {
                 out[d][2*r+4]*=alpha;out[d][2*r+5]*=alpha;
             }
         }
+        if(iter+1<iterations) wait_older_tile(); // V(current), not K(next).
+        else wait_all_tiles();
+        __syncthreads();
         // Convert normalized numerator weights to F16 as an A fragment.
         // Denominator and running output remain FP32 (no F16 output accumulator).
 #pragma unroll
@@ -169,7 +208,8 @@ __global__ __launch_bounds__(128,2) void attention(Params p) {
                 mma::mma_sync_m16n16k16_row_col_f16f16f32(out[d],probability,vr);
             }
         }
-        __syncthreads(); // all warps finished reading this K/V tile before reuse
+        __syncthreads(); // V(current) must be dead in every warp before reuse.
+        if(iter+1<iterations) prefetch_tile<Sparse,true>(p,block,iter+1,sv);
     }
 #pragma unroll
     for(int d=0;d<8;++d) {

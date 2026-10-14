@@ -1917,38 +1917,42 @@ namespace MiniMaxH3 {
             return bytes > 0 && bytes <= max_graph_vram_bytes;
         }
 
-        sd::Tensor<float> compute_adaln_offloaded(get_graph_cb_t build, int threads,
-                                                 const DiffusionParams& params) {
+        sd::Tensor<float> compute_cuda_scoped_offloaded(get_graph_cb_t build, int threads,
+                                                       const DiffusionParams& params, const char* method,
+                                                       size_t kernel_scratch_bytes = 0) {
             validate_cuda_research_execution_mode(model.cuda_optimizations);
             ggml_cgraph* graph = nullptr;
             try {
                 if (!prepare_compute_graph(build, &graph) || !graph)
-                    throw std::runtime_error("MiniMax-H3 AdaLN offload graph build failed");
+                    throw std::runtime_error("MiniMax-H3 scoped offload graph build failed");
                 // Existing H3 boundary-aware planner excludes completed ancestry
                 // from the live segment estimate. It enables legal adjacent merges
                 // without making graph nodes, workspaces, or model precision smaller.
-                auto plan = h3_cache_plan(graph, params_tensor_set_, max_graph_vram_bytes * 15 / 16, true, "AdaLN");
+                if (max_graph_vram_bytes <= kernel_scratch_bytes)
+                    throw std::invalid_argument("MiniMax-H3 scoped offload budget cannot fit bounded kernel scratch");
+                const size_t graph_budget = max_graph_vram_bytes - kernel_scratch_bytes;
+                auto plan = h3_cache_plan(graph, params_tensor_set_, graph_budget * 15 / 16, true, method);
                 if (!plan.valid || plan.segments.empty())
-                    throw std::runtime_error("MiniMax-H3 AdaLN offload graph plan failed");
+                    throw std::runtime_error("MiniMax-H3 scoped offload graph plan failed");
                 sd::ggml_graph_cut::clear_comm_marks();
                 for (const auto& segment : plan.segments) {
-                    size_t remaining = max_graph_vram_bytes;
+                    size_t remaining = graph_budget;
                     for (size_t bytes : {segment.compute_buffer_size, segment.input_param_bytes,
                                          segment.input_previous_cut_bytes, segment.output_bytes}) {
                         if (bytes > remaining)
-                            throw std::invalid_argument("MiniMax-H3 AdaLN indivisible segment exceeds explicit planning budget");
+                            throw std::invalid_argument("MiniMax-H3 scoped indivisible segment exceeds explicit planning budget");
                         remaining -= bytes;
                     }
                     if (!segment.comm_ops.empty())
-                        throw std::invalid_argument("MiniMax-H3 AdaLN offload cannot use parallel graph cuts");
+                        throw std::invalid_argument("MiniMax-H3 scoped offload cannot use parallel graph cuts");
                     auto weights = sd::ggml_graph_cut::runtime_param_tensors(graph, segment, get_desc().c_str());
                     // Existing executor treats empty selection as ALL model weights.
                     // Reject before any stage instead of silently triggering that path.
                     if (weights.empty())
-                        throw std::invalid_argument("MiniMax-H3 AdaLN offload empty-weight segment would stage the entire model");
+                        throw std::invalid_argument("MiniMax-H3 scoped offload empty-weight segment would stage the entire model");
                 }
                 auto output = compute_with_graph_cuts<float>(graph, plan, threads, true, false);
-                if (!output) throw std::runtime_error("MiniMax-H3 AdaLN offload segment execution failed");
+                if (!output) throw std::runtime_error("MiniMax-H3 scoped offload segment execution failed");
                 return restore_trailing_singleton_dims(std::move(*output), params.x->dim());
             } catch (...) {
                 exact_release_projection_graph();
@@ -2385,8 +2389,18 @@ namespace MiniMaxH3 {
             if (model.cuda_optimizations.adaln_cache && params_backend != runtime_backend) {
                 if (model.cuda_optimizations.cache_dit || model.cuda_optimizations.sage_attn || model.cuda_optimizations.sparse_attn)
                     throw std::invalid_argument("MiniMax-H3 AdaLN offload is single-method until combined-path validation");
-                return compute_adaln_offloaded(get_graph, n_threads, params);
+                return compute_cuda_scoped_offloaded(get_graph, n_threads, params, "AdaLN");
             }
+#ifdef ED_ENABLE_CUDA_H3_SUBBLOCK
+            if (model.cuda_optimizations.sparse_attn && params_backend != runtime_backend) {
+                // The same scoped, serial executor: no Cache-DiT step/block
+                // reuse. Reserve the bounded native K/V staging outside the
+                // graph estimate. Other models, backends and switches stay on
+                // their existing executor, including the default-off baseline.
+                return compute_cuda_scoped_offloaded(get_graph, n_threads, params, "SubBlock",
+                    edgedit::h3_subblock::indexed_staging_limit);
+            }
+#endif
             if (model.cuda_optimizations.cache_dit) {
                 validate_cuda_cache_execution_mode();
                 return compute_cuda_dual_block_cache(n_threads, params, get_graph);

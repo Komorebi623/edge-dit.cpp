@@ -605,5 +605,15 @@
     "status": "repair_implemented_partial_validation_user_stopped_repeats",
     "results": "benchmark/h3_cuda/adaln-fix-results.json",
     "note": "User requested stop repeated validation and proceed to SubBlock. Remaining mixed run was stopped; T2VA and final modal8 were not launched. Preserve pending raw report, do not fabricate completed workflow status."
+  },
+  "subblock_repair": {
+    "date": "2026-10-14",
+    "status": "complete_single_t2va_then_single_mixed",
+    "results": "benchmark/h3_cuda/subblock-fix-results.json",
+    "new_full_generations": 3,
+    "t2va_time_reduction_percent": 15.3,
+    "mixed_time_reduction_percent": 12.2,
+    "both_outputs_byte_identical_to_old_subblock": true,
+    "note": "same keep0.5/precision/input; not dense-output parity, no three-repeat claim. No remaining GPU queue."
   }
 }

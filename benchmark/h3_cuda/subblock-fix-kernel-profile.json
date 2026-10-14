@@ -1,0 +1,238 @@
+{
+  "date": "2026-10-14",
+  "scope": "synthetic single-layer diagnostic only; not production E2E; one warmup and one measured graph per kernel",
+  "config": {
+    "sequence": 15000,
+    "heads": 56,
+    "head_dim": 128,
+    "keep_ratio": 0.5,
+    "topk": 118,
+    "blocks": 235,
+    "protected_tokens": 0
+  },
+  "runs": {
+    "kernel-old-perf": {
+      "log": "_scratch/h3-subblock-fix-20261014/logs/kernel-old-perf.log",
+      "sha256": "6f06a941da8c6d661718d4b97143aba1751c81899a088bcf090bf28499d4f046",
+      "measurements": [
+        {
+          "event": "timing",
+          "kernel": "router",
+          "status": "ok",
+          "warmups": 1,
+          "measurements": 1,
+          "ms": 5.772035,
+          "valid_route_ids": true,
+          "unique_per_row": true,
+          "route_ids_checked": 1552880
+        },
+        {
+          "event": "timing",
+          "kernel": "indexed_attention",
+          "status": "ok",
+          "warmups": 1,
+          "measurements": 1,
+          "ms": 81.440395,
+          "router_in_timed_graph": false,
+          "route_unchanged": true,
+          "finite": true,
+          "elements_checked": 107520000,
+          "max_abs": 0.0288145020604,
+          "sum": 6897.35623691
+        },
+        {
+          "event": "timing",
+          "kernel": "dense_flash_with_kv_prep",
+          "status": "ok",
+          "warmups": 1,
+          "measurements": 1,
+          "ms": 105.388854,
+          "finite": true,
+          "elements_checked": 107520000,
+          "max_abs": 0.0174379590899,
+          "sum": 7009.14761386
+        }
+      ]
+    },
+    "kernel01-perf-idle": {
+      "log": "_scratch/h3-subblock-fix-20261014/logs/kernel01-perf-idle.log",
+      "sha256": "3aa62ec9c50d289726cd70d205d3fb217e1790440b8f0734faf999424beaa947",
+      "measurements": [
+        {
+          "event": "timing",
+          "kernel": "router",
+          "status": "ok",
+          "warmups": 1,
+          "measurements": 1,
+          "ms": 5.79636,
+          "valid_route_ids": true,
+          "unique_per_row": true,
+          "route_ids_checked": 1552880
+        },
+        {
+          "event": "timing",
+          "kernel": "indexed_attention",
+          "status": "ok",
+          "warmups": 1,
+          "measurements": 1,
+          "ms": 71.826176,
+          "router_in_timed_graph": false,
+          "route_unchanged": true,
+          "finite": true,
+          "elements_checked": 107520000,
+          "max_abs": 0.0288145020604,
+          "sum": 6897.35623691
+        },
+        {
+          "event": "timing",
+          "kernel": "dense_flash_with_kv_prep",
+          "status": "ok",
+          "warmups": 1,
+          "measurements": 1,
+          "ms": 104.264296,
+          "finite": true,
+          "elements_checked": 107520000,
+          "max_abs": 0.0174379590899,
+          "sum": 7009.14761386
+        }
+      ]
+    },
+    "kernel02-perf": {
+      "log": "_scratch/h3-subblock-fix-20261014/logs/kernel02-perf.log",
+      "sha256": "ddff953d0ac32c49fecdcd0790870ae41a44acf6131a9e73900f9b97dc253656",
+      "measurements": [
+        {
+          "event": "timing",
+          "kernel": "router",
+          "status": "ok",
+          "warmups": 1,
+          "measurements": 1,
+          "ms": 5.793376,
+          "valid_route_ids": true,
+          "unique_per_row": true,
+          "route_ids_checked": 1552880
+        },
+        {
+          "event": "timing",
+          "kernel": "indexed_attention",
+          "status": "ok",
+          "warmups": 1,
+          "measurements": 1,
+          "ms": 27.911874,
+          "router_in_timed_graph": false,
+          "route_unchanged": true,
+          "finite": true,
+          "elements_checked": 107520000,
+          "max_abs": 0.0288145020604,
+          "sum": 6897.35623691
+        },
+        {
+          "event": "timing",
+          "kernel": "dense_flash_with_kv_prep",
+          "status": "ok",
+          "warmups": 1,
+          "measurements": 1,
+          "ms": 104.075967,
+          "finite": true,
+          "elements_checked": 107520000,
+          "max_abs": 0.0174379590899,
+          "sum": 7009.14761386
+        }
+      ]
+    },
+    "final-kernel-dense-probe": {
+      "log": "_scratch/h3-subblock-fix-20261014/logs/final-kernel-dense-probe.log",
+      "sha256": "1ec2ac0d872937c131f2d49b8a40e21281a9dbf53ee4110ba8cd39147e09310f",
+      "measurements": [
+        {
+          "event": "timing",
+          "kernel": "router",
+          "status": "ok",
+          "warmups": 1,
+          "measurements": 1,
+          "ms": 5.772637,
+          "valid_route_ids": true,
+          "unique_per_row": true,
+          "route_ids_checked": 1552880
+        },
+        {
+          "event": "timing",
+          "kernel": "indexed_attention",
+          "status": "ok",
+          "warmups": 1,
+          "measurements": 1,
+          "ms": 28.01574,
+          "router_in_timed_graph": false,
+          "route_unchanged": true,
+          "finite": true,
+          "elements_checked": 107520000,
+          "max_abs": 0.0288145020604,
+          "sum": 6897.35623691
+        },
+        {
+          "event": "production_graph",
+          "helper": "ggml_ext_attention_ext",
+          "ggml_nodes": 11,
+          "tensor_bytes_estimate": 2580481792,
+          "flash_attn": true,
+          "skip_reshape": true,
+          "kv_scale": 0.0078125,
+          "pad_kv_arg": true,
+          "actual_kv_padding": 0,
+          "mask": false,
+          "flash_q_type": "F32",
+          "flash_kv_type": "F16",
+          "flash_output_type": "F32",
+          "precision": "GGML_PREC_F32",
+          "sync_plan_ready": true,
+          "plan_build_timed": false,
+          "shared_device_qkv": true,
+          "includes_production_kv_prep_and_output_scaling": true
+        },
+        {
+          "event": "timing",
+          "kernel": "dense_production_cudnn",
+          "status": "ok",
+          "warmups": 1,
+          "measurements": 1,
+          "ms": 50.505485,
+          "role": "production_baseline",
+          "route_attested": true,
+          "actual_attention_backend": "cudnn_sdpa",
+          "warmup_cudnn_successes": 1,
+          "measured_cudnn_successes": 1,
+          "warmup_stock_flash_calls": 0,
+          "measured_stock_flash_calls": 0,
+          "attestation": "real_DSO_dispatch_return_counters",
+          "cuda_library": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate/bin/libggml-cuda.so.0",
+          "finite": true,
+          "elements_checked": 107520000,
+          "max_abs": 0.0175323486328,
+          "sum": 7009.75504303
+        },
+        {
+          "event": "timing",
+          "kernel": "dense_stock_ggml_diagnostic",
+          "status": "ok",
+          "warmups": 1,
+          "measurements": 1,
+          "ms": 103.431279,
+          "role": "diagnostic_not_production_baseline",
+          "route_attested": true,
+          "actual_attention_backend": "ggml_cuda_flash",
+          "warmup_cudnn_successes": 0,
+          "measured_cudnn_successes": 0,
+          "warmup_stock_flash_calls": 1,
+          "measured_stock_flash_calls": 1,
+          "attestation": "real_DSO_dispatch_return_counters",
+          "cuda_library": "/home/public/edge-dit.cpp/_scratch/h3-cuda-continuation/_scratch/h3-subblock-fix-20261014/fix-build-01/candidate/bin/libggml-cuda.so.0",
+          "finite": true,
+          "elements_checked": 107520000,
+          "max_abs": 0.0174379590899,
+          "sum": 7009.14761386
+        }
+      ]
+    }
+  },
+  "ncu": "Counter access denied; no system configuration changes; timings are synchronized graph elapsed time, not inferred counter attribution."
+}
